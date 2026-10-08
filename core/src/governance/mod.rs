@@ -75,7 +75,10 @@ use crate::{
         Node, NodeMessage, NodeResponse, TransferSubject,
         register::RegisterMessage,
     },
-    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
+    sink::{
+        SinkManager, SinkManagerInitParams, SinkManagerMessage,
+        SinkManagerResponse,
+    },
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
@@ -3172,6 +3175,9 @@ impl Governance {
             (true, false) => {
                 let actor = ctx.get_child::<ApprPersist>("approver").await?;
 
+                // Role lost: votes must not survive. Regaining it
+                // recreates the child, which would rehydrate them.
+                actor.ask(ApprPersistMessage::PurgeStorage).await?;
                 actor.ask_stop().await?;
             }
             (false, true) => {
@@ -3251,6 +3257,8 @@ impl Governance {
         }) {
             let actor = ctx.get_child::<ApprPersist>("approver").await?;
 
+            // Same as the role-diff path: no surviving votes.
+            actor.ask(ApprPersistMessage::PurgeStorage).await?;
             actor.ask_stop().await?;
         }
 
@@ -3304,6 +3312,8 @@ impl Governance {
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<ApprPersist>("approver").await?;
+        // Same as the other down paths: no surviving votes.
+        actor.ask(ApprPersistMessage::PurgeStorage).await?;
         actor.ask_stop().await?;
 
         if !self.is_compiler()
@@ -4942,6 +4952,29 @@ impl Governance {
                 cleanup_errors.push(format!(
                     "transfer_verification_register stop: {error}"
                 ));
+            }
+        }
+
+        // The per-governance sink manager stops with this actor but
+        // nothing purges its cursors otherwise: a rejoin would
+        // resurrect them and skip events.
+        match ctx.get_child::<SinkManager>("sink_manager").await {
+            Ok(manager) => {
+                match manager.ask(SinkManagerMessage::PurgeStorage).await {
+                    Ok(SinkManagerResponse::Ok) => {}
+                    Ok(other) => cleanup_errors.push(format!(
+                        "sink_manager: unexpected response {other:?}"
+                    )),
+                    Err(error) => cleanup_errors
+                        .push(format!("sink_manager: {error}")),
+                }
+
+                if let Err(error) = manager.ask_stop().await {
+                    cleanup_errors.push(format!("sink_manager stop: {error}"));
+                }
+            }
+            Err(error) => {
+                cleanup_errors.push(format!("sink_manager lookup: {error}"));
             }
         }
 

@@ -216,6 +216,8 @@ impl BorshDeserialize for Node {
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
         let owner = KeyPair::default();
+        // Runtime-only: the store re-injects the live key through
+        // `restore_runtime` before any replay touches this base.
         let our_key = Arc::new(PublicKey::default());
         let hash = None;
 
@@ -1692,6 +1694,18 @@ impl PersistentActor for Node {
     /// every snapshot instead of accumulating forever.
     fn prune_events_on_snapshot() -> bool {
         true
+    }
+
+    /// The split owned/known is decided in `apply` against this key,
+    /// so every replay base (snapshot decode included) must carry
+    /// the live one — never the deserialization placeholder.
+    fn restore_runtime(
+        base: Arc<Self::State>,
+        live: &Self::State,
+    ) -> Arc<Self::State> {
+        let mut out = (*base).clone();
+        out.our_key = live.our_key.clone();
+        Arc::new(out)
     }
 
     fn create_initial(params: Self::InitParams) -> Self {

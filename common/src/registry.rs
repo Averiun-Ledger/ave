@@ -71,7 +71,7 @@ static PIN_REGISTRY: &[PinRecord] = &[
             rustc_version: "1.95.0",
             cargo_config_hash: "10ed106c093be78c7d13394e01b78904155ef70e7e74dc9ce8b69f9cd40f4bea",
             sdk_version: "0.8.0",
-            lock_hash: "995560fd74456da3cf8d795aedb01dcf70c5cbfea8dd6c3ac9ed076d27380a6b",
+            lock_hash: "3a6c866856a40d2c0af480077bed19666647a48697d00b789a6b174375a16dcf",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
                 (
@@ -93,7 +93,7 @@ static PIN_REGISTRY: &[PinRecord] = &[
             rustc_version: "1.98.1",
             cargo_config_hash: "10ed106c093be78c7d13394e01b78904155ef70e7e74dc9ce8b69f9cd40f4bea",
             sdk_version: "0.8.0",
-            lock_hash: "995560fd74456da3cf8d795aedb01dcf70c5cbfea8dd6c3ac9ed076d27380a6b",
+            lock_hash: "3a6c866856a40d2c0af480077bed19666647a48697d00b789a6b174375a16dcf",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
                 (

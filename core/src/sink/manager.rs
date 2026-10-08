@@ -31,6 +31,7 @@ use ave_common::sink::{
 
 use crate::db::Storable;
 use crate::metrics::try_core_metrics;
+use crate::model::common::purge_storage;
 use crate::node::Node;
 use crate::sink::NodeSigner;
 use crate::sink::extract_sn;
@@ -137,9 +138,17 @@ pub enum SinkManagerMessage {
     HealthcheckTick {
         sink: String,
     },
+    /// Purge all persisted cursor state. Sent when the owning
+    /// governance is deleted: the child stops with it, but nothing
+    /// purges its store otherwise.
+    PurgeStorage,
 }
 
-impl Message for SinkManagerMessage {}
+impl Message for SinkManagerMessage {
+    fn is_critical(&self) -> bool {
+        matches!(self, Self::PurgeStorage)
+    }
+}
 
 /// Failure of a non-persistent sink test ([`SinkManagerMessage::TestSink`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -828,6 +837,10 @@ impl Handler<Self> for SinkManager {
             }
             SinkManagerMessage::RemoveSubject { subject_id } => {
                 self.handle_remove_subject(&subject_id, ctx).await?;
+            }
+            SinkManagerMessage::PurgeStorage => {
+                purge_storage(ctx).await?;
+                debug!("Sink manager storage purged");
             }
             SinkManagerMessage::CatchUpCompleted { sink, subject_id } => {
                 self.handle_catch_up_completed(sink, subject_id, ctx)

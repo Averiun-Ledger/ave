@@ -92,6 +92,18 @@ pub struct RequestHandler {
     >,
 }
 
+/// Owned handoff for one queue/create attempt, field for field like
+/// `RetryQueueRequest`: the funnel signature stays narrow no matter
+/// how many attempt-scoped values travel together.
+struct QueueRequest {
+    request: Signed<EventRequest>,
+    request_id: DigestIdentifier,
+    subject_id: DigestIdentifier,
+    is_gov: bool,
+    governance_id: Option<DigestIdentifier>,
+    attempts_left: usize,
+}
+
 impl BorshSerialize for RequestHandler {
     fn serialize<W: std::io::Write>(
         &self,
@@ -690,13 +702,16 @@ impl RequestHandler {
     async fn handle_queue_request(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        request: Signed<EventRequest>,
-        request_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        is_gov: bool,
-        governance_id: Option<DigestIdentifier>,
-        attempts_left: usize,
+        queue_request: QueueRequest,
     ) -> Result<(), ActorError> {
+        let QueueRequest {
+            request,
+            request_id,
+            subject_id,
+            is_gov,
+            governance_id,
+            attempts_left,
+        } = queue_request;
         let Some(helpers) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
 
@@ -710,13 +725,13 @@ impl RequestHandler {
         // queues normally — the request is never lost to the window.
         // Retries go by message, never by sleeping here: this actor
         // funnels every subject.
-    let in_handling = self.handling.contains_key(subject_id);
-        let in_queue = self.in_queue.contains_key(subject_id);
+        let in_handling = self.handling.contains_key(&subject_id);
+        let in_queue = self.in_queue.contains_key(&subject_id);
 
         if in_handling || in_queue {
             // Bounded queue: an authorized signer must not enqueue
             // without limit (the payload is persisted per entry).
-            if self.in_queue.get(subject_id).is_some_and(|queue| {
+            if self.in_queue.get(&subject_id).is_some_and(|queue| {
                 queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
             }) {
                 return Err(ActorError::Functional {
@@ -756,6 +771,7 @@ impl RequestHandler {
             subject_id: subject_id.clone(),
             governance_id: governance_id.clone(),
             helpers: helpers.clone(),
+            durable: is_gov,
         };
 
         match ctx
@@ -766,8 +782,13 @@ impl RequestHandler {
             .await
         {
             Ok(actor) => {
+                // `ask`, not `tell`: the handler records handling
+                // only after the manager acknowledged intake (its
+                // SafeState checkpoint is durable), so a crash in
+                // between never leaves a started-but-unrecorded
+                // request behind.
                 actor
-                    .tell(RequestManagerMessage::FirstRun {
+                    .ask(RequestManagerMessage::FirstRun {
                         command,
                         request,
                         request_id: request_id.clone(),
@@ -792,7 +813,7 @@ impl RequestHandler {
                 )
                 .await?;
 
-                return Ok(());
+                Ok(())
             }
             Err(ActorError::Exists { .. }) => {
                 if let Some(metrics) = try_core_metrics() {
@@ -812,16 +833,16 @@ impl RequestHandler {
                     ),
                     RequestHandlerMessage::RetryQueueRequest {
                         request,
-                        request_id: request_id.clone(),
-                        subject_id: subject_id.clone(),
+                        request_id,
+                        subject_id,
                         is_gov,
-                        governance_id: governance_id.clone(),
+                        governance_id,
                         attempts_left: attempts_left - 1,
                     },
                 )?;
-                return Ok(());
+                Ok(())
             }
-            Err(error) => return Err(error),
+            Err(error) => Err(error),
         }
     }
 
@@ -923,8 +944,10 @@ impl RequestHandler {
             .get_child::<RequestManager>(&subject_id.to_string())
             .await?;
 
+        // `ask`, not `tell`: same intake acknowledgement as the
+        // direct path before moving queue to handling.
         actor
-            .tell(RequestManagerMessage::FirstRun {
+            .ask(RequestManagerMessage::FirstRun {
                 command,
                 request,
                 request_id: request_id.clone(),
@@ -992,6 +1015,8 @@ impl RequestHandler {
             subject_id: subject_id.clone(),
             governance_id,
             helpers: (hash, network),
+            // Stopped right after the purge: durability is irrelevant.
+            durable: true,
         };
 
         let actor = match ctx
@@ -1207,9 +1232,17 @@ impl Actor for RequestHandler {
         // mid-reconcile. Governance ids resolve from node state like
         // the live path; unknown targets proceed ungated.
         for (subject_id, request_id) in self.handling.clone() {
-            let governance_id = get_subject_data(ctx, &subject_id)
-                .await?
+            let subject_data = get_subject_data(ctx, &subject_id).await?;
+            let governance_id = subject_data
+                .as_ref()
                 .and_then(|data| data.get_governance_id());
+            // Same durability rule as the live path: governance
+            // requests resume fully persistent, tracker requests
+            // resume from their two checkpoints. Unknown targets
+            // proceed ungated and durable, like today.
+            let durable = subject_data
+                .as_ref()
+                .is_none_or(|data| data.get_schema_id().is_gov());
             if let Some(governance_id) = &governance_id
                 && let Err(e) = wait_governance_ready(ctx, governance_id).await
             {
@@ -1223,6 +1256,7 @@ impl Actor for RequestHandler {
                 subject_id: subject_id.clone(),
                 governance_id,
                 helpers: (hash, network.clone()),
+                durable,
             };
 
             let request_manager_actor = match ctx
@@ -1524,12 +1558,14 @@ impl Handler<Self> for RequestHandler {
                 if let Err(e) = self
                     .handle_queue_request(
                         ctx,
-                        request,
-                        &request_id,
-                        &subject_id,
-                        is_gov,
-                        governance_id,
-                        MAX_CHILD_CREATE_ATTEMPTS,
+                        QueueRequest {
+                            request,
+                            request_id: request_id.clone(),
+                            subject_id: subject_id.clone(),
+                            is_gov,
+                            governance_id,
+                            attempts_left: MAX_CHILD_CREATE_ATTEMPTS,
+                        },
                     )
                     .await
                 {
@@ -1559,12 +1595,14 @@ impl Handler<Self> for RequestHandler {
                 if let Err(e) = self
                     .handle_queue_request(
                         ctx,
-                        request,
-                        &request_id,
-                        &subject_id,
-                        is_gov,
-                        governance_id,
-                        attempts_left,
+                        QueueRequest {
+                            request,
+                            request_id: request_id.clone(),
+                            subject_id: subject_id.clone(),
+                            is_gov,
+                            governance_id,
+                            attempts_left,
+                        },
                     )
                     .await
                 {
@@ -1716,6 +1754,14 @@ impl PersistentActor for RequestHandler {
     /// every snapshot instead of accumulating forever.
     fn prune_events_on_snapshot() -> bool {
         true
+    }
+
+    /// Wide snapshot cadence: each snapshot rewrites the whole queue
+    /// maps (up to 1024 full payloads per subject), so snapshotting
+    /// every 100 events would re-write gigabytes per cycle. Recovery
+    /// replays at most this many events, bounded and fast.
+    fn snapshot_every() -> Option<u64> {
+        Some(500)
     }
 
     fn create_initial(params: Self::InitParams) -> Self {

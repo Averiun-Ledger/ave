@@ -110,6 +110,12 @@ pub struct RequestManager {
     /// incident record. Never persisted (runtime only).
     #[serde(skip)]
     watchdog_budget_secs: u64,
+    /// Durability mode: governance requests persist every event,
+    /// tracker requests persist only the two recovery checkpoints
+    /// (request intake and post-validation ledger) and apply the rest
+    /// in memory. Set from init params at spawn and at boot, and
+    /// carried in snapshots so a restored manager keeps its mode.
+    durable: bool,
     command: ReqManInitMessage,
     request: Option<Signed<EventRequest>>,
     state: RequestManagerState,
@@ -128,6 +134,8 @@ pub struct InitRequestManager {
     pub subject_id: DigestIdentifier,
     pub governance_id: Option<DigestIdentifier>,
     pub helpers: (HashAlgorithm, Arc<NetworkSender>),
+    /// False for tracker requests: only checkpoint events touch disk.
+    pub durable: bool,
 }
 
 impl BorshSerialize for RequestManager {
@@ -139,6 +147,7 @@ impl BorshSerialize for RequestManager {
         BorshSerialize::serialize(&self.state, writer)?;
         BorshSerialize::serialize(&self.version, writer)?;
         BorshSerialize::serialize(&self.request, writer)?;
+        BorshSerialize::serialize(&self.durable, writer)?;
 
         Ok(())
     }
@@ -154,6 +163,7 @@ impl BorshDeserialize for RequestManager {
         let version = u64::deserialize_reader(reader)?;
         let request =
             Option::<Signed<EventRequest>>::deserialize_reader(reader)?;
+        let durable = bool::deserialize_reader(reader)?;
 
         let our_key = Arc::new(PublicKey::default());
         let subject_id = DigestIdentifier::default();
@@ -172,6 +182,7 @@ impl BorshDeserialize for RequestManager {
             id,
             subject_id,
             governance_id: None,
+            durable,
             command,
             request,
             state,
@@ -2014,6 +2025,21 @@ impl RequestManager {
 
         self.on_event(RequestManagerEvent::Finish, ctx).await;
 
+        // Tracker managers leave at most two checkpoint events per
+        // request behind; the manager outlives the request, so wipe
+        // them instead of accumulating history forever. A later purge
+        // would collect a failed wipe, and recovery never needs a
+        // finished request.
+        if !self.durable
+            && let Err(e) = purge_storage(ctx).await
+        {
+            warn!(
+                request_id = %self.id,
+                error = %e,
+                "Failed to purge ephemeral request storage"
+            );
+        }
+
         self.end_request(ctx).await?;
 
         Ok(())
@@ -2425,135 +2451,75 @@ impl RequestManager {
         Ok(())
     }
 
+    /// Best-effort stop of one phase child: a child that is already
+    /// gone is the desired end state, not an error. Already-closed
+    /// ones are skipped so the runtime does not log a
+    /// stop-confirmation error for them.
+    async fn stop_phase_child<T>(
+        ctx: &ActorContext<Self>,
+        request_id: &DigestIdentifier,
+        name: &str,
+    ) where
+        T: Actor + Handler<T>,
+    {
+        if let Ok(actor) = ctx.get_child::<T>(name).await
+            && !actor.is_closed()
+            && let Err(e) = actor.ask_stop().await
+        {
+            debug!(
+                request_id = %request_id,
+                error = %e,
+                "Phase child already gone while stopping"
+            );
+        }
+    }
+
     async fn stops_childs(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         match self.state {
             RequestManagerState::Reboot => {
-                if let Ok(actor) = ctx.get_child::<Update>("update").await {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
-                if let Ok(actor) = ctx.get_child::<Reboot>("reboot").await {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                tokio::join!(
+                    Self::stop_phase_child::<Update>(ctx, &self.id, "update"),
+                    Self::stop_phase_child::<Reboot>(ctx, &self.id, "reboot"),
+                );
             }
             RequestManagerState::Compilation => {
-                if let Ok(actor) =
-                    ctx.get_child::<Compilation>("compilation").await
-                {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                Self::stop_phase_child::<Compilation>(
+                    ctx,
+                    &self.id,
+                    "compilation",
+                )
+                .await;
             }
             RequestManagerState::Evaluation { .. } => {
-                if let Ok(actor) =
-                    ctx.get_child::<Evaluation>("evaluation").await
-                {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                Self::stop_phase_child::<Evaluation>(
+                    ctx,
+                    &self.id,
+                    "evaluation",
+                )
+                .await;
             }
             RequestManagerState::Approval { .. } => {
-                if let Ok(actor) = ctx.get_child::<Approval>("approval").await {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                Self::stop_phase_child::<Approval>(ctx, &self.id, "approval")
+                    .await;
             }
             RequestManagerState::Validation { .. } => {
-                if let Ok(actor) =
-                    ctx.get_child::<Validation>("validation").await
-                {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                Self::stop_phase_child::<Validation>(
+                    ctx,
+                    &self.id,
+                    "validation",
+                )
+                .await;
             }
             RequestManagerState::Distribution { .. } => {
-                if let Ok(actor) =
-                    ctx.get_child::<Distribution>("distribution").await
-                {
-                    // Best-effort: a child that is already gone is the
-                    // desired end state, not an error. Skip the
-                    // already-closed ones so the runtime does not log
-                    // a stop-confirmation error for them.
-                    if !actor.is_closed()
-                        && let Err(e) = actor.ask_stop().await
-                    {
-                        debug!(
-                            request_id = %self.id,
-                            error = %e,
-                            "Phase child already gone while stopping"
-                        );
-                    }
-                };
+                Self::stop_phase_child::<Distribution>(
+                    ctx,
+                    &self.id,
+                    "distribution",
+                )
+                .await;
             }
             _ => {}
         }
@@ -2619,6 +2585,18 @@ impl RequestManager {
         .await?;
 
         self.on_event(RequestManagerEvent::Finish, ctx).await;
+
+        // Same store hygiene as the success path: aborted tracker
+        // requests must not leave checkpoints behind either.
+        if !self.durable
+            && let Err(e) = purge_storage(ctx).await
+        {
+            warn!(
+                request_id = %self.id,
+                error = %e,
+                "Failed to purge ephemeral request storage"
+            );
+        }
 
         self.end_request(ctx).await?;
 
@@ -3106,6 +3084,29 @@ impl Handler<Self> for RequestManager {
                 };
             }
             RequestManagerMessage::Run { request_id } => {
+                // Boot resume found no persisted checkpoints: the
+                // request never reached intake (or its ephemeral
+                // checkpoints were already purged). Nothing to
+                // re-drive — release the subject so the handler stops
+                // listing it in handling; the live machinery reuses
+                // or stops this child from there.
+                if matches!(self.state, RequestManagerState::Starting)
+                    && self.request.is_none()
+                {
+                    warn!(
+                        request_id = %request_id,
+                        subject_id = %self.subject_id,
+                        "Run without persisted request: dropping stale handling entry"
+                    );
+                    if let Err(e) = self.end_request(ctx).await {
+                        error!(
+                            request_id = %request_id,
+                            error = %e,
+                            "Failed to release stale handling entry"
+                        );
+                    }
+                    return Ok(());
+                }
                 self.id = request_id;
                 self.ensure_request_metrics_started();
 
@@ -3991,12 +3992,39 @@ impl Handler<Self> for RequestManager {
             RequestManagerEvent::SafeState { .. } => "SafeState",
         };
 
-        if let Err(e) = self.persist(event, ctx).await {
+        // Tracker managers persist only the two recovery checkpoints:
+        // intake (SafeState, to restart from zero) and the committed
+        // ledger (Distribution state, to resume distribution with
+        // identical bytes). Everything else applies in memory.
+        let checkpoint = match &event {
+            RequestManagerEvent::SafeState { .. } => true,
+            RequestManagerEvent::UpdateState { state } => {
+                matches!(**state, RequestManagerState::Distribution { .. })
+            }
+            _ => false,
+        };
+        if self.durable || checkpoint {
+            if let Err(e) = self.persist(event, ctx).await {
+                error!(
+                    event_type = event_type,
+                    request_id = %self.id,
+                    error = %e,
+                    "Failed to persist event"
+                );
+                crash_system(ctx, e).await;
+            };
+            return;
+        }
+
+        // Same post-state as the persist path, without touching disk.
+        if let Err(e) =
+            Self::apply(self.state(), &event).map(|state| self.set_state(state))
+        {
             error!(
                 event_type = event_type,
                 request_id = %self.id,
                 error = %e,
-                "Failed to persist event"
+                "Failed to apply ephemeral event"
             );
             crash_system(ctx, e).await;
         };
@@ -4024,6 +4052,7 @@ impl PersistentActor for RequestManager {
             current_phase_started_at: None,
             watchdog_generation: 0,
             watchdog_budget_secs: 0,
+            durable: params.durable,
             our_key: params.our_key,
             id: DigestIdentifier::default(),
             subject_id: params.subject_id,

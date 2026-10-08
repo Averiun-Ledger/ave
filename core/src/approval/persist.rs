@@ -1106,7 +1106,9 @@ impl PersistentActor for ApprPersist {
     }
 
     fn snapshot_every() -> Option<u64> {
-        Some(1) // snapshot cada 25 eventos; None = solo manual/cierre
+        // Snapshot after every event: the state is small and the
+        // log stays flat (one snapshot, zero events).
+        Some(1)
     }
 
     fn create_initial(params: Self::InitParams) -> Self {

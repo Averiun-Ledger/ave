@@ -72,7 +72,7 @@ pub fn pin_lockfile(id: &str) -> Option<FrozenLockfile> {
     let (content, provenance) = match version {
         1 => (
             include_str!("../pins/contract-v1.Cargo.lock"),
-            "cargo-generate-lockfile/1.98.1 template=CONTRACT_CARGO_TOML sdk=0.8.0 date=2026-09-28",
+            "cargo-generate-lockfile/1.98.1 template=CONTRACT_CARGO_TOML+chrono sdk=0.8.0 date=2026-10-08",
         ),
         _ => return None,
     };
