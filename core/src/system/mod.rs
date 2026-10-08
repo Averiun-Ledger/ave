@@ -168,6 +168,12 @@ pub async fn system(
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
+    // Uniform per-message observability for every actor spawned
+    // below (actors snapshot the registry at spawn). Sanitized
+    // paths keep label cardinality bounded; no interceptors means
+    // no per-message cost beyond the envelope itself.
+    system.add_interceptor(crate::metrics::MessageMetrics);
+
     #[cfg(feature = "prometheus")]
     if let Some(registry) = registry.as_mut() {
         ave_actors::prometheus::register(registry, &mut system);

@@ -97,9 +97,20 @@ struct CompilerBuildLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ActorMessageLabels {
+    // Sanitized parent path (leaf ids stripped): bounded cardinality.
+    actor: String,
+    kind: &'static str,
+    result: &'static str,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
+    actor_messages: Family<ActorMessageLabels, Counter>,
+    actor_message_duration_seconds:
+        Family<ActorMessageLabels, Histogram, fn() -> Histogram>,
     request_duration_seconds:
         Family<RequestResultLabels, Histogram, fn() -> Histogram>,
     request_phase_duration_seconds:
@@ -150,6 +161,15 @@ impl CoreMetrics {
     fn new() -> Self {
         Self {
             requests: Family::default(),
+            actor_messages: Family::default(),
+            actor_message_duration_seconds: Family::new_with_constructor(
+                || {
+                    Histogram::new(vec![
+                        0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+                        5.0, 10.0, 30.0,
+                    ])
+                },
+            ),
             request_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
                     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
@@ -229,6 +249,16 @@ impl CoreMetrics {
             "core_requests",
             "Core request lifecycle counters labeled by result.",
             self.requests.clone(),
+        );
+        registry.register(
+            "core_actor_messages",
+            "Handled actor messages labeled by sanitized actor path, kind and result.",
+            self.actor_messages.clone(),
+        );
+        registry.register(
+            "core_actor_message_duration_seconds",
+            "Actor message handling duration labeled by sanitized actor path, kind and result.",
+            self.actor_message_duration_seconds.clone(),
         );
         registry.register(
             "core_request_duration_seconds",
@@ -429,6 +459,24 @@ impl CoreMetrics {
                 result: "handler_child_collision",
             })
             .inc();
+    }
+
+    pub fn observe_actor_message(
+        &self,
+        actor: String,
+        kind: &'static str,
+        result: &'static str,
+        duration: Duration,
+    ) {
+        let labels = ActorMessageLabels {
+            actor,
+            kind,
+            result,
+        };
+        self.actor_messages.get_or_create(&labels).inc();
+        self.actor_message_duration_seconds
+            .get_or_create(&labels)
+            .observe(Self::seconds(duration));
     }
 
     pub fn observe_request_terminal(
@@ -749,6 +797,78 @@ pub fn register(registry: &mut Registry) -> Arc<CoreMetrics> {
 
 pub fn try_core_metrics() -> Option<&'static Arc<CoreMetrics>> {
     CORE_METRICS.get()
+}
+
+#[cfg(test)]
+mod message_metrics_tests {
+    use super::*;
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+
+    #[test]
+    fn sanitize_strips_leaf_ids() {
+        let deep = ave_actors::ActorPath::from("/user/request/abc123");
+        assert_eq!(sanitize_actor_path(&deep), "/user/request");
+        let shallow = ave_actors::ActorPath::from("/user/node");
+        assert_eq!(sanitize_actor_path(&shallow), "/user/node");
+    }
+
+    #[test]
+    fn observe_emits_counter_and_histogram() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+        metrics.observe_actor_message(
+            "/user/request".to_owned(),
+            "tell",
+            "ok",
+            Duration::from_millis(5),
+        );
+        let mut buf = String::new();
+        encode(&mut buf, &registry).unwrap();
+        assert!(
+            buf.contains("core_actor_messages_total{actor=\"/user/request\",kind=\"tell\",result=\"ok\"} 1"),
+            "counter missing:\n{buf}"
+        );
+        assert!(
+            buf.contains("core_actor_message_duration_seconds"),
+            "histogram missing:\n{buf}"
+        );
+    }
+}
+
+/// Strips the leaf segment (subject/request/sink ids) so per-actor
+/// metric labels stay bounded no matter how many subjects exist.
+fn sanitize_actor_path(path: &ave_actors::ActorPath) -> String {
+    if path.level() > 2 {
+        path.parent().to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// Uniform per-message observability: elapsed and outcome for every
+/// handled message, with sanitized actor paths. Hooks never fail
+/// delivery and must stay fast: this one does a single metrics
+/// lookup per message and nothing when metrics are off.
+pub struct MessageMetrics;
+
+impl ave_actors::Interceptor for MessageMetrics {
+    fn after_handle(
+        &self,
+        ctx: ave_actors::Intercept<'_>,
+        result: &Result<(), ave_actors::ActorError>,
+        elapsed: Duration,
+    ) {
+        let Some(metrics) = try_core_metrics() else {
+            return;
+        };
+        metrics.observe_actor_message(
+            sanitize_actor_path(ctx.path),
+            ctx.kind,
+            if result.is_ok() { "ok" } else { "error" },
+            elapsed,
+        );
+    }
 }
 
 #[cfg(test)]
