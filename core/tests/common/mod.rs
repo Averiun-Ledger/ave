@@ -148,6 +148,10 @@ pub struct CreateNodeConfig {
     /// values. Needed by tests that wait on idle sync rounds so they do
     /// not pay the full default interval.
     pub governance_sync: Option<GovernanceSyncConfig>,
+    /// Explicit tracker sync timing; `None` uses the default test
+    /// values (10s interval). Needed by tests that wait on the fetch
+    /// tick so they do not pay the full default interval.
+    pub tracker_sync: Option<TrackerSyncConfig>,
     /// Explicit approval timing; `None` uses the default test values
     /// (long window, fast early probes). Needed by tests that exercise
     /// the approval deadline: they set a short window explicitly.
@@ -181,6 +185,7 @@ pub async fn try_create_node(
         compiler,
         contracts_path,
         governance_sync,
+        tracker_sync,
         approval,
         toolchains,
         cargo_bin,
@@ -251,13 +256,13 @@ pub async fn try_create_node(
                 sample_size: 3,
                 response_timeout_secs: 5,
             }),
-            tracker: TrackerSyncConfig {
+            tracker: tracker_sync.unwrap_or(TrackerSyncConfig {
                 interval_secs: 10,
                 page_size: 10,
                 response_timeout_secs: 5,
                 update_batch_size: 2,
                 update_timeout_secs: 5,
-            },
+            }),
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         },

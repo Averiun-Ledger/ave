@@ -13,6 +13,7 @@ use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };
+use tracing::warn;
 
 pub struct RotateApiKeyParams<'a> {
     pub key_id: &'a str,
@@ -22,6 +23,10 @@ pub struct RotateApiKeyParams<'a> {
     pub revoked_by: Option<i64>,
     pub reason: Option<&'a str>,
     pub audit: Option<AuditLogParams<'a>>,
+    /// `(requesting_user_id, is_superadmin)`: when present, rotation
+    /// of another user's key is rejected inside the tx. `None` skips
+    /// the check (service/internal callers).
+    pub owner_check: Option<(i64, bool)>,
 }
 
 // =============================================================================
@@ -432,6 +437,7 @@ impl AuthDatabase {
             revoked_by,
             reason,
             audit,
+            owner_check,
         } = params;
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
@@ -441,6 +447,15 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let existing = Self::get_api_key_info_internal(&tx, key_id)?;
+            if let Some((owner_id, is_superadmin)) = owner_check
+                && existing.user_id != owner_id
+                && !is_superadmin
+            {
+                return Err(DatabaseError::PermissionDenied(
+                    "Only superadmin can rotate API keys of other users"
+                        .to_owned(),
+                ));
+            }
             let new_name = name.unwrap_or(existing.name.as_str());
             let new_description =
                 description.or(existing.description.as_deref());
@@ -574,6 +589,8 @@ impl AuthDatabase {
     pub fn list_all_api_keys(
         &self,
         include_revoked: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<ApiKeyInfo>, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -586,7 +603,8 @@ impl AuthDatabase {
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              LEFT JOIN usage_plans p ON p.id = kp.plan_id
-             ORDER BY k.created_at DESC"
+             ORDER BY k.created_at DESC
+             LIMIT ?1 OFFSET ?2"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked,
@@ -597,7 +615,8 @@ impl AuthDatabase {
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.revoked = 0
-             ORDER BY k.created_at DESC"
+             ORDER BY k.created_at DESC
+             LIMIT ?1 OFFSET ?2"
         };
 
         let mut stmt = conn
@@ -605,7 +624,7 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let keys = stmt
-            .query_map([], |row| {
+            .query_map(params![limit, offset], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
                     user_id: row.get(1)?,
@@ -640,11 +659,30 @@ impl AuthDatabase {
         revoked_by: Option<i64>,
         reason: Option<&str>,
         audit: Option<AuditLogParams>,
+        owner_check: Option<(i64, bool)>,
+        reject_management: bool,
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        // Ownership and management guards run inside the same write
+        // tx that revokes: no check-then-act gap between a separate
+        // lookup and this write.
+        let info = Self::get_api_key_info_internal(&tx, key_id)?;
+        if let Some((owner_id, is_superadmin)) = owner_check
+            && info.user_id != owner_id
+            && !is_superadmin
+        {
+            return Err(DatabaseError::NotFound(
+                "API key not found".to_owned(),
+            ));
+        }
+        if reject_management && info.is_management {
+            return Err(DatabaseError::Validation(
+                "Cannot revoke the management API key".to_owned(),
+            ));
+        }
         Self::revoke_api_key_internal(&tx, key_id, revoked_by, reason)?;
         if let Some(audit) = audit {
             Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
@@ -781,13 +819,6 @@ impl AuthDatabase {
         // Get user roles
         let roles = Self::get_user_roles_internal(conn, user_id)?;
 
-        let now = Self::now();
-        conn.execute(
-            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
-            params![now, ip_address, &key_id],
-        )
-        .map_err(|e| DatabaseError::Update(e.to_string()))?;
-
         let mut permissions =
             Self::get_effective_permissions_internal(conn, user_id)?;
 
@@ -866,6 +897,17 @@ impl AuthDatabase {
                 )?;
             }
 
+            // Usage bookkeeping rides the same Immediate write tx the
+            // quota consume already opened: no extra lock, and direct
+            // (non-HTTP) callers keep the authenticate-records-use
+            // contract. The middleware spawn stays as cover for paths
+            // that never reach this function.
+            tx.execute(
+                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
+                params![Self::now(), ip_address, auth_ctx.api_key_id],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
             tx.commit()
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
@@ -876,6 +918,36 @@ impl AuthDatabase {
             tx_started.elapsed(),
         );
         result
+    }
+
+    /// Best-effort `last_used` bookkeeping, deliberately outside the
+    /// auth transaction and the request path: a failed touch must
+    /// never deny an otherwise valid request, and the write must not
+    /// serialize read-only traffic behind a write lock.
+    pub fn touch_api_key_last_used(
+        &self,
+        key_id: &str,
+        ip_address: Option<&str>,
+    ) {
+        let conn = match self.lock_conn() {
+            Ok(conn) => conn,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "touch last_used: no connection, skipped"
+                );
+                return;
+            }
+        };
+        if let Err(error) = conn.execute(
+            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
+            params![Self::now(), ip_address, key_id],
+        ) {
+            warn!(
+                error = %error,
+                "touch last_used failed, skipped"
+            );
+        }
     }
 
     /// Delete expired API keys

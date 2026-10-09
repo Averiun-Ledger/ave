@@ -108,7 +108,6 @@ struct ActorMessageLabels {
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
-    actor_messages: Family<ActorMessageLabels, Counter>,
     actor_message_duration_seconds:
         Family<ActorMessageLabels, Histogram, fn() -> Histogram>,
     request_duration_seconds:
@@ -161,7 +160,6 @@ impl CoreMetrics {
     fn new() -> Self {
         Self {
             requests: Family::default(),
-            actor_messages: Family::default(),
             actor_message_duration_seconds: Family::new_with_constructor(
                 || {
                     Histogram::new(vec![
@@ -249,11 +247,6 @@ impl CoreMetrics {
             "core_requests",
             "Core request lifecycle counters labeled by result.",
             self.requests.clone(),
-        );
-        registry.register(
-            "core_actor_messages",
-            "Handled actor messages labeled by sanitized actor path, kind and result.",
-            self.actor_messages.clone(),
         );
         registry.register(
             "core_actor_message_duration_seconds",
@@ -473,7 +466,8 @@ impl CoreMetrics {
             kind,
             result,
         };
-        self.actor_messages.get_or_create(&labels).inc();
+        // Single family lookup per message: the histogram already
+        // carries `_count`, so no separate counter is needed.
         self.actor_message_duration_seconds
             .get_or_create(&labels)
             .observe(Self::seconds(duration));
@@ -826,8 +820,8 @@ mod message_metrics_tests {
         let mut buf = String::new();
         encode(&mut buf, &registry).unwrap();
         assert!(
-            buf.contains("core_actor_messages_total{actor=\"/user/request\",kind=\"tell\",result=\"ok\"} 1"),
-            "counter missing:\n{buf}"
+            buf.contains("core_actor_message_duration_seconds_count{actor=\"/user/request\",kind=\"tell\",result=\"ok\"} 1"),
+            "count missing:\n{buf}"
         );
         assert!(
             buf.contains("core_actor_message_duration_seconds"),

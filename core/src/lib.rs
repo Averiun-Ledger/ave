@@ -85,9 +85,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use validation::{Validation, ValidationMessage};
 
+use crate::api_input_validation::page_sorted;
 pub use crate::api_input_validation::{
-    parse_request_id, require_non_empty_str, require_positive_u64,
-    require_query_limit, validate_aborts_query, validate_event_request,
+    DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT, parse_request_id,
+    require_non_empty_str, require_positive_u64, require_query_limit,
+    resolve_page, validate_aborts_query, validate_event_request,
     validate_events_query, validate_governance_id, validate_incidents_query,
     validate_request_id, validate_sink_events_query,
     validate_sink_replay_request, validate_sinks_query, validate_subject_id,
@@ -785,6 +787,8 @@ impl Api {
     pub async fn get_approvals(
         &self,
         state: Option<ApprovalState>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<(ApprovalReq, ApprovalState)>, Error> {
         let response = self
             .request
@@ -796,7 +800,13 @@ impl Api {
             })?;
 
         match response {
-            RequestHandlerResponse::Approvals(data) => Ok(data),
+            RequestHandlerResponse::Approvals(data) => {
+                // Approvers answer per governance in spawn order, so
+                // sort for stable pages before slicing.
+                Ok(page_sorted(data, limit, offset, |x| {
+                    x.0.subject_id.to_string()
+                }))
+            }
             _ => {
                 warn!("Unexpected response from request handler");
                 Err(Error::UnexpectedResponse {
@@ -903,6 +913,8 @@ impl Api {
 
     pub async fn all_request_state(
         &self,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<RequestInfoExtend>, Error> {
         let Some(tracking) = &self.tracking else {
             return Err(Error::SafeMode(
@@ -919,7 +931,9 @@ impl Api {
             })?;
 
         match response {
-            RequestTrackingResponse::AllInfo(state) => Ok(state),
+            RequestTrackingResponse::AllInfo(state) => {
+                Ok(page_sorted(state, limit, offset, |x| x.request_id.clone()))
+            }
             _ => {
                 warn!("Unexpected response from tracking");
                 Err(Error::UnexpectedResponse {
@@ -962,6 +976,8 @@ impl Api {
 
     pub async fn get_pending_transfers(
         &self,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<TransferSubject>, Error> {
         let response =
             self.node.ask(NodeMessage::PendingTransfers).await.map_err(
@@ -980,7 +996,9 @@ impl Api {
             });
         };
 
-        Ok(pending)
+        Ok(page_sorted(pending, limit, offset, |x| {
+            x.subject_id.to_string()
+        }))
     }
 
     ///////// Subject Access
@@ -2099,11 +2117,16 @@ impl Api {
     pub async fn all_govs(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, Error> {
-        self.db.get_governances(active).await.map_err(|e| {
-            warn!(error = %e, "Failed to get governances");
-            Error::QueryFailed(e.to_string())
-        })
+        self.db
+            .get_governances(active, limit, offset)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to get governances");
+                Error::QueryFailed(e.to_string())
+            })
     }
 
     pub async fn all_subjs(
@@ -2111,6 +2134,8 @@ impl Api {
         governance_id: DigestIdentifier,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, Error> {
         validate_governance_id(&governance_id)?;
         if let Some(schema_id) = schema_id.as_ref() {
@@ -2119,7 +2144,7 @@ impl Api {
         let governance_id = governance_id.to_string();
         match self
             .db
-            .get_subjects(&governance_id, active, schema_id)
+            .get_subjects(&governance_id, active, schema_id, limit, offset)
             .await
         {
             Ok(subjects) => Ok(subjects),

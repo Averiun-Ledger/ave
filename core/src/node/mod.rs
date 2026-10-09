@@ -49,11 +49,11 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
     Message, Response,
 };
-use ave_actors::PersistentActor;
 use serde::{Deserialize, Serialize};
 
 pub mod register;
@@ -1251,6 +1251,20 @@ impl Handler<Self> for Node {
                 subject_id,
                 data,
             } => {
+                // Backstop: new subjects only come from live creation,
+                // which is dead in safe mode — but registering here
+                // persists a journal event and spawns a distributor,
+                // so refuse loudly instead of depending on that.
+                if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config")
+                    && config.safe_mode
+                {
+                    return Err(ActorError::Functional {
+                        description:
+                            "RegisterSubject is not available in safe mode"
+                                .to_owned(),
+                    });
+                }
                 let Some(network): Option<Arc<NetworkSender>> =
                     ctx.system().get_helper("network")
                 else {

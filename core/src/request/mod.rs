@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::PersistentActor;
 use ave_common::Namespace;
 use ave_common::bridge::request::{
     ApprovalState, ApprovalStateRes, EventRequestType,
@@ -914,11 +914,7 @@ impl RequestHandler {
                 .await
                 .map_err(RequestHandlerError::from)
             },
-            Self::check_fact_viewpoints(
-                ctx,
-                request.content(),
-                &subject_data
-            )
+            Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
         )?;
 
         Self::check_creation(ctx, subject_data, &event_request_type, signer)
@@ -1416,32 +1412,36 @@ impl Handler<Self> for RequestHandler {
                     return Err(crash_system(ctx, ActorError::from(err)).await);
                 };
 
-                if let Err(e) =
-                    Self::check_owner_new_owner(ctx, request.content()).await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Owner or new owner check failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
-                let subject_data = match Self::build_subject_data(
-                    ctx,
-                    request.content(),
-                )
-                .await
-                {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NewRequest",
-                            error = %e,
-                            "Failed to build subject data"
-                        );
-                        return Err(ActorError::from(e));
-                    }
+                // Round 1: the two intake reads only need the
+                // request itself — ask together.
+                let subject_data = match tokio::try_join!(
+                    async {
+                        Self::check_owner_new_owner(ctx, request.content())
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    msg_type = "NewRequest",
+                                    error = %e,
+                                    "Owner or new owner check failed"
+                                );
+                                ActorError::from(e)
+                            })
+                    },
+                    async {
+                        Self::build_subject_data(ctx, request.content())
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    msg_type = "NewRequest",
+                                    error = %e,
+                                    "Failed to build subject data"
+                                );
+                                ActorError::from(e)
+                            })
+                    },
+                ) {
+                    Ok(((), subject_data)) => subject_data,
+                    Err(e) => return Err(e),
                 };
                 let event_request_type =
                     EventRequestType::from(request.content());
@@ -1466,21 +1466,6 @@ impl Handler<Self> for RequestHandler {
                     ));
                 }
 
-                if let Err(e) = Self::check_tracker_ledger_full(
-                    ctx,
-                    request.content(),
-                    &subject_data,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Tracker full ledger check failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
                 if let Err(e) =
                     Self::check_event_request(request.content(), is_gov)
                 {
@@ -1492,55 +1477,80 @@ impl Handler<Self> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                if let Err(e) = Self::check_fact_viewpoints(
-                    ctx,
-                    request.content(),
-                    &subject_data,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Fact viewpoints validation failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
-                if let Err(e) = Self::check_signer_authorization(
-                    ctx,
-                    (*self.our_key).clone(),
-                    signer.clone(),
-                    &governance_subject_id,
-                    &event_request_type,
-                    subject_data.clone(),
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        governance_id = %governance_subject_id,
-                        error = %e,
-                        "Signature check failed"
-                    );
-                    return Err(e);
-                }
-
-                if let Err(e) = Self::check_creation(
-                    ctx,
-                    subject_data,
-                    &event_request_type,
-                    signer,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Creation check failed"
-                    );
-                    return Err(e);
-                }
+                // Round 2: the remaining checks only read shared
+                // state — ask together. Each logs its own failure
+                // like the sequential code did.
+                tokio::try_join!(
+                    async {
+                        Self::check_tracker_ledger_full(
+                            ctx,
+                            request.content(),
+                            &subject_data,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Tracker full ledger check failed"
+                            );
+                            ActorError::from(e)
+                        })
+                    },
+                    async {
+                        Self::check_fact_viewpoints(
+                            ctx,
+                            request.content(),
+                            &subject_data,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Fact viewpoints validation failed"
+                            );
+                            ActorError::from(e)
+                        })
+                    },
+                    async {
+                        Self::check_signer_authorization(
+                            ctx,
+                            (*self.our_key).clone(),
+                            signer.clone(),
+                            &governance_subject_id,
+                            &event_request_type,
+                            subject_data.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                governance_id = %governance_subject_id,
+                                error = %e,
+                                "Signature check failed"
+                            );
+                            e
+                        })
+                    },
+                    async {
+                        Self::check_creation(
+                            ctx,
+                            subject_data.clone(),
+                            &event_request_type,
+                            signer.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Creation check failed"
+                            );
+                            e
+                        })
+                    },
+                )?;
 
                 let (request_id, subject_id) =
                     match Self::build_request_id_subject_id(hash, &request) {

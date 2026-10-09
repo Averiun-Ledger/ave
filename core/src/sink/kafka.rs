@@ -910,24 +910,28 @@ impl SinkTransport for KafkaTransport {
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        for (event_type, group) in
+        // Same concurrent-groups shape as the HTTP sink: one
+        // produce per group, whole batch fails on the first error.
+        let sends =
             group_events_by_type(events, self.topic_template.has_event_type())
-        {
-            let Some((topic, key, payload, request_id)) =
-                self.prepare_group(&event_type, &group)?
-            else {
-                continue;
-            };
-            self.produce(
-                &topic,
-                key.as_deref(),
-                &payload,
-                None,
-                None,
-                &request_id,
-            )
-            .await?;
-        }
+                .into_iter()
+                .map(|(event_type, group)| async move {
+                    let Some((topic, key, payload, request_id)) =
+                        self.prepare_group(&event_type, &group)?
+                    else {
+                        return Ok(());
+                    };
+                    self.produce(
+                        &topic,
+                        key.as_deref(),
+                        &payload,
+                        None,
+                        None,
+                        &request_id,
+                    )
+                    .await
+                });
+        futures::future::try_join_all(sends).await?;
 
         Ok(())
     }

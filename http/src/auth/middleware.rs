@@ -4,7 +4,6 @@
 
 use super::crypto::generate_uuid;
 use super::database::{AuthDatabase, DatabaseError};
-use super::http_api::rate_limit_error_response;
 use super::http_api::request_result_from_status;
 use super::models::{AuthContext, ErrorResponse};
 use super::request_meta;
@@ -88,49 +87,30 @@ where
             _ => None,
         };
 
-        // SECURITY FIX: Pre-authentication rate limiting by IP
-        // Check rate limit BEFORE verifying credentials to prevent brute force attacks
+        // Single blocking hop for the whole pre-check + verify
+        // sequence: the IP rate limit still runs BEFORE credential
+        // verification (brute-force protection), just without a
+        // second pool roundtrip in between.
+        let request_path = parts.uri.path().to_string();
+        let auth_api_key = api_key.to_string();
+        let auth_ip = ip_address.clone();
         let pre_auth_ip = ip_address.clone();
-        let pre_auth_result = db
-            .run_blocking("pre_auth_rate_limit", move |db| {
+        let auth_result = db
+            .run_blocking("authenticate_api_key_request", move |db| {
                 db.check_rate_limit(
                     None,
                     pre_auth_ip.as_deref(),
                     Some("/auth/*"),
-                )
-            })
-            .await;
-        pre_auth_result.map_err(|e| {
-            if matches!(e, DatabaseError::RateLimitExceeded(_)) {
-                warn!(
-                    target: TARGET,
-                    ip = ?ip_address,
-                    error = %e,
-                    "pre-auth rate limit exceeded"
-                );
-            }
-            let response = rate_limit_error_response(e);
-            db.record_request_metrics(
-                "api_key_auth",
-                request_result_from_status(response.0),
-                request_started.elapsed(),
-            );
-            response
-        })?;
-
-        let request_path = parts.uri.path().to_string();
-        let auth_api_key = api_key.to_string();
-        let auth_ip = ip_address.clone();
-        let auth_ctx = db
-            .run_blocking("authenticate_api_key_request", move |db| {
+                )?;
                 db.authenticate_api_key_request(
                     &auth_api_key,
                     auth_ip.as_deref(),
                     &request_path,
                 )
             })
-            .await
-            .map_err(|e| match e {
+            .await;
+        let auth_ctx = auth_result.map_err(|e| {
+            match e {
                 DatabaseError::RateLimitExceeded(message) => {
                     db.record_request_metrics(
                         "api_key_auth",
@@ -212,12 +192,22 @@ where
                         }),
                     )
                 }
-            })?;
+            }
+        })?;
         db.record_request_metrics(
             "api_key_auth",
             "success",
             request_started.elapsed(),
         );
+
+        // last_used bookkeeping rides outside the request: a background
+        // single UPDATE instead of a write inside the auth transaction.
+        let touch_db = db.clone();
+        let touch_key = auth_ctx.api_key_id.clone();
+        let touch_ip = auth_ctx.ip_address.clone();
+        tokio::spawn(async move {
+            touch_db.touch_api_key_last_used(&touch_key, touch_ip.as_deref());
+        });
 
         // Store auth context in request extensions for later use
         parts.extensions.insert(Arc::new(auth_ctx));
@@ -348,66 +338,39 @@ pub async fn audit_log_middleware(
         // If we have auth_ctx, use normal logging
         if let Some(ctx) = auth_ctx {
             let ctx = (*ctx).clone();
-            let path_for_log = path.clone();
-            let method_for_log = method.clone();
-            let ip_for_log = ip_address.clone();
-            let user_agent_for_log = user_agent.clone();
-            let request_id_for_log = request_id.clone();
-            let error_for_log = error_message.clone();
-            if let Err(e) = db
-                .run_blocking("log_api_request", move |db| {
-                    db.log_api_request(
-                        &ctx,
-                        crate::auth::database_audit::ApiRequestParams {
-                            path: &path_for_log,
-                            method: &method_for_log,
-                            ip_address: ip_for_log.as_deref(),
-                            user_agent: user_agent_for_log.as_deref(),
-                            request_id: &request_id_for_log,
-                            success,
-                            error_message: error_for_log.as_deref(),
-                        },
-                    )
-                })
-                .await
-            {
-                error!(target: TARGET, error = %e, "failed to write request audit log");
-            }
+            db.audit_async(crate::auth::database_audit::QueuedAuditLog {
+                user_id: Some(ctx.user_id),
+                api_key_id: Some(ctx.api_key_id.clone()),
+                action_type: "api_request",
+                endpoint: Some(path.clone()),
+                http_method: Some(method.clone()),
+                ip_address: ip_address.clone(),
+                user_agent: user_agent.clone(),
+                request_id: Some(request_id.clone()),
+                details: None,
+                success,
+                error_message: error_message.clone(),
+            });
         } else {
             // No auth context - log as unauthenticated request
-            let path_for_log = path.clone();
-            let method_for_log = method.clone();
-            let ip_for_log = ip_address.clone();
-            let user_agent_for_log = user_agent.clone();
-            let request_id_for_log = request_id.clone();
-            let error_for_log = error_message.clone();
             let details = format!("{} {}", method, path);
-            if let Err(e) = db
-                .run_blocking("create_unauthenticated_audit_log", move |db| {
-                    db.create_audit_log(
-                        crate::auth::database_audit::AuditLogParams {
-                            user_id: None,
-                            api_key_id: None,
-                            action_type: if success {
-                                "unauthenticated_request_success"
-                            } else {
-                                "unauthenticated_request_failed"
-                            },
-                            endpoint: Some(&path_for_log),
-                            http_method: Some(&method_for_log),
-                            ip_address: ip_for_log.as_deref(),
-                            user_agent: user_agent_for_log.as_deref(),
-                            request_id: Some(&request_id_for_log),
-                            details: Some(&details),
-                            success,
-                            error_message: error_for_log.as_deref(),
-                        },
-                    )
-                })
-                .await
-            {
-                error!(target: TARGET, error = %e, "failed to write audit log");
-            }
+            db.audit_async(crate::auth::database_audit::QueuedAuditLog {
+                user_id: None,
+                api_key_id: None,
+                action_type: if success {
+                    "unauthenticated_request_success"
+                } else {
+                    "unauthenticated_request_failed"
+                },
+                endpoint: Some(path.clone()),
+                http_method: Some(method.clone()),
+                ip_address: ip_address.clone(),
+                user_agent: user_agent.clone(),
+                request_id: Some(request_id.clone()),
+                details: Some(details),
+                success,
+                error_message: error_message.clone(),
+            });
         }
     }
 
@@ -474,41 +437,35 @@ pub async fn audit_rejected_request(
     let user_agent = meta.user_agent;
     let error_message = format!("HTTP {}", status);
     let request_id = generate_uuid();
-    let result = db
-        .run_blocking("audit_rejected_request", move |db| {
-            let Some(ctx) = auth_ctx else {
-                let details = format!("{} {}", method, path);
-                return db.create_audit_log(
-                    crate::auth::database_audit::AuditLogParams {
-                        user_id: None,
-                        api_key_id: None,
-                        action_type: "unauthenticated_request_failed",
-                        endpoint: Some(&path),
-                        http_method: Some(&method),
-                        ip_address: ip_address.as_deref(),
-                        user_agent: user_agent.as_deref(),
-                        request_id: Some(&request_id),
-                        details: Some(&details),
-                        success: false,
-                        error_message: Some(&error_message),
-                    },
-                );
-            };
-            db.log_api_request(
-                &ctx,
-                crate::auth::database_audit::ApiRequestParams {
-                    path: &path,
-                    method: &method,
-                    ip_address: ip_address.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                    request_id: &request_id,
-                    success: false,
-                    error_message: Some(&error_message),
-                },
-            )
-        })
-        .await;
-    if let Err(e) = result {
-        error!(target: TARGET, error = %e, "failed to write rejection audit log");
+    if let Some(ctx) = auth_ctx {
+        let ctx = (*ctx).clone();
+        db.audit_async(crate::auth::database_audit::QueuedAuditLog {
+            user_id: Some(ctx.user_id),
+            api_key_id: Some(ctx.api_key_id.clone()),
+            action_type: "api_request",
+            endpoint: Some(path),
+            http_method: Some(method),
+            ip_address,
+            user_agent,
+            request_id: Some(request_id),
+            details: None,
+            success: false,
+            error_message: Some(error_message),
+        });
+    } else {
+        let details = format!("{} {}", method, path);
+        db.audit_async(crate::auth::database_audit::QueuedAuditLog {
+            user_id: None,
+            api_key_id: None,
+            action_type: "unauthenticated_request_failed",
+            endpoint: Some(path),
+            http_method: Some(method),
+            ip_address,
+            user_agent,
+            request_id: Some(request_id),
+            details: Some(details),
+            success: false,
+            error_message: Some(error_message),
+        });
     }
 }

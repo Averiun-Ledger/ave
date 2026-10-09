@@ -74,7 +74,11 @@ struct FetchState {
 struct UpdateState {
     peer: PublicKey,
     governance_version: u64,
-    pending_items: VecDeque<CurrentWitnessSubject>,
+    /// Pending items with the local sn read while planning:
+    /// launching reuses it instead of re-asking per item (a
+    /// concurrent local advance only overlaps already-have events,
+    /// skipped by sn).
+    pending_items: VecDeque<(CurrentWitnessSubject, Option<u64>)>,
     next_cursor: Option<DigestIdentifier>,
     active_batch: Vec<ActiveUpdate>,
     batch_nonce: u64,
@@ -472,7 +476,8 @@ impl TrackerSync {
         &self,
         ctx: &mut ActorContext<Self>,
         items: Vec<CurrentWitnessSubject>,
-    ) -> Result<VecDeque<CurrentWitnessSubject>, ActorError> {
+    ) -> Result<VecDeque<(CurrentWitnessSubject, Option<u64>)>, ActorError>
+    {
         let banned_set: HashSet<DigestIdentifier> = {
             let access_path = ActorPath::from("/user/node/auth");
             let access = ctx
@@ -511,7 +516,7 @@ impl TrackerSync {
             let local_sn =
                 self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             if local_sn.is_none_or(|local_sn| local_sn < item.target_sn) {
-                pending_items.push_back(item);
+                pending_items.push_back((item, local_sn));
             }
         }
 
@@ -523,7 +528,7 @@ impl TrackerSync {
         ctx: &mut ActorContext<Self>,
         peer: PublicKey,
         governance_version: u64,
-        pending_items: VecDeque<CurrentWitnessSubject>,
+        pending_items: VecDeque<(CurrentWitnessSubject, Option<u64>)>,
         next_cursor: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         self.cancel_fetch_timeout(ctx);
@@ -634,11 +639,10 @@ impl TrackerSync {
         let peer = state.peer.clone();
         let mut active_batch = Vec::with_capacity(self.update_batch_size);
         for _ in 0..self.update_batch_size {
-            let Some(item) = state.pending_items.pop_front() else {
+            let Some((item, last_seen_sn)) = state.pending_items.pop_front()
+            else {
                 break;
             };
-            let last_seen_sn =
-                self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             self.request_tracker_update(
                 ctx,
                 &peer,

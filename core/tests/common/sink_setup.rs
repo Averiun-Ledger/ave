@@ -99,6 +99,7 @@ pub fn make_sink_entry_with_concurrency(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
@@ -130,6 +131,7 @@ pub fn make_sink_entry_with_auth(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 auth: Some(auth),
                 max_retries: 0,
                 request_timeout_ms: 10_000,
@@ -177,6 +179,7 @@ pub fn make_sink_entry_with_signature_and_retries(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 signature: true,
                 max_retries,
                 retry_base_delay_ms: 100,
@@ -211,6 +214,7 @@ pub fn make_sink_entry_with_tls(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 tls: Some(tls),
                 max_retries: 0,
                 request_timeout_ms: 10_000,
@@ -279,6 +283,7 @@ pub fn make_sink_entry_with_proxy(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 proxy: Some(proxy),
                 max_retries: 0,
                 request_timeout_ms: 10_000,
@@ -312,6 +317,7 @@ pub fn make_sink_entry_with_headers(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 headers,
                 max_retries: 0,
                 request_timeout_ms: 10_000,
@@ -347,6 +353,7 @@ pub fn make_sink_entry_with_retry_policy(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries,
                 retry_base_delay_ms,
                 retry_max_delay_ms,
@@ -392,6 +399,7 @@ pub fn short_timeout_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 2000,
                 connect_timeout_ms: 1000,
@@ -422,6 +430,7 @@ pub fn flapping_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
@@ -452,6 +461,7 @@ pub fn transient_error_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 2,
                 request_timeout_ms: 500,
                 retry_base_delay_ms: 100,
@@ -485,6 +495,7 @@ pub fn short_idle_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
@@ -841,6 +852,7 @@ pub fn make_governance_sink_entry(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
@@ -936,6 +948,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         compiler: None,
         contracts_path: None,
         governance_sync: None,
+        tracker_sync: None,
         approval: None,
         toolchains: None,
         cargo_bin: None,

@@ -1611,7 +1611,10 @@ async fn test_subject_transfer_event_1() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1622,7 +1625,8 @@ async fn test_subject_transfer_event_1() {
     );
     assert_eq!(transfer_data[0].subject_id, subject_id);
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1637,10 +1641,14 @@ async fn test_subject_transfer_event_1() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     assert!(
@@ -1862,7 +1870,10 @@ async fn test_subject_transfer_event_2() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1876,7 +1887,7 @@ async fn test_subject_transfer_event_2() {
         subject_id.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1890,7 +1901,8 @@ async fn test_subject_transfer_event_2() {
         subject_id.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1918,13 +1930,17 @@ async fn test_subject_transfer_event_2() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     let _state = get_subject(old_owner, subject_id.clone(), Some(3), true)
@@ -2210,7 +2226,10 @@ async fn test_subject_transfer_event_3() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2224,7 +2243,7 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2238,7 +2257,8 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2265,7 +2285,10 @@ async fn test_subject_transfer_event_3() {
             .is_err()
     );
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2279,7 +2302,7 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2293,7 +2316,8 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2330,13 +2354,17 @@ async fn test_subject_transfer_event_3() {
         .await
         .unwrap();
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
     assert!(

@@ -1200,6 +1200,14 @@ impl PersistentActor for Tracker {
     type InitParams = InitParamsTracker;
     type State = TrackerState;
 
+    /// Wide cadence: snapshots rewrite the whole state (properties
+    /// included) while replay of up to 1000 events stays in the
+    /// millisecond range. The event log itself is never pruned: it
+    /// doubles as the servable ledger.
+    fn snapshot_every() -> Option<u64> {
+        Some(1000)
+    }
+
     fn create_initial(params: Self::InitParams) -> Self {
         let init = params.data.unwrap_or_default();
 

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
 };
-use ave_actors::PersistentActor;
 use ave_common::bridge::request::EventRequestType;
 use ave_common::governance::GovernanceEvent;
 use ave_common::identity::{
@@ -110,6 +110,11 @@ pub struct RequestManager {
     /// incident record. Never persisted (runtime only).
     #[serde(skip)]
     watchdog_budget_secs: u64,
+    /// Live watchdog timer, cancelled on every re-arm so stale timers
+    /// never linger for hours. Never persisted (runtime only); the
+    /// generation guard stays as backstop for in-flight fires.
+    #[serde(skip)]
+    watchdog_timer: Option<ave_actors::TimerKey>,
     /// Durability mode: governance requests persist every event,
     /// tracker requests persist only the two recovery checkpoints
     /// (request intake and post-validation ledger) and apply the rest
@@ -177,6 +182,7 @@ impl BorshDeserialize for RequestManager {
             current_phase_started_at: None,
             watchdog_generation: 0,
             watchdog_budget_secs: 0,
+            watchdog_timer: None,
             helpers: None,
             our_key,
             id,
@@ -223,8 +229,9 @@ impl RequestManager {
 
     /// Arms the phase watchdog: a generation-guarded timer that fires
     /// after `budget` to catch a silently stuck phase. Every arming
-    /// invalidates previous timers (no disarm calls needed anywhere),
-    /// and the fire handler re-checks generation plus phase state, so
+    /// cancels the previous timer outright; the generation guard
+    /// stays as backstop for an already-firing timer. The fire
+    /// handler re-checks generation plus phase state, so
     /// a slow-but-advancing request can never trip it spuriously —
     /// only a phase that produced nothing for its whole worst-case
     /// budget fires, and then it only diagnoses + reboots.
@@ -236,13 +243,17 @@ impl RequestManager {
     ) -> Result<(), RequestManagerError> {
         self.watchdog_generation = self.watchdog_generation.wrapping_add(1);
         self.watchdog_budget_secs = budget.as_secs();
-        ctx.schedule_once(
+        if let Some(timer) = self.watchdog_timer.take() {
+            ctx.cancel_timer(timer);
+        }
+        let timer = ctx.schedule_once(
             budget,
             RequestManagerMessage::WatchdogFire {
                 generation: self.watchdog_generation,
                 phase,
             },
         )?;
+        self.watchdog_timer = Some(timer);
         Ok(())
     }
 
@@ -4052,6 +4063,7 @@ impl PersistentActor for RequestManager {
             current_phase_started_at: None,
             watchdog_generation: 0,
             watchdog_budget_secs: 0,
+            watchdog_timer: None,
             durable: params.durable,
             our_key: params.our_key,
             id: DigestIdentifier::default(),

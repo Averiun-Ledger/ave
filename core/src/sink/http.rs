@@ -941,17 +941,24 @@ impl SinkTransport for HttpTransport {
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        for (event_type, group) in
+        // Route groups are independent deliveries (per-group order is
+        // trivially preserved: one send per group): run them together
+        // so batch latency is the slowest group, not the sum. A failed
+        // group fails the whole batch like the sequential loop did,
+        // and the caller retries it whole.
+        let sends =
             group_events_by_type(events, self.url_template.has_event_type())
-        {
-            let Some((url, payload)) =
-                self.prepare_group(&event_type, &group).await?
-            else {
-                continue;
-            };
+                .into_iter()
+                .map(|(event_type, group)| async move {
+                    let Some((url, payload)) =
+                        self.prepare_group(&event_type, &group).await?
+                    else {
+                        return Ok(());
+                    };
 
-            self.send_with_retry(&url, payload, None).await?;
-        }
+                    self.send_with_retry(&url, payload, None).await
+                });
+        futures::future::try_join_all(sends).await?;
 
         Ok(())
     }

@@ -58,6 +58,8 @@ fn kafka_sink_config(bootstrap_servers: &str, topic: &str) -> KafkaSinkConfig {
     KafkaSinkConfig {
         bootstrap_servers: bootstrap_servers.to_string(),
         topic: topic.to_string(),
+        // Per-event suites; batching is opt-in per test.
+        batch_delivery: false,
         ..KafkaSinkConfig::default()
     }
 }
@@ -84,6 +86,8 @@ fn kafka_sink_config_sasl(
             mechanism: KafkaSaslMechanism::ScramSha256,
             username: username.to_string(),
         },
+        // Per-event suites; batching is opt-in per test.
+        batch_delivery: false,
         ..KafkaSinkConfig::default()
     }
 }
@@ -884,6 +888,8 @@ fn make_kafka_sink_entry(
             transport: SinkTransportConfig::Kafka(Box::new(KafkaSinkConfig {
                 bootstrap_servers,
                 topic: topic.to_owned(),
+                // Per-event suites; batching is opt-in per test.
+                batch_delivery: false,
                 ..KafkaSinkConfig::default()
             })),
             healthcheck_intervals_secs: vec![1],
@@ -1942,6 +1948,8 @@ async fn kafka_node_signature_v2_binds_headers() {
                         topic: topic.to_owned(),
                         signature: true,
                         signature_version: 2,
+                        // Per-event header assertions below.
+                        batch_delivery: false,
                         ..KafkaSinkConfig::default()
                     },
                 )),

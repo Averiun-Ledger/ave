@@ -867,7 +867,7 @@ mod tests {
             serde_json::from_str(r#"{"url": "https://example.com"}"#).unwrap();
         assert!(cfg.proxy.is_none());
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
-        assert!(!cfg.batch_delivery);
+        assert!(cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
         assert_eq!(cfg.compression, SinkCompression::None);
         assert_eq!(cfg.max_error_body_bytes, 4_096);
@@ -939,11 +939,13 @@ mod tests {
     #[test]
     fn test_http_sink_config_validate_batch_delay_only_when_enabled() {
         let mut cfg = valid_http_config();
+        // Batch delivery defaults on: zero delay is rejected.
         cfg.batch_max_delay_ms = 0;
+        assert!(cfg.validate().is_err());
         // Ignored while batch delivery is disabled.
+        cfg.batch_delivery = false;
         assert!(cfg.validate().is_ok());
         cfg.batch_delivery = true;
-        assert!(cfg.validate().is_err());
         cfg.batch_max_delay_ms = 50;
         assert!(cfg.validate().is_ok());
     }
@@ -1088,7 +1090,7 @@ mod tests {
         assert_eq!(cfg.max_retries, 2);
         assert_eq!(cfg.retry_base_delay_ms, 500);
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
-        assert!(!cfg.batch_delivery);
+        assert!(cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
         assert!(matches!(cfg.compression, SinkCompression::None));
         assert_eq!(cfg.max_decoding_message_bytes, 4 * 1024 * 1024);
@@ -1840,7 +1842,7 @@ impl Default for HttpSinkConfig {
             signature_version: 1,
             proxy: None,
             retry_max_delay_ms: 30_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             compression: SinkCompression::None,
             headers: HashMap::new(),
@@ -2335,7 +2337,7 @@ impl Default for KafkaSinkConfig {
             acks: KafkaAcks::default(),
             compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             max_retries: 2,
             retry_base_delay_ms: 500,
@@ -2631,7 +2633,7 @@ impl Default for GrpcSinkConfig {
             max_retries: 2,
             retry_base_delay_ms: 500,
             retry_max_delay_ms: 30_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             compression: SinkCompression::None,
             headers: HashMap::new(),

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message, PersistentActor, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    PersistentActor, Response,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};

@@ -7207,6 +7207,8 @@ async fn sink_signature_v2_zstd_verify() {
                         max_retries: 0,
                         request_timeout_ms: 10_000,
                         connect_timeout_ms: 1000,
+                        // Per-event header assertions below.
+                        batch_delivery: false,
                         ..Default::default()
                     }),
                 ),

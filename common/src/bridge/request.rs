@@ -21,6 +21,8 @@ use utoipa::{IntoParams, ToSchema};
 pub struct SubjectQuery {
     pub active: Option<bool>,
     pub schema_id: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Query flags for manually updating a subject.
@@ -42,6 +44,8 @@ pub struct UpdateSubjectQuery {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct GovQuery {
     pub active: Option<bool>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Filters approvals by state.
@@ -52,6 +56,19 @@ pub struct GovQuery {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct ApprovalQuery {
     pub state: Option<ApprovalState>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+/// Plain limit/offset page for list endpoints without filters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ListQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Pagination and time filters for event queries.

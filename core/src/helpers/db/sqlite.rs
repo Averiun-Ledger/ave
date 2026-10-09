@@ -46,8 +46,8 @@ use crate::request::tracking::RequestTrackingEvent;
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;
-const WRITE_BATCH_MIN_FOR_WINDOW: usize = 8;
-const WRITE_BATCH_WINDOW: Duration = Duration::from_millis(3);
+const WRITE_BATCH_MIN_FOR_WINDOW: usize = 4;
+const WRITE_BATCH_WINDOW: Duration = Duration::from_millis(10);
 const WRITE_BATCH_RETRY_ATTEMPTS: usize = 3;
 const WRITE_BATCH_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(5);
 const READER_STATEMENT_CACHE_CAPACITY: usize = 32;
@@ -1155,8 +1155,10 @@ impl ReadStore for SqliteLocal {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
-        self.reader.get_governances(active).await
+        self.reader.get_governances(active, limit, offset).await
     }
 
     async fn get_subjects(
@@ -1164,9 +1166,11 @@ impl ReadStore for SqliteLocal {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         self.reader
-            .get_subjects(governance_id, active, schema_id)
+            .get_subjects(governance_id, active, schema_id, limit, offset)
             .await
     }
 
@@ -1240,9 +1244,13 @@ impl ReadStore for SqliteReadStore {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         self.with_reader("governances", move |conn| {
-            get_governances_from_conn(conn, active)
+            get_governances_from_conn(conn, active, limit, offset)
         })
         .await
     }
@@ -1252,11 +1260,22 @@ impl ReadStore for SqliteReadStore {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         let governance_id = governance_id.to_owned();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
 
         self.with_reader("subjects", move |conn| {
-            get_subjects_from_conn(conn, &governance_id, active, schema_id)
+            get_subjects_from_conn(
+                conn,
+                &governance_id,
+                active,
+                schema_id,
+                limit,
+                offset,
+            )
         })
         .await
     }
@@ -1651,6 +1670,26 @@ fn execute_write_batch(
     }
 }
 
+/// Prepares `sql` on first use and hands out the cached handle.
+/// Batches usually touch a subset of tables; preparing all 13 upfront
+/// wastes cache fills on fresh pool connections for single-kind
+/// batches.
+fn lazy_stmt<'t, 's>(
+    slot: &'s mut Option<rusqlite::CachedStatement<'t>>,
+    tx: &'t rusqlite::Transaction<'t>,
+    sql: &str,
+) -> Result<&'s mut rusqlite::CachedStatement<'t>, DatabaseError> {
+    if slot.is_none() {
+        *slot = Some(
+            tx.prepare_cached(sql)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        );
+    }
+    slot.as_mut().ok_or_else(|| {
+        DatabaseError::Query("statement slot empty after prepare".to_owned())
+    })
+}
+
 fn persist_write_batch(
     runtime: &SqliteRuntime,
     jobs: &[WriteJob],
@@ -1661,61 +1700,46 @@ fn persist_write_batch(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    let mut insert_event_stmt = tx
-        .prepare_cached(SQL_INSERT_EVENT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_subject_stmt = tx
-        .prepare_cached(SQL_UPSERT_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_abort_stmt = tx
-        .prepare_cached(SQL_UPSERT_ABORT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut insert_incident_stmt = tx
-        .prepare_cached(SQL_INSERT_INCIDENT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_register_gov_stmt = tx
-        .prepare_cached(SQL_UPSERT_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut eol_register_gov_stmt = tx
-        .prepare_cached(SQL_EOL_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_register_subject_stmt = tx
-        .prepare_cached(SQL_UPSERT_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut eol_register_subject_stmt = tx
-        .prepare_cached(SQL_EOL_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_subject_state_stmt = tx
-        .prepare_cached(SQL_DELETE_SUBJECT_STATE)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_events_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_EVENTS_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_aborts_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_ABORTS_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_register_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_register_gov_stmt = tx
-        .prepare_cached(SQL_DELETE_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut insert_event_stmt = None;
+    let mut upsert_subject_stmt = None;
+    let mut upsert_abort_stmt = None;
+    let mut insert_incident_stmt = None;
+    let mut upsert_register_gov_stmt = None;
+    let mut eol_register_gov_stmt = None;
+    let mut upsert_register_subject_stmt = None;
+    let mut eol_register_subject_stmt = None;
+    let mut delete_subject_state_stmt = None;
+    let mut delete_events_subject_stmt = None;
+    let mut delete_aborts_subject_stmt = None;
+    let mut delete_register_subject_stmt = None;
+    let mut delete_register_gov_stmt = None;
 
     for job in jobs {
         match &job.command {
             WriteCommand::Ledger(event) => {
                 touched_subjects.push(event.get_subject_id().to_string());
-                insert_event_with_stmt(&mut insert_event_stmt, event)?
+                insert_event_with_stmt(
+                    lazy_stmt(&mut insert_event_stmt, &tx, SQL_INSERT_EVENT)?,
+                    event,
+                )?
             }
             WriteCommand::SubjectState(metadata) => {
                 touched_subjects.push(metadata.subject_id.to_string());
-                upsert_subject_with_stmt(&mut upsert_subject_stmt, metadata)?
+                upsert_subject_with_stmt(
+                    lazy_stmt(
+                        &mut upsert_subject_stmt,
+                        &tx,
+                        SQL_UPSERT_SUBJECT,
+                    )?,
+                    metadata,
+                )?
             }
-            WriteCommand::Incident(event) => {
-                insert_incident_with_stmt(&mut insert_incident_stmt, event)?
-            }
+            WriteCommand::Incident(event) => insert_incident_with_stmt(
+                lazy_stmt(&mut insert_incident_stmt, &tx, SQL_INSERT_INCIDENT)?,
+                event,
+            )?,
             WriteCommand::Abort(event) => upsert_abort_with_stmt(
-                &mut upsert_abort_stmt,
+                lazy_stmt(&mut upsert_abort_stmt, &tx, SQL_UPSERT_ABORT)?,
                 event.request_id.clone(),
                 {
                     touched_subjects.push(event.subject_id.clone());
@@ -1729,7 +1753,11 @@ fn persist_write_batch(
             WriteCommand::Register(event) => match event {
                 RegisterEvent::RegisterGov { gov_id, data } => {
                     upsert_register_governance_with_stmt(
-                        &mut upsert_register_gov_stmt,
+                        lazy_stmt(
+                            &mut upsert_register_gov_stmt,
+                            &tx,
+                            SQL_UPSERT_REGISTER_GOV,
+                        )?,
                         gov_id,
                         data.active,
                         data.name.clone(),
@@ -1738,7 +1766,11 @@ fn persist_write_batch(
                 }
                 RegisterEvent::EOLGov { gov_id } => {
                     eol_register_governance_with_stmt(
-                        &mut eol_register_gov_stmt,
+                        lazy_stmt(
+                            &mut eol_register_gov_stmt,
+                            &tx,
+                            SQL_EOL_REGISTER_GOV,
+                        )?,
                         gov_id,
                     )?
                 }
@@ -1747,7 +1779,11 @@ fn persist_write_batch(
                     subject_id,
                     data,
                 } => upsert_register_subject_with_stmt(
-                    &mut upsert_register_subject_stmt,
+                    lazy_stmt(
+                        &mut upsert_register_subject_stmt,
+                        &tx,
+                        SQL_UPSERT_REGISTER_SUBJECT,
+                    )?,
                     RegisterSubjectRow {
                         governance_id: gov_id,
                         subject_id,
@@ -1760,7 +1796,11 @@ fn persist_write_batch(
                 )?,
                 RegisterEvent::EOLSubj { gov_id, subj_id } => {
                     eol_register_subject_with_stmt(
-                        &mut eol_register_subject_stmt,
+                        lazy_stmt(
+                            &mut eol_register_subject_stmt,
+                            &tx,
+                            SQL_EOL_REGISTER_SUBJECT,
+                        )?,
                         gov_id,
                         subj_id,
                     )?
@@ -1772,23 +1812,43 @@ fn persist_write_batch(
                 // are dropped with them.
                 runtime.prune_subject_generation(subject_id);
                 delete_by_subject_with_stmt(
-                    &mut delete_subject_state_stmt,
+                    lazy_stmt(
+                        &mut delete_subject_state_stmt,
+                        &tx,
+                        SQL_DELETE_SUBJECT_STATE,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_events_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_events_subject_stmt,
+                        &tx,
+                        SQL_DELETE_EVENTS_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_aborts_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_aborts_subject_stmt,
+                        &tx,
+                        SQL_DELETE_ABORTS_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_register_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_register_subject_stmt,
+                        &tx,
+                        SQL_DELETE_REGISTER_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_register_gov_stmt,
+                    lazy_stmt(
+                        &mut delete_register_gov_stmt,
+                        &tx,
+                        SQL_DELETE_REGISTER_GOV,
+                    )?,
                     subject_id,
                 )?;
             }
@@ -2372,20 +2432,27 @@ fn get_subject_state_from_conn(
 fn get_governances_from_conn(
     conn: &Connection,
     active: Option<bool>,
+    limit: i64,
+    offset: i64,
 ) -> Result<Vec<GovsData>, DatabaseError> {
+    let (base, tail) = match active {
+        Some(_) => (SQL_GET_REGISTER_GOVS_BY_ACTIVE, "LIMIT ?2 OFFSET ?3"),
+        None => (SQL_GET_REGISTER_GOVS, "LIMIT ?1 OFFSET ?2"),
+    };
+    let sql = format!("{base}\n{tail}");
     let mut stmt = conn
-        .prepare_cached(match active {
-            Some(_) => SQL_GET_REGISTER_GOVS_BY_ACTIVE,
-            None => SQL_GET_REGISTER_GOVS,
-        })
+        .prepare_cached(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let rows = match active {
         Some(active) => stmt
-            .query_map(params![if active { 1 } else { 0 }], map_governance_row)
+            .query_map(
+                params![if active { 1 } else { 0 }, limit, offset],
+                map_governance_row,
+            )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         None => stmt
-            .query_map([], map_governance_row)
+            .query_map(params![limit, offset], map_governance_row)
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
     };
 
@@ -2398,35 +2465,60 @@ fn get_subjects_from_conn(
     governance_id: &str,
     active: Option<bool>,
     schema_id: Option<String>,
+    limit: i64,
+    offset: i64,
 ) -> Result<Vec<SubjsData>, DatabaseError> {
+    let (base, tail) = match (active, schema_id.as_ref()) {
+        (None, None) => (SQL_GET_REGISTER_SUBJECTS, "LIMIT ?2 OFFSET ?3"),
+        (Some(_), None) => {
+            (SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE, "LIMIT ?3 OFFSET ?4")
+        }
+        (None, Some(_)) => {
+            (SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA, "LIMIT ?3 OFFSET ?4")
+        }
+        (Some(_), Some(_)) => (
+            SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA,
+            "LIMIT ?4 OFFSET ?5",
+        ),
+    };
+    let sql = format!("{base}\n{tail}");
     let mut stmt = conn
-        .prepare_cached(match (active, schema_id.as_ref()) {
-            (None, None) => SQL_GET_REGISTER_SUBJECTS,
-            (Some(_), None) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE,
-            (None, Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA,
-            (Some(_), Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA,
-        })
+        .prepare_cached(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let rows = match (active, schema_id.as_ref()) {
         (None, None) => stmt
-            .query_map(params![governance_id], map_register_subject_row)
+            .query_map(
+                params![governance_id, limit, offset],
+                map_register_subject_row,
+            )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), None) => stmt
             .query_map(
-                params![governance_id, if active { 1 } else { 0 }],
+                params![
+                    governance_id,
+                    if active { 1 } else { 0 },
+                    limit,
+                    offset
+                ],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (None, Some(schema_id)) => stmt
             .query_map(
-                params![governance_id, schema_id],
+                params![governance_id, schema_id, limit, offset],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), Some(schema_id)) => stmt
             .query_map(
-                params![governance_id, if active { 1 } else { 0 }, schema_id],
+                params![
+                    governance_id,
+                    if active { 1 } else { 0 },
+                    schema_id,
+                    limit,
+                    offset
+                ],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
@@ -4133,6 +4225,101 @@ mod tests {
             ),
             1.0
         );
+    }
+
+    #[test]
+    fn register_lists_page_with_filters_and_stable_order() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(include_str!(
+            "../../../migrations/001_initial_schema.sql"
+        ))
+        .expect("migrate");
+
+        for (gov, active) in [("g-a", 1), ("g-b", 1), ("g-c", 0)] {
+            conn.execute(
+                SQL_UPSERT_REGISTER_GOV,
+                params![
+                    gov,
+                    active,
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("insert gov");
+        }
+        for (subj, schema, active) in [
+            ("s-1", "schema-a", 1),
+            ("s-2", "schema-a", 0),
+            ("s-3", "schema-b", 1),
+        ] {
+            conn.execute(
+                SQL_UPSERT_REGISTER_SUBJECT,
+                params![
+                    "g-a",
+                    subj,
+                    schema,
+                    active,
+                    "ns",
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("insert subject");
+        }
+
+        // Governances: full page ordered, active filter, offset page.
+        let all =
+            get_governances_from_conn(&conn, None, 1000, 0).expect("govs");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].governance_id, "g-a");
+        assert_eq!(all[2].governance_id, "g-c");
+        let active = get_governances_from_conn(&conn, Some(true), 1000, 0)
+            .expect("active govs");
+        assert_eq!(active.len(), 2);
+        let page =
+            get_governances_from_conn(&conn, None, 1, 1).expect("gov page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].governance_id, "g-b");
+
+        // Subjects: every filter combination plus paging.
+        let all = get_subjects_from_conn(&conn, "g-a", None, None, 1000, 0)
+            .expect("subjects");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].subject_id, "s-1");
+        let active =
+            get_subjects_from_conn(&conn, "g-a", Some(true), None, 1000, 0)
+                .expect("active subjects");
+        assert_eq!(active.len(), 2);
+        let by_schema = get_subjects_from_conn(
+            &conn,
+            "g-a",
+            None,
+            Some("schema-a".to_owned()),
+            1000,
+            0,
+        )
+        .expect("schema subjects");
+        assert_eq!(by_schema.len(), 2);
+        let both = get_subjects_from_conn(
+            &conn,
+            "g-a",
+            Some(true),
+            Some("schema-a".to_owned()),
+            1000,
+            0,
+        )
+        .expect("active schema subjects");
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].subject_id, "s-1");
+        let page = get_subjects_from_conn(&conn, "g-a", None, None, 1, 2)
+            .expect("subject page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].subject_id, "s-3");
+        let empty = get_subjects_from_conn(&conn, "g-a", None, None, 10, 99)
+            .expect("empty page");
+        assert!(empty.is_empty());
     }
 
     #[test]

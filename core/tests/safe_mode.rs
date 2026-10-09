@@ -175,7 +175,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     assert_eq!(state.subject_id, tracker_id.to_string());
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert!(
@@ -184,7 +184,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             .any(|s| s.subject_id == tracker_id.to_string())
     );
 
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // Delete tracker in safe mode
@@ -205,7 +205,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     );
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert!(
@@ -214,7 +214,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             .any(|s| s.subject_id == tracker_id.to_string())
     );
 
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(!transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // After deletion the DBs are purged; the events list reads empty
@@ -342,7 +342,7 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     let owner = &node.api;
 
     // Verify pending transfer exists for the first tracker
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // Launch 12 concurrent deletes alternating between the two trackers.
@@ -392,7 +392,7 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     }
 
     // Verify pending transfer for the transferred tracker is cleared
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(
         !transfers.iter().any(|t| t.subject_id == tracker_id),
         "pending transfer for tracker should have been cleared"
@@ -446,7 +446,7 @@ async fn safe_mode_governance_delete_lists_pending_trackers() {
     assert_eq!(gov_state.subject_id, governance_id.to_string());
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert_eq!(subjects.len(), tracker_ids.len());
@@ -515,7 +515,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
     let owner = &node.api;
 
     // Verify governance exists
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         govs.iter()
             .any(|g| g.governance_id == governance_id.to_string())
@@ -542,7 +542,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
         .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         !govs
             .iter()
@@ -550,7 +550,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
     );
 
     let err = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap_err();
     assert!(
@@ -569,7 +569,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
         .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         !govs
             .iter()

@@ -12,11 +12,11 @@ use crate::model::common::{
 };
 use crate::model::event::Ledger;
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::PersistentActor;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::request::EventRequest;
 use ave_common::{Namespace, SchemaType};

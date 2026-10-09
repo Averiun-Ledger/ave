@@ -5430,6 +5430,14 @@ impl PersistentActor for Governance {
     );
     type State = GovernanceState;
 
+    /// Wide cadence, like Tracker: gov events are rare, so snapshots
+    /// are infrequent anyway; replay stays trivially bounded. The
+    /// event log itself is never pruned: it doubles as the servable
+    /// ledger.
+    fn snapshot_every() -> Option<u64> {
+        Some(1000)
+    }
+
     fn create_initial(params: Self::InitParams) -> Self {
         let (subject_metadata, properties) =
             if let Some((subject_metadata, properties)) = params.0 {

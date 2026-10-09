@@ -1391,7 +1391,10 @@ async fn test_transfer_event_governance_2() {
     .await
     .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1402,7 +1405,8 @@ async fn test_transfer_event_governance_2() {
     );
     assert_eq!(transfer_data[0].subject_id, governance_id);
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1423,10 +1427,14 @@ async fn test_transfer_event_governance_2() {
     .await
     .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())

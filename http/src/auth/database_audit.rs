@@ -9,6 +9,7 @@ use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };
+use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // =============================================================================
@@ -123,6 +124,42 @@ pub struct AuditLogParams<'a> {
     pub error_message: Option<&'a str>,
 }
 
+/// Owned audit write for the background queue: everything the
+/// middleware needs after the response is already on its way.
+/// Dropped (with a warning) only if the bounded queue is full —
+/// audit writes were already best-effort (failures only logged).
+pub struct QueuedAuditLog {
+    pub user_id: Option<i64>,
+    pub api_key_id: Option<String>,
+    pub action_type: &'static str,
+    pub endpoint: Option<String>,
+    pub http_method: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub request_id: Option<String>,
+    pub details: Option<String>,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+impl QueuedAuditLog {
+    fn as_params(&self) -> AuditLogParams<'_> {
+        AuditLogParams {
+            user_id: self.user_id,
+            api_key_id: self.api_key_id.as_deref(),
+            action_type: self.action_type,
+            endpoint: self.endpoint.as_deref(),
+            http_method: self.http_method.as_deref(),
+            ip_address: self.ip_address.as_deref(),
+            user_agent: self.user_agent.as_deref(),
+            request_id: self.request_id.as_deref(),
+            details: self.details.as_deref(),
+            success: self.success,
+            error_message: self.error_message.as_deref(),
+        }
+    }
+}
+
 /// Parameters for logging an API request
 pub struct ApiRequestParams<'a> {
     pub path: &'a str,
@@ -134,7 +171,51 @@ pub struct ApiRequestParams<'a> {
     pub error_message: Option<&'a str>,
 }
 
+/// Bounded audit queue: responses never wait for SQLite. A full
+/// queue drops with a warning (audit was already best-effort).
+const AUDIT_QUEUE_CAPACITY: usize = 1024;
+
 impl AuthDatabase {
+    /// Enqueues an audit write for the background worker, starting it
+    /// on first use. Never blocks the caller.
+    pub fn audit_async(self: &Arc<Self>, job: QueuedAuditLog) {
+        let sender = {
+            let mut guard = self.audit_sender.lock().unwrap_or_else(|e| {
+                tracing::warn!("audit sender lock poisoned, recovering");
+                e.into_inner()
+            });
+            if let Some(sender) = guard.as_ref() {
+                sender.clone()
+            } else {
+                let (sender, mut receiver) =
+                    tokio::sync::mpsc::channel::<QueuedAuditLog>(
+                        AUDIT_QUEUE_CAPACITY,
+                    );
+                let db = Arc::clone(self);
+                tokio::spawn(async move {
+                    while let Some(job) = receiver.recv().await {
+                        if let Err(error) = db
+                            .run_blocking("audit_background_write", move |db| {
+                                db.create_audit_log(job.as_params())
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                "background audit write failed"
+                            );
+                        }
+                    }
+                });
+                guard.replace(sender.clone());
+                sender
+            }
+        };
+        if sender.try_send(job).is_err() {
+            tracing::warn!("audit queue full, entry dropped");
+        }
+    }
+
     pub(crate) fn create_audit_log_with_conn(
         conn: &rusqlite::Connection,
         audit_enabled: bool,
@@ -232,6 +313,9 @@ impl AuthDatabase {
     ) -> Result<AuditLogPage, DatabaseError> {
         let conn = self.lock_conn()?;
 
+        // The filtered total rides along as a window count: one
+        // query instead of building the same filters twice (page +
+        // COUNT).
         let mut sql = String::from(
             "SELECT audit_logs.id, audit_logs.timestamp, audit_logs.user_id,
                     users.username, audit_logs.api_key_id, api_keys.name,
@@ -239,7 +323,7 @@ impl AuthDatabase {
                     audit_logs.http_method, audit_logs.ip_address,
                     audit_logs.user_agent, audit_logs.request_id,
                     audit_logs.details, audit_logs.success,
-                    audit_logs.error_message
+                    audit_logs.error_message, COUNT(*) OVER() AS __total
              FROM audit_logs
              LEFT JOIN users ON audit_logs.user_id = users.id
              LEFT JOIN api_keys ON audit_logs.api_key_id = api_keys.id
@@ -291,24 +375,14 @@ impl AuthDatabase {
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
 
-        let mut count_sql =
-            String::from("SELECT COUNT(*) FROM audit_logs WHERE 1=1");
-        let mut count_params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        append_audit_log_filters(query, &mut count_sql, &mut count_params_vec);
-        let count_params_refs: Vec<&dyn rusqlite::ToSql> =
-            count_params_vec.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = conn
-            .query_row(&count_sql, count_params_refs.as_slice(), |row| {
-                row.get(0)
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        let mut total: i64 = 0;
         let logs = stmt
             .query_map(params_refs.as_slice(), |row| {
+                total = row.get(15)?;
                 Ok(AuditLog {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
@@ -444,29 +518,15 @@ impl AuthDatabase {
 
         let cutoff = Self::now() - (days as i64 * 86400);
 
-        // Total logs
-        let total: i64 = conn
+        // Total + success/failure in a single scan instead of three.
+        let (total, success_count, failure_count): (i64, i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1",
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0)
+                 FROM audit_logs WHERE timestamp >= ?1",
                 params![cutoff],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        // Success/failure counts
-        let success_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1 AND success = 1",
-                params![cutoff],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let failure_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1 AND success = 0",
-                params![cutoff],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 

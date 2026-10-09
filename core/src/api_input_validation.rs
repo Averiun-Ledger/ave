@@ -25,6 +25,41 @@ use crate::error::Error;
 /// unbounded in-memory reads.
 pub const MAX_QUERY_LIMIT: u64 = 1000;
 
+/// Page size used when the caller passes no explicit `limit`.
+/// Every list endpoint pages by default so a growing ledger can
+/// never turn a plain GET into an unbounded read.
+pub const DEFAULT_QUERY_LIMIT: u64 = 100;
+
+/// Validates an optional limit/offset pair and resolves the effective
+/// `(limit, offset)`: missing limit falls back to
+/// [`DEFAULT_QUERY_LIMIT`], missing offset to `0`.
+pub fn resolve_page(
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> Result<(u64, u64), Error> {
+    if let Some(limit) = limit {
+        require_query_limit("limit", limit)?;
+    }
+    Ok((limit.unwrap_or(DEFAULT_QUERY_LIMIT), offset.unwrap_or(0)))
+}
+
+/// Sorts `items` by `key` for stable pages, then applies
+/// `offset`/`limit`. Limits are clamped to [`MAX_QUERY_LIMIT`]
+/// so direct (non-HTTP) callers can never force an unbounded
+/// read either.
+pub fn page_sorted<T, K: Ord>(
+    mut items: Vec<T>,
+    limit: u64,
+    offset: u64,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    items.sort_by_key(key);
+    let limit =
+        usize::try_from(limit.min(MAX_QUERY_LIMIT)).unwrap_or(usize::MAX);
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    items.into_iter().skip(offset).take(limit).collect()
+}
+
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
     if value == 0 {
@@ -365,6 +400,28 @@ mod tests {
             ..EventsQuery::default()
         };
         assert!(validate_events_query(&over).is_err());
+    }
+
+    #[test]
+    fn page_sorted_sorts_slices_and_clamps() {
+        let items = vec![(3, "c"), (1, "a"), (2, "b")];
+        let page: Vec<_> = page_sorted(items, 2, 1, |x| x.0);
+        assert_eq!(page, vec![(2, "b"), (3, "c")]);
+        let all: Vec<_> =
+            page_sorted(vec![(2, "b"), (1, "a")], u64::MAX, 0, |x| x.0);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, 1);
+        let empty: Vec<(i32, &str)> =
+            page_sorted(vec![(1, "a")], 10, 5, |x| x.0);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn resolve_page_defaults_validates_and_caps() {
+        assert_eq!(resolve_page(None, None).unwrap(), (DEFAULT_QUERY_LIMIT, 0));
+        assert_eq!(resolve_page(Some(10), Some(5)).unwrap(), (10, 5));
+        assert!(resolve_page(Some(0), None).is_err());
+        assert!(resolve_page(Some(MAX_QUERY_LIMIT + 1), None).is_err());
     }
 
     #[test]

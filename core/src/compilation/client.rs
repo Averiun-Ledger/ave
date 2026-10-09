@@ -55,6 +55,10 @@ pub struct CompilerClient {
     seen: Mutex<HashMap<String, DigestIdentifier>>,
     /// Toolchain fingerprint of the last successful compile.
     last_toolchain: Mutex<Option<DigestIdentifier>>,
+    /// One long-lived channel per endpoint: tonic reconnects by
+    /// itself, so caching only skips the TCP+TLS handshake per
+    /// attempt, never masks a dead peer.
+    channels: Mutex<HashMap<String, Channel>>,
 }
 
 /// Outcome of a single endpoint attempt.
@@ -98,6 +102,7 @@ impl CompilerClient {
             hash: HashAlgorithm::Blake3,
             seen: Mutex::new(HashMap::new()),
             last_toolchain: Mutex::new(None),
+            channels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -198,9 +203,20 @@ impl CompilerClient {
         api_key: &MetadataValue<tonic::metadata::Ascii>,
         source_b64: &str,
     ) -> Attempt {
-        let channel = match self.connect(endpoint).await {
-            Ok(channel) => channel,
-            Err(reason) => return Attempt::Failed(reason),
+        if self.channels.lock().await.get(endpoint).is_none() {
+            match self.connect(endpoint).await {
+                Ok(channel) => {
+                    self.channels
+                        .lock()
+                        .await
+                        .insert(endpoint.to_owned(), channel);
+                }
+                Err(reason) => return Attempt::Failed(reason),
+            }
+        }
+        let channel = match self.channels.lock().await.get(endpoint).cloned() {
+            Some(channel) => channel,
+            None => return Attempt::Failed("channel cache miss".to_owned()),
         };
 
         let mut client = CompilerServiceClient::new(channel)

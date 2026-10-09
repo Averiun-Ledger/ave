@@ -3,7 +3,7 @@ mod common;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_core::{
     Api,
-    config::GovernanceSyncConfig,
+    config::{GovernanceSyncConfig, TrackerSyncConfig},
     helpers::network::{
         ActorMessage, NetworkMessage,
         test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
@@ -55,6 +55,15 @@ async fn create_sync_nodes() -> (Vec<common::NodeData>, Vec<tempfile::TempDir>)
     let boot_addr = listen;
 
     // Two addressable service nodes with fast sync ticks.
+    let tracker_sync = || {
+        Some(TrackerSyncConfig {
+            interval_secs: 1,
+            page_size: 10,
+            response_timeout_secs: 5,
+            update_batch_size: 2,
+            update_timeout_secs: 5,
+        })
+    };
     for _ in 0..2 {
         let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let listen = format!("/memory/{port}");
@@ -68,6 +77,7 @@ async fn create_sync_nodes() -> (Vec<common::NodeData>, Vec<tempfile::TempDir>)
             always_accept: true,
             is_service: true,
             governance_sync: gov_sync(),
+            tracker_sync: tracker_sync(),
             ..Default::default()
         })
         .await;
@@ -106,13 +116,13 @@ async fn held_count(api: &Api, message: FaultMessage) -> usize {
 }
 
 async fn wait_held_ledger_reqs(api: &Api, at_least: usize, timeout_secs: u64) {
-    for _ in 0..timeout_secs * 2 {
+    for _ in 0..timeout_secs * 10 {
         if held_count(api, FaultMessage::DistributionLedgerReq).await
             >= at_least
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!(
         "only {} held ledger requests, wanted at least {}",
@@ -282,11 +292,11 @@ async fn test_sync_page_cap_and_resume() {
         );
     }
 
-    // Let the next tick fire (10s interval): with the cap, the
-    // cycle ended at 100 pages and the new cycle resumes from the
-    // saved cursor. Without the cap, the cycle would still be open
-    // (or restarts from scratch with no cursor).
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    // Let the next tick fire (1s interval in these nodes): with the
+    // cap, the cycle ended at 100 pages and the new cycle resumes
+    // from the saved cursor. Without the cap, the cycle would still
+    // be open (or restarts from scratch with no cursor).
+    tokio::time::sleep(Duration::from_secs(4)).await;
     let fetches = tracker_fetch_full(&a, &b_key).await;
     // Exactly the initial 100 plus at most the one resume fetch.
     assert!(
@@ -348,6 +358,10 @@ async fn test_sync_serving_gate() {
 
     // A's answers are held so silence vs response is observable.
     hold_outbound(&a, FaultMessage::TrackerSyncRes).await;
+    // B's background fetches are held too: with fast tracker ticks B
+    // would fetch from A mid-window and A's legitimate member answer
+    // would pollute the stranger-silence count below.
+    hold_outbound(&b, FaultMessage::TrackerSyncReq).await;
     let sync_actor =
         format!("/user/node/subject_manager/{governance_id}/tracker_sync");
     // Stranger first: nothing may come back.
@@ -365,7 +379,7 @@ async fn test_sync_serving_gate() {
 
     // Member: answered.
     inject_sync_req(&a, &a_key, &b_key, &governance_id, &sync_actor).await;
-    for _ in 0..20 {
+    for _ in 0..100 {
         let answers = a
             .test_held_outbound()
             .await
@@ -378,7 +392,7 @@ async fn test_sync_serving_gate() {
         if answers > 0 {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("member got no sync answer");
 }
@@ -437,7 +451,7 @@ async fn wait_tracker_fetch_unseen(
     peer: &PublicKey,
     seen: &HashSet<u64>,
 ) -> u64 {
-    for _ in 0..120 {
+    for _ in 0..600 {
         let fresh: Vec<u64> = tracker_fetch_nonces(api, peer)
             .await
             .into_iter()
@@ -446,7 +460,7 @@ async fn wait_tracker_fetch_unseen(
         if let Some(last) = fresh.last() {
             return *last;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("no fresh tracker fetch in time");
 }
@@ -475,13 +489,13 @@ async fn wait_tracker_fetch(
     peer: &PublicKey,
     after: Option<u64>,
 ) -> u64 {
-    for _ in 0..60 {
+    for _ in 0..300 {
         let mut nonces = tracker_fetch_nonces(api, peer).await;
         nonces.retain(|n| Some(*n) != after);
         if let Some(last) = nonces.last() {
             return *last;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("no tracker fetch to peer in time");
 }

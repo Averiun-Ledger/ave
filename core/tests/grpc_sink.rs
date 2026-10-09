@@ -52,6 +52,9 @@ const SUBJECT_ID: &str = "GRPC-SUBJECT-ID";
 fn grpc_config(endpoint: &str) -> GrpcSinkConfig {
     GrpcSinkConfig {
         endpoint: endpoint.to_owned(),
+        // These suites assert per-event delivery (meta per delivery);
+        // batching has its own dedicated tests with explicit opt-in.
+        batch_delivery: false,
         ..GrpcSinkConfig::default()
     }
 }
@@ -1134,6 +1137,8 @@ fn make_grpc_sink_entry(
             transport: SinkTransportConfig::Grpc(Box::new(GrpcSinkConfig {
                 endpoint: endpoint.to_owned(),
                 signature,
+                // Per-event suites; batching is opt-in per test.
+                batch_delivery: false,
                 ..GrpcSinkConfig::default()
             })),
             healthcheck_intervals_secs: vec![1],
@@ -3134,6 +3139,9 @@ async fn grpc_node_slow_live_delivery_no_idle_kill() {
                     GrpcSinkConfig {
                         endpoint: sink.endpoint(),
                         request_timeout_ms: 15_000,
+                        // Per-event assertions below; batching would
+                        // hold the slow delivery past the ack window.
+                        batch_delivery: false,
                         ..GrpcSinkConfig::default()
                     },
                 )),

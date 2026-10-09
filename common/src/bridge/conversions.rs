@@ -26,8 +26,9 @@ use crate::{
 
 impl From<Signed<EventRequest>> for BridgeSignedEventRequest {
     fn from(value: Signed<EventRequest>) -> Self {
-        let request = BridgeEventRequest::from(value.content().clone());
-        let signature = Some(BridgeSignature::from(value.signature().clone()));
+        let (content, signature) = value.into_parts();
+        let request = BridgeEventRequest::from(content);
+        let signature = Some(BridgeSignature::from(signature));
 
         Self { request, signature }
     }
@@ -146,11 +147,12 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
 
         let mut viewpoints = BTreeSet::new();
         for viewpoint in request.viewpoints {
-            if !viewpoints.insert(viewpoint.clone()) {
+            if viewpoints.contains(&viewpoint) {
                 return Err(ConversionError::InvalidViewpoints(format!(
                     "duplicated viewpoint '{viewpoint}'"
                 )));
             }
+            viewpoints.insert(viewpoint);
         }
 
         Ok(Self {

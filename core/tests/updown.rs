@@ -295,8 +295,15 @@ async fn gov_life() {
         .await
         .unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 1);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 1);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     emit_reject(&bootstrap, governance_id.clone(), true)
         .await
@@ -360,8 +367,15 @@ async fn gov_life() {
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 0);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 0);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 0);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 
     emit_transfer(
         &owner,
@@ -380,8 +394,15 @@ async fn gov_life() {
         .await
         .unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 1);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 1);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     node_new_owner.token.cancel();
     join_all(node_new_owner.handler.iter_mut()).await;
@@ -448,8 +469,15 @@ async fn gov_life() {
         .await
         .unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 0);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 0);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 0);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 
     node_bootstrap.token.cancel();
     join_all(node_bootstrap.handler.iter_mut()).await;
@@ -873,8 +901,15 @@ async fn tracker_life() {
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 1);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 1);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     emit_reject(&bootstrap, subject_id.clone(), true)
         .await
@@ -936,8 +971,15 @@ async fn tracker_life() {
     let bootstrap = node_bootstrap.api.clone();
     node_running(&bootstrap).await.unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 0);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 0);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 0);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 
     emit_transfer(
         &owner,
@@ -956,8 +998,15 @@ async fn tracker_life() {
         .await
         .unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 1);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 1);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     node_new_owner.token.cancel();
     join_all(node_new_owner.handler.iter_mut()).await;
@@ -1019,8 +1068,15 @@ async fn tracker_life() {
         .await
         .unwrap();
 
-    assert_eq!(owner.get_pending_transfers().await.unwrap().len(), 0);
-    assert_eq!(bootstrap.get_pending_transfers().await.unwrap().len(), 0);
+    assert_eq!(owner.get_pending_transfers(1000, 0).await.unwrap().len(), 0);
+    assert_eq!(
+        bootstrap
+            .get_pending_transfers(1000, 0)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 
     node_bootstrap.token.cancel();
     join_all(node_bootstrap.handler.iter_mut()).await;

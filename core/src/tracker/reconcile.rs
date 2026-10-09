@@ -182,8 +182,20 @@ impl Tracker {
 
         // Post-batch sn cursor, like the live path sends after
         // applying (absolute set with the tip sn: no-op when already
-        // there, heal when the tell was lost).
+        // there, heal when the tell was lost). This single write
+        // replaces the per-event post-apply writes: they all
+        // overwrote the same entry.
         if report.versions_seen > 0 {
+            if let Some((gov_version, sn)) = fold.prev {
+                sn_register
+                    .tell(SnRegisterMessage::RegisterSn {
+                        subject_id: self.subject_metadata.subject_id.clone(),
+                        gov_version,
+                        sn: if sn == 0 { 0 } else { sn + 1 },
+                    })
+                    .await?;
+                report.writes_resent += 1;
+            }
             let witnesses_register = ctx
                 .system()
                 .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
@@ -366,14 +378,9 @@ impl Tracker {
                 .await?;
             report.writes_resent += 1;
         }
-        sn_register
-            .tell(SnRegisterMessage::RegisterSn {
-                subject_id: self.subject_metadata.subject_id.clone(),
-                gov_version: event.gov_version,
-                sn: if event.sn == 0 { 0 } else { event.sn + 1 },
-            })
-            .await?;
-        report.writes_resent += 1;
+        // No per-event post-apply write: every one overwrites the
+        // same map entry, so only the last survives. It goes once
+        // after the loop, like the witnesses tip cursor below.
         fold.prev = Some((event.gov_version, event.sn));
         Ok(())
     }

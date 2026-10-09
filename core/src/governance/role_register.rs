@@ -7,8 +7,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    Message, PersistentActor, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    PersistentActor, Response,
 };
 
 use ave_common::{Namespace, SchemaType, identity::PublicKey};

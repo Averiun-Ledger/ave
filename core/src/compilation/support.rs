@@ -489,10 +489,11 @@ impl CompilerSupport {
             // Same binary on every compiler: the registry-blessed
             // cargo the pins were measured with. `RUSTC` still
             // resolves to the selected toolchain inside ave-build.
-            cargo: cargo_bin.as_ref().map_or(
-                ave_build::CargoProgram::Rustup(toolchain),
-                |binary| ave_build::CargoProgram::Pinned(binary),
-            ),
+            cargo: cargo_bin
+                .as_ref()
+                .map_or(ave_build::CargoProgram::Rustup(toolchain), |binary| {
+                    ave_build::CargoProgram::Pinned(binary)
+                }),
             rust_src,
             rustc_commit,
             offline: contracts_root.join(pipeline::VENDOR_DIR).exists(),

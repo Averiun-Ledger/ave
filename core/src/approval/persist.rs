@@ -16,11 +16,11 @@ use crate::{
     validation::worker::{ValiWorker, ValiWorkerMessage},
 };
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::PersistentActor;
 use ave_common::{
     Namespace, SchemaType,
     bridge::request::{ApprovalState, ApprovalStateRes},

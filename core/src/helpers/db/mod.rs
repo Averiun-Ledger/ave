@@ -78,6 +78,8 @@ pub trait ReadStore {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError>;
 
     async fn get_subjects(
@@ -85,6 +87,8 @@ pub trait ReadStore {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError>;
 }
 
@@ -304,11 +308,13 @@ impl ReadStore for ExternalDB {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_governances(active).await
+                sqlite_local.get_governances(active, limit, offset).await
             }
         }
     }
@@ -318,12 +324,20 @@ impl ReadStore for ExternalDB {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_subjects(governance_id, active, schema_id)
+                    .get_subjects(
+                        governance_id,
+                        active,
+                        schema_id,
+                        limit,
+                        offset,
+                    )
                     .await
             }
         }

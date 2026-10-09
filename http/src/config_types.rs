@@ -1032,7 +1032,7 @@ impl Default for HttpSinkConfigHttp {
             signature_version: 1,
             proxy: None,
             retry_max_delay_ms: 30_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             compression: SinkCompressionHttp::None,
             health_check_url: None,

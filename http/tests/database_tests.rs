@@ -364,6 +364,14 @@ async fn test_assign_role_to_user() {
 
     let roles = db.get_user_roles(user.id).unwrap();
     assert!(roles.contains(&"editor".to_string()));
+
+    // The batched list_users path must carry the same roles.
+    let listed = db.list_users(true, 100, 0).unwrap();
+    let listed_user = listed
+        .iter()
+        .find(|u| u.id == user.id)
+        .expect("user listed");
+    assert!(listed_user.roles.contains(&"editor".to_string()));
 }
 
 #[test(tokio::test)]
@@ -872,6 +880,7 @@ async fn test_rotate_api_key_rolls_back_on_error() {
         revoked_by: Some(user.id),
         reason: Some("test rollback"),
         audit: None,
+        owner_check: None,
     });
     assert!(matches!(result, Err(DatabaseError::Validation(_))));
 
@@ -905,6 +914,7 @@ async fn test_rotate_api_key_transactional_writes_audit() {
             expires_in_seconds: None,
             revoked_by: Some(user.id),
             reason: Some("test rotate"),
+            owner_check: None,
             audit: Some(ave_http::auth::database_audit::AuditLogParams {
                 user_id: Some(user.id),
                 api_key_id: Some(&old_key_info.id),
@@ -946,6 +956,169 @@ async fn test_rotate_api_key_transactional_writes_audit() {
         .items;
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].action_type, "api_key_rotated");
+}
+
+#[test(tokio::test)]
+async fn test_rotate_foreign_key_rejected_inside_tx() {
+    let (db, _dirs) = create_test_db();
+
+    let owner = db
+        .create_user("owner1", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let intruder = db
+        .create_user("intruder1", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_old_api_key, old_key_info) = db
+        .create_api_key(owner.id, Some("victim"), None, None, false)
+        .unwrap();
+
+    let result = db.rotate_api_key_transactional(RotateApiKeyParams {
+        key_id: &old_key_info.id,
+        name: None,
+        description: None,
+        expires_in_seconds: None,
+        revoked_by: Some(intruder.id),
+        reason: Some("theft"),
+        audit: None,
+        owner_check: Some((intruder.id, false)),
+    });
+    assert!(
+        matches!(result, Err(DatabaseError::PermissionDenied(_))),
+        "foreign rotation must be denied, got {:?}",
+        result.as_ref().map(|_| ())
+    );
+    assert!(
+        !db.get_api_key_info(&old_key_info.id).unwrap().revoked,
+        "rejected rotation must not touch the key"
+    );
+}
+
+#[test(tokio::test)]
+async fn test_revoke_foreign_key_reports_not_found() {
+    let (db, _dirs) = create_test_db();
+
+    let owner = db
+        .create_user("owner2", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let intruder = db
+        .create_user("intruder2", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_old_api_key, old_key_info) = db
+        .create_api_key(owner.id, Some("victim"), None, None, false)
+        .unwrap();
+
+    let result = db.revoke_api_key_transactional(
+        &old_key_info.id,
+        Some(intruder.id),
+        None,
+        None,
+        Some((intruder.id, false)),
+        false,
+    );
+    assert!(
+        matches!(result, Err(DatabaseError::NotFound(_))),
+        "foreign revoke must look like not found, got {:?}",
+        result.as_ref().map(|_| ())
+    );
+    assert!(
+        !db.get_api_key_info(&old_key_info.id).unwrap().revoked,
+        "rejected revoke must not touch the key"
+    );
+}
+
+#[test(tokio::test)]
+async fn test_queued_audit_log_eventually_lands() {
+    use std::time::{Duration, Instant};
+
+    let (db, _dirs) = create_test_db();
+    let db = Arc::new(db);
+    db.audit_async(ave_http::auth::database_audit::QueuedAuditLog {
+        user_id: None,
+        api_key_id: None,
+        action_type: "flush_check",
+        endpoint: Some("/test".to_string()),
+        http_method: Some("GET".to_string()),
+        ip_address: None,
+        user_agent: None,
+        request_id: Some("req-flush-1".to_string()),
+        details: None,
+        success: true,
+        error_message: None,
+    });
+
+    // The background worker owns the timing: poll instead of
+    // assuming the write already happened.
+    let query = AuditLogQuery {
+        user_id: None,
+        api_key_id: None,
+        endpoint: Some("/test".to_string()),
+        http_method: None,
+        ip_address: None,
+        user_agent: None,
+        success: None,
+        start_timestamp: None,
+        end_timestamp: None,
+        limit: Some(10),
+        offset: Some(0),
+        exclude_user_id: None,
+        exclude_api_key_id: None,
+        exclude_ip_address: None,
+        exclude_endpoint: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let page = db.query_audit_logs_page(&query).unwrap();
+        if page.total >= 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "queued audit log never landed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[test(tokio::test)]
+async fn test_audit_page_total_comes_with_the_page() {
+    let (db, _dirs) = create_test_db();
+
+    for i in 0..3 {
+        db.create_audit_log(ave_http::auth::database_audit::AuditLogParams {
+            user_id: None,
+            api_key_id: None,
+            action_type: "page_check",
+            endpoint: Some("/test"),
+            http_method: Some("GET"),
+            ip_address: None,
+            user_agent: None,
+            request_id: Some(&format!("req-{i}")),
+            details: None,
+            success: true,
+            error_message: None,
+        })
+        .unwrap();
+    }
+
+    let page = db
+        .query_audit_logs_page(&AuditLogQuery {
+            user_id: None,
+            api_key_id: None,
+            endpoint: Some("/test".to_string()),
+            http_method: None,
+            ip_address: None,
+            user_agent: None,
+            success: None,
+            start_timestamp: None,
+            end_timestamp: None,
+            limit: Some(2),
+            offset: Some(0),
+            exclude_user_id: None,
+            exclude_api_key_id: None,
+            exclude_ip_address: None,
+            exclude_endpoint: None,
+        })
+        .unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.total, 3);
+    assert!(page.has_more);
 }
 
 #[test(tokio::test)]
@@ -1295,6 +1468,7 @@ async fn test_transfer_api_key_quota_state_moves_plan_usage_and_extensions() {
             revoked_by: Some(1),
             reason: Some("rotation"),
             audit: None,
+            owner_check: None,
         })
         .unwrap();
 

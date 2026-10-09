@@ -77,8 +77,12 @@ fn payload_hash(message: &Bytes) -> u64 {
 }
 
 impl PendingQueue {
-    fn contains(&self, message: &Bytes) -> bool {
-        let hash = payload_hash(message);
+    fn contains(&self, hash: u64, message: &Bytes) -> bool {
+        // Empty queue is the common case for an idle peer: answer
+        // without hashing the payload at all.
+        if self.messages.is_empty() {
+            return false;
+        }
         self.hashes.contains(&hash)
             && self.messages.iter().any(|x| x.payload == *message)
     }
@@ -91,9 +95,8 @@ impl PendingQueue {
         Some(popped)
     }
 
-    fn push_back(&mut self, message: Bytes) {
+    fn push_back(&mut self, message: Bytes, payload_hash: u64) {
         self.pending_bytes += message.len();
-        let payload_hash = payload_hash(&message);
         self.hashes.insert(payload_hash);
         self.messages.push_back(PendingMessage {
             payload: message,
@@ -169,9 +172,11 @@ fn enqueue_pending(
         Tentative,
     }
 
+    // One hash per insert: shared by the dedup check and the push.
+    let message_hash = payload_hash(&message);
     let verdict = {
         let queue = queues.entry(peer).or_default();
-        if queue.contains(&message) {
+        if queue.contains(message_hash, &message) {
             PeerVerdict::Duplicate
         } else {
             while queue.len() >= max_messages_per_peer {
@@ -256,10 +261,16 @@ fn enqueue_pending(
                 {
                     report.dropped_bytes_limit_global += 1;
                 } else {
-                    queues.entry(peer).or_default().push_back(message);
+                    queues
+                        .entry(peer)
+                        .or_default()
+                        .push_back(message, message_hash);
                 }
             } else {
-                queues.entry(peer).or_default().push_back(message);
+                queues
+                    .entry(peer)
+                    .or_default()
+                    .push_back(message, message_hash);
             }
         }
     }
@@ -2284,6 +2295,29 @@ mod tests {
 
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Dummy;
+
+    #[test]
+    fn pending_queue_dedups_and_evicts_oldest_first() {
+        use libp2p::PeerId;
+
+        let peer = PeerId::random();
+        let mut queues: HashMap<PeerId, PendingQueue> = HashMap::new();
+        let msg = Bytes::from_static(b"hello");
+
+        // First insert lands; an identical retry is a duplicate.
+        let report = enqueue_pending(&mut queues, 0, 0, 10, peer, msg.clone());
+        assert!(!report.duplicate);
+        let report = enqueue_pending(&mut queues, 0, 0, 10, peer, msg.clone());
+        assert!(report.duplicate);
+        assert_eq!(queues[&peer].len(), 1);
+
+        // Count limit evicts oldest first.
+        for i in 0..10u8 {
+            enqueue_pending(&mut queues, 0, 0, 10, peer, Bytes::from(vec![i]));
+        }
+        assert_eq!(queues[&peer].len(), 10);
+        assert_eq!(queues[&peer].messages.front().unwrap().payload[0], 0);
+    }
 
     fn metric_value(metrics: &str, name: &str) -> f64 {
         metrics

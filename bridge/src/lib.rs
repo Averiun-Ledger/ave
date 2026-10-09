@@ -12,9 +12,10 @@ pub use ave_common::{
 };
 use ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, IncidentsQuery, SinkEventsQuery,
-        SinkReplayRequest, UpdateSubjectQuery,
+        AbortsQuery, ApprovalQuery, ApprovalState, ApprovalStateRes,
+        BridgeSignedEventRequest, EventRequestType, EventsQuery, GovQuery,
+        IncidentsQuery, ListQuery, SinkEventsQuery, SinkReplayRequest,
+        SubjectQuery, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -269,9 +270,11 @@ impl Bridge {
 
     pub async fn get_approvals(
         &self,
-        state: Option<ApprovalState>,
+        query: ApprovalQuery,
     ) -> Result<Vec<ApprovalEntry>, BridgeError> {
-        let res = self.api.get_approvals(state).await?;
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        let res = self.api.get_approvals(query.state, limit, offset).await?;
 
         Ok(res
             .into_iter()
@@ -319,16 +322,22 @@ impl Bridge {
 
     pub async fn get_all_request_state(
         &self,
+        query: ListQuery,
     ) -> Result<Vec<RequestInfoExtend>, BridgeError> {
-        Ok(self.api.all_request_state().await?)
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        Ok(self.api.all_request_state(limit, offset).await?)
     }
 
     ///////// Node
     ////////////////////////////
     pub async fn get_pending_transfers(
         &self,
+        query: ListQuery,
     ) -> Result<Vec<TransferSubject>, BridgeError> {
-        let res = self.api.get_pending_transfers().await?;
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        let res = self.api.get_pending_transfers(limit, offset).await?;
         Ok(res
             .into_iter()
             .map(core_tranfer_subject_to_common)
@@ -576,23 +585,35 @@ impl Bridge {
     ////////////////////////////
     pub async fn get_all_govs(
         &self,
-        active: Option<bool>,
+        query: GovQuery,
     ) -> Result<Vec<GovsData>, BridgeError> {
-        Ok(self.api.all_govs(active).await?)
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        Ok(self.api.all_govs(query.active, limit, offset).await?)
     }
 
     pub async fn get_all_subjs(
         &self,
         governance_id: String,
-        active: Option<bool>,
-        schema_id: Option<String>,
+        query: SubjectQuery,
     ) -> Result<Vec<SubjsData>, BridgeError> {
         let governance_id = Self::parse_governance_id(governance_id)?;
-        if let Some(schema_id) = schema_id.as_deref() {
+        if let Some(schema_id) = query.schema_id.as_deref() {
             Self::require_non_empty_str("schema_id", schema_id)?;
         }
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
 
-        Ok(self.api.all_subjs(governance_id, active, schema_id).await?)
+        Ok(self
+            .api
+            .all_subjs(
+                governance_id,
+                query.active,
+                query.schema_id,
+                limit,
+                offset,
+            )
+            .await?)
     }
 
     ///////// Query

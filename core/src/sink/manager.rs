@@ -1695,6 +1695,15 @@ impl SinkManager {
         data: Arc<DataToSink>,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        // Backstop: safe mode is network-isolated and processes no new
+        // events by design, but this handler must never depend on that
+        // holding elsewhere. Drop the notification before persisting
+        // anything or (re)creating workers.
+        if let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+            && config.safe_mode
+        {
+            return Ok(());
+        }
         let subject_id = data.payload.get_subject_schema().0;
         let sn = extract_sn(&data);
 

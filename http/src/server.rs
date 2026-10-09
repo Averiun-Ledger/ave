@@ -18,7 +18,7 @@ use crate::{
 use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, IncidentsQuery, SinkEventsQuery,
+        FirstEndEvents, GovQuery, IncidentsQuery, ListQuery, SinkEventsQuery,
         SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     response::{
@@ -175,9 +175,10 @@ pub async fn get_public_key(
 )]
 pub async fn get_config(
     _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<ConfigHttp> {
-    Json(ConfigHttp::from(bridge.get_config()))
+    Extension(config): Extension<Arc<ConfigHttp>>,
+) -> Json<Arc<ConfigHttp>> {
+    // No clone: axum serializes straight through the Arc.
+    Json(config)
 }
 
 ///////// Network
@@ -335,7 +336,7 @@ pub async fn get_approvals(
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiQuery(parameters): ApiQuery<ApprovalQuery>,
 ) -> Result<Json<Vec<ApprovalEntry>>, HttpError> {
-    Ok(Json(bridge.get_approvals(parameters.state).await?))
+    Ok(Json(bridge.get_approvals(parameters).await?))
 }
 
 /// Update approval state
@@ -433,6 +434,7 @@ pub async fn get_request_state(
     path = "/requests",
     operation_id = "getAllRequestStates",
     tag = "Tracking",
+    params(ListQuery),
     responses(
         (status = 200, description = "All tracked request states", body = Vec<RequestInfoExtend>),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -442,8 +444,9 @@ pub async fn get_request_state(
 pub async fn get_all_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ListQuery>,
 ) -> Result<Json<Vec<RequestInfoExtend>>, HttpError> {
-    Ok(Json(bridge.get_all_request_state().await?))
+    Ok(Json(bridge.get_all_request_state(parameters).await?))
 }
 ///////// Node
 ////////////////////////////
@@ -456,6 +459,7 @@ pub async fn get_all_request_state(
     path = "/pending-transfers",
     operation_id = "getPendingTransfers",
     tag = "Transfer",
+    params(ListQuery),
     responses(
         (status = 200, description = "List of pending transfers", body = Vec<TransferSubject>),
         (status = 404, description = "No pending transfers", body = ErrorResponse),
@@ -466,8 +470,9 @@ pub async fn get_all_request_state(
 pub async fn get_pending_transfers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ListQuery>,
 ) -> Result<Json<Vec<TransferSubject>>, HttpError> {
-    Ok(Json(bridge.get_pending_transfers().await?))
+    Ok(Json(bridge.get_pending_transfers(parameters).await?))
 }
 
 ///////// Sink
@@ -1093,7 +1098,7 @@ pub async fn get_all_govs(
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiQuery(parameters): ApiQuery<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, HttpError> {
-    Ok(Json(bridge.get_all_govs(parameters.active).await?))
+    Ok(Json(bridge.get_all_govs(parameters).await?))
 }
 
 /// List subjects under a governance
@@ -1123,15 +1128,7 @@ pub async fn get_all_subjs(
     ApiPath(governance_id): ApiPath<String>,
     ApiQuery(parameters): ApiQuery<SubjectQuery>,
 ) -> Result<Json<Vec<SubjsData>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_all_subjs(
-                governance_id,
-                parameters.active,
-                parameters.schema_id,
-            )
-            .await?,
-    ))
+    Ok(Json(bridge.get_all_subjs(governance_id, parameters).await?))
 }
 
 ///////// Query
@@ -1723,6 +1720,10 @@ pub fn build_routes(
     >,
 ) -> Router {
     let auth_safe_mode = AuthSafeMode(bridge.get_config().node.safe_mode);
+    // Node Config is immutable after boot: render the public view once
+    // and serve an Arc clone per poll instead of re-cloning + converting
+    // the whole config on every GET /config.
+    let config_snapshot = Arc::new(ConfigHttp::from(bridge.get_config()));
     let bridge = Arc::new(bridge);
     let proxy = Arc::new(proxy_config);
 
@@ -1733,6 +1734,7 @@ pub fn build_routes(
         .layer(
             ServiceBuilder::new()
                 .layer(Extension(bridge))
+                .layer(Extension(config_snapshot))
                 .layer(Extension(proxy.clone())),
         );
 

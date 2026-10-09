@@ -730,9 +730,10 @@ impl CompileWorker {
         // each other. The fold restores schema order and keeps the exact
         // first-failure semantics of the old sequential loop (a task can
         // not observe another task's outcome).
-        let jobs = targets.into_iter().enumerate().map(
-            |(index, (schema_id, target))| (index, schema_id, target),
-        );
+        let jobs = targets
+            .into_iter()
+            .enumerate()
+            .map(|(index, (schema_id, target))| (index, schema_id, target));
         let limit = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -740,8 +741,8 @@ impl CompileWorker {
         // Borrowed outside so the closure below captures references,
         // not owned values it would have to move out per call.
         let register_path = &register_path;
-        let mut outcomes: Vec<(usize, SchemaOutcome)> = futures::stream::iter(
-            jobs.map(|(index, schema_id, target)| {
+        let mut outcomes: Vec<(usize, SchemaOutcome)> =
+            futures::stream::iter(jobs.map(|(index, schema_id, target)| {
                 self.compile_one(
                     ctx,
                     CompileOneInput {
@@ -753,11 +754,10 @@ impl CompileWorker {
                         target,
                     },
                 )
-            }),
-        )
-        .buffer_unordered(limit)
-        .collect()
-        .await;
+            }))
+            .buffer_unordered(limit)
+            .collect()
+            .await;
         outcomes.sort_by_key(|(index, _)| *index);
 
         let mut contracts = BTreeMap::new();
@@ -1245,8 +1245,7 @@ impl Handler<Self> for CompileWorker {
                 let pin_changed = self.toolchain_pin != toolchain_pin;
                 let mut live = BTreeSet::new();
                 for child_name in std::mem::take(&mut self.build_children) {
-                    if let Ok(child) =
-                        ctx.get_child::<Self>(&child_name).await
+                    if let Ok(child) = ctx.get_child::<Self>(&child_name).await
                     {
                         if pin_changed {
                             child.tell_stop().await;
