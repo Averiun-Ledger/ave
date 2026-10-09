@@ -322,6 +322,11 @@ pub(crate) enum ServedArtifact {
 #[derive(Debug, Clone)]
 pub struct ServingCacheEntry {
     pub artifact: ArtifactData,
+    /// Ledger anchor the cached bytes were verified against. A hit
+    /// only counts when it still matches the current anchor: anything
+    /// else (contract change, pin switch, role loss/regain across a
+    /// commit) falls through to disk, which re-verifies.
+    pub wasm_hash: DigestIdentifier,
     pub filled_at: Instant,
 }
 
@@ -1430,6 +1435,7 @@ impl CompilerSupport {
     /// is kept) and reports `Corrupt`, so the caller re-obtains the
     /// artifact. Without metadata there is nothing to verify against —
     /// nothing is served and nothing is discarded.
+
     pub(crate) async fn serve_official_artifact<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,
@@ -1527,6 +1533,55 @@ impl CompilerSupport {
                 );
                 Ok(ServedArtifact::Missing)
             }
+        }
+    }
+
+    /// Whether a cache entry may serve: fresh TTL, stamped anchor
+    /// present, and still the current one. Anything else falls
+    /// through to disk, which re-verifies against the anchor.
+    pub(crate) fn serving_cache_hit(
+        entry: Option<&ServingCacheEntry>,
+        anchor: Option<&DigestIdentifier>,
+        now: Instant,
+    ) -> bool {
+        match (entry, anchor) {
+            (Some(entry), Some(anchor)) => {
+                now.saturating_duration_since(entry.filled_at)
+                    < SERVING_CACHE_TTL
+                    && entry.wasm_hash == *anchor
+            }
+            _ => false,
+        }
+    }
+
+    /// Current ledger anchor for a contract, if anything is
+    /// registered. Serving caches stamp it on fill and honor a hit
+    /// only while it still matches.
+    pub(crate) async fn current_anchor_hash<A: Actor>(
+        ctx: &ActorContext<A>,
+        contract_name: &str,
+        register_path: &ActorPath,
+    ) -> Result<Option<DigestIdentifier>, CompilerError> {
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(register_path)
+            .await
+            .map_err(|e| CompilerError::ContractRegisterFailed {
+                details: e.to_string(),
+            })?;
+        match register
+            .ask(ContractRegisterMessage::GetMetadata {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Metadata(record)) => {
+                Ok(record.map(|record| record.wasm_hash))
+            }
+            Ok(_) => Ok(None),
+            Err(error) => Err(CompilerError::ContractRegisterFailed {
+                details: error.to_string(),
+            }),
         }
     }
 
@@ -1964,5 +2019,51 @@ mod tests {
             ave_common::registry::cargo_bin_blake3("rust-9.99-ficticio")
                 .is_none()
         );
+    }
+
+    fn cached_entry(hash: DigestIdentifier) -> ServingCacheEntry {
+        ServingCacheEntry {
+            artifact: ArtifactData {
+                compressed_wasm: vec![1, 2, 3],
+                toolchain_fingerprint: None,
+            },
+            wasm_hash: hash,
+            filled_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn serving_cache_hit_needs_fresh_matching_anchor() {
+        use std::time::Instant;
+        let anchor = DigestIdentifier::default();
+        let other = crate::compilation::pipeline::hash_bytes(
+            HashAlgorithm::Blake3,
+            b"other",
+            "test",
+        )
+        .unwrap();
+        let entry = cached_entry(anchor.clone());
+        let now = Instant::now();
+        // Fresh + matching anchor: hit.
+        assert!(CompilerSupport::serving_cache_hit(
+            Some(&entry),
+            Some(&anchor),
+            now
+        ));
+        // Same entry after the anchor moved (pin switch, contract
+        // change): miss, falls through to disk re-verify.
+        assert!(!CompilerSupport::serving_cache_hit(
+            Some(&entry),
+            Some(&other),
+            now
+        ));
+        // Anchor gone (schema deleted): miss.
+        assert!(!CompilerSupport::serving_cache_hit(Some(&entry), None, now));
+        // No entry: miss.
+        assert!(!CompilerSupport::serving_cache_hit(
+            None,
+            Some(&anchor),
+            now
+        ));
     }
 }

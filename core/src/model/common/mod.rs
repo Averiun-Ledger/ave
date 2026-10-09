@@ -1036,6 +1036,34 @@ pub fn take_seeded_signers(
     (chosen, rest)
 }
 
+/// Hedging spares for quorum collection: contact a few extra signers
+/// beyond the quorum quantity so one dead or slow signer does not
+/// stall the round to timeout plus replenish.
+///
+/// Returns `(spares, rest)`: `ceil(quantity / 10)` signers moved from
+/// `pending` (at least 1 while anyone is spare, at most what exists).
+/// Deterministic like [`take_seeded_signers`] (borsh-byte order), so
+/// every node derives the same spare set from the same pool. Spare
+/// votes are ordinary authorized votes: they count toward quorum when
+/// they arrive first and are ignored after close like any straggler.
+pub fn take_hedge_spares(
+    pending: HashSet<PublicKey>,
+    quantity: usize,
+) -> (HashSet<PublicKey>, HashSet<PublicKey>) {
+    if quantity == 0 || pending.is_empty() {
+        return (HashSet::new(), pending);
+    }
+    let mut ordered: Vec<PublicKey> = pending.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        borsh::to_vec(a)
+            .unwrap_or_default()
+            .cmp(&borsh::to_vec(b).unwrap_or_default())
+    });
+    let spare_count = quantity.div_ceil(10).min(ordered.len());
+    let rest = ordered.split_off(spare_count);
+    (ordered.into_iter().collect(), rest.into_iter().collect())
+}
+
 pub async fn send_reboot_to_req<A>(
     ctx: &mut ActorContext<A>,
     request_id: DigestIdentifier,
@@ -1084,6 +1112,33 @@ mod tests {
         let union: HashSet<PublicKey> =
             chosen_a.union(&rest_a).cloned().collect();
         assert_eq!(union, all);
+    }
+
+    #[test]
+    fn hedge_spares_math_and_determinism() {
+        // ceil(10%), at least 1 while anyone is spare.
+        let (spares, rest) = take_hedge_spares(sample_keys(8), 8);
+        assert_eq!(spares.len(), 1);
+        assert_eq!(rest.len(), 7);
+        let (spares, rest) = take_hedge_spares(sample_keys(12), 12);
+        assert_eq!(spares.len(), 2);
+        assert_eq!(rest.len(), 10);
+        // Capped by availability, empty stays empty.
+        let (spares, rest) = take_hedge_spares(sample_keys(2), 30);
+        assert_eq!(spares.len(), 2);
+        assert!(rest.is_empty());
+        let (spares, rest) = take_hedge_spares(HashSet::new(), 8);
+        assert!(spares.is_empty());
+        assert!(rest.is_empty());
+        let (spares, rest) = take_hedge_spares(sample_keys(5), 0);
+        assert!(spares.is_empty());
+        assert_eq!(rest.len(), 5);
+        // Deterministic and disjoint.
+        let pool = sample_keys(20);
+        let (a, _) = take_hedge_spares(pool.clone(), 12);
+        let (b, _) = take_hedge_spares(pool.clone(), 12);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 2);
     }
 }
 

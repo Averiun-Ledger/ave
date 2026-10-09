@@ -21,8 +21,8 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, crash_system, send_reboot_to_req, take_random_signers,
-            take_seeded_signers,
+            abort_req, crash_system, send_reboot_to_req, take_hedge_spares,
+            take_random_signers, take_seeded_signers,
         },
         event::{CompilationData, CompilationResponse},
     },
@@ -700,13 +700,20 @@ impl Handler<Self> for Compilation {
                     .quorum
                     .get_signers(self.compilers_quantity, signers.len() as u32);
 
-                let (current_comp, pending_comp) = take_seeded_signers(
+                let (mut current_comp, pending_comp) = take_seeded_signers(
                     signers,
                     compilers_quantity as usize,
                     &self.compilation_request_hash,
                 );
+                // Hedging spares, like evaluators: extra compilers up
+                // front instead of timeout plus replenish on failure.
+                let (spares, rest) = take_hedge_spares(
+                    pending_comp,
+                    compilers_quantity as usize,
+                );
+                current_comp.extend(spares);
                 self.current_compilers.clone_from(&current_comp);
-                self.pending_compilers.clone_from(&pending_comp);
+                self.pending_compilers.clone_from(&rest);
 
                 for signer in current_comp.clone() {
                     if let Err(e) =

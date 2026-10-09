@@ -170,6 +170,18 @@ impl DbManager<DbCollection, DbCollection> for Database {
             Self::SQLite(manager) => manager.stop(),
         }
     }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[ave_actors::PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Database::RocksDb(manager) => manager.purge_scopes(scopes),
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(manager) => manager.purge_scopes(scopes),
+        }
+    }
 }
 
 impl DbManager<DbCollection, DbCollection> for Arc<Database> {
@@ -196,6 +208,13 @@ impl DbManager<DbCollection, DbCollection> for Arc<Database> {
         // The real shutdown is performed on the owned `Database` after removing
         // this helper from the actor system.
         Ok(())
+    }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[ave_actors::PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        self.as_ref().purge_scopes(scopes)
     }
 }
 

@@ -675,7 +675,9 @@ impl Api {
         validate_event_request(request.content())?;
         let response = self
             .request
-            .ask(RequestHandlerMessage::NewRequest { request })
+            .ask(RequestHandlerMessage::NewRequest {
+                request: Arc::new(request),
+            })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Request processing failed");
@@ -731,7 +733,7 @@ impl Api {
         let response = self
             .request
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req,
+                request: Arc::new(signed_event_req),
             })
             .await
             .map_err(|e| {

@@ -11,7 +11,10 @@ use ave_common::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Default)]
 pub enum EvalWorkerContext {
@@ -69,7 +72,7 @@ impl EvalWorkerContext {
 )]
 pub struct EvaluationReq {
     /// The signed event request.
-    pub event_request: Signed<EventRequest>,
+    pub event_request: Arc<Signed<EventRequest>>,
 
     pub governance_id: DigestIdentifier,
 
@@ -248,7 +251,7 @@ mod tests {
         let event_request = Signed::new(request, &signer).unwrap();
 
         let req = EvaluationReq {
-            event_request,
+            event_request: Arc::new(event_request),
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::GovFact {
                 state: GovernanceData::new(public_key.clone()),
@@ -280,7 +283,7 @@ mod tests {
         let event_request = Signed::new(request, &signer).unwrap();
 
         let req = EvaluationReq {
-            event_request,
+            event_request: Arc::new(event_request),
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
@@ -322,7 +325,7 @@ mod tests {
         let event_request = Signed::new(request, &signer).unwrap();
 
         let req = EvaluationReq {
-            event_request,
+            event_request: Arc::new(event_request),
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),
@@ -364,7 +367,7 @@ mod tests {
         let event_request = Signed::new(request, &signer).unwrap();
 
         let req = EvaluationReq {
-            event_request,
+            event_request: Arc::new(event_request),
             governance_id: DigestIdentifier::default(),
             data: EvaluateData::TrackerSchemasFact {
                 state: ValueWrapper(json!({ "one": 0, "two": 0, "three": 0 })),

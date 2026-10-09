@@ -6,8 +6,8 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, crash_system, send_reboot_to_req, take_random_signers,
-            take_seeded_signers,
+            abort_req, crash_system, send_reboot_to_req, take_hedge_spares,
+            take_random_signers, take_seeded_signers,
         },
         event::{ValidationData, ValidationMetadata},
     },
@@ -427,13 +427,20 @@ impl Handler<Self> for Validation {
                     signers.len() as u32,
                 );
 
-                let (current_vali, pending_vali) = take_seeded_signers(
+                let (mut current_vali, pending_vali) = take_seeded_signers(
                     signers,
                     validators_quantity as usize,
                     &self.validation_request_hash,
                 );
+                // Hedging spares, like evaluators: extra validators up
+                // front instead of timeout plus replenish on failure.
+                let (spares, rest) = take_hedge_spares(
+                    pending_vali,
+                    validators_quantity as usize,
+                );
+                current_vali.extend(spares);
                 self.current_validators.clone_from(&current_vali);
-                self.pending_validators.clone_from(&pending_vali);
+                self.pending_validators.clone_from(&rest);
 
                 for signer in current_vali.clone() {
                     if let Err(e) =
@@ -1091,7 +1098,7 @@ pub mod tests {
 
         let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .unwrap()
@@ -1243,7 +1250,7 @@ pub mod tests {
 
         let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .unwrap()
@@ -1323,7 +1330,7 @@ pub mod tests {
 
         if request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .is_ok()

@@ -256,11 +256,39 @@ impl CompileWorker {
         schema_id: &SchemaType,
         contract_name: &str,
     ) -> Result<Option<ArtifactData>, ActorError> {
+        let anchor = match CompilerSupport::current_anchor_hash(
+            ctx,
+            contract_name,
+            &self.register_path(),
+        )
+        .await
+        {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read anchor to serve {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
         if let Some(entry) = self.serving_cache.get(contract_name)
-            && entry.filled_at.elapsed() < SERVING_CACHE_TTL
+            && CompilerSupport::serving_cache_hit(
+                Some(entry),
+                anchor.as_ref(),
+                Instant::now(),
+            )
         {
             return Ok(Some(entry.artifact.clone()));
         }
+        self.serving_cache.remove(contract_name);
+        let Some(anchor) = anchor else {
+            return Ok(None);
+        };
 
         let artifact = match CompilerSupport::serve_official_artifact(
             self.hash,
@@ -314,6 +342,7 @@ impl CompileWorker {
             contract_name.to_owned(),
             ServingCacheEntry {
                 artifact: artifact.clone(),
+                wasm_hash: anchor,
                 filled_at,
             },
         );
@@ -1967,7 +1996,7 @@ mod tests {
         let signed_event = Signed::new(event_request, &requester_keys).unwrap();
         let compilation_req = Signed::new(
             CompilationReq {
-                event_request: signed_event,
+                event_request: Arc::new(signed_event),
                 governance_id: governance_id.clone(),
                 sn: 0,
                 gov_version: 0,

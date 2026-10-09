@@ -607,7 +607,7 @@ mod tests {
         let signed_event = Signed::new(event_request, &our_keys).unwrap();
         let signed_req = Signed::new(
             CompilationReq {
-                event_request: signed_event,
+                event_request: Arc::new(signed_event),
                 governance_id,
                 sn: 0,
                 gov_version: 0,

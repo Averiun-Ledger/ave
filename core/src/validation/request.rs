@@ -13,6 +13,7 @@ use ave_common::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A struct representing a validation request.
 #[derive(
@@ -21,12 +22,12 @@ use serde::{Deserialize, Serialize};
 pub enum ValidationReq {
     Create {
         subject_id: DigestIdentifier,
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         gov_version: u64,
     },
     Event {
         actual_protocols: Box<ActualProtocols>,
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         ledger_hash: DigestIdentifier,
         metadata: Box<Metadata>,
         last_data: Box<LastData>,
@@ -43,7 +44,7 @@ impl ValidationReq {
         }
     }
 
-    pub const fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         match self {
             Self::Create { event_request, .. } => {
                 matches!(event_request.content(), EventRequest::Create(..))
@@ -54,7 +55,7 @@ impl ValidationReq {
         }
     }
 
-    pub fn get_signed_event_request(&self) -> Signed<EventRequest> {
+    pub fn get_signed_event_request(&self) -> Arc<Signed<EventRequest>> {
         match self {
             Self::Create { event_request, .. } => event_request.clone(),
             Self::Event { event_request, .. } => event_request.clone(),

@@ -206,7 +206,7 @@ struct ApprovalRoute {
 /// Ledger-anchored identity of the event under validation, shared by
 /// the evidence checks so their signatures stay readable.
 struct EventAnchor<'a> {
-    event_request: &'a Signed<EventRequest>,
+    event_request: &'a Arc<Signed<EventRequest>>,
     metadata: &'a Metadata,
     gov_version: u64,
     req_subject_data_hash: DigestIdentifier,
@@ -1900,7 +1900,7 @@ impl ValiWorker {
         ctx: &mut ActorContext<Self>,
         metadata: &Metadata,
         actual_protocols: &ActualProtocols,
-        event_request: &Signed<EventRequest>,
+        event_request: &Arc<Signed<EventRequest>>,
         gov_version: u64,
         signer: PublicKey,
     ) -> Result<Option<ValueWrapper>, ValidatorError> {
@@ -3457,7 +3457,7 @@ mod tests {
         compilers: Vec<Ed25519Signer>,
         evaluators: Vec<Ed25519Signer>,
         approvers: Vec<Ed25519Signer>,
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         metadata: Metadata,
         gov_version: u64,
         signer: PublicKey,
@@ -3547,7 +3547,7 @@ mod tests {
                 compilers: gen_keys(),
                 evaluators: gen_keys(),
                 approvers: gen_keys(),
-                event_request,
+                event_request: Arc::new(event_request),
                 metadata,
                 gov_version: 0,
                 signer: owner_pub,

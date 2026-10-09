@@ -21,7 +21,7 @@ use crate::{
         worker::{CompileWorker, CompileWorkerMessage},
     },
     config::SinkTarget,
-    db::Storable,
+    db::{Database, Storable},
     evaluation::{
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
@@ -66,19 +66,14 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
-        common::{
-            crash_system, get_last_event, purge_storage, subject::make_obsolete,
-        },
+        common::{crash_system, get_last_event, subject::make_obsolete},
         event::{CompilationResponse, Ledger, Protocols, ValidationMetadata},
     },
     node::{
         Node, NodeMessage, NodeResponse, TransferSubject,
         register::RegisterMessage,
     },
-    sink::{
-        SinkManager, SinkManagerInitParams, SinkManagerMessage,
-        SinkManagerResponse,
-    },
+    sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
@@ -93,8 +88,8 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, DbManager, Handler,
+    Message, Response,
 };
 use ave_common::{
     DataToSink, Namespace, SchemaType, ValueWrapper,
@@ -4615,78 +4610,19 @@ impl Governance {
     ) -> Result<(), ActorError> {
         let mut cleanup_errors = Vec::new();
 
+        // Phase 1 — stop every store-backed child. A missing
+        // child is already gone: nothing to stop, and the atomic
+        // purge below covers orphaned data without recreating
+        // anyone. Orphan-data recreation (up_approver_only) is gone
+        // with it.
         if self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
-        }) {
-            let hash = self.hash.map_or_else(
-                || {
-                    cleanup_errors
-                        .push("approver init: missing hash".to_owned());
-                    None
-                },
-                Some,
-            );
-
-            let network = ctx
-                .system()
-                .get_helper::<Arc<NetworkSender>>("network")
-                .map_or_else(
-                    || {
-                        cleanup_errors.push(
-                            "approver init: missing network helper".to_owned(),
-                        );
-                        None
-                    },
-                    Some,
-                );
-
-            if let (Some(hash), Some(network)) = (hash, network) {
-                let approver = match ctx
-                    .get_child::<ApprPersist>("approver")
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(_) => match self
-                        .up_approver_only(ctx, &hash, &network)
-                        .await
-                    {
-                        Ok(()) => match ctx
-                            .get_child::<ApprPersist>("approver")
-                            .await
-                        {
-                            Ok(actor) => Some(actor),
-                            Err(error) => {
-                                cleanup_errors
-                                    .push(format!("approver lookup: {error}"));
-                                None
-                            }
-                        },
-                        Err(error) => {
-                            cleanup_errors.push(format!("approver: {error}"));
-                            None
-                        }
-                    },
-                };
-
-                if let Some(approver) = approver {
-                    match approver
-                        .ask(crate::approval::persist::ApprPersistMessage::PurgeStorage)
-                        .await
-                    {
-                        Ok(crate::approval::persist::ApprPersistResponse::Ok) => {}
-                        Ok(_) => cleanup_errors
-                            .push("approver: unexpected response".to_owned()),
-                        Err(error) => {
-                            cleanup_errors.push(format!("approver: {error}"))
-                        }
-                    }
-
-                    if let Err(error) = approver.ask_stop().await {
-                        cleanup_errors.push(format!("approver stop: {error}"));
-                    }
-                }
-            }
+        }) && let Ok(approver) =
+            ctx.get_child::<ApprPersist>("approver").await
+            && let Err(error) = approver.ask_stop().await
+        {
+            cleanup_errors.push(format!("approver stop: {error}"));
         }
 
         let contract_register = match ctx
@@ -4721,265 +4657,93 @@ impl Governance {
                 cleanup_errors.push(format!("contract_artifacts: {error}"));
             }
 
-            match contract_register
-                .ask(ContractRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(ContractRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "contract_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("contract_register: {error}"))
-                }
-            }
-
             if let Err(error) = contract_register.ask_stop().await {
                 cleanup_errors.push(format!("contract_register stop: {error}"));
             }
         }
 
-        let role_register = match ctx
-            .create_child("role_register", RoleRegister::initial(()))
-            .await
+        if let Ok(role_register) =
+            ctx.get_child::<RoleRegister>("role_register").await
+            && let Err(error) = role_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<RoleRegister>("role_register").await {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("role_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("role_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(role_register) = role_register {
-            match role_register.ask(RoleRegisterMessage::PurgeStorage).await {
-                Ok(RoleRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "role_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("role_register: {error}"))
-                }
-            }
-
-            if let Err(error) = role_register.ask_stop().await {
-                cleanup_errors.push(format!("role_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("role_register stop: {error}"));
         }
 
-        let subject_register = match ctx
-            .create_child("subject_register", SubjectRegister::initial(()))
-            .await
+        if let Ok(subject_register) =
+            ctx.get_child::<SubjectRegister>("subject_register").await
+            && let Err(error) = subject_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<SubjectRegister>("subject_register").await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("subject_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("subject_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(subject_register) = subject_register {
-            match subject_register
-                .ask(SubjectRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(SubjectRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "subject_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("subject_register: {error}"))
-                }
-            }
-
-            if let Err(error) = subject_register.ask_stop().await {
-                cleanup_errors.push(format!("subject_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("subject_register stop: {error}"));
         }
 
-        let sn_register = match ctx
-            .create_child("sn_register", SnRegister::initial(()))
-            .await
+        if let Ok(sn_register) =
+            ctx.get_child::<SnRegister>("sn_register").await
+            && let Err(error) = sn_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<SnRegister>("sn_register").await {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("sn_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("sn_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(sn_register) = sn_register {
-            match sn_register.ask(SnRegisterMessage::PurgeStorage).await {
-                Ok(SnRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "sn_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("sn_register: {error}"))
-                }
-            }
-
-            if let Err(error) = sn_register.ask_stop().await {
-                cleanup_errors.push(format!("sn_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("sn_register stop: {error}"));
         }
 
-        let witnesses_register = match ctx
-            .create_child("witnesses_register", WitnessesRegister::initial(()))
+        if let Ok(witnesses_register) = ctx
+            .get_child::<WitnessesRegister>("witnesses_register")
             .await
+            && let Err(error) = witnesses_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx
-                    .get_child::<WitnessesRegister>("witnesses_register")
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors.push(format!(
-                            "witnesses_register lookup: {error}"
-                        ));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("witnesses_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(witnesses_register) = witnesses_register {
-            match witnesses_register
-                .ask(WitnessesRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(WitnessesRegisterResponse::Ok) => {}
-                Ok(_) => cleanup_errors
-                    .push("witnesses_register: unexpected response".to_owned()),
-                Err(error) => {
-                    cleanup_errors.push(format!("witnesses_register: {error}"))
-                }
-            }
-
-            if let Err(error) = witnesses_register.ask_stop().await {
-                cleanup_errors
-                    .push(format!("witnesses_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("witnesses_register stop: {error}"));
         }
 
-        let transfer_verification_register = match ctx
-            .create_child(
+        if let Ok(transfer_verification_register) = ctx
+            .get_child::<TransferVerificationRegister>(
                 "transfer_verification_register",
-                TransferVerificationRegister::initial(()),
             )
             .await
+            && let Err(error) = transfer_verification_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx
-                    .get_child::<TransferVerificationRegister>(
-                        "transfer_verification_register",
-                    )
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors.push(format!(
-                            "transfer_verification_register lookup: {error}"
-                        ));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors
-                    .push(format!("transfer_verification_register: {error}"));
-                None
-            }
+            cleanup_errors
+                .push(format!("transfer_verification_register stop: {error}"));
+        }
+
+        if let Ok(manager) = ctx.get_child::<SinkManager>("sink_manager").await
+            && let Err(error) = manager.ask_stop().await
+        {
+            cleanup_errors.push(format!("sink_manager stop: {error}"));
+        }
+
+        // Phase 2 — one atomic purge for the whole subtree (children
+        // above plus this actor): all rows go in a single backend
+        // transaction, so a crash leaves either everything or
+        // nothing — never a half-deleted governance. Child prefixes
+        // are the governance name, like at creation; ours is the
+        // store default for this path.
+        let prefix = ctx.path().key().to_string();
+        let mut scopes: Vec<ave_actors::PurgeScope<'_>> = [
+            "approver",
+            "contract_register",
+            "role_register",
+            "subject_register",
+            "sn_register",
+            "witnesses_register",
+            "transfer_verification_register",
+            "sink",
+        ]
+        .iter()
+        .map(|store| ave_actors::PurgeScope {
+            store,
+            prefix: prefix.as_str(),
+        })
+        .collect();
+        let gov_prefix = ave_actors::default_store_prefix(ctx.path());
+        scopes.push(ave_actors::PurgeScope {
+            store: "governance",
+            prefix: gov_prefix.as_str(),
+        });
+        let Some(db) = ctx.system().get_helper::<Arc<Database>>("store") else {
+            cleanup_errors.push("store helper missing".to_owned());
+            return Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            });
         };
-
-        if let Some(transfer_verification_register) =
-            transfer_verification_register
-        {
-            match transfer_verification_register
-                .ask(TransferVerificationRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(TransferVerificationRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "transfer_verification_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!(
-                        "transfer_verification_register: {error}"
-                    ))
-                }
-            }
-
-            if let Err(error) = transfer_verification_register.ask_stop().await
-            {
-                cleanup_errors.push(format!(
-                    "transfer_verification_register stop: {error}"
-                ));
-            }
-        }
-
-        // The per-governance sink manager stops with this actor but
-        // nothing purges its cursors otherwise: a rejoin would
-        // resurrect them and skip events.
-        match ctx.get_child::<SinkManager>("sink_manager").await {
-            Ok(manager) => {
-                match manager.ask(SinkManagerMessage::PurgeStorage).await {
-                    Ok(SinkManagerResponse::Ok) => {}
-                    Ok(other) => cleanup_errors.push(format!(
-                        "sink_manager: unexpected response {other:?}"
-                    )),
-                    Err(error) => cleanup_errors
-                        .push(format!("sink_manager: {error}")),
-                }
-
-                if let Err(error) = manager.ask_stop().await {
-                    cleanup_errors.push(format!("sink_manager stop: {error}"));
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("sink_manager lookup: {error}"));
-            }
-        }
-
-        if let Err(error) = purge_storage(ctx).await {
-            cleanup_errors.push(format!("governance: {error}"));
+        if let Err(error) = db.purge_scopes(&scopes) {
+            cleanup_errors.push(format!("atomic purge: {error}"));
         }
 
         if cleanup_errors.is_empty() {

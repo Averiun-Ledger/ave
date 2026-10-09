@@ -60,7 +60,7 @@ async-trait = "0.1.92"
 bs58 = "0.5.1"
 base64 = "0.23.1"
 blake3 = "1.8.6"
-borsh = { version = "1.8.0", features = ["std", "derive"] }
+borsh = { version = "1.8.0", features = ["std", "derive", "rc"] }
 ed25519-dalek = { version = "3", features = ["alloc", "pkcs8"] }
 futures = "0.3.34"
 futures-timer = "3.0"

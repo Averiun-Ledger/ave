@@ -117,7 +117,7 @@ pub struct RequestManager {
     /// carried in snapshots so a restored manager keeps its mode.
     durable: bool,
     command: ReqManInitMessage,
-    request: Option<Signed<EventRequest>>,
+    request: Option<Arc<Signed<EventRequest>>>,
     state: RequestManagerState,
     version: u64,
 }
@@ -162,7 +162,7 @@ impl BorshDeserialize for RequestManager {
         let state = RequestManagerState::deserialize_reader(reader)?;
         let version = u64::deserialize_reader(reader)?;
         let request =
-            Option::<Signed<EventRequest>>::deserialize_reader(reader)?;
+            Option::<Arc<Signed<EventRequest>>>::deserialize_reader(reader)?;
         let durable = bool::deserialize_reader(reader)?;
 
         let our_key = Arc::new(PublicKey::default());
@@ -418,7 +418,7 @@ impl RequestManager {
         )?;
 
         let compile_req = CompilationReq {
-            event_request: request.clone(),
+            event_request: Arc::new(request.clone()),
             governance_id: metadata.governance_id.clone(),
             sn: metadata.sn + 1,
             gov_version: state.version,
@@ -848,7 +848,7 @@ impl RequestManager {
         };
 
         let eval_req = EvaluationReq {
-            event_request: request.clone(),
+            event_request: Arc::new(request.clone()),
             data: evaluate_data,
             sn: metadata.sn + 1,
             gov_version,
@@ -2625,7 +2625,7 @@ pub enum RequestManagerMessage {
     },
     FirstRun {
         command: ReqManInitMessage,
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
         request_id: DigestIdentifier,
     },
     Abort {
@@ -2704,7 +2704,7 @@ pub enum RequestManagerEvent {
     },
     SafeState {
         command: ReqManInitMessage,
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
     },
 }
 

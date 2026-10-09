@@ -1072,11 +1072,45 @@ impl ContractCompiler {
         ctx: &mut ActorContext<Self>,
         contract_name: &str,
     ) -> Result<Option<ArtifactData>, ActorError> {
-        if let Some(entry) = &self.serving_cache
-            && entry.filled_at.elapsed() < SERVING_CACHE_TTL
+        // The anchor decides, not the TTL: a hit counts only while
+        // the cached bytes are still the official ones. Anything
+        // else (including anchor gone) drops the entry and falls
+        // through to disk, which re-verifies.
+        let anchor = match CompilerSupport::current_anchor_hash(
+            ctx,
+            contract_name,
+            &Self::register_path(ctx),
+        )
+        .await
+        {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read anchor to serve {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        if let Some(entry) = self.serving_cache.as_ref()
+            && CompilerSupport::serving_cache_hit(
+                Some(entry),
+                anchor.as_ref(),
+                Instant::now(),
+            )
         {
             return Ok(Some(entry.artifact.clone()));
         }
+        self.serving_cache = None;
+        let Some(anchor) = anchor else {
+            // Nothing registered under this name: nothing to serve,
+            // and no stale entry may survive.
+            return Ok(None);
+        };
 
         let artifact = match CompilerSupport::serve_official_artifact(
             self.hash,
@@ -1127,6 +1161,7 @@ impl ContractCompiler {
 
         self.serving_cache = Some(ServingCacheEntry {
             artifact: artifact.clone(),
+            wasm_hash: anchor,
             filled_at,
         });
 

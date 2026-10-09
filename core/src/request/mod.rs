@@ -86,17 +86,17 @@ pub struct RequestHandler {
     #[serde(skip)]
     our_key: Arc<PublicKey>,
     handling: HashMap<DigestIdentifier, DigestIdentifier>,
-    in_queue: HashMap<
-        DigestIdentifier,
-        VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
-    >,
+    in_queue: HashMap<DigestIdentifier, VecDeque<QueuedRequest>>,
 }
+
+/// One queued request: shared payload plus its id.
+type QueuedRequest = (Arc<Signed<EventRequest>>, DigestIdentifier);
 
 /// Owned handoff for one queue/create attempt, field for field like
 /// `RetryQueueRequest`: the funnel signature stays narrow no matter
 /// how many attempt-scoped values travel together.
 struct QueueRequest {
-    request: Signed<EventRequest>,
+    request: Arc<Signed<EventRequest>>,
     request_id: DigestIdentifier,
     subject_id: DigestIdentifier,
     is_gov: bool,
@@ -125,10 +125,10 @@ impl BorshDeserialize for RequestHandler {
             HashMap::<DigestIdentifier, DigestIdentifier>::deserialize_reader(
                 reader,
             )?;
-        let in_queue = HashMap::<
-            DigestIdentifier,
-            VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
-        >::deserialize_reader(reader)?;
+        let in_queue =
+            HashMap::<DigestIdentifier, VecDeque<QueuedRequest>>::deserialize_reader(
+                reader,
+            )?;
 
         let our_key = Arc::new(PublicKey::default());
 
@@ -930,7 +930,7 @@ impl RequestHandler {
     async fn in_queue_to_handling(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
         request_id: &DigestIdentifier,
         is_gov: bool,
     ) -> Result<(), ActorError> {
@@ -1058,7 +1058,7 @@ impl RequestHandler {
 #[derive(Debug, Clone)]
 pub enum RequestHandlerMessage {
     NewRequest {
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
     },
     RequestInManager,
     RequestInManagerSubjectId {
@@ -1082,7 +1082,7 @@ pub enum RequestHandlerMessage {
     /// actor. Never sleeps in-handler: this actor funnels every
     /// subject, so waiting here would stall them all.
     RetryQueueRequest {
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
         request_id: DigestIdentifier,
         subject_id: DigestIdentifier,
         is_gov: bool,
@@ -1121,7 +1121,7 @@ impl Response for RequestHandlerResponse {}
 pub enum RequestHandlerEvent {
     EventToQueue {
         subject_id: DigestIdentifier,
-        event: Signed<EventRequest>,
+        event: Arc<Signed<EventRequest>>,
         request_id: DigestIdentifier,
     },
     Invalid {

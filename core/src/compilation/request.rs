@@ -6,6 +6,7 @@ use ave_common::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A struct representing a compilation request.
 ///
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct CompilationReq {
     /// The signed event request.
-    pub event_request: Signed<EventRequest>,
+    pub event_request: Arc<Signed<EventRequest>>,
 
     pub governance_id: DigestIdentifier,
 

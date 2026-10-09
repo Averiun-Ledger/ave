@@ -2,6 +2,7 @@
 //!
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::{
     compilation::response::{CompilationError, CompilerResponse},
@@ -220,11 +221,11 @@ pub struct OpaqueData {
 )]
 pub enum Protocols {
     Create {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     TrackerFactFull {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
@@ -235,7 +236,7 @@ pub enum Protocols {
         data: OpaqueData,
     },
     GovFact {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         /// Compilation evidence, present when the fact adds a schema or
         /// changes a contract (or its initial value). Boxed to keep the
         /// enum size close to the other variants.
@@ -249,25 +250,25 @@ pub enum Protocols {
         validation: Box<ValidationData>,
     },
     Transfer {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
     TrackerConfirm {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     GovConfirm {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
     Reject {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     EOL {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
 }
@@ -643,7 +644,7 @@ impl Protocols {
 
     pub fn build(
         is_gov: bool,
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         actual_protocols: ActualProtocols,
         approval_data: Option<ApprovalData>,
         validation: ValidationData,
