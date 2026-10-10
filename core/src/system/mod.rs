@@ -457,7 +457,17 @@ pub mod tests {
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),
-            toolchains: Default::default(),
+            // Unit tests vote and validate exactly like production:
+            // the pin resolves to the real installed toolchain it
+            // names (never system cargo).
+            toolchains: std::collections::BTreeMap::from([(
+                ave_common::governance::DEFAULT_PIN.to_owned(),
+                ave_common::governance::toolchain_info(
+                    ave_common::governance::DEFAULT_PIN,
+                )
+                .map(|entry| entry.rustc_version.to_owned())
+                .unwrap_or_else(|| "1.95.0".to_owned()),
+            )]),
             cargo_bin: None,
         };
 
@@ -546,7 +556,16 @@ pub mod tests {
             spec: None,
             #[cfg(feature = "test")]
             compiler: Default::default(),
-            toolchains: Default::default(),
+            // Same pinned map as above: unit tests attest like
+            // production.
+            toolchains: std::collections::BTreeMap::from([(
+                ave_common::governance::DEFAULT_PIN.to_owned(),
+                ave_common::governance::toolchain_info(
+                    ave_common::governance::DEFAULT_PIN,
+                )
+                .map(|entry| entry.rustc_version.to_owned())
+                .unwrap_or_else(|| "1.95.0".to_owned()),
+            )]),
             cargo_bin: None,
         };
 

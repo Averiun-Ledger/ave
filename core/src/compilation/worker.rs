@@ -536,8 +536,6 @@ impl CompileWorker {
         // per request from the SELECTED toolchain — the gate above
         // already proved it resolves. Unmeasurable means the toolchain
         // is broken: stand down, the build would fail the same way.
-        // The test-only pool votes empty (unattested): only test pool
-        // builds can produce those, never production ones.
         let toolchain_name = if pin.is_empty() {
             String::new()
         } else {
@@ -546,14 +544,10 @@ impl CompileWorker {
                 None => return Ok(CompilationRes::NoToolchain { pin }),
             }
         };
-        // The test-only pool votes empty (unattested): only test pool
-        // builds can produce those, never production ones. An empty
-        // toolchain name selects the system cargo (legacy request):
-        // production measures it (validators judge whatever it
-        // attests); tests vote empty.
-        #[cfg(feature = "test")]
-        let empty_version = String::new();
-        #[cfg(not(feature = "test"))]
+        // An empty toolchain name selects the system cargo (legacy
+        // request): it is measured like any other toolchain, in
+        // tests exactly as in production, so both vote the same
+        // attestation (validators judge whatever it attests).
         let empty_version =
             match Self::measure_toolchain_version("", &pin).await {
                 Ok(version) => version,

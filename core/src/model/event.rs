@@ -71,7 +71,7 @@ pub enum CompilationResponse {
         /// rustc version the quorum built with, voted inside the
         /// result hash: validators compare it against the registry
         /// entry for the pin (valid ID, wrong toolchain is
-        /// rejected). Empty only from the test-only pool.
+        /// rejected). Always measured, in tests as in production.
         toolchain_version: String,
     },
     Error {

@@ -685,12 +685,13 @@ impl CompilerSupport {
             }
 
             // Test builds compile through the embedded gRPC compiler
-            // (shared content-addressed store across the suite) unless
-            // the request resolves to a NAMED toolchain installed on
-            // this machine — those suites exercise true divergence.
-            // Production nodes always compile in-process with the local
-            // toolchain (`build_local`). Everything after the build —
-            // anchor check, precompile, validation, persistence — is
+            // (shared content-addressed store across the suite, keyed
+            // per toolchain so pin switches get real bytes): the pool
+            // builds once per (contract, toolchain) and every compiler
+            // votes over the same artifact. Production nodes always
+            // compile in-process with the local toolchain
+            // (`build_local`). Everything after the build — anchor
+            // check, precompile, validation, persistence — is
             // identical either way.
             // Resolved only on the build path: a valid cached
             // artifact never needs the toolchain, so an unknown pin
@@ -705,7 +706,7 @@ impl CompilerSupport {
                 .map(|toolchains| toolchains.cargo_bin())
                 .unwrap_or(None);
             #[cfg(feature = "test")]
-            let use_pool = toolchain_name.is_empty();
+            let use_pool = true;
             #[cfg(not(feature = "test"))]
             let _use_pool = false;
             #[cfg(feature = "test")]
@@ -715,14 +716,19 @@ impl CompilerSupport {
                 None
             };
 
-            // Global test cache: only usable once the toolchain fingerprint
-            // of the pool is known (after the first remote compile).
+            // Global test cache: keyed by the REQUESTED toolchain's
+            // fingerprint (never the pool's last one: consecutive
+            // facts under different pins must not serve each other's
+            // bytes). Only usable once known locally (probe cached
+            // inside `ave_build` after the first measurement).
             #[cfg(feature = "test")]
             if use_pool
-                && let Some(toolchain_fingerprint) = client
-                    .as_ref()
-                    .expect("pool client present when pooling")
-                    .last_toolchain()
+                && let Ok(requested_fingerprint) =
+                    ave_build::toolchain_fingerprint(
+                        hash,
+                        &toolchain_name,
+                        ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+                    )
                     .await
                 && let Some((
                     module,
@@ -737,7 +743,7 @@ impl CompilerSupport {
                     &contract_hash,
                     &manifest_hash,
                     &engine_fingerprint,
-                    &toolchain_fingerprint,
+                    &requested_fingerprint,
                 )
                 .await?
             {
@@ -811,7 +817,7 @@ impl CompilerSupport {
             let (wasm, toolchain_fingerprint) = if use_pool {
                 let outcome = client
                     .expect("pool client present when pooling")
-                    .compile(contract)
+                    .compile(contract, &toolchain_name)
                     .await?;
                 (outcome.wasm, outcome.toolchain_fingerprint)
             } else {

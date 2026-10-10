@@ -73,9 +73,9 @@ pub enum CompilationResult {
         /// the existing field order stable.
         pin: String,
         /// rustc version that produced these bytes, measured from the
-        /// selected toolchain (never the ambient one). Empty only from
-        /// the test-only compiler pool (unattested); production nodes
-        /// always measure or stand down. Hash-covered with the rest.
+        /// selected toolchain (never the ambient one), in tests
+        /// exactly as in production. Nodes that can not measure stand
+        /// down instead of voting. Hash-covered with the rest.
         toolchain_version: String,
     },
     Error {

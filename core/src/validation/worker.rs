@@ -1841,11 +1841,9 @@ impl ValiWorker {
 
         // The toolchain that built the bytes must be the pin's: a valid
         // ID with another toolchain's bytes is rejected here (no
-        // commit), which an empty version can never smuggle past in
-        // production — only the test-only pool votes empty, and only
-        // test builds accept that.
+        // commit), which an empty version can never smuggle past —
+        // in tests exactly as in production.
         if toolchain_version.is_empty() {
-            #[cfg(not(any(test, feature = "test")))]
             return Err(ValidatorError::InvalidData {
                 value: "compilation toolchain version",
             });

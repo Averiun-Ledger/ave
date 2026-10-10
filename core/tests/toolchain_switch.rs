@@ -2,20 +2,26 @@
 //! registry IDs, never synthetic ones. For the capacity tests,
 //! per-node toolchain maps.
 //!
-//! Note on hashes: test builds compile through the shared pool, which
-//! ignores pins, so a recompile-all under a new pin reproduces
-//! byte-identical artifacts here. Real byte divergence across pins is
-//! covered by the dedicated real-toolchain test, not the suite.
+//! Test builds go through the shared pool like production builds go
+//! through the local toolchain: the pool builds once per
+//! (contract, toolchain) with the requested rustup toolchain, so a
+//! recompile-all under a new pin reproduces real byte divergence
+//! here. The dedicated real-toolchain test pins the byte comparison.
 mod common;
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ave_common::SchemaType;
 use ave_common::bridge::request::ApprovalStateRes;
+use ave_common::identity::{PublicKey, keys::{Ed25519Signer, KeyPair}};
 use ave_common::response::RequestState;
 use ave_core::governance::data::GovernanceData;
+use ave_core::helpers::network::test_faults::{
+    FaultAction, FaultDirection, FaultMessage, FaultRule,
+};
 use ave_core::test_compiler::{ScriptedCompiler, ScriptedTransform};
 use ave_network::{NodeType, RoutingNode};
 use common::{
@@ -23,7 +29,7 @@ use common::{
     EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
     PORT_COUNTER, create_and_authorize_governance, create_node,
     create_nodes_and_connections, emit_approve, emit_fact, get_events,
-    get_subject, node_running, wait_artifact_bytes,
+    get_subject, node_running, toolchain_name, wait_artifact_bytes,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -41,8 +47,8 @@ fn default_pin() -> String {
 
 fn both_pins() -> BTreeMap<String, String> {
     BTreeMap::from([
-        (default_pin(), String::new()),
-        (PIN_198.to_owned(), String::new()),
+        (default_pin(), toolchain_name(&default_pin())),
+        (PIN_198.to_owned(), toolchain_name(PIN_198)),
     ])
 }
 
@@ -148,7 +154,7 @@ async fn test_pin_switch_no_schemas_commits() {
 async fn test_pin_bare_switch_without_capacity_reboots() {
     let (node, _dirs) = single_node_with(Some(BTreeMap::from([(
         default_pin(),
-        String::new(),
+        toolchain_name(&default_pin()),
     )])))
     .await;
     let node = &node.api;
@@ -1072,7 +1078,7 @@ async fn test_pin_nobody_holds_reboots() {
     // so the stand-down is meaningful (not an empty-map artifact).
     let (node, _dirs) = single_node_with(Some(BTreeMap::from([(
         default_pin(),
-        String::new(),
+        toolchain_name(&default_pin()),
     )])))
     .await;
     let node = &node.api;
@@ -1153,7 +1159,10 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
         peers: vec![peer],
         always_accept: true,
         is_service: true,
-        toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
         ..Default::default()
     })
     .await;
@@ -1325,7 +1334,10 @@ async fn test_pin_boot_without_pin_stays_dormant() {
         contracts_path: Some(contracts_dir.path().to_path_buf()),
         always_accept: true,
         is_service: true,
-        toolchains: Some(BTreeMap::from([(PIN_198.to_owned(), String::new())])),
+        toolchains: Some(BTreeMap::from([(
+            PIN_198.to_owned(),
+            toolchain_name(PIN_198),
+        )])),
         ..Default::default()
     })
     .await;
@@ -1370,7 +1382,10 @@ async fn test_pin_switch_blind_proponent_commits() {
             always_accept: true,
             is_service: true,
             // Owner holds only the current pin.
-            toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
             ..Default::default()
         })
         .await;
@@ -1660,7 +1675,10 @@ async fn test_pin_stood_down_node_survives_switch() {
         always_accept: true,
         is_service: true,
         contracts_path: Some(node3_contracts.path().to_path_buf()),
-        toolchains: Some(BTreeMap::from([(default_pin(), String::new())])),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
         ..Default::default()
     })
     .await;
@@ -1788,4 +1806,798 @@ async fn test_pin_boot_missing_toolchain_fails_loud() {
         msg.contains(&default_pin()),
         "boot error must name the broken mapping, got: {msg}"
     );
+}
+
+#[test(tokio::test)]
+// Stale restart: a witness down during the switch comes back WITHOUT
+// the new pin. It boots live (no crash-loop), syncs the ledger to the
+// tip and keeps serving its retained 1.95 artifact, but holds no 1.98
+// bytes: without the toolchain it can not build, only retain.
+async fn test_pin_restart_without_new_pin_stays_stale_but_live() {
+    let owner_contracts = tempfile::tempdir().unwrap();
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(owner_contracts.path().to_path_buf()),
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+    let owner_peer = RoutingNode {
+        peer_id: owner.api.peer_id().to_string(),
+        address: vec![owner.listen_address.clone()],
+    };
+
+    let b_contracts = tempfile::tempdir().unwrap();
+    let (mut node_b, mut node_b_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![owner_peer.clone()],
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(b_contracts.path().to_path_buf()),
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node_b.api).await.unwrap();
+    let node_b_keys = node_b.keys.clone();
+    let node_b_local_db = node_b_dirs[0].path().to_path_buf();
+    let node_b_ext_db = node_b_dirs[1].path().to_path_buf();
+    dirs.append(&mut node_b_dirs);
+
+    let node1 = &owner.api;
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node_b.api]).await;
+
+    // B: member and gov witness. Schema roles land together with
+    // the schema itself below. B never compiles (no compiler role):
+    // it fetches everything it evaluates.
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    { "name": "AveNodeB", "key": node_b.api.public_key() }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": { "witness": ["AveNodeB"] }
+                }
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    node_b.api.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&node_b.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: schema under the default pin with its roles; B fetches
+    // the artifact when it evaluates below.
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": example_initial()
+                    }
+                ]
+            },
+            "roles": {
+                "tracker_schemas": {
+                    "add": {
+                        "issuer": [{ "name": "Owner", "namespace": [] }]
+                    }
+                },
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "AveNodeB", "namespace": [] }
+                            ],
+                            "validator": [
+                                { "name": "Owner", "namespace": [] }
+                            ],
+                            "witness": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "AveNodeB", "namespace": [] }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    node_b.api.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&node_b.api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Tracker on Example: B fetches the 1.95 artifact and votes it,
+    // so its bytes below are fetched, not built.
+    let (tracker_id, ..) = common::create_subject(
+        node1,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&node_b.api, tracker_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    emit_fact(
+        node1,
+        tracker_id.clone(),
+        json!({"ModOne": {"data": 5}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let b_state = get_subject(&node_b.api, tracker_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(b_state.properties, json!({"one": 5, "two": 0, "three": 0}));
+
+    let official = format!("{governance_id}_Example");
+    let b_example_before =
+        wait_artifact_bytes(b_contracts.path(), &official).await;
+
+    // B goes down; the switch and a second schema commit without it.
+    node_b.token.cancel();
+    join_all(node_b.handler.iter_mut()).await;
+
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        schema_add("Example2", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // Restart stale: same identity and disks, but only the old pin.
+    let (node_b2, mut node_b2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![owner_peer],
+        always_accept: true,
+        is_service: true,
+        keys: Some(node_b_keys),
+        local_db: Some(node_b_local_db),
+        ext_db: Some(node_b_ext_db),
+        contracts_path: Some(b_contracts.path().to_path_buf()),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut node_b2_dirs);
+    // Live, no crash-loop without the new toolchain.
+    node_running(&node_b2.api).await.unwrap();
+
+    // Ledger sync needs no toolchain: the tip is reachable.
+    node_b2.api.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&node_b2.api, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let props = properties(&node_b2.api, &governance_id, 4).await;
+    assert_eq!(props.toolchain, PIN_198);
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+    assert!(
+        props
+            .schemas
+            .contains_key(&SchemaType::Type("Example2".to_owned()))
+    );
+
+    // The stale node heals by fetching: its Example bytes must be
+    // the current anchored ones (owner's 1.98 build), fetched, never
+    // built locally without the toolchain. The heal replaces the
+    // retained file asynchronously, so wait for the exact bytes.
+    let owner_example = std::fs::read(
+        owner_contracts
+            .path()
+            .join("contracts")
+            .join(&official)
+            .join("contract.wasm"),
+    )
+    .expect("owner artifact must be on disk");
+    assert_ne!(
+        owner_example, b_example_before,
+        "the switch must rebuild under the new toolchain"
+    );
+    common::wait_artifact_bytes_eq(
+        b_contracts.path(),
+        &official,
+        &owner_example,
+    )
+    .await;
+    // Nothing built under the new pin: no bytes, no staging.
+    assert!(
+        !b_contracts
+            .path()
+            .join("contracts")
+            .join(format!("{governance_id}_Example2"))
+            .join("contract.wasm")
+            .exists(),
+        "a node without the new toolchain must hold no 1.98 bytes"
+    );
+
+    node_running(&owner.api).await.unwrap();
+    node_running(&node_b2.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Fresh join across pins: a node joining after the switch with only
+// the new toolchain syncs the full ledger and serves current bytes
+// without ever building. Behind nodes are never consulted for
+// current bytes (the fetch layer only asks ahead servers, and sync
+// sweeps stale files before healing), so stale bytes can never land
+// as current: both directions are asserted below.
+async fn test_pin_fresh_join_with_only_new_pin_syncs_current() {
+    let owner_contracts = tempfile::tempdir().unwrap();
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(owner_contracts.path().to_path_buf()),
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+    let owner_peer = RoutingNode {
+        peer_id: owner.api.peer_id().to_string(),
+        address: vec![owner.listen_address.clone()],
+    };
+
+    // Stale: evaluator/witness/member on Example, but never a gov
+    // witness (no auto-advance past the switch) and never a compiler.
+    // It fetches 1.95 bytes to evaluate, then freezes with them.
+    let stale_contracts = tempfile::tempdir().unwrap();
+    let (stale, mut stale_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![owner_peer.clone()],
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(stale_contracts.path().to_path_buf()),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
+        ..Default::default()
+    })
+    .await;
+    node_running(&stale.api).await.unwrap();
+    dirs.append(&mut stale_dirs);
+
+    let node1 = &owner.api;
+    let node_s = &stale.api;
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node_s]).await;
+
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [{ "name": "Stale", "key": node_s.public_key() }]
+            },
+            "roles": {
+                "tracker_schemas": {
+                    "add": {
+                        "issuer": [{ "name": "Owner", "namespace": [] }]
+                    }
+                }
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    node_s.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node_s, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": example_initial()
+                    }
+                ]
+            },
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "Stale", "namespace": [] }
+                            ],
+                            "validator": [
+                                { "name": "Owner", "namespace": [] }
+                            ],
+                            "witness": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "Stale", "namespace": [] }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    let (tracker_id, ..) = common::create_subject(
+        node1,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node_s, tracker_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    emit_fact(
+        node1,
+        tracker_id.clone(),
+        json!({"ModOne": {"data": 5}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let stale_state = get_subject(node_s, tracker_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(stale_state.properties, json!({"one": 5, "two": 0, "three": 0}));
+
+    // Stale holds 1.95 bytes from here on: no gov witness role, no
+    // more updates, no demand. Record them before the switch.
+    let official = format!("{governance_id}_Example");
+    let stale_bytes =
+        wait_artifact_bytes(stale_contracts.path(), &official).await;
+
+    // Switch + member add for the fresh node. Stale never sees them.
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // Freeze the dangerous state deterministically: block byte
+    // serving network-wide, then sync the stale node. Its ledger
+    // reaches the tip; without servable bytes the stale file is
+    // swept, never served as current.
+    node1
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    let _ = node_s.update_subject(governance_id.clone()).await;
+    get_subject(node_s, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert!(
+        !stale_contracts
+            .path()
+            .join("contracts")
+            .join(&official)
+            .join("contract.wasm")
+            .exists(),
+        "sync without byte serving must sweep stale bytes, never serve them"
+    );
+    node1.test_release_held().await.unwrap();
+
+    let fetch_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let fetch_pk = fetch_keys.public_key().to_string();
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [{ "name": "Fetch", "key": fetch_pk }]
+            },
+            "roles": {
+                "governance": { "add": { "witness": ["Fetch"] } },
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                { "name": "Fetch", "namespace": [] }
+                            ],
+                            "witness": [
+                                { "name": "Fetch", "namespace": [] }
+                            ]
+                        },
+                        "remove": {
+                            "evaluator": [
+                                { "name": "Stale", "namespace": [] }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // Fresh node, only the new pin: joins after the switch and must
+    // end up with 1.98 bytes without ever building. Peered to both
+    // servers so the stale one is directly reachable for the fetch.
+    let fetch_contracts = tempfile::tempdir().unwrap();
+    let (fetch, mut fetch_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![
+            owner_peer,
+            RoutingNode {
+                peer_id: stale.api.peer_id().to_string(),
+                address: vec![stale.listen_address.clone()],
+            },
+        ],
+        always_accept: true,
+        is_service: true,
+        keys: Some(fetch_keys),
+        contracts_path: Some(fetch_contracts.path().to_path_buf()),
+        toolchains: Some(BTreeMap::from([(
+            PIN_198.to_owned(),
+            toolchain_name(PIN_198),
+        )])),
+        ..Default::default()
+    })
+    .await;
+    node_running(&fetch.api).await.unwrap();
+    dirs.append(&mut fetch_dirs);
+    let node_f = &fetch.api;
+    node_f
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(node1.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    // Fresh join: full ledger sync plus current bytes, all without
+    // building. The swept node has nothing to offer, so everything
+    // comes from the updated server.
+    node_f.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node_f, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let owner_bytes =
+        wait_artifact_bytes(owner_contracts.path(), &official).await;
+    let fetch_bytes =
+        wait_artifact_bytes(fetch_contracts.path(), &official).await;
+    assert_eq!(fetch_bytes, owner_bytes);
+    assert_ne!(fetch_bytes, stale_bytes);
+
+    // Whatever the stale node holds afterwards is current: it either
+    // healed to the anchored bytes or holds nothing (never stale).
+    let stale_path = stale_contracts
+        .path()
+        .join("contracts")
+        .join(&official)
+        .join("contract.wasm");
+    if stale_path.exists() {
+        let stale_now =
+            std::fs::read(&stale_path).expect("stale file must read");
+        assert_eq!(
+            stale_now, owner_bytes,
+            "a healed node serves current bytes, never stale ones"
+        );
+    }
+
+    node_running(&owner.api).await.unwrap();
+    node_running(&stale.api).await.unwrap();
+    node_running(&fetch.api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Fetch across pins: an evaluator WITHOUT the new toolchain fetches
+// the artifact built under it from an updated compiler and evaluates
+// with it. Building needs the toolchain; evaluating and serving only
+// need the bytes, verified against the ledger anchor either way.
+async fn test_pin_evaluator_without_new_pin_fetches_and_evaluates() {
+    let owner_contracts = tempfile::tempdir().unwrap();
+    let (owner, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(owner_contracts.path().to_path_buf()),
+        toolchains: Some(both_pins()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&owner.api).await.unwrap();
+    let owner_peer = RoutingNode {
+        peer_id: owner.api.peer_id().to_string(),
+        address: vec![owner.listen_address.clone()],
+    };
+
+    let eval_contracts = tempfile::tempdir().unwrap();
+    let (eval, mut eval_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![owner_peer],
+        always_accept: true,
+        is_service: true,
+        contracts_path: Some(eval_contracts.path().to_path_buf()),
+        toolchains: Some(BTreeMap::from([(
+            default_pin(),
+            toolchain_name(&default_pin()),
+        )])),
+        ..Default::default()
+    })
+    .await;
+    node_running(&eval.api).await.unwrap();
+    dirs.append(&mut eval_dirs);
+
+    let node1 = &owner.api;
+    let node2 = &eval.api;
+    let governance_id =
+        create_and_authorize_governance(node1, vec![node2]).await;
+
+    // Eval: member and gov witness. Schema roles for Example2 land
+    // together with the schema itself; Eval never compiles (no
+    // compiler role anywhere).
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [{ "name": "Eval", "key": node2.public_key() }]
+            },
+            "roles": {
+                "governance": { "add": { "witness": ["Eval"] } }
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // SN 2: schema under the default pin (baseline, same pin).
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        schema_add("Example", EXAMPLE_CONTRACT, example_initial()),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // SN 3: switch recompiles it under 1.98.1; SN 4 adds Example2.
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({ "toolchain": PIN_198 }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    emit_fact(
+        node1,
+        governance_id.clone(),
+        json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example2",
+                        "contract": EXAMPLE_CONTRACT_V2,
+                        "initial_value": example_initial()
+                    }
+                ]
+            },
+            "roles": {
+                "tracker_schemas": {
+                    "add": {
+                        "issuer": [{ "name": "Owner", "namespace": [] }]
+                    }
+                },
+                "schema": [
+                    {
+                        "schema_id": "Example2",
+                        "add": {
+                            "evaluator": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "Eval", "namespace": [] }
+                            ],
+                            "validator": [
+                                { "name": "Owner", "namespace": [] }
+                            ],
+                            "witness": [
+                                { "name": "Owner", "namespace": [] },
+                                { "name": "Eval", "namespace": [] }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node1, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // Eval tracks the tip without building anything itself.
+    node2.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(node2, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // Tracker on the 1.98.1 schema: Eval fetches the artifact it can
+    // not build and serves/evaluates from the fetched bytes.
+    let (tracker_id, ..) = common::create_subject(
+        node1,
+        governance_id.clone(),
+        "Example2",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(node2, tracker_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        node1,
+        tracker_id.clone(),
+        json!({"ModThree": {"data": 50}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let state = get_subject(node2, tracker_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 0, "two": 0, "three": 50}));
+
+    // Fetched bytes are the anchored 1.98.1 ones, byte for byte.
+    let official = format!("{governance_id}_Example2");
+    let owner_bytes =
+        wait_artifact_bytes(owner_contracts.path(), &official).await;
+    let eval_bytes =
+        wait_artifact_bytes(eval_contracts.path(), &official).await;
+    assert_eq!(eval_bytes, owner_bytes);
+
+    node_running(&owner.api).await.unwrap();
+    node_running(&eval.api).await.unwrap();
 }

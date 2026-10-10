@@ -978,11 +978,12 @@ async fn test_gov_sub_deserialization() {
         } => match compilation_response {
             Some(CompResDB::Ok {
                 contracts,
-                toolchain_version: _,
+                toolchain_version,
             }) => {
                 assert_eq!(contracts.len(), 2);
                 assert!(contracts.contains_key("Example1"));
                 assert!(contracts.contains_key("Example2"));
+                assert!(!toolchain_version.is_empty());
             }
             other => panic!("unexpected compilation result: {other:?}"),
         },

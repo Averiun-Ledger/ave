@@ -204,11 +204,20 @@ async fn local_build_wasm(
     build_dir: &std::path::Path,
     root: &std::path::Path,
 ) -> Vec<u8> {
+    local_build_wasm_with_toolchain(source, build_dir, root, "").await
+}
+
+async fn local_build_wasm_with_toolchain(
+    source: &str,
+    build_dir: &std::path::Path,
+    root: &std::path::Path,
+    toolchain: &str,
+) -> Vec<u8> {
     use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
     let decoded =
         pipeline::decode_contract_source(source).expect("valid payload");
     let (rust_src, rustc_commit) =
-        ave_build::query_sysroot("").await.expect("sysroot");
+        ave_build::query_sysroot(toolchain).await.expect("sysroot");
     let manifest_toml = pipeline::compilation_toml();
     let vendor_dir = {
         let vendor_root = root.join("vendor");
@@ -226,8 +235,12 @@ async fn local_build_wasm(
         target_dir: std::path::PathBuf::from(".build-target"),
         vendor_dir,
         cargo_home: root.join(".cargo-home"),
-        toolchain: "",
-        cargo: ave_build::CargoProgram::System,
+        toolchain,
+        cargo: if toolchain.is_empty() {
+            ave_build::CargoProgram::System
+        } else {
+            ave_build::CargoProgram::Rustup(toolchain)
+        },
         rust_src,
         rustc_commit,
         offline: root.join("vendor").exists(),
@@ -265,8 +278,10 @@ async fn compile_dedup_single_flight() {
     let source = source_b64(CONTRACT_A);
 
     let before = counter(server);
-    let (first, second) =
-        tokio::join!(client.compile(&source), client.compile(&source),);
+    let (first, second) = tokio::join!(
+        client.compile(&source, ""),
+        client.compile(&source, ""),
+    );
     let first = first.expect("first concurrent compile should succeed");
     let second = second.expect("second concurrent compile should succeed");
 
@@ -292,14 +307,14 @@ async fn compile_cache_hit() {
 
     // Ensure the artifact exists (builds only on the first call).
     client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("initial compile should succeed");
 
     let before = counter(server);
     let started_at = Instant::now();
     let outcome = client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("cached compile should succeed");
     let elapsed = started_at.elapsed();
@@ -314,6 +329,51 @@ async fn compile_cache_hit() {
         "cache hit took too long: {elapsed:?}"
     );
     assert!(!outcome.wasm.is_empty());
+}
+
+/// Same source under a named toolchain is its own cache entry,
+/// attested with that toolchain's fingerprint: the first request
+/// builds, the second is served without a new build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn compile_named_toolchain_isolated_cache_entry() {
+    let server = shared_server().await;
+    let client = client_for(&server.endpoint);
+    let source = source_b64(CONTRACT_C);
+
+    let before = counter(server);
+    let first = client
+        .compile(&source, "1.95.0")
+        .await
+        .expect("named toolchain compile should succeed");
+    assert_eq!(
+        counter(server) - before,
+        1,
+        "first named-toolchain compile must build"
+    );
+    assert!(!first.wasm.is_empty());
+
+    let expected = ave_build::toolchain_fingerprint(
+        HashAlgorithm::Blake3,
+        "1.95.0",
+        ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+    )
+    .await
+    .expect("pinned toolchain fingerprint should compute");
+    assert_eq!(first.toolchain_fingerprint, expected);
+
+    let before = counter(server);
+    let second = client
+        .compile(&source, "1.95.0")
+        .await
+        .expect("cached named-toolchain compile should succeed");
+    assert_eq!(
+        counter(server),
+        before,
+        "a cached named-toolchain compile must not rebuild"
+    );
+    assert_eq!(second.wasm, first.wasm);
+    assert_eq!(second.wasm_hash, first.wasm_hash);
 }
 
 /// Requests without an API key or with an unknown one are rejected with
@@ -331,6 +391,7 @@ async fn compile_auth_rejected() {
     let no_key = client
         .compile(Request::new(pb::CompileRequest {
             source_b64: source_b64(CONTRACT_B),
+            toolchain: String::new(),
         }))
         .await;
     let status = no_key.expect_err("request without API key must fail");
@@ -338,6 +399,7 @@ async fn compile_auth_rejected() {
 
     let mut request = Request::new(pb::CompileRequest {
         source_b64: source_b64(CONTRACT_B),
+        toolchain: String::new(),
     });
     request
         .metadata_mut()
@@ -376,7 +438,7 @@ async fn client_failover() {
     );
 
     let outcome = client
-        .compile(&source_b64(CONTRACT_B))
+        .compile(&source_b64(CONTRACT_B), "")
         .await
         .expect("compile should succeed through the second endpoint");
     assert!(!outcome.wasm.is_empty());
@@ -400,7 +462,7 @@ async fn client_toolchain_mismatch() {
         None,
     );
 
-    let result = client.compile(&source_b64(CONTRACT_B)).await;
+    let result = client.compile(&source_b64(CONTRACT_B), "").await;
     let error = result.expect_err("a toolchain mismatch must be an error");
     assert!(
         matches!(error, CompilerError::ToolchainMismatch { .. }),
@@ -492,7 +554,7 @@ async fn compile_artifact_store_corruption_rebuilds() {
 
     let before_entries = artifact_entries(server);
     let baseline = client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("initial compile should succeed");
 
@@ -509,7 +571,7 @@ async fn compile_artifact_store_corruption_rebuilds() {
         .expect("wasm file must be writable");
     let before = counter(server);
     let rebuilt = client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("compile after wasm corruption should succeed");
     assert_eq!(
@@ -526,7 +588,7 @@ async fn compile_artifact_store_corruption_rebuilds() {
         .expect("hash file must exist after the rebuild");
     let before = counter(server);
     let rebuilt = client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("compile after hash file removal should succeed");
     assert_eq!(
@@ -605,7 +667,7 @@ async fn compile_parity_with_local_build() {
     let source = source_b64(CONTRACT_D);
 
     let remote = client
-        .compile(&source)
+        .compile(&source, "")
         .await
         .expect("remote compile should succeed");
 
@@ -619,6 +681,51 @@ async fn compile_parity_with_local_build() {
     assert_eq!(
         remote.wasm, local,
         "the pooled build and the local build must be byte-identical"
+    );
+}
+
+/// Pinned-toolchain honesty: the pool builds with the requested
+/// toolchain, not ambient. For each pinned toolchain the pooled bytes
+/// must equal an independent local build with that toolchain (so a
+/// pool mix-up can not feed every compiler the same wrong bytes
+/// unanimously), and the two toolchains must diverge from each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn compile_pinned_toolchain_matches_local_build() {
+    let server = shared_server().await;
+    let client = client_for(&server.endpoint);
+    let source = source_b64(CONTRACT_D);
+
+    let mut pooled = Vec::new();
+    for toolchain in ["1.95.0", "1.98.1"] {
+        let remote = client
+            .compile(&source, toolchain)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("remote {toolchain} compile should succeed: {e}")
+            });
+
+        let root =
+            tempfile::tempdir().expect("failed to create build tempdir");
+        let build_dir =
+            root.path().join("contracts").join(format!("parity-{toolchain}"));
+        let local = local_build_wasm_with_toolchain(
+            &source,
+            &build_dir,
+            root.path(),
+            toolchain,
+        )
+        .await;
+
+        assert_eq!(
+            remote.wasm, local,
+            "pooled {toolchain} bytes must equal a local {toolchain} build"
+        );
+        pooled.push(remote.wasm);
+    }
+    assert_ne!(
+        pooled[0], pooled[1],
+        "the two pinned toolchains must produce different bytes"
     );
 }
 

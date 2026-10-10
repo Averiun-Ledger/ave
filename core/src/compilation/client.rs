@@ -53,8 +53,6 @@ pub struct CompilerClient {
     /// wasm hash already seen per `(source, manifest, toolchain)` key, for
     /// the opportunistic cross-check.
     seen: Mutex<HashMap<String, DigestIdentifier>>,
-    /// Toolchain fingerprint of the last successful compile.
-    last_toolchain: Mutex<Option<DigestIdentifier>>,
     /// One long-lived channel per endpoint: tonic reconnects by
     /// itself, so caching only skips the TCP+TLS handshake per
     /// attempt, never masks a dead peer.
@@ -101,7 +99,6 @@ impl CompilerClient {
             pinned_cert_pem,
             hash: HashAlgorithm::Blake3,
             seen: Mutex::new(HashMap::new()),
-            last_toolchain: Mutex::new(None),
             channels: Mutex::new(HashMap::new()),
         }
     }
@@ -111,16 +108,13 @@ impl CompilerClient {
         self.expected_toolchain.clone()
     }
 
-    /// Toolchain fingerprint of the last successful compile, when any.
-    pub async fn last_toolchain(&self) -> Option<DigestIdentifier> {
-        self.last_toolchain.lock().await.clone()
-    }
-
-    /// Compiles `source_b64` in the compiler pool, failing over in order
-    /// and verifying the attestation of the winning response.
+    /// Compiles `source_b64` in the compiler pool with `toolchain`
+    /// (rustup name, empty for the pool default), failing over in
+    /// order and verifying the attestation of the winning response.
     pub async fn compile(
         &self,
         source_b64: &str,
+        toolchain: &str,
     ) -> Result<CompileOutcome, CompilerError> {
         let api_key = MetadataValue::from_str(&self.api_key).map_err(|e| {
             CompilerError::CompilersUnavailable {
@@ -133,10 +127,11 @@ impl CompilerClient {
         let mut invalid_attestation = false;
 
         for endpoint in &self.endpoints {
-            match self.attempt(endpoint, &api_key, source_b64).await {
+            match self
+                .attempt(endpoint, &api_key, source_b64, toolchain)
+                .await
+            {
                 Attempt::Success(outcome) => {
-                    *self.last_toolchain.lock().await =
-                        Some(outcome.toolchain_fingerprint.clone());
                     return Ok(outcome);
                 }
                 Attempt::Failed(reason) => {
@@ -158,7 +153,10 @@ impl CompilerClient {
                         actual = %actual,
                         "Compiler endpoint toolchain mismatch, trying next"
                     );
-                    toolchain_mismatch = Some(actual);
+                    toolchain_mismatch = Some(actual.clone());
+                    failures.push(format!(
+                        "{endpoint}: toolchain mismatch (actual {actual})"
+                    ));
                 }
                 Attempt::InvalidAttestation(reason) => {
                     warn!(
@@ -202,6 +200,7 @@ impl CompilerClient {
         endpoint: &str,
         api_key: &MetadataValue<tonic::metadata::Ascii>,
         source_b64: &str,
+        toolchain: &str,
     ) -> Attempt {
         if self.channels.lock().await.get(endpoint).is_none() {
             match self.connect(endpoint).await {
@@ -225,6 +224,7 @@ impl CompilerClient {
 
         let mut request = Request::new(pb::CompileRequest {
             source_b64: source_b64.to_owned(),
+            toolchain: toolchain.to_owned(),
         });
         request.metadata_mut().insert("x-api-key", api_key.clone());
 

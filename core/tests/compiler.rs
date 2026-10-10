@@ -2525,10 +2525,11 @@ async fn test_gov_compile_staging_promoted_and_swept() {
             match compilation_response {
                 Some(CompResDB::Ok {
                     contracts,
-                    toolchain_version: _,
+                    toolchain_version,
                 }) => {
                     assert_eq!(contracts.len(), 1);
                     assert!(contracts.contains_key("Example"));
+                    assert!(!toolchain_version.is_empty());
                 }
                 other => panic!("unexpected compilation result: {other:?}"),
             }
@@ -2610,10 +2611,11 @@ async fn test_gov_compile_staging_promoted_and_swept() {
             match compilation_response {
                 Some(CompResDB::Ok {
                     contracts,
-                    toolchain_version: _,
+                    toolchain_version,
                 }) => {
                     assert_eq!(contracts.len(), 1);
                     assert!(contracts.contains_key("Example2"));
+                    assert!(!toolchain_version.is_empty());
                 }
                 other => panic!("unexpected compilation result: {other:?}"),
             }

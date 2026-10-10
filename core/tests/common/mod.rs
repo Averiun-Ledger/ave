@@ -52,6 +52,29 @@ use tokio_util::sync::CancellationToken;
 pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Local rustup toolchain name building for `pin`: tests vote and
+/// validate exactly like production, so pins resolve to the real
+/// installed toolchains they name (never system cargo).
+#[allow(dead_code)]
+pub fn toolchain_name(pin: &str) -> String {
+    ave_common::governance::toolchain_info(pin)
+        .map(|entry| entry.rustc_version.to_owned())
+        .unwrap_or_default()
+}
+
+/// Test nodes vote and validate exactly like production, so they need
+/// the pinned toolchain installed (`rustup toolchain install 1.95.0`
+/// plus the wasm32 target): the default map below points `DEFAULT_PIN`
+/// at it. Tests simulating missing capacity pass their own map
+/// (unknown pins or an explicitly empty one) instead of `None`.
+#[allow(dead_code)]
+pub fn pinned_toolchains() -> std::collections::BTreeMap<String, String> {
+    let default = ave_common::governance::DEFAULT_PIN.to_owned();
+    let name = toolchain_name(&default);
+    let name = if name.is_empty() { "1.95.0".to_owned() } else { name };
+    std::collections::BTreeMap::from([(default, name)])
+}
+
 /// Helper to set an environment variable for the duration of a test and clean
 /// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
 /// because concurrent mutation of the process environment is UB; tests that
@@ -135,10 +158,10 @@ pub struct CreateNodeConfig {
     /// by tests that manipulate the on-disk artifacts (permissions,
     /// deletions) to exercise boot-time failures.
     pub contracts_path: Option<PathBuf>,
-    /// Explicit toolchain map pin → local name; `None` leaves the
-    /// registry empty (zero-config: `DEFAULT_PIN` resolves to the
-    /// system toolchain). Needed by tests that simulate partial
-    /// capacity (nodes standing down on unknown pins).
+    /// Explicit toolchain map pin → local name; `None` uses
+    /// [`pinned_toolchains`] (same votes as production). Tests that
+    /// simulate partial capacity (nodes standing down on unknown
+    /// pins) pass their own map instead.
     pub toolchains: Option<std::collections::BTreeMap<String, String>>,
     /// Pinned reproducible cargo binary; wired straight into
     /// `Config::cargo_bin`. Needed by tests that prove nodes build
@@ -270,7 +293,7 @@ pub async fn try_create_node(
         // compile in-process and have no compiler pool config).
         #[cfg(feature = "test")]
         compiler: compiler.unwrap_or_default(),
-        toolchains: toolchains.unwrap_or_default(),
+        toolchains: toolchains.unwrap_or_else(pinned_toolchains),
         cargo_bin,
         spec: None,
     };

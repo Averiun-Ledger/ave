@@ -461,15 +461,17 @@ fn assert_approval_outcome(
                 None => {}
                 Some(CompResDB::Ok {
                     contracts,
-                    toolchain_version: _,
+                    toolchain_version,
                 }) => {
                     assert!(!contracts.is_empty());
+                    assert!(!toolchain_version.is_empty());
                 }
                 Some(CompResDB::Error {
                     error,
-                    toolchain_version: _,
+                    toolchain_version,
                 }) => {
                     assert!(!error.is_empty());
+                    assert!(!toolchain_version.is_empty());
                 }
             }
         }

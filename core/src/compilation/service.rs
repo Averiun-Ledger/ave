@@ -526,6 +526,7 @@ impl CompilerServer {
         &self,
         key: &str,
         source_b64: &str,
+        toolchain: &str,
     ) -> Result<CompileArtifact, Status> {
         let permit = match self.inner.build_semaphore.try_acquire() {
             Ok(permit) => permit,
@@ -553,7 +554,7 @@ impl CompilerServer {
         };
 
         let started_at = Instant::now();
-        let result = self.build_once(key, source_b64).await;
+        let result = self.build_once(key, source_b64, toolchain).await;
         drop(permit);
 
         match &result {
@@ -585,6 +586,7 @@ impl CompilerServer {
         &self,
         key: &str,
         source_b64: &str,
+        toolchain: &str,
     ) -> Result<CompileArtifact, Status> {
         // Per-job build directory under <work_dir>/contracts/<key>.
         let build_dir =
@@ -594,16 +596,17 @@ impl CompilerServer {
         // Drop leftovers of a previous crashed attempt with the same key.
         let _ = fs::remove_dir_all(&build_dir).await;
 
-        // The standalone service builds with the system toolchain; pin
-        // selection lives in the node path. Same shared procedure as
-        // the node (decode errors stay request errors, as before).
-        // Arbitrary test sources have no frozen set, so no `--locked`
-        // here; the build is still bounded — a hung cargo must not
-        // hold a semaphore slot forever.
+        // The build runs under the requested toolchain (empty selects
+        // the pool default); pin selection lives in the node path.
+        // Same shared procedure as the node (decode errors stay
+        // request errors, as before). Arbitrary test sources have no
+        // frozen set, so no `--locked` here; the build is still
+        // bounded — a hung cargo must not hold a semaphore slot
+        // forever.
         let source = pipeline::decode_contract_source(source_b64)
             .map_err(|e| status_for_build_error(&e))?;
         let (rust_src, rustc_commit) =
-            ave_build::query_sysroot("").await.map_err(|e| {
+            ave_build::query_sysroot(toolchain).await.map_err(|e| {
                 Status::internal(pipeline::map_build_error(e).to_string())
             })?;
         let vendor_dir =
@@ -618,8 +621,16 @@ impl CompilerServer {
             target_dir: std::path::PathBuf::from(pipeline::BUILD_TARGET_DIR),
             vendor_dir,
             cargo_home: contracts_root.join(pipeline::SHARED_CARGO_HOME_DIR),
-            toolchain: "",
-            cargo: ave_build::CargoProgram::System,
+            toolchain,
+            // A named toolchain builds isolated via `rustup run`
+            // (concurrent builds with different toolchains can not
+            // interfere); empty keeps the ambient cargo, exactly as
+            // before. Same split as the node path.
+            cargo: if toolchain.is_empty() {
+                ave_build::CargoProgram::System
+            } else {
+                ave_build::CargoProgram::Rustup(toolchain)
+            },
             rust_src,
             rustc_commit,
             offline,
@@ -657,11 +668,11 @@ impl CompilerServer {
         wasm: Vec<u8>,
         source_hash: &DigestIdentifier,
         wasm_hash: &DigestIdentifier,
+        toolchain_fingerprint: &DigestIdentifier,
     ) -> Result<pb::CompileResponse, Status> {
         let source_hash = source_hash.to_string();
         let manifest_hash = self.inner.manifest_hash.to_string();
-        let toolchain_fingerprint =
-            self.inner.toolchain_fingerprint.to_string();
+        let toolchain_fingerprint = toolchain_fingerprint.to_string();
         let wasm_hash = wasm_hash.to_string();
 
         let payload = borsh::to_vec(&(
@@ -675,7 +686,6 @@ impl CompilerServer {
                 "failed to serialize attestation payload: {e}"
             ))
         })?;
-
         let signature = self.inner.key_pair.sign(&payload).map_err(|e| {
             Status::internal(format!("failed to sign attestation: {e}"))
         })?;
@@ -689,6 +699,25 @@ impl CompilerServer {
             signature: signature.signature_bytes().to_vec(),
         })
     }
+
+    /// Toolchain fingerprint for the requested toolchain: the pool
+    /// default (measured once at startup) for an empty request, a
+    /// fresh measurement otherwise (probe cached inside `ave_build`).
+    async fn fingerprint_for(
+        &self,
+        toolchain: &str,
+    ) -> Result<DigestIdentifier, Status> {
+        if toolchain.is_empty() {
+            return Ok(self.inner.toolchain_fingerprint.clone());
+        }
+        ave_build::toolchain_fingerprint(
+            self.inner.hash,
+            toolchain,
+            ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))
+    }
 }
 
 #[tonic::async_trait]
@@ -698,7 +727,11 @@ impl CompilerService for CompilerServer {
         request: Request<pb::CompileRequest>,
     ) -> Result<Response<pb::CompileResponse>, Status> {
         let started_at = Instant::now();
-        let source_b64 = request.into_inner().source_b64;
+        let request = request.into_inner();
+        let source_b64 = request.source_b64;
+        // Rustup toolchain name to build with; empty selects the pool
+        // default (its ambient toolchain). Old clients omit it.
+        let toolchain = request.toolchain;
 
         // The limit bounds the decoded source, but the payload travels
         // base64-encoded (4/3 overhead): bound the encoded length or
@@ -712,6 +745,8 @@ impl CompilerService for CompilerServer {
             )));
         }
 
+        let toolchain_fingerprint =
+            self.fingerprint_for(&toolchain).await?;
         let hash = self.inner.hash;
         let source_hash =
             hash_borsh(&*hash.hasher(), &source_b64).map_err(|e| {
@@ -719,9 +754,7 @@ impl CompilerService for CompilerServer {
             })?;
         let key = format!(
             "{}_{}_{}",
-            source_hash,
-            self.inner.manifest_hash,
-            self.inner.toolchain_fingerprint
+            source_hash, self.inner.manifest_hash, toolchain_fingerprint
         );
 
         match self.inner.store.lookup(&key).await {
@@ -731,8 +764,12 @@ impl CompilerService for CompilerServer {
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
                     "Contract cache hit"
                 );
-                let response =
-                    self.build_response(wasm, &source_hash, &wasm_hash)?;
+                let response = self.build_response(
+                    wasm,
+                    &source_hash,
+                    &wasm_hash,
+                    &toolchain_fingerprint,
+                )?;
                 return Ok(Response::new(response));
             }
             Ok(None) => {
@@ -767,8 +804,10 @@ impl CompilerService for CompilerServer {
 
         let shared = match flight {
             Flight::Leader(sender) => {
-                let outcome =
-                    self.build_and_store(&key, &source_b64).await.map(Arc::new);
+                let outcome = self
+                    .build_and_store(&key, &source_b64, &toolchain)
+                    .await
+                    .map(Arc::new);
                 let _ = sender.send(Some(outcome.clone()));
                 self.inner.in_flight.lock().await.remove(&key);
                 outcome
@@ -794,6 +833,7 @@ impl CompilerService for CompilerServer {
             artifact.wasm.clone(),
             &source_hash,
             &artifact.wasm_hash,
+            &toolchain_fingerprint,
         )?;
         Ok(Response::new(response))
     }

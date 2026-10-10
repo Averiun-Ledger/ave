@@ -888,6 +888,12 @@ async fn build_test_router_with_options(
     };
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    // Test nodes vote and validate exactly like production: the pin
+    // resolves to the real installed toolchain it names.
+    let pin = ave_bridge::ave_common::governance::DEFAULT_PIN;
+    let pin_toolchain = ave_bridge::ave_common::governance::toolchain_info(pin)
+        .map(|entry| entry.rustc_version.to_owned())
+        .unwrap_or_else(|| "1.95.0".to_owned());
     let bridge_config_json = format!(
         r#"
         {{
@@ -897,6 +903,7 @@ async fn build_test_router_with_options(
             "tracking_size": 200,
             "always_accept": {always_accept},
             "safe_mode": {safe_mode},
+            "toolchains": {{"{pin}": "{pin_toolchain}"}},
             "internal_db": {{ "db": "{ave_db_path}" }},
             "external_db": {{ "db": "{external_db_path}" }},
             "contracts_path": "{contracts_path}",

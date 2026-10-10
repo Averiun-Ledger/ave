@@ -290,8 +290,9 @@ struct ScriptedCompilerService {
     key_pair: KeyPair,
     toolchain_fingerprint: DigestIdentifier,
     control: Arc<ScriptedControl>,
-    /// Responses by base64 source: the upstream artifact is fetched once
-    /// and the transformed response is served identically afterwards.
+    /// Responses by base64 source plus toolchain: the upstream
+    /// artifact is fetched once and the transformed response is
+    /// served identically afterwards.
     cache: Mutex<HashMap<String, pb::CompileResponse>>,
     /// Sources whose first build was already rejected
     /// (`ScriptedTransform::InvalidOnce`).
@@ -367,7 +368,9 @@ impl CompilerService for ScriptedCompilerService {
             return Err(Status::unauthenticated("invalid API key"));
         }
 
-        let source_b64 = request.into_inner().source_b64;
+        let inner = request.into_inner();
+        let source_b64 = inner.source_b64;
+        let toolchain = inner.toolchain;
         self.control
             .compiles_received
             .fetch_add(1, Ordering::SeqCst);
@@ -395,7 +398,10 @@ impl CompilerService for ScriptedCompilerService {
             notified.await;
         }
 
-        if let Some(response) = self.cache.lock().await.get(&source_b64) {
+        // Cache key covers the toolchain: the same source under
+        // another pin is another artifact.
+        let cache_key = format!("{source_b64}\0{toolchain}");
+        if let Some(response) = self.cache.lock().await.get(&cache_key) {
             return Ok(Response::new(response.clone()));
         }
 
@@ -422,9 +428,14 @@ impl CompilerService for ScriptedCompilerService {
             Some(Duration::from_secs(700)),
             None,
         );
-        let outcome = client.compile(&source_b64).await.map_err(|e| {
-            Status::internal(format!("scripted upstream compile failed: {e}"))
-        })?;
+        let outcome = client
+            .compile(&source_b64, &toolchain)
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "scripted upstream compile failed: {e}"
+                ))
+            })?;
 
         let wasm = match &self.transform {
             // `InvalidOnce` already returned for the first build of
@@ -437,7 +448,7 @@ impl CompilerService for ScriptedCompilerService {
             }
         };
         let response = self.build_response(&source_b64, wasm)?;
-        self.cache.lock().await.insert(source_b64, response.clone());
+        self.cache.lock().await.insert(cache_key, response.clone());
         Ok(Response::new(response))
     }
 }

@@ -20,6 +20,10 @@ message CompileRequest {
   // Contract source code, base64-encoded (standard alphabet, as produced by
   // the node's governance payloads).
   string source_b64 = 1;
+  // Rustup toolchain name to build with (e.g. "1.95.0"). Empty selects
+  // the pool default (its ambient toolchain). Additive field: old
+  // clients omit it and get the previous behavior.
+  string toolchain = 3;
 }
 
 message CompileResponse {
