@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Display,
 };
 
@@ -180,6 +180,7 @@ pub enum RequestEventDB {
         payload: Value,
         evaluation_response: EvalResDB,
         approval_success: Option<bool>,
+        compilation_response: Option<CompResDB>,
     },
     Transfer {
         evaluation_error: Option<String>,
@@ -218,6 +219,25 @@ impl RequestEventDB {
 pub enum EvalResDB {
     Patch(Value),
     Error(String),
+}
+
+/// Compilation verdict stored in the query database, mirroring
+/// `EvalResDB`: only the voted outcome (contracts or deterministic
+/// error) plus the attested toolchain version. Signatures, hashes
+/// and requests stay in the ledger, never here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub enum CompResDB {
+    Ok {
+        contracts: BTreeMap<String, String>,
+        toolchain_version: String,
+    },
+    Error {
+        error: String,
+        toolchain_version: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

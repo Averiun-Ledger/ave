@@ -15,9 +15,10 @@ use ave_bridge::ave_common::{
     bridge::request::ApprovalState,
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
-        ApprovalEntry, GovsData, LedgerDB, PaginatorEvents, RequestData,
-        RequestInfo, RequestInfoExtend, RequestState, SinkEventsPage,
-        SubjectDB, SubjsData, TransferSubject,
+        ApprovalEntry, CompResDB, GovsData, LedgerDB, PaginatorAborts,
+        PaginatorEvents, RequestData, RequestEventDB, RequestInfo,
+        RequestInfoExtend, RequestState, SinkEventsPage, SubjectDB,
+        SubjsData, TransferSubject, WatchdogIncidentRow,
     },
 };
 use reqwest::Client;
@@ -377,6 +378,20 @@ async fn test_request_deserialization() {
     assert_eq!(request_info.len(), 1);
     assert_eq!(request_info[0].state, RequestState::Finish);
     assert_eq!(request_info[0].version, 0);
+
+    // `limit`/`offset` page, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/requests?limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let request_info: Vec<RequestInfoExtend> =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(request_info.len(), 1);
     assert_eq!(request_info[0].request_id, request_data.request_id);
 }
 
@@ -539,6 +554,19 @@ async fn test_approval_deserialization() {
     assert_eq!(approvals[0].request.sn, 1);
     assert_eq!(approvals[0].request.gov_version, 0);
     assert_eq!(approvals[0].request.subject_id, request_data.subject_id);
+
+    // `limit`/`offset` page with `state`, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&"/approvals?state=accepted&limit=10&offset=0".to_string()),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let approvals: Vec<ApprovalEntry> = serde_json::from_value(body).unwrap();
+    assert_eq!(approvals.len(), 1);
 }
 
 // --- SubjectAccess Endpoints ---
@@ -747,6 +775,22 @@ async fn test_update_and_transfer_deserialization() {
     let res: String = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
 
+    // `strict` flag deserializes (false keeps default behavior).
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!(
+            "/subjects/{}/update?strict=false",
+            request_data.subject_id
+        )),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: String = serde_json::from_value(body).unwrap();
+    assert!(!res.is_empty());
+
     let public_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
@@ -839,6 +883,19 @@ async fn test_update_and_transfer_deserialization() {
     assert_eq!(res[0].actual_owner, owner);
     assert_eq!(res[0].new_owner, public_key);
     assert_eq!(res[0].subject_id, subject_id);
+
+    // `limit`/`offset` page, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/pending-transfers?limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<TransferSubject> = serde_json::from_value(body).unwrap();
+    assert!(!res.is_empty());
 }
 
 // --- Gov Sub Endpoints ---
@@ -899,6 +956,37 @@ async fn test_gov_sub_deserialization() {
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
         }
+    }
+
+    // SN 1 compiló Example1+Example2: el evento sirve el veredicto
+    // con sus contratos y la toolchain atestiguada.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{}/events/1", governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let event: LedgerDB = serde_json::from_value(body).unwrap();
+    assert_eq!(event.sn, 1);
+    match &event.event {
+        RequestEventDB::GovernanceFact {
+            compilation_response,
+            ..
+        } => match compilation_response {
+            Some(CompResDB::Ok {
+                contracts,
+                toolchain_version: _,
+            }) => {
+                assert_eq!(contracts.len(), 2);
+                assert!(contracts.contains_key("Example1"));
+                assert!(contracts.contains_key("Example2"));
+            }
+            other => panic!("unexpected compilation result: {other:?}"),
+        },
+        other => panic!("unexpected governance fact event: {other:?}"),
     }
 
     let body = create_subject(
@@ -1220,6 +1308,34 @@ async fn test_gov_sub_deserialization() {
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id);
+
+    // `limit`/`offset` page with `active`, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/governances?active=false&limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
+    assert!(!res.is_empty());
+
+    // `limit`/`offset` page with every subject filter, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?active=false&schema_id=Example2&limit=10&offset=0"
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
+    assert_eq!(res.len(), 1);
 }
 
 // --- Event Endpoints ---
@@ -1651,6 +1767,18 @@ async fn test_subject_deserialization() {
     assert_eq!(paginator_reverse.events[5].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[5].sn, 1);
     assert_eq!(paginator_reverse.events[5].event_type.to_string(), "fact");
+    // SN 1 solo añade un witness: no compila, el campo viaja como
+    // nulo y deserializa sin error.
+    match &paginator_reverse.events[5].event {
+        RequestEventDB::GovernanceFact {
+            compilation_response,
+            ..
+        } => assert!(
+            compilation_response.is_none(),
+            "witness-only fact runs no compilation: {compilation_response:?}"
+        ),
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
 
     assert_eq!(paginator_reverse.events[6].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[6].sn, 0);
@@ -1811,6 +1939,113 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert_eq!(status, 400, "invalid timestamp must be rejected: {body}");
+
+    // Remaining `*_to` filters, each excluding every event.
+    for filter in [
+        "event_ledger_ts_to=2000-01-01T00:00:00Z",
+        "sink_ts_to=2000-01-01T00:00:00Z",
+    ] {
+        let (status, body) = make_request(
+            &client,
+            &server2.url(&format!("/subjects/{}/events?{}", governance_id, filter)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{filter}: {body}");
+        assert_eq!(body["events"], serde_json::Value::Array(vec![]), "{filter}");
+    }
+
+    // Full range with every filter at once -> all 7 events, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?quantity=100&event_request_ts_from=2000-01-01T00:00:00Z&event_request_ts_to={}&event_ledger_ts_from=2000-01-01T00:00:00Z&event_ledger_ts_to={}&sink_ts_from=2000-01-01T00:00:00Z&sink_ts_to={}",
+            governance_id, future_date, future_date, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 7);
+
+    // `event_type` filter -> only the fact, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_type=fact",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 1);
+    assert_eq!(paginator.events[0].sn, 1);
+
+    // `events-first-last` with `event_type` -> only the fact, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events-first-last?quantity=7&event_type=fact",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let events: Vec<LedgerDB> = serde_json::from_value(body).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].sn, 1);
+
+    // `aborts` with every variable, typed (no aborts here, but the
+    // shape must deserialize).
+    for query in [
+        "quantity=10&page=1".to_owned(),
+        "quantity=10&page=1&reverse=true".to_owned(),
+        "request_id=missing&sn=999999&quantity=10&page=1&reverse=true".to_owned(),
+    ] {
+        let (status, body) = make_request(
+            &client,
+            &server2.url(&format!(
+                "/subjects/{}/aborts?{}",
+                governance_id, query
+            )),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{query}: {body}");
+        let paginator: PaginatorAborts = serde_json::from_value(body).unwrap();
+        assert!(paginator.events.is_empty(), "{query}");
+    }
+
+    // `watchdog/incidents` with every variable, typed (nominal
+    // operation never fires, but the shape must deserialize).
+    let (status, body) = make_request(
+        &client,
+        &server2.url(
+            "/watchdog/incidents?phase=compilation&from_nanos=0&to_nanos=4102444800000000000&limit=10",
+        ),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let incidents: Vec<WatchdogIncidentRow> =
+        serde_json::from_value(body).unwrap();
+    assert!(incidents.is_empty());
 }
 
 /// The shared query cap (`MAX_QUERY_LIMIT` = 1000) is enforced end-to-end:

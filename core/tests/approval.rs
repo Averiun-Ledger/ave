@@ -18,7 +18,7 @@ use ave_common::{
     Namespace, SchemaType,
     bridge::{
         request::{ApprovalState, ApprovalStateRes},
-        response::{EvalResDB, RequestEventDB},
+        response::{CompResDB, EvalResDB, RequestEventDB},
     },
     identity::{
         HashAlgorithm, PublicKey, Signature, Signed, TimeStamp, hash_borsh,
@@ -447,12 +447,30 @@ fn assert_approval_outcome(
         RequestEventDB::GovernanceFact {
             evaluation_response,
             approval_success,
+            compilation_response,
             ..
         } => {
             assert_eq!(*approval_success, expected);
             match evaluation_response {
                 EvalResDB::Patch(_) => {}
                 other => panic!("unexpected evaluation result: {other:?}"),
+            }
+            // Callers vary (some facts compile contracts, most do
+            // not): only check the stored verdict is complete.
+            match compilation_response {
+                None => {}
+                Some(CompResDB::Ok {
+                    contracts,
+                    toolchain_version: _,
+                }) => {
+                    assert!(!contracts.is_empty());
+                }
+                Some(CompResDB::Error {
+                    error,
+                    toolchain_version: _,
+                }) => {
+                    assert!(!error.is_empty());
+                }
             }
         }
         other => panic!("unexpected event at sn {sn}: {other:?}"),

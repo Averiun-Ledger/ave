@@ -4741,6 +4741,7 @@ async fn test_sink_replay_and_external_db_battery() {
             payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } => {
             assert_eq!(payload, &governance_setup_payload);
             match evaluation_response {
@@ -4750,6 +4751,10 @@ async fn test_sink_replay_and_external_db_battery() {
                 }
             }
             assert_eq!(*approval_success, Some(true));
+            assert!(
+                compilation_response.is_none(),
+                "members/roles fact runs no compilation: {compilation_response:?}"
+            );
         }
         other => panic!("unexpected governance fact event: {other:?}"),
     }
@@ -4759,6 +4764,7 @@ async fn test_sink_replay_and_external_db_battery() {
             payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } => {
             assert_eq!(payload, &governance_setup_payload);
             match evaluation_response {
@@ -4772,6 +4778,10 @@ async fn test_sink_replay_and_external_db_battery() {
                 }
             }
             assert!(approval_success.is_none());
+            assert!(
+                compilation_response.is_none(),
+                "members/roles fact runs no compilation: {compilation_response:?}"
+            );
         }
         other => panic!("unexpected failed governance fact event: {other:?}"),
     }

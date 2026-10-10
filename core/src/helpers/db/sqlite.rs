@@ -2300,28 +2300,36 @@ fn get_incidents_from_conn(
             ))
         })
     };
-    let from_nanos: Option<i64> = query
-        .from_nanos
-        .map(|v| i64::try_from(v).unwrap_or(i64::MAX));
-    let to_nanos: Option<i64> =
-        query.to_nanos.map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+    let as_i64_opt = |value: Option<u64>, field: &str| {
+        value
+            .map(|v| {
+                i64::try_from(v).map_err(|_| {
+                    DatabaseError::IntegerConversion(format!(
+                        "{field} out of range for SQLite INTEGER (i64): {v}"
+                    ))
+                })
+            })
+            .transpose()
+    };
+    let from_nanos: Option<i64> = as_i64_opt(query.from_nanos, "from_nanos")?;
+    let to_nanos: Option<i64> = as_i64_opt(query.to_nanos, "to_nanos")?;
     let rows = stmt
         .query_map(
             rusqlite::params![query.phase.clone(), from_nanos, to_nanos, limit],
             |row| {
-                let timestamp_nanos: i64 = row.get(0)?;
-                let expected_secs: i64 = row.get(2)?;
-                let elapsed_secs: i64 = row.get(3)?;
-                let gov_version: i64 = row.get(5)?;
+                let timestamp_nanos: i64 = row.get("timestamp_nanos")?;
+                let expected_secs: i64 = row.get("expected_secs")?;
+                let elapsed_secs: i64 = row.get("elapsed_secs")?;
+                let gov_version: i64 = row.get("gov_version")?;
                 Ok((
                     timestamp_nanos,
                     expected_secs,
                     elapsed_secs,
                     gov_version,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, String>("phase")?,
+                    row.get::<_, String>("request_id")?,
+                    row.get::<_, String>("node_version")?,
+                    row.get::<_, String>("detail")?,
                 ))
             },
         )
@@ -3880,9 +3888,9 @@ fn insert_incident_with_stmt(
         as_i64(event.watchdog_expected_secs.unwrap_or(0), "expected_secs")?,
         as_i64(event.watchdog_elapsed_secs.unwrap_or(0), "elapsed_secs")?,
         event.request_id.clone(),
-        as_i64(event.sn.unwrap_or(0), "gov_version")?,
+        as_i64(event.incident_gov_version(), "gov_version")?,
         event.watchdog_node_version.clone().unwrap_or_default(),
-        event.error.clone()
+        event.incident_detail().to_owned()
     ])
     .map_err(|e| DatabaseError::Query(e.to_string()))?;
 

@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS watchdog_incidents (
 
 CREATE INDEX IF NOT EXISTS idx_watchdog_incidents_ts
 ON watchdog_incidents(timestamp_nanos DESC);
+
+CREATE INDEX IF NOT EXISTS idx_watchdog_incidents_phase_ts
+ON watchdog_incidents(phase, timestamp_nanos DESC);
 -- =============================================================================
 -- END OF MIGRATION
 -- =============================================================================

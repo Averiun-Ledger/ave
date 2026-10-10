@@ -1172,6 +1172,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } = event.event
         else {
             panic!()
@@ -1182,6 +1183,10 @@ pub mod tests {
         };
 
         assert!(approval_success.unwrap());
+        assert!(
+            compilation_response.is_none(),
+            "name/description fact runs no compilation: {compilation_response:?}"
+        );
 
         assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
@@ -1290,6 +1295,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } = event.event
         else {
             panic!()
@@ -1298,6 +1304,10 @@ pub mod tests {
         let EvalResDB::Error(e) = evaluation_response else {
             panic!("");
         };
+        assert!(
+            compilation_response.is_none(),
+            "name/description fact runs no compilation: {compilation_response:?}"
+        );
 
         assert_eq!(
             "runner error: invalid event: [check_members] invalid event: member name cannot be 'Owner' (reserved word)",

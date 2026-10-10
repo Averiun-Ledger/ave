@@ -122,6 +122,21 @@ pub struct RequestTrackingEvent {
 /// event is not a request verdict and must never mix with them.
 pub const WATCHDOG_ABORT_TYPE: &str = "Watchdog";
 
+impl RequestTrackingEvent {
+    /// Watchdog incidents reuse `sn` to carry `gov_version` and
+    /// `error` to carry the diagnosis sentence, so the struct shape
+    /// (and its Borsh encoding) stays frozen. Read incidents only
+    /// through these accessors, never via `sn`/`error` directly.
+    pub fn incident_gov_version(&self) -> u64 {
+        self.sn.unwrap_or(0)
+    }
+
+    /// See [`RequestTrackingEvent::incident_gov_version`].
+    pub fn incident_detail(&self) -> &str {
+        &self.error
+    }
+}
+
 impl Event for RequestTrackingEvent {}
 
 #[async_trait]

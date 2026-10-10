@@ -18,7 +18,7 @@ use ave_common::{
         TimeStamp, hash_borsh,
     },
     request::{CreateRequest, EventRequest},
-    response::{EvalResDB, LedgerDB, RequestEventDB},
+    response::{CompResDB, EvalResDB, LedgerDB, RequestEventDB},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -508,11 +508,43 @@ impl Protocols {
                     ));
                 };
 
+                let compilation_response =
+                    compilation.as_ref().map(|compilation| {
+                        match &compilation.response {
+                            CompilationResponse::Ok {
+                                result,
+                                toolchain_version,
+                                ..
+                            } => CompResDB::Ok {
+                                contracts: result
+                                    .contracts
+                                    .iter()
+                                    .map(|(schema, hash)| {
+                                        (
+                                            schema.to_string(),
+                                            hash.to_string(),
+                                        )
+                                    })
+                                    .collect(),
+                                toolchain_version: toolchain_version.clone(),
+                            },
+                            CompilationResponse::Error {
+                                result,
+                                toolchain_version,
+                                ..
+                            } => CompResDB::Error {
+                                error: result.to_string(),
+                                toolchain_version: toolchain_version.clone(),
+                            },
+                        }
+                    });
+
                 Ok((
                     RequestEventDB::GovernanceFact {
                         payload: fact_request.payload.0.clone(),
                         evaluation_response,
                         approval_success,
+                        compilation_response,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),

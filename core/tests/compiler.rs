@@ -25,7 +25,7 @@ use ave_common::{
     SchemaType,
     bridge::{
         request::ApprovalStateRes,
-        response::{EvalResDB, RequestEventDB},
+        response::{CompResDB, EvalResDB, RequestEventDB},
     },
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
@@ -2503,6 +2503,39 @@ async fn test_gov_compile_staging_promoted_and_swept() {
         temp_staging_dirs()
     );
 
+    // SN 1 compiló el contrato: el evento guarda el veredicto con
+    // sus contratos y la toolchain atestiguada.
+    let events = get_events(&node.api, governance_id.clone(), 2, true)
+        .await
+        .unwrap();
+    match &events[1].event {
+        RequestEventDB::GovernanceFact {
+            evaluation_response,
+            approval_success,
+            compilation_response,
+            ..
+        } => {
+            match evaluation_response {
+                EvalResDB::Patch(_) => {}
+                other => {
+                    panic!("unexpected evaluation result: {other:?}")
+                }
+            }
+            assert_eq!(*approval_success, Some(true));
+            match compilation_response {
+                Some(CompResDB::Ok {
+                    contracts,
+                    toolchain_version: _,
+                }) => {
+                    assert_eq!(contracts.len(), 1);
+                    assert!(contracts.contains_key("Example"));
+                }
+                other => panic!("unexpected compilation result: {other:?}"),
+            }
+        }
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
+
     // SN 2 (fallido): se añade otro schema con contrato (se compila y
     // queda en staging) pero el evento también da el rol compiler a un
     // miembro que no existe, así que la evaluación lo rechaza. El
@@ -2554,6 +2587,39 @@ async fn test_gov_compile_staging_promoted_and_swept() {
             .exists(),
         "el artefacto de un evento fallido no debe ser oficial"
     );
+
+    // SN 2 falló en evaluación pero compiló bien: el evento guarda
+    // el error de evaluación y el veredicto de compilación.
+    let events = get_events(&node.api, governance_id.clone(), 3, true)
+        .await
+        .unwrap();
+    match &events[2].event {
+        RequestEventDB::GovernanceFact {
+            evaluation_response,
+            approval_success,
+            compilation_response,
+            ..
+        } => {
+            match evaluation_response {
+                EvalResDB::Error(error) => assert!(!error.is_empty()),
+                other => {
+                    panic!("unexpected evaluation result: {other:?}")
+                }
+            }
+            assert!(approval_success.is_none());
+            match compilation_response {
+                Some(CompResDB::Ok {
+                    contracts,
+                    toolchain_version: _,
+                }) => {
+                    assert_eq!(contracts.len(), 1);
+                    assert!(contracts.contains_key("Example2"));
+                }
+                other => panic!("unexpected compilation result: {other:?}"),
+            }
+        }
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
 }
 #[test(tokio::test)]
 // Un compilador con el pool caído responde `Unavailable` y no arrastra
