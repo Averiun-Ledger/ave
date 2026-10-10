@@ -705,6 +705,17 @@ impl CompilerSupport {
             let cargo_bin = Self::toolchains_helper(ctx)
                 .map(|toolchains| toolchains.cargo_bin())
                 .unwrap_or(None);
+            // Test cache scope: this node's contracts dir, so nodes
+            // never serve each other's bytes (a node that never built
+            // must miss, exactly like production owns its disk state).
+            #[cfg(feature = "test")]
+            let cache_scope = ctx
+                .system()
+                .get_helper::<crate::system::ConfigHelper>("config")
+                .map(|config| {
+                    pipeline::global_cache_scope(&config.contracts_path)
+                })
+                .unwrap_or_else(|| "shared".to_owned());
             #[cfg(feature = "test")]
             let use_pool = true;
             #[cfg(not(feature = "test"))]
@@ -740,6 +751,7 @@ impl CompilerSupport {
                     hash,
                     &contract_runtime,
                     initial_value.clone(),
+                    &cache_scope,
                     &contract_hash,
                     &manifest_hash,
                     &engine_fingerprint,
@@ -899,6 +911,7 @@ impl CompilerSupport {
             #[cfg(feature = "test")]
             {
                 let global_cache_dir = pipeline::global_cache_entry_dir(
+                    &cache_scope,
                     &metadata.contract_hash,
                     &metadata.manifest_hash,
                     &metadata.engine_fingerprint,

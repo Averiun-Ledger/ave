@@ -562,6 +562,7 @@ impl CompilerServer {
                 self.inner.builds_completed.fetch_add(1, Ordering::SeqCst);
                 info!(
                     key = %key,
+                    toolchain = %toolchain,
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
                     "Contract build completed"
                 );

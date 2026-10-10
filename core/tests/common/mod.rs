@@ -617,13 +617,22 @@ pub async fn get_subject(
     sn: Option<u64>,
     timeout: bool,
 ) -> Result<SubjectDB, Box<dyn std::error::Error>> {
+    // Iterations without progress (same sn or node unreachable).
+    // Advancing toward the target resets the budget, so slowness
+    // under load never fails: only a stuck subject times out.
     let mut count = 0;
+    let mut last_sn: Option<u64> = None;
     loop {
         if let Ok(state) = node.get_subject_state(subject_id.clone()).await {
             if let Some(sn) = sn {
                 if sn == state.sn {
                     return Ok(state);
-                } else if count > 100 {
+                }
+                if last_sn.is_some_and(|last| last != state.sn) {
+                    count = 0;
+                }
+                last_sn = Some(state.sn);
+                if timeout && count > 100 {
                     return Err(format!(
                         "timeout waiting for subject {} at sn {}, actual sn {}",
                         subject_id, sn, state.sn
@@ -633,13 +642,14 @@ pub async fn get_subject(
             } else {
                 return Ok(state);
             }
-        } else if count > 100 {
+        } else if timeout && count > 100 {
             return Err(format!(
                 "timeout waiting for subject {} at sn {:?}",
                 subject_id, sn
             )
             .into());
         }
+
         tokio::time::sleep(Duration::from_millis(300)).await;
         if timeout {
             count += 1;
@@ -654,7 +664,11 @@ pub async fn get_events(
     expected_len: usize,
     timeout: bool,
 ) -> Result<Vec<LedgerDB>, Box<dyn std::error::Error>> {
+    // Iterations without progress (same event count). Appends reset
+    // the budget: slowness under load never fails, only a stuck
+    // ledger times out.
     let mut count = 0;
+    let mut last_len: Option<usize> = None;
     loop {
         if let Ok(state) = node
             .get_events(
@@ -668,7 +682,12 @@ pub async fn get_events(
         {
             if state.events.len() == expected_len {
                 return Ok(state.events);
-            } else if count > 100 {
+            }
+            if last_len.is_some_and(|last| last != state.events.len()) {
+                count = 0;
+            }
+            last_len = Some(state.events.len());
+            if timeout && count > 100 {
                 return Err(format!(
                     "timeout waiting for events {} at len {}, actual len {}",
                     subject_id,
@@ -677,7 +696,7 @@ pub async fn get_events(
                 )
                 .into());
             }
-        } else if count > 100 {
+        } else if timeout && count > 100 {
             return Err(format!(
                 "timeout waiting for events {} at len {}",
                 subject_id, expected_len
@@ -727,7 +746,7 @@ pub async fn wait_request_state(
     loop {
         if let Ok(state) = node.get_request_state(request_id.clone()).await {
             if let Some(request_state) = request_state.clone() {
-                match (request_state, state.state.clone()) {
+                match (request_state.clone(), state.state.clone()) {
                     (RequestState::InQueue, RequestState::InQueue)
                     | (RequestState::Handling, RequestState::Handling)
                     | (
@@ -756,6 +775,19 @@ pub async fn wait_request_state(
                     )
                     | (RequestState::Finish, RequestState::Finish) => {
                         return Ok(state.state);
+                    }
+                    // Terminal states never transition: waiting for
+                    // anything else while the request already finished,
+                    // aborted or was invalidated can not succeed no
+                    // matter the load — fail fast instead of hanging
+                    // forever and hiding the real outcome.
+                    (_, RequestState::Finish)
+                    | (_, RequestState::Abort { .. })
+                    | (_, RequestState::Invalid { .. }) => {
+                        panic!(
+                            "request {:?} ended in {:?}, waited for {:?}",
+                            request_id, state.state, request_state
+                        );
                     }
                     _ => {
                         tokio::time::sleep(Duration::from_millis(300)).await;

@@ -301,11 +301,17 @@ struct ScriptedCompilerService {
 
 impl ScriptedCompilerService {
     /// Builds the signed attestation response for `wasm`, attesting the
-    /// hashes of the requested source and the current manifest.
+    /// hashes of the requested source and the current manifest. The
+    /// attested toolchain fingerprint combines the upstream one (what
+    /// actually built the bytes, per requested toolchain) with this
+    /// instance's: transformed bytes stay isolated per instance AND
+    /// per toolchain, and sharing one fingerprint across toolchains
+    /// would trip the node's cross-check as false divergence.
     fn build_response(
         &self,
         source_b64: &str,
         wasm: Vec<u8>,
+        upstream_fingerprint: &DigestIdentifier,
     ) -> Result<pb::CompileResponse, Status> {
         let hash = HashAlgorithm::Blake3;
         let source_hash = hash_borsh(&*hash.hasher(), &source_b64.to_owned())
@@ -321,10 +327,22 @@ impl ScriptedCompilerService {
                 })?;
         let wasm_hash = pipeline::hash_bytes(hash, &wasm, "scripted wasm")
             .map_err(|e| Status::internal(e.to_string()))?;
+        let toolchain_fingerprint = hash_borsh(
+            &*hash.hasher(),
+            &(
+                upstream_fingerprint.to_string(),
+                self.toolchain_fingerprint.to_string(),
+            ),
+        )
+        .map_err(|e| {
+            Status::internal(format!(
+                "failed to hash toolchain fingerprints: {e}"
+            ))
+        })?;
 
         let source_hash = source_hash.to_string();
         let manifest_hash = manifest_hash.to_string();
-        let toolchain_fingerprint = self.toolchain_fingerprint.to_string();
+        let toolchain_fingerprint = toolchain_fingerprint.to_string();
         let wasm_hash = wasm_hash.to_string();
 
         let payload = borsh::to_vec(&(
@@ -436,18 +454,24 @@ impl CompilerService for ScriptedCompilerService {
                     "scripted upstream compile failed: {e}"
                 ))
             })?;
+        let crate::compilation::client::CompileOutcome {
+            wasm: upstream_wasm,
+            toolchain_fingerprint: upstream_fingerprint,
+            ..
+        } = outcome;
 
         let wasm = match &self.transform {
             // `InvalidOnce` already returned for the first build of
             // this source: from here on it serves the real artifact.
             ScriptedTransform::Identity | ScriptedTransform::InvalidOnce => {
-                outcome.wasm
+                upstream_wasm
             }
             ScriptedTransform::CustomSection(tag) => {
-                append_custom_section(outcome.wasm, tag)
+                append_custom_section(upstream_wasm, tag)
             }
         };
-        let response = self.build_response(&source_b64, wasm)?;
+        let response =
+            self.build_response(&source_b64, wasm, &upstream_fingerprint)?;
         self.cache.lock().await.insert(cache_key, response.clone());
         Ok(Response::new(response))
     }

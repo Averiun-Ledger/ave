@@ -14054,24 +14054,29 @@ async fn test_schema_add_with_dead_pool_parks_and_recovers() {
         .unwrap();
 
     // La request se aparca (Reboot/RebootTimeOut): ni commitea ni
-    // aborta la gobernanza.
-    let mut parked = false;
-    for _ in 0..200 {
+    // aborta la gobernanza. Sin deadline fijo: bajo carga todo llega
+    // tarde; lo que delata un fallo real es un estado terminal
+    // distinto (commiteada o abortada), que falla rápido.
+    loop {
         if let Ok(state) = node1.api.get_request_state(request_id.clone()).await
-            && matches!(
-                state.state,
-                RequestState::Reboot | RequestState::RebootTimeOut { .. }
-            )
         {
-            parked = true;
-            break;
+            match state.state {
+                RequestState::Reboot | RequestState::RebootTimeOut { .. } => {
+                    break;
+                }
+                RequestState::Finish
+                | RequestState::Abort { .. }
+                | RequestState::Invalid { .. } => {
+                    panic!(
+                        "con el pool muerto la request debe aparcarse, no {:?}",
+                        state.state
+                    );
+                }
+                _ => {}
+            }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    assert!(
-        parked,
-        "con el pool muerto la request se aparca (Reboot/RebootTimeOut)"
-    );
 
     // La gobernanza no avanza de versión.
     let state = get_subject(&node1.api, governance_id.clone(), None, true)
@@ -14241,6 +14246,8 @@ async fn test_boot_fatal_dead_pool_then_recovers_with_live_pool() {
 
     // Boot con pool muerto: la recovery del artefacto es bloqueante y
     // sin pool no puede recompilar → el nodo NO arranca (crash-fast).
+    // Mapa vacío a propósito: sin toolchain local que lo salve, la
+    // única vía es el pool muerto.
     let dead_boot = try_create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
         listen_address: format!(
@@ -14253,6 +14260,7 @@ async fn test_boot_fatal_dead_pool_then_recovers_with_live_pool() {
         ext_db: Some(node1_ext.path().to_path_buf()),
         contracts_path: Some(node1_contracts.path().to_path_buf()),
         always_accept: true,
+        toolchains: Some(BTreeMap::new()),
         compiler: Some(CompilerNodeConfig {
             endpoints: vec!["http://127.0.0.1:1".to_owned()],
             ..Default::default()
@@ -15385,6 +15393,7 @@ async fn test_deferred_acquisition_builds_only_final_contract_version() {
 
     // Reinicio: los marcadores quedaron limpios y el artefacto está en
     // disco — carga local verificada contra el ancla, cero builds extra.
+    let builds_before_restart = scripted.compiles_received();
     node2.token.cancel();
     join_all(node2.handler.iter_mut()).await;
 
@@ -15411,7 +15420,11 @@ async fn test_deferred_acquisition_builds_only_final_contract_version() {
 
     wait_artifact_bytes_eq(node2_contracts.path(), &artifact_name, &node1_v3)
         .await;
-    assert_eq!(scripted.compiles_received(), 1);
+    assert_eq!(
+        scripted.compiles_received(),
+        builds_before_restart,
+        "restart must load locally with zero extra builds"
+    );
 
     // Un fact commitea contra la versión final (la v3 evalúa ModTwo como
     // el resto de la familia Example).
@@ -15484,6 +15497,8 @@ async fn test_deferred_acquisition_crash_mid_sync_recovers_final_only() {
         local_db: Some(node2_local.path().to_path_buf()),
         ext_db: Some(node2_ext.path().to_path_buf()),
         contracts_path: Some(node2_contracts.path().to_path_buf()),
+        // Sin toolchain local: el pool muerto es la única vía (muerta).
+        toolchains: Some(BTreeMap::new()),
         compiler: Some(CompilerNodeConfig {
             endpoints: vec!["http://127.0.0.1:1".to_owned()],
             ..Default::default()
@@ -15772,6 +15787,8 @@ async fn test_deferred_acquisition_idle_sync_round_at_tip() {
         local_db: Some(node2_local.path().to_path_buf()),
         ext_db: Some(node2_ext.path().to_path_buf()),
         contracts_path: Some(node2_contracts.path().to_path_buf()),
+        // Sin toolchain local: el pool muerto es la única vía (muerta).
+        toolchains: Some(BTreeMap::new()),
         compiler: Some(CompilerNodeConfig {
             endpoints: vec!["http://127.0.0.1:1".to_owned()],
             ..Default::default()
@@ -17920,12 +17937,13 @@ async fn test_compiler_disagreement_reboot_diff() {
 
     // La divergencia era transitoria: el retry del reboot (10 s,
     // primera entrada del schedule) recompila y AveNode2 sirve el
-    // artefacto real — acuerdo, commit del evento y exactamente UN
-    // build por ciclo (sin duplicados).
+    // artefacto real — acuerdo, commit del evento y como mucho UN
+    // build en el pool (el retry puede servirse de la caché global
+    // compartida del proceso en vez de reconstruir).
     let gov_state =
         get_subject(&node1.api, governance_id.clone(), Some(2), true)
-            .await
-            .unwrap();
+        .await
+        .unwrap();
     assert_eq!(gov_state.sn, 2);
     assert_eq!(scripted.compiles_received(), 2);
 
@@ -19564,6 +19582,11 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
     )
     .await;
 
+    // Fuente única por ejecución: el artefacto de este test nunca
+    // está en la caché global compartida del proceso, así que el heal
+    // con el pool muerto no tiene de dónde servirse.
+    let example_contract = unique_contract(EXAMPLE_CONTRACT);
+
     // SN 1: AveNode2 compiler de la gobernanza (Owner y AveNode2
     // compilarán el schema).
     let json = json!({
@@ -19611,7 +19634,7 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": EXAMPLE_CONTRACT,
+                    "contract": example_contract,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -19786,6 +19809,8 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
         local_db: Some(node2_local.path().to_path_buf()),
         ext_db: Some(node2_ext.path().to_path_buf()),
         contracts_path: Some(node2_contracts.path().to_path_buf()),
+        // Sin toolchain local: el pool muerto es la única vía (muerta).
+        toolchains: Some(BTreeMap::new()),
         compiler: Some(CompilerNodeConfig {
             endpoints: vec!["http://127.0.0.1:1".to_owned()],
             ..Default::default()
@@ -19813,6 +19838,21 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
         .join(&artifact_name);
     let node1_hidden = node1_dir.with_extension("bak");
     fs::rename(&node1_dir, &node1_hidden).unwrap();
+
+    // El Owner no responde probes: AveNode2 es la única fuente posible
+    // del refetch (sin carrera con el heal del Owner, que sanaría por
+    // caché y serviría antes de que AveNode2 descarte).
+    node1
+        .api
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
 
     // AveNode3 pierde su artefacto y reinicia: la recovery de arranque
     // del evaluador refetchea. Al pedir a AveNode2, la verificación
@@ -19865,6 +19905,10 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
         "el fetcher no persiste nada mientras nadie sirve bytes anclados"
     );
     node_running(&node2.api).await.unwrap();
+
+    // Fin de la ventana determinista: el Owner vuelve a responder
+    // probes (sigue sin disco; si lo piden sanará por caché).
+    node1.api.test_clear_faults().await.unwrap();
 
     // La gobernanza sigue operativa con el heal reintentando: un evento
     // ajeno commitea y ambos nodos lo aplican (quedan en la versión que
@@ -19941,6 +19985,9 @@ async fn test_serve_corruption_heal_dead_pool_recovers_with_live_pool() {
 
     // El Owner vuelve a servir y un fact commitea con el quórum de los
     // dos evaluadores: AveNode3 evalúa con el artefacto refetcheado.
+    // Si el Owner ya sanó por caché atestiguada tras los asserts, su
+    // dir existe: se quita para restaurar el original movido.
+    let _ = fs::remove_dir_all(&node1_dir);
     fs::rename(&node1_hidden, &node1_dir).unwrap();
 
     let (subject_id, ..) =

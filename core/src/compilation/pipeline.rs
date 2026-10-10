@@ -204,24 +204,45 @@ fn legacy_artifact_metadata_path(contract_path: &Path) -> PathBuf {
 }
 
 #[cfg(feature = "test")]
-fn global_cache_root() -> PathBuf {
-    // Namespaced per test process: the cache key embeds each
-    // ScriptedCompiler instance's fingerprint, whose counter restarts
-    // in every process — a shared dir lets one run serve another
-    // run's transformed bytes (or starve its pool assertions, as
-    // REC-01 learned). Within a process the sharing stays: first
-    // build still serves all tests of the run.
-    env::temp_dir().join(format!("{}-{}", GLOBAL_CACHE_DIR, std::process::id()))
+fn global_cache_root(scope: &str) -> PathBuf {
+    // Namespaced per test process AND per node contracts dir: the cache
+    // key embeds each ScriptedCompiler instance's fingerprint, whose
+    // counter restarts in every process — a shared dir lets one run
+    // serve another run's transformed bytes (or starve its pool
+    // assertions, as REC-01 learned). Within a process the scope keeps
+    // nodes from serving each other's bytes: a node that never built
+    // must miss (dead pool stays dead), exactly like production, where
+    // every node owns its disk state. First build still serves the
+    // whole run through the compiler pool store.
+    env::temp_dir().join(format!(
+        "{}-{}-{}",
+        GLOBAL_CACHE_DIR,
+        std::process::id(),
+        scope
+    ))
+}
+
+/// Scope string isolating one node's share of the global test cache:
+/// stable for the node's lifetime (restarts reuse their dirs), distinct
+/// across nodes.
+#[cfg(feature = "test")]
+pub fn global_cache_scope(contracts_path: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    contracts_path.to_string_lossy().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(feature = "test")]
 pub fn global_cache_entry_dir(
+    scope: &str,
     contract_hash: &DigestIdentifier,
     manifest_hash: &DigestIdentifier,
     engine_fingerprint: &DigestIdentifier,
     toolchain_fingerprint: &DigestIdentifier,
 ) -> PathBuf {
-    global_cache_root().join(format!(
+    global_cache_root(scope).join(format!(
         "{contract_hash}_{manifest_hash}_{engine_fingerprint}_{toolchain_fingerprint}"
     ))
 }
@@ -491,6 +512,7 @@ pub async fn try_load_global_cache(
     hash: HashAlgorithm,
     contract_runtime: &Arc<ContractRuntime>,
     initial_value: Value,
+    scope: &str,
     contract_hash: &DigestIdentifier,
     manifest_hash: &DigestIdentifier,
     engine_fingerprint: &DigestIdentifier,
@@ -506,6 +528,7 @@ pub async fn try_load_global_cache(
     CompilerError,
 > {
     let cache_dir = global_cache_entry_dir(
+        scope,
         contract_hash,
         manifest_hash,
         engine_fingerprint,
@@ -734,8 +757,13 @@ mod tests {
 
         // Case 1: corrupt metadata.borsh (invalid borsh) → miss.
         let (contract, manifest, engine, toolchain) = test_fingerprints("meta");
-        let cache_dir =
-            global_cache_entry_dir(&contract, &manifest, &engine, &toolchain);
+        let cache_dir = global_cache_entry_dir(
+            "unittest",
+            &contract,
+            &manifest,
+            &engine,
+            &toolchain,
+        );
         fs::create_dir_all(&cache_dir)
             .await
             .expect("cache dir must be created");
@@ -746,6 +774,7 @@ mod tests {
             HashAlgorithm::Blake3,
             &runtime,
             Value::Null,
+            "unittest",
             &contract,
             &manifest,
             &engine,
@@ -759,8 +788,13 @@ mod tests {
         // Case 2: valid metadata, but the wasm bytes do not match the
         // recorded hash → miss.
         let (contract, manifest, engine, toolchain) = test_fingerprints("wasm");
-        let cache_dir =
-            global_cache_entry_dir(&contract, &manifest, &engine, &toolchain);
+        let cache_dir = global_cache_entry_dir(
+            "unittest",
+            &contract,
+            &manifest,
+            &engine,
+            &toolchain,
+        );
         let wasm_bytes = b"fake wasm".to_vec();
         let precompiled_bytes = b"fake cwasm".to_vec();
         let mut record = build_contract_record(
@@ -792,6 +826,7 @@ mod tests {
             HashAlgorithm::Blake3,
             &runtime,
             Value::Null,
+            "unittest",
             &contract,
             &manifest,
             &engine,
@@ -809,6 +844,7 @@ mod tests {
             HashAlgorithm::Blake3,
             &runtime,
             Value::Null,
+            "unittest",
             &contract,
             &manifest,
             &engine,
