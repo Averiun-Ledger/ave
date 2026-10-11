@@ -2,7 +2,7 @@
 //
 // Database-backed login endpoint that returns full authentication context
 
-use super::database::AuthDatabase;
+use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::{
     DatabaseErrorMapping, db_error_to_response, rate_limit_error_response,
     request_result_from_status,
@@ -61,6 +61,7 @@ pub async fn login(
     .await
     .map_err(|e| {
         let response = rate_limit_error_response(e);
+        db.record_login_attempt(request_result_from_status(response.0));
         db.record_request_metrics(
             "login",
             request_result_from_status(response.0),
@@ -97,15 +98,23 @@ pub async fn login(
                 error = %e,
                 "login failed"
             );
+            let locked = matches!(e, DatabaseError::AccountLocked(_));
             let response =
                 db_error_to_response(e, DatabaseErrorMapping::login());
+            let result = if locked {
+                "locked"
+            } else {
+                request_result_from_status(response.0)
+            };
+            db.record_login_attempt(result);
             db.record_request_metrics(
                 "login",
-                request_result_from_status(response.0),
+                result,
                 request_started.elapsed(),
             );
             response
         })?;
+    db.record_login_attempt("success");
     db.record_request_metrics("login", "success", request_started.elapsed());
 
     // Build user info

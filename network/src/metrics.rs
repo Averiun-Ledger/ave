@@ -35,11 +35,6 @@ struct MessageDropLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ReqResMessageLabels {
-    kind: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ReqResFailureLabels {
     direction: &'static str,
     kind: &'static str,
@@ -48,17 +43,6 @@ struct ReqResFailureLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ErrorKindLabels {
     kind: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ControlListUpdateLabels {
-    list: &'static str,
-    result: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ControlListLabels {
-    list: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -82,19 +66,12 @@ pub struct NetworkMetrics {
     dial_attempts_total: Family<DialAttemptLabels, Counter>,
     dial_failures_total: Family<DialFailureLabels, Counter>,
     messages_dropped_total: Family<MessageDropLabels, Counter>,
-    reqres_messages_received_total: Family<ReqResMessageLabels, Counter>,
     reqres_failures_total: Family<ReqResFailureLabels, Counter>,
     identify_errors_total: Family<ErrorKindLabels, Counter>,
-    control_list_updates_total: Family<ControlListUpdateLabels, Counter>,
-    control_list_apply_total: Family<ControlListLabels, Counter>,
     control_list_denied_total: Family<ControlListDeniedLabels, Counter>,
     retry_queue_len: Gauge,
     retry_scheduled_total: Family<RetryScheduleLabels, Counter>,
-    pending_outbound_peers: Gauge,
-    pending_outbound_messages: Gauge,
     pending_outbound_bytes: Gauge,
-    pending_inbound_peers: Gauge,
-    pending_inbound_messages: Gauge,
     pending_inbound_bytes: Gauge,
     identified_peers: Gauge,
     response_channels_pending: Gauge,
@@ -105,7 +82,6 @@ pub struct NetworkMetrics {
     state: Family<NetworkStateLabels, Gauge>,
     bootstrap_duration_seconds:
         Family<BootstrapDurationLabels, Histogram, fn() -> Histogram>,
-    pending_message_age_seconds: Histogram,
     control_list_updater_duration_seconds: Histogram,
 }
 
@@ -115,19 +91,12 @@ impl NetworkMetrics {
             dial_attempts_total: Family::default(),
             dial_failures_total: Family::default(),
             messages_dropped_total: Family::default(),
-            reqres_messages_received_total: Family::default(),
             reqres_failures_total: Family::default(),
             identify_errors_total: Family::default(),
-            control_list_updates_total: Family::default(),
-            control_list_apply_total: Family::default(),
             control_list_denied_total: Family::default(),
             retry_queue_len: Gauge::default(),
             retry_scheduled_total: Family::default(),
-            pending_outbound_peers: Gauge::default(),
-            pending_outbound_messages: Gauge::default(),
             pending_outbound_bytes: Gauge::default(),
-            pending_inbound_peers: Gauge::default(),
-            pending_inbound_messages: Gauge::default(),
             pending_inbound_bytes: Gauge::default(),
             identified_peers: Gauge::default(),
             response_channels_pending: Gauge::default(),
@@ -141,9 +110,6 @@ impl NetworkMetrics {
                     0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0,
                 ])
             }),
-            pending_message_age_seconds: Histogram::new(vec![
-                0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
-            ]),
             control_list_updater_duration_seconds: Histogram::new(vec![
                 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
             ]),
@@ -167,11 +133,6 @@ impl NetworkMetrics {
             self.messages_dropped_total.clone(),
         );
         registry.register(
-            "network_reqres_messages_received",
-            "Total request-response messages received, labeled by kind.",
-            self.reqres_messages_received_total.clone(),
-        );
-        registry.register(
             "network_reqres_failures",
             "Total request-response failures, labeled by direction and kind.",
             self.reqres_failures_total.clone(),
@@ -180,16 +141,6 @@ impl NetworkMetrics {
             "network_identify_errors",
             "Total identify protocol errors, labeled by kind.",
             self.identify_errors_total.clone(),
-        );
-        registry.register(
-            "network_control_list_updates",
-            "Total control-list update attempts, labeled by list and result.",
-            self.control_list_updates_total.clone(),
-        );
-        registry.register(
-            "network_control_list_apply",
-            "Total applied control-list updates, labeled by list.",
-            self.control_list_apply_total.clone(),
         );
         registry.register(
             "network_control_list_denied",
@@ -207,29 +158,9 @@ impl NetworkMetrics {
             self.retry_scheduled_total.clone(),
         );
         registry.register(
-            "network_pending_outbound_peers",
-            "Peers with pending outbound messages.",
-            self.pending_outbound_peers.clone(),
-        );
-        registry.register(
-            "network_pending_outbound_messages",
-            "Total pending outbound messages.",
-            self.pending_outbound_messages.clone(),
-        );
-        registry.register(
             "network_pending_outbound_bytes",
             "Total pending outbound payload bytes.",
             self.pending_outbound_bytes.clone(),
-        );
-        registry.register(
-            "network_pending_inbound_peers",
-            "Peers with pending inbound messages.",
-            self.pending_inbound_peers.clone(),
-        );
-        registry.register(
-            "network_pending_inbound_messages",
-            "Total pending inbound messages.",
-            self.pending_inbound_messages.clone(),
         );
         registry.register(
             "network_pending_inbound_bytes",
@@ -275,11 +206,6 @@ impl NetworkMetrics {
             "network_bootstrap_duration_seconds",
             "Bootstrap connection duration in seconds, labeled by result.",
             self.bootstrap_duration_seconds.clone(),
-        );
-        registry.register(
-            "network_pending_message_age_seconds",
-            "Age of pending messages when they leave queue or are dropped.",
-            self.pending_message_age_seconds.clone(),
         );
         registry.register(
             "network_control_list_updater_duration_seconds",
@@ -445,18 +371,6 @@ impl NetworkMetrics {
             .inc();
     }
 
-    pub(crate) fn inc_reqres_request_received(&self) {
-        self.reqres_messages_received_total
-            .get_or_create(&ReqResMessageLabels { kind: "request" })
-            .inc();
-    }
-
-    pub(crate) fn inc_reqres_response_received(&self) {
-        self.reqres_messages_received_total
-            .get_or_create(&ReqResMessageLabels { kind: "response" })
-            .inc();
-    }
-
     pub(crate) fn observe_reqres_failure(
         &self,
         direction: &'static str,
@@ -476,38 +390,6 @@ impl NetworkMetrics {
     pub(crate) fn observe_control_list_denied(&self, reason: &'static str) {
         self.control_list_denied_total
             .get_or_create(&ControlListDeniedLabels { reason })
-            .inc();
-    }
-
-    pub(crate) fn observe_control_list_allow_update(&self, success: bool) {
-        let result = if success { "success" } else { "failure" };
-        self.control_list_updates_total
-            .get_or_create(&ControlListUpdateLabels {
-                list: "allow",
-                result,
-            })
-            .inc();
-    }
-
-    pub(crate) fn observe_control_list_block_update(&self, success: bool) {
-        let result = if success { "success" } else { "failure" };
-        self.control_list_updates_total
-            .get_or_create(&ControlListUpdateLabels {
-                list: "block",
-                result,
-            })
-            .inc();
-    }
-
-    pub(crate) fn inc_control_list_allow_apply(&self) {
-        self.control_list_apply_total
-            .get_or_create(&ControlListLabels { list: "allow" })
-            .inc();
-    }
-
-    pub(crate) fn inc_control_list_block_apply(&self) {
-        self.control_list_apply_total
-            .get_or_create(&ControlListLabels { list: "block" })
             .inc();
     }
 
@@ -553,10 +435,6 @@ impl NetworkMetrics {
         self.set_state_current(state);
     }
 
-    pub(crate) fn observe_pending_message_age_seconds(&self, age_seconds: f64) {
-        self.pending_message_age_seconds.observe(age_seconds);
-    }
-
     pub(crate) fn set_retry_queue_len(&self, value: i64) {
         self.retry_queue_len.set(value);
     }
@@ -567,24 +445,8 @@ impl NetworkMetrics {
             .inc();
     }
 
-    pub(crate) fn set_pending_outbound_peers(&self, value: i64) {
-        self.pending_outbound_peers.set(value);
-    }
-
-    pub(crate) fn set_pending_outbound_messages(&self, value: i64) {
-        self.pending_outbound_messages.set(value);
-    }
-
     pub(crate) fn set_pending_outbound_bytes(&self, value: i64) {
         self.pending_outbound_bytes.set(value);
-    }
-
-    pub(crate) fn set_pending_inbound_peers(&self, value: i64) {
-        self.pending_inbound_peers.set(value);
-    }
-
-    pub(crate) fn set_pending_inbound_messages(&self, value: i64) {
-        self.pending_inbound_messages.set(value);
     }
 
     pub(crate) fn set_pending_inbound_bytes(&self, value: i64) {

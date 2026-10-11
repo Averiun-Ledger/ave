@@ -737,6 +737,9 @@ impl Approval {
             })
             .await?;
 
+        if outcome {
+            Self::observe_event("approved");
+        }
         if !outcome {
             Self::observe_event("rejected");
         }

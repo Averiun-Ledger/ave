@@ -518,6 +518,7 @@ impl Handler<Self> for Evaluation {
                                     result_hash,
                                     result_hash_signature,
                                 );
+                                Self::observe_event("success");
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");

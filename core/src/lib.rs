@@ -419,7 +419,9 @@ impl Api {
 
         let spec = config.spec.map(MachineSpec::from);
         let network_metrics = ave_network::metrics::register(registry);
-        crate::metrics::register(registry);
+        let core_metrics = crate::metrics::register(registry);
+        core_metrics.set_build_info(env!("CARGO_PKG_VERSION"));
+        core_metrics.set_safe_mode(config.safe_mode);
 
         let mut worker: NetworkWorker<NetworkMessage> = NetworkWorker::new(
             &keys,

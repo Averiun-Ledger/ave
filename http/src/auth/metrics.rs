@@ -24,6 +24,13 @@ struct RequestLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct LoginLabels {
+    // Closed set: success, unauthorized, rate_limited, locked,
+    // internal_error. Never usernames or IPs.
+    result: &'static str,
+}
+
 #[derive(Debug)]
 pub struct AuthPrometheusMetrics {
     lock_wait_seconds: Family<PoolLabels, Histogram, fn() -> Histogram>,
@@ -37,6 +44,7 @@ pub struct AuthPrometheusMetrics {
     blocking_in_flight: Gauge,
     request_db_duration_seconds:
         Family<RequestLabels, Histogram, fn() -> Histogram>,
+    login_attempts_total: Family<LoginLabels, Counter>,
 }
 
 impl AuthPrometheusMetrics {
@@ -76,6 +84,7 @@ impl AuthPrometheusMetrics {
                     5.0, 10.0,
                 ])
             }),
+            login_attempts_total: Family::default(),
         }
     }
 
@@ -114,6 +123,11 @@ impl AuthPrometheusMetrics {
             "auth_db_request_seconds",
             "End-to-end database time consumed by auth-facing requests, labeled by request kind and result.",
             self.request_db_duration_seconds.clone(),
+        );
+        registry.register(
+            "auth_login_attempts_total",
+            "Login attempts labeled by result.",
+            self.login_attempts_total.clone(),
         );
     }
 
@@ -172,6 +186,12 @@ impl AuthPrometheusMetrics {
         self.request_db_duration_seconds
             .get_or_create(&labels)
             .observe(elapsed_seconds);
+    }
+
+    pub fn observe_login_attempt(&self, result: &'static str) {
+        self.login_attempts_total
+            .get_or_create(&LoginLabels { result })
+            .inc();
     }
 
     pub fn set_blocking_in_flight(&self, value: i64) {

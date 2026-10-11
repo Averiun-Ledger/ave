@@ -560,6 +560,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         self.safe_mode
     }
 
+    #[cfg(test)]
     fn pending_outbound_messages_len(&self) -> usize {
         self.pending_outbound_messages
             .values()
@@ -574,6 +575,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .sum()
     }
 
+    #[cfg(test)]
     fn pending_inbound_messages_len(&self) -> usize {
         self.pending_inbound_messages
             .values()
@@ -598,20 +600,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         };
 
         metrics.set_retry_queue_len(self.retry_queue.len() as i64);
-        metrics.set_pending_outbound_peers(
-            self.pending_outbound_messages.len() as i64,
-        );
-        metrics.set_pending_outbound_messages(
-            self.pending_outbound_messages_len() as i64,
-        );
         metrics.set_pending_outbound_bytes(
             self.pending_outbound_bytes_len() as i64
-        );
-        metrics.set_pending_inbound_peers(
-            self.pending_inbound_messages.len() as i64
-        );
-        metrics.set_pending_inbound_messages(
-            self.pending_inbound_messages_len() as i64,
         );
         metrics
             .set_pending_inbound_bytes(self.pending_inbound_bytes_len() as i64);
@@ -621,14 +611,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         );
     }
 
-    fn observe_pending_message_age(&self, enqueued_at: Instant) {
-        if let Some(metrics) = self.metric_handle() {
-            metrics.observe_pending_message_age_seconds(
-                enqueued_at.elapsed().as_secs_f64(),
-            );
-        }
-    }
-
     fn drop_pending_outbound_messages(&mut self, peer_id: &PeerId) -> usize {
         let Some(mut queue) = self.pending_outbound_messages.remove(peer_id)
         else {
@@ -636,19 +618,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         };
 
         let mut dropped = 0usize;
-        for message in queue.drain() {
+        for _ in queue.drain() {
             dropped += 1;
-            self.observe_pending_message_age(message.enqueued_at);
         }
         dropped
     }
 
     fn drop_pending_inbound_messages(&mut self, peer_id: &PeerId) {
-        if let Some(mut queue) = self.pending_inbound_messages.remove(peer_id) {
-            for message in queue.drain() {
-                self.observe_pending_message_age(message.enqueued_at);
-            }
-        }
+        self.pending_inbound_messages.remove(peer_id);
     }
 
     fn observe_identify_error(
@@ -940,9 +917,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
         }
         let count = expired.len() as u64;
-        for message in expired {
-            self.observe_pending_message_age(message.enqueued_at);
-        }
         count
     }
 
@@ -967,10 +941,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if report.duplicate {
             self.refresh_runtime_metrics();
             return;
-        }
-
-        for evicted in &report.evicted {
-            self.observe_pending_message_age(evicted.enqueued_at);
         }
 
         if report.dropped_count > 0 {
@@ -1037,10 +1007,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if report.duplicate {
             self.refresh_runtime_metrics();
             return;
-        }
-
-        for evicted in &report.evicted {
-            self.observe_pending_message_age(evicted.enqueued_at);
         }
 
         if report.dropped_count > 0 {
@@ -1119,9 +1085,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             self.pending_inbound_messages.remove(peer);
         }
         let count = expired.len() as u64;
-        for message in expired {
-            self.observe_pending_message_age(message.enqueued_at);
-        }
         count
     }
 
@@ -1176,7 +1139,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             let ttl = self.pending_outbound_ttl;
             let mut expired = 0u64;
             for message in queue.drain() {
-                self.observe_pending_message_age(message.enqueued_at);
                 // Expired messages are purged instead of delivered: a
                 // stale copy is worse than a lost one for senders with
                 // their own retry machine.
@@ -1977,9 +1939,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 let mut buffered = VecDeque::new();
                                 let mut expired = 0u64;
                                 for message in queue.drain() {
-                                    self.observe_pending_message_age(
-                                        message.enqueued_at,
-                                    );
                                     // Stale buffered copies are worse than
                                     // lost ones: receivers re-request what
                                     // they still miss.
@@ -2065,9 +2024,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
 
                         if is_request {
-                            if let Some(metrics) = self.metric_handle() {
-                                metrics.inc_reqres_request_received();
-                            }
                             trace!(
                                 target: TARGET,
                                 msg_type = "ReqRes",
@@ -2078,9 +2034,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                 self.add_ephemeral_response(peer_id, channel);
                             }
                         } else {
-                            if let Some(metrics) = self.metric_handle() {
-                                metrics.inc_reqres_response_received();
-                            }
                             trace!(
                                 target: TARGET,
                                 msg_type = "ReqRes",
@@ -2500,10 +2453,6 @@ mod tests {
             0.0
         );
         assert_eq!(metric_value(&text, "network_pending_outbound_bytes"), 16.0);
-        assert!(
-            metric_value(&text, "network_pending_message_age_seconds_count")
-                >= 1.0
-        );
     }
 
     #[test]

@@ -98,18 +98,26 @@ struct CompilerBuildLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ActorMessageLabels {
-    // Sanitized parent path (leaf ids stripped): bounded cardinality.
-    actor: String,
-    kind: &'static str,
-    result: &'static str,
+struct HttpRequestLabels {
+    // Route template (`/subjects/{subject_id}/events`): one series per
+    // route, never per id. Unmatched paths collapse into `unmatched`.
+    route: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct BuildInfoLabels {
+    version: String,
 }
 
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
-    actor_message_duration_seconds:
-        Family<ActorMessageLabels, Histogram, fn() -> Histogram>,
+    http_requests: Family<HttpRequestLabels, Counter>,
+    http_request_duration_seconds:
+        Family<HttpRequestLabels, Histogram, fn() -> Histogram>,
+    node_build_info: Family<BuildInfoLabels, Gauge>,
+    node_safe_mode: Gauge,
     request_duration_seconds:
         Family<RequestResultLabels, Histogram, fn() -> Histogram>,
     request_phase_duration_seconds:
@@ -149,7 +157,6 @@ pub struct CoreMetrics {
     external_db_critical_errors: Counter,
     governance_version_sync_failures:
         Family<GovernanceVersionSyncFailureLabels, Counter>,
-    http_server_errors: Counter,
     network_ingress_drops: Family<NetworkIngressDropLabels, Counter>,
     network_wire_versions: Family<NetworkWireVersionLabels, Counter>,
 }
@@ -160,14 +167,17 @@ impl CoreMetrics {
     fn new() -> Self {
         Self {
             requests: Family::default(),
-            actor_message_duration_seconds: Family::new_with_constructor(
+            http_requests: Family::default(),
+            http_request_duration_seconds: Family::new_with_constructor(
                 || {
                     Histogram::new(vec![
-                        0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
-                        5.0, 10.0, 30.0,
+                        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                        5.0, 10.0,
                     ])
                 },
             ),
+            node_build_info: Family::default(),
+            node_safe_mode: Gauge::default(),
             request_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
                     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
@@ -236,7 +246,6 @@ impl CoreMetrics {
             reboot_max_retries_reached: Counter::default(),
             external_db_critical_errors: Counter::default(),
             governance_version_sync_failures: Family::default(),
-            http_server_errors: Counter::default(),
             network_ingress_drops: Family::default(),
             network_wire_versions: Family::default(),
         }
@@ -249,9 +258,24 @@ impl CoreMetrics {
             self.requests.clone(),
         );
         registry.register(
-            "core_actor_message_duration_seconds",
-            "Actor message handling duration labeled by sanitized actor path, kind and result.",
-            self.actor_message_duration_seconds.clone(),
+            "http_requests_total",
+            "HTTP responses served, labeled by route template and status code.",
+            self.http_requests.clone(),
+        );
+        registry.register(
+            "http_request_duration_seconds",
+            "HTTP response latency in seconds, labeled by route and status.",
+            self.http_request_duration_seconds.clone(),
+        );
+        registry.register(
+            "node_build_info",
+            "Node build version (always 1).",
+            self.node_build_info.clone(),
+        );
+        registry.register(
+            "node_safe_mode",
+            "Whether the node runs in safe mode (1) or not (0).",
+            self.node_safe_mode.clone(),
         );
         registry.register(
             "core_request_duration_seconds",
@@ -399,19 +423,9 @@ impl CoreMetrics {
             self.reboot_max_retries_reached.clone(),
         );
         registry.register(
-            "core_external_db_critical_errors",
-            "Total critical external database errors reported to DBManager.",
-            self.external_db_critical_errors.clone(),
-        );
-        registry.register(
             "core_governance_version_sync_failures",
             "Total governance version sync failures by reason.",
             self.governance_version_sync_failures.clone(),
-        );
-        registry.register(
-            "core_http_server_errors",
-            "Total HTTP 5xx server errors.",
-            self.http_server_errors.clone(),
         );
         registry.register(
             "core_network_ingress_drops",
@@ -454,23 +468,34 @@ impl CoreMetrics {
             .inc();
     }
 
-    pub fn observe_actor_message(
+    pub fn observe_http_request(
         &self,
-        actor: String,
-        kind: &'static str,
-        result: &'static str,
+        route: &str,
+        status: u16,
         duration: Duration,
     ) {
-        let labels = ActorMessageLabels {
-            actor,
-            kind,
-            result,
+        let labels = HttpRequestLabels {
+            route: route.to_owned(),
+            status: status.to_string(),
         };
-        // Single family lookup per message: the histogram already
-        // carries `_count`, so no separate counter is needed.
-        self.actor_message_duration_seconds
+        self.http_requests.get_or_create(&labels).inc();
+        self.http_request_duration_seconds
             .get_or_create(&labels)
             .observe(Self::seconds(duration));
+    }
+
+    /// Pin the running build version. Call once at startup.
+    pub fn set_build_info(&self, version: &str) {
+        self.node_build_info
+            .get_or_create(&BuildInfoLabels {
+                version: version.to_owned(),
+            })
+            .set(1);
+    }
+
+    /// Track safe-mode state. Call once at startup.
+    pub fn set_safe_mode(&self, enabled: bool) {
+        self.node_safe_mode.set(i64::from(enabled));
     }
 
     pub fn observe_request_terminal(
@@ -764,10 +789,6 @@ impl CoreMetrics {
             .inc();
     }
 
-    pub fn observe_http_server_error(&self) {
-        self.http_server_errors.inc();
-    }
-
     pub fn observe_network_ingress_drop(&self, cause: &'static str) {
         self.network_ingress_drops
             .get_or_create(&NetworkIngressDropLabels { cause })
@@ -794,73 +815,51 @@ pub fn try_core_metrics() -> Option<&'static Arc<CoreMetrics>> {
 }
 
 #[cfg(test)]
-mod message_metrics_tests {
+mod http_metrics_tests {
     use super::*;
     use prometheus_client::{encoding::text::encode, registry::Registry};
-
-    #[test]
-    fn sanitize_strips_leaf_ids() {
-        let deep = ave_actors::ActorPath::from("/user/request/abc123");
-        assert_eq!(sanitize_actor_path(&deep), "/user/request");
-        let shallow = ave_actors::ActorPath::from("/user/node");
-        assert_eq!(sanitize_actor_path(&shallow), "/user/node");
-    }
 
     #[test]
     fn observe_emits_counter_and_histogram() {
         let metrics = CoreMetrics::new();
         let mut registry = Registry::default();
         metrics.register_into(&mut registry);
-        metrics.observe_actor_message(
-            "/user/request".to_owned(),
-            "tell",
-            "ok",
+        metrics.observe_http_request(
+            "/subjects/{subject_id}/events",
+            200,
             Duration::from_millis(5),
         );
         let mut buf = String::new();
         encode(&mut buf, &registry).unwrap();
         assert!(
-            buf.contains("core_actor_message_duration_seconds_count{actor=\"/user/request\",kind=\"tell\",result=\"ok\"} 1"),
+            buf.contains(concat!(
+                "http_requests_total{route=\"/subjects/{subject_id}/events\",",
+                "status=\"200\"} 1"
+            )),
             "count missing:\n{buf}"
         );
         assert!(
-            buf.contains("core_actor_message_duration_seconds"),
+            buf.contains("http_request_duration_seconds"),
             "histogram missing:\n{buf}"
         );
     }
-}
 
-/// Strips the leaf segment (subject/request/sink ids) so per-actor
-/// metric labels stay bounded no matter how many subjects exist.
-fn sanitize_actor_path(path: &ave_actors::ActorPath) -> String {
-    if path.level() > 2 {
-        path.parent().to_string()
-    } else {
-        path.to_string()
-    }
-}
-
-/// Uniform per-message observability: elapsed and outcome for every
-/// handled message, with sanitized actor paths. Hooks never fail
-/// delivery and must stay fast: this one does a single metrics
-/// lookup per message and nothing when metrics are off.
-pub struct MessageMetrics;
-
-impl ave_actors::Interceptor for MessageMetrics {
-    fn after_handle(
-        &self,
-        ctx: ave_actors::Intercept<'_>,
-        result: &Result<(), ave_actors::ActorError>,
-        elapsed: Duration,
-    ) {
-        let Some(metrics) = try_core_metrics() else {
-            return;
-        };
-        metrics.observe_actor_message(
-            sanitize_actor_path(ctx.path),
-            ctx.kind,
-            if result.is_ok() { "ok" } else { "error" },
-            elapsed,
+    #[test]
+    fn build_info_and_safe_mode_expose_gauges() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+        metrics.set_build_info("1.2.3");
+        metrics.set_safe_mode(true);
+        let mut buf = String::new();
+        encode(&mut buf, &registry).unwrap();
+        assert!(
+            buf.contains("node_build_info{version=\"1.2.3\"} 1"),
+            "build info missing:\n{buf}"
+        );
+        assert!(
+            buf.contains("node_safe_mode 1"),
+            "safe mode missing:\n{buf}"
         );
     }
 }

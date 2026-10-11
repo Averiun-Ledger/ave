@@ -367,9 +367,6 @@ pub fn build_control_lists_updaters(
 
                 // If at least 1 update of the list was possible
                 if successful_allow != 0 {
-                    if let Some(metrics) = metrics_updater.as_deref() {
-                        metrics.observe_control_list_allow_update(true);
-                    }
                     last_allow_success = Some(now);
                     if let Err(e) = sender.send(Event::AllowListUpdated(vec_allow_peers)).await {
                         debug!(
@@ -380,9 +377,6 @@ pub fn build_control_lists_updaters(
                         );
                     }
                 } else {
-                    if let Some(metrics) = metrics_updater.as_deref() {
-                        metrics.observe_control_list_allow_update(false);
-                    }
                     warn!(
                         target: TARGET,
                         msg_type = "ControlList",
@@ -392,9 +386,6 @@ pub fn build_control_lists_updaters(
 
                 // If at least 1 update of the list was possible
                 if successful_block != 0 {
-                    if let Some(metrics) = metrics_updater.as_deref() {
-                        metrics.observe_control_list_block_update(true);
-                    }
                     last_block_success = Some(now);
                     if let Err(e) = sender.send(Event::BlockListUpdated(vec_block_peers)).await {
                         debug!(
@@ -405,9 +396,6 @@ pub fn build_control_lists_updaters(
                         );
                     }
                 } else {
-                    if let Some(metrics) = metrics_updater.as_deref() {
-                        metrics.observe_control_list_block_update(false);
-                    }
                     warn!(
                         target: TARGET,
                         msg_type = "ControlList",
@@ -539,7 +527,6 @@ impl Behaviour {
         self.close_connections.extend(close_peers);
         self.allow_peers.clone_from(&new_list);
         if let Some(metrics) = self.metrics.as_deref() {
-            metrics.inc_control_list_allow_apply();
             metrics.set_control_list_allow_peers(self.allow_peers.len() as i64);
         }
     }
@@ -557,7 +544,6 @@ impl Behaviour {
         self.close_connections.extend(new_list.clone());
         self.block_peers.clone_from(&new_list);
         if let Some(metrics) = self.metrics.as_deref() {
-            metrics.inc_control_list_block_apply();
             metrics.set_control_list_block_peers(self.block_peers.len() as i64);
         }
     }
@@ -1100,31 +1086,25 @@ mod tests {
         let mut text = String::new();
         encode(&mut text, &registry).expect("encode metrics");
 
-        assert!(
+        assert_eq!(
             metric_value(
                 &text,
-                "network_control_list_updates_total{list=\"allow\",result=\"failure\"}"
-            ) >= 1.0
-        );
-        assert!(
-            metric_value(
-                &text,
-                "network_control_list_updates_total{list=\"block\",result=\"failure\"}"
-            ) >= 1.0
+                "network_control_list_allow_last_success_age_seconds"
+            ),
+            -1.0
         );
         assert_eq!(
             metric_value(
                 &text,
-                "network_control_list_updates_total{list=\"allow\",result=\"success\"}"
+                "network_control_list_block_last_success_age_seconds"
             ),
-            0.0
+            -1.0
         );
-        assert_eq!(
+        assert!(
             metric_value(
                 &text,
-                "network_control_list_updates_total{list=\"block\",result=\"success\"}"
-            ),
-            0.0
+                "network_control_list_updater_duration_seconds_count"
+            ) >= 1.0
         );
 
         cancel.cancel();
@@ -1180,13 +1160,7 @@ mod tests {
         assert!(
             metric_value(
                 &text,
-                "network_control_list_updates_total{list=\"allow\",result=\"success\"}"
-            ) >= 1.0
-        );
-        assert!(
-            metric_value(
-                &text,
-                "network_control_list_updates_total{list=\"block\",result=\"success\"}"
+                "network_control_list_updater_duration_seconds_count"
             ) >= 1.0
         );
 

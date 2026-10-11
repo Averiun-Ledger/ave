@@ -103,15 +103,28 @@ async fn public_auth_safe_mode_layer(
     next.run(req).await
 }
 
-async fn server_error_metrics_layer(
+async fn http_metrics_layer(
     req: Request<Body>,
     next: middleware::Next,
 ) -> Response {
+    use std::time::Instant;
+
+    use axum::extract::MatchedPath;
+
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+    let started = Instant::now();
     let response = next.run(req).await;
-    if response.status().is_server_error()
-        && let Some(metrics) = try_core_metrics()
-    {
-        metrics.observe_http_server_error();
+    if let Some(metrics) = try_core_metrics() {
+        metrics.observe_http_request(
+            &route,
+            response.status().as_u16(),
+            started.elapsed(),
+        );
     }
 
     response
@@ -1790,7 +1803,7 @@ pub fn build_routes(
 
         app.fallback(route_not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn(server_error_metrics_layer))
+            .layer(middleware::from_fn(http_metrics_layer))
     } else {
         let app = main_routes;
         #[cfg(feature = "prometheus")]
@@ -1801,7 +1814,7 @@ pub fn build_routes(
         }
         app.fallback(route_not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn(server_error_metrics_layer))
+            .layer(middleware::from_fn(http_metrics_layer))
     }
 }
 

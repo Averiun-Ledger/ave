@@ -780,6 +780,7 @@ impl Handler<Self> for Compilation {
                                     result_hash,
                                     result_hash_signature,
                                 );
+                                Self::observe_event("success");
                             }
                             CompilationRes::TimeOut => {
                                 Self::observe_event("timeout");

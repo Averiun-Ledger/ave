@@ -528,6 +528,13 @@ impl AuthDatabase {
         }
     }
 
+    pub(crate) fn record_login_attempt(&self, result: &'static str) {
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_login_attempt(result);
+        }
+    }
+
     pub fn metrics_snapshot(&self) -> DbMetricsSnapshot {
         let primary_lock_wait_count =
             self.metrics.primary_lock_wait_count.load(Ordering::Relaxed);
