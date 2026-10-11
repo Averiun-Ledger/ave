@@ -165,7 +165,12 @@ impl Bridge {
     ) -> Result<(), BridgeError> {
         let cancellation_token = token;
         let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to register SIGTERM handler");
+            tracing::error!(
+                target: "ave::bridge",
+                msg_type = "sigterm_failed",
+                error = %e,
+                "Failed to register SIGTERM handler"
+            );
             BridgeError::SignalRegistration(e.to_string())
         })?;
 

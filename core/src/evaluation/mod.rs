@@ -191,12 +191,14 @@ impl Evaluation {
                 // The child would stay idle forever under the signer
                 // name: stop the orphan before propagating.
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to evaluation coordinator, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan evaluation coordinator"
@@ -234,12 +236,14 @@ impl Evaluation {
                 .await
             {
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to local evaluator, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan local evaluator"

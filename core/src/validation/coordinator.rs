@@ -337,7 +337,7 @@ impl Handler<Self> for ValiCoordinator {
                                 sender = %sender,
                                 "Retry actor not found while closing validation coordinator"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
 
@@ -347,7 +347,7 @@ impl Handler<Self> for ValiCoordinator {
                                 error = %e,
                                 "Failed to end retry actor"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
                     }

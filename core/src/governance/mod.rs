@@ -422,7 +422,7 @@ impl Subject for Governance {
                     "Error verifying new ledger events"
                 );
 
-                // Falló en la creación
+                // Failed during creation
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
@@ -470,11 +470,11 @@ impl Subject for Governance {
                 let mut up_owner: bool = false;
 
                 if current_owner == *self.our_key {
-                    // Eramos dueños
+                    // We were owners
                     if current_owner != self.subject_metadata.owner {
-                        // Ya no somos dueño
+                        // No longer owner
                         if !current_new_owner_some && !i_new_owner {
-                            // Si antes new owner false
+                            // If new owner was false before
                             up_not_owner = true;
                         } else if current_new_owner_some && i_new_owner {
                             up_owner = true;
@@ -583,7 +583,11 @@ impl Subject for Governance {
                     .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
                     .await
                 {
-                    error!(error = %e, "Failed to notify NodeSinkManager");
+                    warn!(
+                        msg_type = "SinkNotify",
+                        error = %e,
+                        "Failed to notify NodeSinkManager"
+                    );
                 }
             }
             Err(e) => {
@@ -1232,6 +1236,7 @@ impl Governance {
                 // The staged artifact is not the one the quorum
                 // anchored: discard it.
                 warn!(
+                    msg_type = "StagedMismatch",
                     schema_id = %schema_id,
                     staged_hash = %record.wasm_hash,
                     evidence_hash = %evidence_wasm_hash,
@@ -1753,6 +1758,7 @@ impl Governance {
                 })
                 .is_some();
         tracing::info!(
+            msg_type = "CompilerBoot",
             governance_id = %self.subject_metadata.subject_id,
             gov_version = self.properties.version,
             toolchain_pin = %self.properties.toolchain,

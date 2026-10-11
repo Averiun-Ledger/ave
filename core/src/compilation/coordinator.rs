@@ -246,6 +246,7 @@ impl Handler<Self> for CompileCoordinator {
                 // result deadline governs the wait from now on.
                 if self.acked {
                     debug!(
+                        msg_type = "Retry",
                         node_key = %self.node_key,
                         request_id = %self.request_id,
                         version = self.version,
@@ -255,6 +256,7 @@ impl Handler<Self> for CompileCoordinator {
                 }
 
                 warn!(
+                    msg_type = "Retry",
                     node_key = %self.node_key,
                     request_id = %self.request_id,
                     version = self.version,
@@ -267,6 +269,7 @@ impl Handler<Self> for CompileCoordinator {
             }
             CompileCoordinatorMessage::ResultDeadline => {
                 warn!(
+                    msg_type = "Deadline",
                     node_key = %self.node_key,
                     request_id = %self.request_id,
                     version = self.version,

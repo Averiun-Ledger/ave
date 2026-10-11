@@ -769,7 +769,11 @@ impl SinkSubjectWorker {
                     }
                 }
             } else {
-                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Governance not found for catch-up query");
+                warn!(
+                    msg_type = "CatchUpQuery",
+                    subject_id = %subject_id,
+                    "Governance not found for catch-up query"
+                );
                 SubjectQuery::NotFound
             }
         } else {
@@ -792,7 +796,11 @@ impl SinkSubjectWorker {
             ) {
                 Ok(d) => d,
                 Err(_) => {
-                    error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
+                    warn!(
+                        msg_type = "CatchUpQuery",
+                        subject_id = %subject_id,
+                        "Invalid subject_id format"
+                    );
                     return SubjectQuery::NotFound;
                 }
             };

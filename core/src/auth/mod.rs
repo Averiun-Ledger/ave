@@ -248,6 +248,7 @@ impl Actor for SubjectAccess {
     ) -> Result<(), ActorError> {
         if let Err(e) = self.init_store("auth", None, false, ctx).await {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize subject_access store"
             );
@@ -596,6 +597,7 @@ impl Handler<Self> for SubjectAccess {
                                                 .await
                                                 .map_err(|e| {
                                                     error!(
+                                                        msg_type = "Witnesses",
                                                         subject_id = %subject_id,
                                                         governance_id = %governance_id,
                                                         error = %e,
@@ -725,6 +727,7 @@ impl Handler<Self> for SubjectAccess {
     ) {
         if let Err(e) = self.persist(event, ctx).await {
             error!(
+                msg_type = "Persist",
                 error = %e,
                 "Failed to persist subject_access event"
             );

@@ -1034,6 +1034,7 @@ impl RequestHandler {
                     actor.tell(RequestManagerMessage::ManualAbort).await
                 {
                     warn!(
+                        msg_type = "Purge",
                         subject_id = %subject_id,
                         error = %e,
                         "Failed to abort in-flight request before purge"
@@ -1159,6 +1160,7 @@ impl Actor for RequestHandler {
     ) -> Result<(), ActorError> {
         if let Err(e) = self.init_store("request", None, false, ctx).await {
             error!(
+                msg_type = "PreStart",
                 error = %e,
                 "Failed to initialize store during pre_start"
             );
@@ -1168,6 +1170,7 @@ impl Actor for RequestHandler {
         let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             error!(
+                msg_type = "PreStart",
                 helper = "config",
                 "Config helper not found during pre_start"
             );
@@ -1181,7 +1184,11 @@ impl Actor for RequestHandler {
             let Some(ext_db): Option<Arc<ExternalDB>> =
                 ctx.system().get_helper("ext_db")
             else {
-                error!("External database helper not found");
+                error!(
+                    msg_type = "PreStart",
+                    helper = "ext_db",
+                    "External database helper not found"
+                );
                 return Err(ActorError::Helper {
                     name: "ext_db".to_string(),
                     reason: "Not found".to_string(),
@@ -1198,6 +1205,7 @@ impl Actor for RequestHandler {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(
+                        msg_type = "PreStart",
                         error = %e,
                         "Failed to create tracking child during pre_start"
                     );
@@ -1212,6 +1220,7 @@ impl Actor for RequestHandler {
         let Some((hash, network)) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
             error!(
+                msg_type = "PreStart",
                 error = %e,
                 "Failed to obtain helpers during pre_start"
             );
@@ -1265,6 +1274,7 @@ impl Actor for RequestHandler {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(
+                        msg_type = "PreStart",
                         subject_id = %subject_id,
                         error = %e,
                         "Failed to create request manager child during pre_start"
@@ -1280,6 +1290,7 @@ impl Actor for RequestHandler {
                 .await
             {
                 error!(
+                    msg_type = "PreStart",
                     subject_id = %subject_id,
                     request_id = %request_id,
                     error = %e,
@@ -1398,7 +1409,11 @@ impl Handler<Self> for RequestHandler {
                     let err = RequestHandlerError::SignatureVerification(
                         e.to_string(),
                     );
-                    error!(error = %err, "Request signature verification failed");
+                    warn!(
+                        msg_type = "NewRequest",
+                        error = %err,
+                        "Request signature verification failed"
+                    );
                     return Err(ActorError::from(err));
                 };
 
@@ -1454,7 +1469,7 @@ impl Handler<Self> for RequestHandler {
 
                 if !subject_data.get_active() {
                     let subject_id = request.content().get_subject_id();
-                    error!(
+                    warn!(
                         msg_type = "NewRequest",
                         subject_id = %subject_id,
                         "Subject is not active"
@@ -1469,7 +1484,7 @@ impl Handler<Self> for RequestHandler {
                 if let Err(e) =
                     Self::check_event_request(request.content(), is_gov)
                 {
-                    error!(
+                    warn!(
                         msg_type = "NewRequest",
                         error = %e,
                         "Event request validation failed"

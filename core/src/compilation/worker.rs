@@ -235,6 +235,7 @@ impl CompileWorker {
             .await
         {
             debug!(
+                msg_type = "Stop",
                 error = %error,
                 request_id = %pending.request_id,
                 "Could not notify compiler unavailability while stopping"

@@ -1265,6 +1265,7 @@ impl ContractCompiler {
             return Ok(true);
         }
         warn!(
+            msg_type = "Reconcile",
             contract_name = %contract_name,
             "Persisted artifact failed reconcile re-verification, discarding it"
         );
@@ -1618,7 +1619,8 @@ impl Handler<Self> for ContractCompiler {
                             .await
                             .is_err()
                         {
-                            warn!(
+                            debug!(
+                                msg_type = "Compile",
                                 toolchain_pin = %toolchain_pin,
                                 contract_name = %contract_name,
                                 "No local toolchain for pin, staying dormant"
@@ -1988,7 +1990,8 @@ impl Handler<Self> for ContractCompiler {
                             .await
                             .is_err()
                         {
-                            warn!(
+                            debug!(
+                                msg_type = "Heal",
                                 toolchain_pin = %toolchain_pin,
                                 contract_name = %contract_name,
                                 "No local toolchain for pin, healing stays dormant"

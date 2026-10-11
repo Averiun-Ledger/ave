@@ -94,6 +94,7 @@ impl Handler<Self> for Updater {
         match msg {
             UpdaterMessage::EndRetry => {
                 warn!(
+                    msg_type = "Retry",
                     node_key = %self.node_key,
                     "Retry exhausted, notifying parent and stopping"
                 );
@@ -109,6 +110,7 @@ impl Handler<Self> for Updater {
                             .await
                         {
                             error!(
+                                msg_type = "Timeout",
                                 error = %e,
                                 "Failed to send timeout response to update actor"
                             );
@@ -122,6 +124,7 @@ impl Handler<Self> for Updater {
                     }
                     Err(e) => {
                         error!(
+                            msg_type = "Update",
                             error = %e,
                             path = %ctx.path().parent(),
                             "Update actor not found"
@@ -253,7 +256,7 @@ impl Handler<Self> for Updater {
                             sender = %sender,
                             "Retry actor not found while closing updater"
                         );
-                        // Aquí me da igual, porque al parar este actor para el hijo
+                        // Stopping this actor stops the child too
                         break 'retry;
                     };
 
@@ -263,7 +266,7 @@ impl Handler<Self> for Updater {
                             error = %e,
                             "Failed to end retry actor"
                         );
-                        // Aquí me da igual, porque al parar este actor para el hijo
+                        // Stopping this actor stops the child too
                         break 'retry;
                     };
                 }

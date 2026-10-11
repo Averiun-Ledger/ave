@@ -933,6 +933,8 @@ impl AuthDatabase {
             Ok(conn) => conn,
             Err(error) => {
                 warn!(
+                    target: "ave::http::auth",
+                    msg_type = "touch_skipped",
                     error = %error,
                     "touch last_used: no connection, skipped"
                 );
@@ -944,6 +946,8 @@ impl AuthDatabase {
             params![Self::now(), ip_address, key_id],
         ) {
             warn!(
+                target: "ave::http::auth",
+                msg_type = "touch_failed",
                 error = %error,
                 "touch last_used failed, skipped"
             );

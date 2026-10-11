@@ -30,6 +30,7 @@ pub fn tower_trace(routes: Router) -> Router {
             .on_request(|request: &Request<_>, _span: &Span| {
                 debug!(
                     target: TARGET,
+                    msg_type = "http_request",
                     method = %request.method(),
                     path = %request.uri().path(),
                     "request received"
@@ -39,6 +40,7 @@ pub fn tower_trace(routes: Router) -> Router {
                 |response: &Response, latency: Duration, _span: &Span| {
                     debug!(
                         target: TARGET,
+                        msg_type = "http_response",
                         status = response.status().as_u16(),
                         latency_ms = latency.as_millis(),
                         "response sent"
@@ -46,7 +48,12 @@ pub fn tower_trace(routes: Router) -> Router {
                 },
             )
             .on_body_chunk(|chunk: &Bytes, _latency: Duration, _span: &Span| {
-                trace!(target: TARGET, bytes = chunk.len(), "sending body chunk")
+                trace!(
+                    target: TARGET,
+                    msg_type = "http_body",
+                    bytes = chunk.len(),
+                    "sending body chunk"
+                )
             })
             .on_eos(
                 |_trailers: Option<&HeaderMap>,
@@ -54,6 +61,7 @@ pub fn tower_trace(routes: Router) -> Router {
                  _span: &Span| {
                     trace!(
                         target: TARGET,
+                        msg_type = "http_stream",
                         duration_ms = stream_duration.as_millis(),
                         "stream closed"
                     )
@@ -65,6 +73,7 @@ pub fn tower_trace(routes: Router) -> Router {
                  _span: &Span| {
                     warn!(
                         target: TARGET,
+                        msg_type = "http_failed",
                         error = %error,
                         latency_ms = latency.as_millis(),
                         "request failed"

@@ -840,7 +840,7 @@ impl Handler<Self> for SinkManager {
             }
             SinkManagerMessage::PurgeStorage => {
                 purge_storage(ctx).await?;
-                debug!("Sink manager storage purged");
+                debug!(msg_type = "PurgeStore", "Sink manager storage purged");
             }
             SinkManagerMessage::CatchUpCompleted { sink, subject_id } => {
                 self.handle_catch_up_completed(sink, subject_id, ctx)
@@ -1032,7 +1032,14 @@ impl Handler<Self> for SinkManager {
                 sn,
                 reason,
             } => {
-                error!(msg_type = "DeliveryFailed", sink = %sink, subject_id = %subject_id, sn = %sn, reason = %reason, "Sink delivery failed");
+                warn!(
+                    msg_type = "DeliveryFailed",
+                    sink = %sink,
+                    subject_id = %subject_id,
+                    sn = %sn,
+                    reason = %reason,
+                    "Sink delivery failed"
+                );
                 self.last_errors.insert(sink.clone(), reason.clone());
                 self.catch_up_in_flight
                     .remove(&(sink.clone(), subject_id.clone()));
@@ -1764,7 +1771,7 @@ impl SinkManager {
                 .map(|sn| sn.saturating_add(1))
                 .unwrap_or(0);
             if sn != expected_sn {
-                warn!(
+                debug!(
                     msg_type = "SequentialGap",
                     sink = %sink_name,
                     subject_id = %subject_id,

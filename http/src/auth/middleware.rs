@@ -17,7 +17,7 @@ use axum::{
 };
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 const TARGET: &str = "ave::http::auth";
 
@@ -28,7 +28,6 @@ const TARGET: &str = "ave::http::auth";
 /// New API key authentication extractor that uses the database
 ///
 /// This extractor validates the API key and provides full auth context.
-/// Use this instead of the legacy ApiKeyAuth.
 pub struct ApiKeyAuthNew;
 
 impl<S> FromRequestParts<S> for ApiKeyAuthNew
@@ -117,8 +116,9 @@ where
                         "rate_limited",
                         request_started.elapsed(),
                     );
-                    warn!(
+                    debug!(
                         target: TARGET,
+                        msg_type = "auth_rate_limited",
                         ip = ?ip_address,
                         error = %message,
                         "authenticated request rate limited"
@@ -134,8 +134,9 @@ where
                         request_result_from_status(StatusCode::FORBIDDEN),
                         request_started.elapsed(),
                     );
-                    warn!(
+                    debug!(
                         target: TARGET,
+                        msg_type = "auth_blocked",
                         ip = ?ip_address,
                         error = %message,
                         "api key blocked pending password change"
@@ -152,8 +153,9 @@ where
                         request_result_from_status(StatusCode::UNAUTHORIZED),
                         request_started.elapsed(),
                     );
-                    warn!(
+                    debug!(
                         target: TARGET,
+                        msg_type = "auth_failed",
                         ip = ?ip_address,
                         error = %e,
                         "api key authentication failed"

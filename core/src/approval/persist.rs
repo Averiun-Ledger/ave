@@ -161,6 +161,7 @@ impl ApprPersist {
                 Ok(gov) => gov,
                 Err(e) => {
                     error!(
+                        msg_type = "Init",
                         subject_id = %metadata.subject_id,
                         error = %e,
                         "Failed to convert governance from properties"
@@ -179,7 +180,7 @@ impl ApprPersist {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
             }
             std::cmp::Ordering::Greater => {
-                // Me llega una versión mayor a la mía.
+                // Received a higher version than ours.
                 let data = UpdateData {
                     sn: metadata.sn,
                     gov_version: governance.version,
@@ -241,6 +242,7 @@ impl ApprPersist {
                 Err(e) => {
                     // The collecting validator is gone: the vote is moot.
                     debug!(
+                        msg_type = "Response",
                         error = %e,
                         asker_actor = %asker.1,
                         "Validator worker not found, dropping approval response"
@@ -428,6 +430,7 @@ impl Actor for ApprPersist {
             .await
         {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize approver store"
             );
@@ -637,7 +640,7 @@ impl Handler<Self> for ApprPersist {
                     }
 
                     if let Err(e) = approval_req.verify() {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
                             "Invalid approval signature"
@@ -977,7 +980,7 @@ impl ApprPersist {
         let state = if let Some(state) = self.state.clone() {
             state
         } else {
-            warn!(msg_type = msg_type, "Approval state not found");
+            error!(msg_type = msg_type, "Approval state not found");
             let e = ActorError::FunctionalCritical {
                 description: "Can not get state".to_owned(),
             };
@@ -1146,7 +1149,7 @@ impl PersistentActor for ApprPersist {
         match event {
             ApprPersistEvent::ChangeState { state, .. } => {
                 debug!(
-                    event_type = "ChangeState",
+                    msg_type = "ChangeState",
                     new_state = ?state,
                     "Approval state changed"
                 );

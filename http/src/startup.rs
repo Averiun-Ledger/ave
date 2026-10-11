@@ -155,16 +155,30 @@ fn log_effective_configuration(
     config: &BridgeConfig,
     secrets: &StartupSecrets,
 ) {
-    info!(target: TARGET, "--- configuration ---");
-    info!(target: TARGET, "[runtime]");
+    info!(target: TARGET, msg_type = "startup_config", "--- configuration ---");
+    info!(target: TARGET, msg_type = "startup_config", "[runtime]");
     if config_path.is_empty() {
-        info!(target: TARGET, "  config    : default (built-in)");
+        info!(
+            target: TARGET,
+            msg_type = "startup_config",
+            "  config    : default (built-in)"
+        );
     } else {
-        info!(target: TARGET, "  config    : {}", config_path);
+        info!(
+            target: TARGET,
+            msg_type = "startup_config",
+            "  config    : {}",
+            config_path
+        );
     }
-    info!(target: TARGET, "  safe mode : {}", config.node.safe_mode);
+    info!(
+        target: TARGET,
+        msg_type = "startup_config",
+        "  safe mode : {}",
+        config.node.safe_mode
+    );
 
-    info!(target: TARGET, "[secrets]");
+    info!(target: TARGET, msg_type = "startup_config", "[secrets]");
     info!(
         target: TARGET,
         "  auth pass : {} ({})",
@@ -209,9 +223,17 @@ fn log_effective_configuration(
     match config_log_sections(config) {
         Ok(sections) => {
             for (section, lines) in &sections {
-                info!(target: TARGET, "[{section}]");
+                info!(
+                    target: TARGET,
+                    msg_type = "startup_config",
+                    "[{section}]"
+                );
                 for line in lines {
-                    info!(target: TARGET, "  {line}");
+                    info!(
+                        target: TARGET,
+                        msg_type = "startup_config",
+                        "  {line}"
+                    );
                 }
             }
         }
@@ -223,7 +245,7 @@ fn log_effective_configuration(
         }
     }
 
-    info!(target: TARGET, "--- end ---");
+    info!(target: TARGET, msg_type = "startup_config", "--- end ---");
 }
 
 /// Config keys whose values must never appear in logs. Non-empty values are
@@ -612,7 +634,7 @@ async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
     tokio::spawn(async move {
         join_all(runners).await;
         handle.graceful_shutdown(Some(Duration::from_secs(10)));
-        info!(target: TARGET, "all runners stopped");
+        info!(target: TARGET, msg_type = "shutdown", "all runners stopped");
     });
 
     let app = tower_trace(build_routes(
@@ -696,7 +718,7 @@ async fn serve_http(
         )
         .with_graceful_shutdown(async move {
             join_all(runners).await;
-            info!(target: TARGET, "all runners stopped");
+            info!(target: TARGET, msg_type = "shutdown", "all runners stopped");
             let _ = shutdown_tx.send(());
         }),
     );

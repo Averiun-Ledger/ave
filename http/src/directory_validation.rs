@@ -28,7 +28,11 @@ pub fn validate_http_paths(config: &BridgeConfig) -> Result<(), String> {
         check_file_or_parent(key_path, "https_private_key_path", need_write)?;
     }
 
-    info!(target: TARGET, "HTTP path permissions verified successfully");
+    info!(
+        target: TARGET,
+        msg_type = "paths_verified",
+        "HTTP path permissions verified successfully"
+    );
     Ok(())
 }
 

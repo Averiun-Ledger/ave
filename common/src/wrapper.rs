@@ -954,26 +954,27 @@ mod tests {
     }
 }
 
-/// Payload de boundary host-contrato.
+/// Host-contract boundary payload.
 ///
-/// Transporta bytes JSON crudos entre el runtime Ave y los contratos WASM.
-/// No contiene un DOM; es una envoltura Borsh nativa de `Vec<u8>`.
+/// Carries raw JSON bytes between the Ave runtime and WASM contracts.
+/// It holds no DOM; it is a native Borsh wrapper over `Vec<u8>`.
 ///
-/// El host serializa su `serde_json::Value` a bytes UTF-8, los envuelve en
-/// `ContractData` y los envía al contrato. El contrato recibe `ContractData`,
-/// extrae los bytes y hace `serde_json::from_slice::<T>()` directamente.
+/// The host serializes its `serde_json::Value` to UTF-8 bytes, wraps
+/// them in `ContractData` and sends them to the contract. The contract
+/// receives `ContractData`, extracts the bytes and calls
+/// `serde_json::from_slice::<T>()` directly.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractData(pub Vec<u8>);
 
 impl ContractData {
-    /// Crea `ContractData` a partir de un `serde_json::Value`.
+    /// Creates `ContractData` from a `serde_json::Value`.
     pub fn from_json_value(
         value: &serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self(serde_json::to_vec(value)?))
     }
 
-    /// Reconstruye un `serde_json::Value` a partir de los bytes internos.
+    /// Rebuilds a `serde_json::Value` from the inner bytes.
     pub fn to_json_value(
         &self,
     ) -> Result<serde_json::Value, serde_json::Error> {
@@ -981,10 +982,10 @@ impl ContractData {
     }
 }
 
-/// Resultado de ejecución de contrato en el boundary.
+/// Contract execution result at the boundary.
 ///
-/// Usado por el contrato para devolver el estado final al host.
-/// El host convierte `ContractData` → `ValueWrapper` para uso interno.
+/// Used by the contract to return the final state to the host.
+/// The host converts `ContractData` → `ValueWrapper` for internal use.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractResultData {
     pub final_state: ContractData,
@@ -1006,9 +1007,9 @@ impl ContractResultData {
     }
 }
 
-/// Resultado de validación de inicialización en el boundary.
+/// Init-check validation result at the boundary.
 ///
-/// Usado por el contrato para devolver el resultado de `init_check_function`.
+/// Used by the contract to return the result of `init_check_function`.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractInitCheckData {
     pub success: bool,

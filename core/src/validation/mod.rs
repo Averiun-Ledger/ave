@@ -203,12 +203,14 @@ impl Validation {
                 .await
             {
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to validation coordinator, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan validation coordinator"
@@ -266,12 +268,14 @@ impl Validation {
                 .await
             {
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to local validator, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan local validator"
@@ -579,7 +583,7 @@ impl Handler<Self> for Validation {
                                             .push(signature);
                                     }
                                     (signed, _) => {
-                                        error!(
+                                        warn!(
                                             msg_type = "Response",
                                             sender = %sender,
                                             signed = signed.is_some(),
@@ -628,7 +632,7 @@ impl Handler<Self> for Validation {
                                         req_hash_matches,
                                         approval_matches,
                                     ) => {
-                                        error!(
+                                        warn!(
                                             msg_type = "Response",
                                             sender = %sender,
                                             signed = signed.is_some(),

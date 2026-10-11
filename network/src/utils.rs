@@ -296,6 +296,7 @@ async fn request_peer_list(
             if !res.status().is_success() {
                 warn!(
                     target: TARGET,
+                    msg_type = "ControlList",
                     list_kind = list_kind,
                     url = service,
                     status = %res.status(),
@@ -315,6 +316,7 @@ async fn request_peer_list(
                 Err(ListBodyError::TooLarge) => {
                     warn!(
                         target: TARGET,
+                        msg_type = "ControlList",
                         list_kind = list_kind,
                         url = service,
                         max_bytes = MAX_CONTROL_LIST_BODY_BYTES,
@@ -325,6 +327,7 @@ async fn request_peer_list(
                 Err(ListBodyError::Read(e)) => {
                     warn!(
                         target: TARGET,
+                        msg_type = "ControlList",
                         list_kind = list_kind,
                         url = service,
                         error = %e,
@@ -339,6 +342,7 @@ async fn request_peer_list(
                 Err(e) => {
                     warn!(
                         target: TARGET,
+                        msg_type = "ControlList",
                         list_kind = list_kind,
                         url = service,
                         error = %e,
@@ -352,6 +356,7 @@ async fn request_peer_list(
             if e.is_timeout() {
                 warn!(
                     target: TARGET,
+                    msg_type = "ControlList",
                     list_kind = list_kind,
                     url = service,
                     timeout_secs = request_timeout.as_secs_f64(),
@@ -360,6 +365,7 @@ async fn request_peer_list(
             } else {
                 warn!(
                     target: TARGET,
+                    msg_type = "ControlList",
                     list_kind = list_kind,
                     url = service,
                     error = %e,

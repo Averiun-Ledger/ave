@@ -158,7 +158,13 @@ pub async fn cert_needs_renewal(
     let pem_data = match fs::read(cert_path).await {
         Ok(data) => data,
         Err(e) => {
-            warn!(target: TARGET, "Could not read certificate file: {}, forcing renewal", e);
+            warn!(
+                target: TARGET,
+                msg_type = "cert_read_failed",
+                error = %e,
+                "Could not read certificate file,
+                forcing renewal"
+            );
             return true;
         }
     };
@@ -174,14 +180,20 @@ pub async fn cert_needs_renewal(
                 let days_until_expiry = (expiry - now).whole_days();
                 warn!(
                     target: TARGET,
-                    "Certificate expires in {} days, renewal needed",
-                    days_until_expiry
+                    msg_type = "cert_expiring",
+                    days_until_expiry = days_until_expiry,
+                    "Certificate expires soon, renewal needed"
                 );
                 return true;
             }
         }
         None => {
-            warn!(target: TARGET, "Could not parse certificate expiry, forcing renewal");
+            warn!(
+                target: TARGET,
+                msg_type = "cert_expiry_parse_failed",
+                "Could not parse certificate expiry,
+                forcing renewal"
+            );
             return true;
         }
     }
@@ -189,18 +201,22 @@ pub async fn cert_needs_renewal(
     // Check SANs match current configuration
     let expected = expected_sans(config);
     match parse_cert_sans(&pem_data) {
-        Some(current) if current == expected => false,
-        Some(current) => {
+        Some(_current) if _current == expected => false,
+        Some(_) => {
             warn!(
                 target: TARGET,
-                "Certificate SANs do not match configuration (current: {:?}, expected: {:?}), renewal needed",
-                current,
-                expected
+                msg_type = "cert_san_mismatch",
+                "Certificate SANs do not match configuration, renewal needed"
             );
             true
         }
         None => {
-            warn!(target: TARGET, "Could not parse certificate SANs, forcing renewal");
+            warn!(
+                target: TARGET,
+                msg_type = "cert_san_parse_failed",
+                "Could not parse certificate SANs,
+                forcing renewal"
+            );
             true
         }
     }
@@ -263,12 +279,22 @@ pub async fn cert_renewal_task(
                             info!(target: TARGET, "Certificate renewed and reloaded successfully");
                         }
                         Err(e) => {
-                            error!(target: TARGET, "Failed to reload certificate: {}", e);
+                            error!(
+                                target: TARGET,
+                                msg_type = "cert_reload_failed",
+                                error = %e,
+                                "Failed to reload certificate"
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    error!(target: TARGET, "Failed to generate new certificate: {}", e);
+                    error!(
+                        target: TARGET,
+                        msg_type = "cert_generate_failed",
+                        error = %e,
+                        "Failed to generate new certificate"
+                    );
                 }
             }
         }

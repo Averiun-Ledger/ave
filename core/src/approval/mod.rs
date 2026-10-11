@@ -240,6 +240,7 @@ impl Approval {
                 self.create_validators(ctx, replacement.clone()).await
             {
                 error!(
+                    msg_type = "Supervise",
                     error = %e,
                     signer = %replacement,
                     "Failed to create replacement approval validator"
@@ -303,12 +304,14 @@ impl Approval {
                 .await
             {
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to approval coordinator, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan approval coordinator"
@@ -361,12 +364,14 @@ impl Approval {
                 .await
             {
                 warn!(
+                    msg_type = "Supervise",
                     signer = %signer,
                     error = %e,
                     "Failed to dispatch to local approval collector, stopping orphan"
                 );
                 if let Err(stop_err) = child.ask_stop().await {
                     warn!(
+                        msg_type = "Supervise",
                         signer = %signer,
                         error = %stop_err,
                         "Failed to stop orphan local approval collector"
@@ -422,6 +427,7 @@ impl Approval {
             };
             if let Err(e) = send {
                 warn!(
+                    msg_type = "Supervise",
                     error = %e,
                     validator = %validator,
                     "Local approval validator worker gone, replacing it"

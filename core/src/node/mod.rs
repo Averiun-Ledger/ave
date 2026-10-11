@@ -363,7 +363,7 @@ impl Node {
         {
             config.contracts_path
         } else {
-            error!("Config helper not found");
+            error!(msg_type = "Config", "Config helper not found");
             return Err(ActorError::Helper {
                 name: "config".to_owned(),
                 reason: "Not found".to_string(),
@@ -961,7 +961,7 @@ impl Actor for Node {
         let Some(config_helper) =
             ctx.system().get_helper::<ConfigHelper>("config")
         else {
-            error!("Config helper not found");
+            error!(msg_type = "Config", "Config helper not found");
             return Err(ActorError::Helper {
                 name: "config".to_string(),
                 reason: "Not found".to_string(),
@@ -1857,7 +1857,11 @@ async fn populate_sink_registry(
                     "duplicate sink name '{}' in configuration",
                     server.server
                 );
-                error!(%msg);
+                error!(
+                    msg_type = "SinkRegistry",
+                    server = %server.server,
+                    "duplicate sink name in configuration"
+                );
                 return Err(ActorError::Functional { description: msg });
             }
             config_names.insert(server.server.clone());

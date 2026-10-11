@@ -382,6 +382,7 @@ impl RequestManager {
 
         if signers.is_empty() {
             warn!(
+                msg_type = "NoCompilers",
                 request_id = %self.id,
                 schema_id = %metadata.schema_id,
                 "No compilers available for schema"
@@ -477,7 +478,12 @@ impl RequestManager {
             crate::watchdog::PHASE_COMPILATION,
             crate::watchdog::budget_for_compilation(schemas),
         )?;
-        info!("Init compilation {}", self.id);
+        debug!(
+            msg_type = "PhaseStart",
+            phase = "compilation",
+            request_id = %self.id,
+            "Init compilation"
+        );
         let child = ctx
             .create_child(
                 "compilation",
@@ -542,6 +548,7 @@ impl RequestManager {
 
         if signers.is_empty() {
             warn!(
+                msg_type = "NoEvaluators",
                 request_id = %self.id,
                 schema_id = %metadata.schema_id,
                 "No evaluators available for schema"
@@ -824,7 +831,8 @@ impl RequestManager {
                     )
                 }
                 _ => {
-                    error!(
+                    warn!(
+                        msg_type = "BadEvalReq",
                         request_id = %self.id,
                         is_gov = is_gov,
                         request_type = ?request_type,
@@ -906,7 +914,12 @@ impl RequestManager {
             crate::watchdog::PHASE_EVALUATION,
             crate::watchdog::budget_for_evaluation(signers.len() as u32),
         )?;
-        info!("Init evaluation {}", self.id);
+        debug!(
+            msg_type = "PhaseStart",
+            phase = "evaluation",
+            request_id = %self.id,
+            "Init evaluation"
+        );
         let child = ctx
             .create_child(
                 "evaluation",
@@ -1408,7 +1421,12 @@ impl RequestManager {
                 ave_common::identity::TimeStamp::now(),
             ),
         )?;
-        info!("Init approval {}", self.id);
+        debug!(
+            msg_type = "PhaseStart",
+            phase = "approval",
+            request_id = %self.id,
+            "Init approval"
+        );
         let child = ctx
             .create_child(
                 "approval",
@@ -1462,7 +1480,12 @@ impl RequestManager {
             crate::watchdog::PHASE_VALIDATION,
             crate::watchdog::budget_for_validation(signers.len() as u32),
         )?;
-        info!("Init validation {}", self.id);
+        debug!(
+            msg_type = "PhaseStart",
+            phase = "validation",
+            request_id = %self.id,
+            "Init validation"
+        );
         let child = ctx
             .create_child(
                 "validation",
@@ -1698,7 +1721,12 @@ impl RequestManager {
         };
 
         self.start_phase_metrics("distribution");
-        info!("Init distribution {}", self.id);
+        debug!(
+            msg_type = "PhaseStart",
+            phase = "distribution",
+            request_id = %self.id,
+            "Init distribution"
+        );
         let child = ctx
             .create_child(
                 "distribution",
@@ -1803,7 +1831,7 @@ impl RequestManager {
                 );
             }
         } else if witnesses.len() == 1 {
-            let Some(objetive) = witnesses.iter().next() else {
+            let Some(objective) = witnesses.iter().next() else {
                 error!(
                     request_id = %self.id,
                     governance_id = %governance_id,
@@ -1818,7 +1846,7 @@ impl RequestManager {
                 ));
             };
             let info = ComunicateInfo {
-                receiver: objetive.clone(),
+                receiver: objective.clone(),
                 request_id: String::default(),
                 version: 0,
                 receiver_actor: format!(
@@ -2024,7 +2052,12 @@ impl RequestManager {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         self.finish_request_metrics("finished");
-        info!("Ending {}", self.id);
+        info!(
+            msg_type = "RequestFinish",
+            request_id = %self.id,
+            "Ending {}",
+            self.id
+        );
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
@@ -2082,7 +2115,12 @@ impl RequestManager {
 
         match reboot_type {
             RebootType::Normal => {
-                info!("Launching Normal reboot {}", self.id);
+                debug!(
+                    msg_type = "Reboot",
+                    kind = "normal",
+                    request_id = %self.id,
+                    "Launching Normal reboot"
+                );
                 send_to_tracking(
                     ctx,
                     RequestTrackingMessage::UpdateState {
@@ -2101,7 +2139,12 @@ impl RequestManager {
                     .await?;
             }
             RebootType::Diff => {
-                info!("Launching Diff reboot {}", self.id);
+                debug!(
+                    msg_type = "Reboot",
+                    kind = "diff",
+                    request_id = %self.id,
+                    "Launching Diff reboot"
+                );
                 self.retry_diff += 1;
 
                 let seconds = Self::retry_seconds_for_attempt(
@@ -2109,9 +2152,12 @@ impl RequestManager {
                     self.retry_diff,
                 );
 
-                info!(
-                    "Launching Diff reboot {}, try: {}, seconds: {}",
-                    self.id, self.retry_diff, seconds
+                debug!(
+                    msg_type = "RebootRetry",
+                    request_id = %self.id,
+                    try = self.retry_diff,
+                    seconds = seconds,
+                    "Launching Diff reboot retry"
                 );
 
                 send_to_tracking(
@@ -2143,8 +2189,11 @@ impl RequestManager {
                 );
 
                 info!(
-                    "Launching TimeOut reboot {}, try: {}, seconds: {}",
-                    self.id, self.retry_timeout, seconds
+                    msg_type = "RebootTimeout",
+                    request_id = %self.id,
+                    try = self.retry_timeout,
+                    seconds = seconds,
+                    "Launching TimeOut reboot"
                 );
                 send_to_tracking(
                     ctx,
@@ -2485,7 +2534,7 @@ impl RequestManager {
         }
     }
 
-    async fn stops_childs(
+    async fn stop_children(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
@@ -2545,7 +2594,7 @@ impl RequestManager {
         sn: Option<u64>,
         who: PublicKey,
     ) -> Result<(), RequestManagerError> {
-        self.stops_childs(ctx).await?;
+        self.stop_children(ctx).await?;
 
         // The approvers' pending state for this request is dropped when
         // an in-flight request with approval is aborted. An abort
@@ -2580,7 +2629,12 @@ impl RequestManager {
         self.sweep_staged_contracts(ctx).await;
 
         self.finish_request_metrics("aborted");
-        info!("Aborting {}", self.id);
+        info!(
+            msg_type = "RequestAbort",
+            request_id = %self.id,
+            "Aborting {}",
+            self.id
+        );
         send_to_tracking(
             ctx,
             RequestTrackingMessage::UpdateState {
@@ -2781,7 +2835,6 @@ impl Handler<Self> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
-                    info!("Init reboot update {}", self.id);
                     debug!(
                         msg_type = "RebootUpdate",
                         request_id = %self.id,
@@ -2808,7 +2861,6 @@ impl Handler<Self> for RequestManager {
                 request_id,
             } => {
                 if request_id == self.id {
-                    info!("Init reboot wait {}", self.id);
                     debug!(
                         msg_type = "RebootWait",
                         request_id = %self.id,
@@ -2851,13 +2903,13 @@ impl Handler<Self> for RequestManager {
                             reboot_type = ?reboot_type,
                             "Initiating reboot"
                         );
-                        if let Err(e) = self.stops_childs(ctx).await {
+                        if let Err(e) = self.stop_children(ctx).await {
                             error!(
                                 msg_type = "Reboot",
                                 request_id = %self.id,
                                 governance_id = %governance_id,
                                 error = %e,
-                                "Failed to stop childs"
+                                "Failed to stop children"
                             );
                             self.match_error(ctx, e).await;
                             return Ok(());
@@ -2893,19 +2945,18 @@ impl Handler<Self> for RequestManager {
                         );
                         return Ok(());
                     }
-                    info!("Init reboot finish {}", self.id);
                     debug!(
                         msg_type = "FinishReboot",
                         request_id = %self.id,
                         version = self.version,
                         "Reboot completed, resuming request"
                     );
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "FinishReboot",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs before resuming"
+                            "Failed to stop children before resuming"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -3003,9 +3054,11 @@ impl Handler<Self> for RequestManager {
                             }
                         }
                         _ => {
-                            info!(
-                                "Late abort for request {} in non-abortable state {} ignored",
-                                self.id, self.state
+                            debug!(
+                                msg_type = "LateAbort",
+                                request_id = %self.id,
+                                state = ?self.state,
+                                "Late abort ignored: request not abortable"
                             );
                         }
                     }
@@ -3039,11 +3092,13 @@ impl Handler<Self> for RequestManager {
                         }
                     }
                     _ => {
-                        info!(
-                            "The request is in a state that cannot be aborted {}, state: {}",
-                            self.id, self.state
-                        );
-                    }
+                            debug!(
+                                msg_type = "ManualAbort",
+                                request_id = %self.id,
+                                state = ?self.state,
+                                "Request in non-abortable state, ignored"
+                            );
+                        }
                 }
 
                 return Ok(());
@@ -3366,12 +3421,12 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     }
 
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "CompilationRes",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs"
+                            "Failed to stop children"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -3487,12 +3542,12 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "EvaluationRes",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs"
+                            "Failed to stop children"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -3764,12 +3819,12 @@ impl Handler<Self> for RequestManager {
                         if actual_protocols.needs_approval()
                     );
 
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "ValidationRes",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs"
+                            "Failed to stop children"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -3893,12 +3948,12 @@ impl Handler<Self> for RequestManager {
                         return Ok(());
                     };
 
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "ApprovalClosed",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs"
+                            "Failed to stop children"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -3963,12 +4018,12 @@ impl Handler<Self> for RequestManager {
                         "Finishing request"
                     );
 
-                    if let Err(e) = self.stops_childs(ctx).await {
+                    if let Err(e) = self.stop_children(ctx).await {
                         error!(
                             msg_type = "FinishRequest",
                             request_id = %self.id,
                             error = %e,
-                            "Failed to stop childs"
+                            "Failed to stop children"
                         );
                         self.match_error(ctx, e).await;
                         return Ok(());
@@ -4017,6 +4072,7 @@ impl Handler<Self> for RequestManager {
         if self.durable || checkpoint {
             if let Err(e) = self.persist(event, ctx).await {
                 error!(
+                    msg_type = "PersistEvent",
                     event_type = event_type,
                     request_id = %self.id,
                     error = %e,
@@ -4032,6 +4088,7 @@ impl Handler<Self> for RequestManager {
             Self::apply(self.state(), &event).map(|state| self.set_state(state))
         {
             error!(
+                msg_type = "ApplyEvent",
                 event_type = event_type,
                 request_id = %self.id,
                 error = %e,

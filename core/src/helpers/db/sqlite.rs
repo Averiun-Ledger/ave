@@ -34,7 +34,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::{self, JoinHandle};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 use super::{DatabaseError, DbMetricsSnapshot, ReadStore};
 use crate::config::{MachineSpec, resolve_spec};
@@ -1351,7 +1351,8 @@ impl SqliteLocal {
         .map_err(|e| DatabaseError::BlockingTask(e.to_string()))??;
         let runtime = Arc::new(runtime);
 
-        debug!(
+        info!(
+            msg_type = "Startup",
             path = %path.display(),
             ram_mb = resolved.ram_mb,
             readers = SqliteRuntime::recommended_reader_pool_size(),
@@ -1612,7 +1613,8 @@ fn spawn_write_worker(
             // here would wedge every later job silently. Locally fatal
             // breakage surfaces per batch through the job responses.
             if let Err(error) = &result {
-                debug!(
+                warn!(
+                    msg_type = "WriteBatch",
                     error = %error,
                     "SQLite write batch failed terminally, writer continues"
                 );
@@ -1964,7 +1966,10 @@ impl SqliteRuntime {
         match self.page_cache.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                error!("Page anchor cache mutex poisoned, resetting cache");
+                warn!(
+                    msg_type = "Cache",
+                    "Page anchor cache mutex poisoned, resetting cache"
+                );
                 let mut guard = poisoned.into_inner();
                 *guard = PageAnchorCache::default();
                 guard
@@ -2065,7 +2070,10 @@ impl ConnectionPool {
             let mut guard = match self.connections.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
-                    error!("Reader pool mutex poisoned, recovering guard");
+                    warn!(
+                        msg_type = "Pool",
+                        "Reader pool mutex poisoned, recovering guard"
+                    );
                     poisoned.into_inner()
                 }
             };
@@ -4007,6 +4015,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                 let persist_result = self.persist_signed_ledger(event).await;
                 if let Err(e) = &persist_result {
                     error!(
+                        msg_type = "PersistLedger",
                         subject_id = %subject_id,
                         sn = sn,
                         error = %e,

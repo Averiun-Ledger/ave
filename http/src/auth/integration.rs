@@ -5,7 +5,7 @@
 use super::database::AuthDatabase;
 use ave_bridge::{MachineSpec, auth::AuthConfig};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 const TARGET: &str = "ave::http::auth";
 
@@ -56,7 +56,12 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
             debug!(target: TARGET, count = users.len(), "active users");
         }
         Err(e) => {
-            error!(target: TARGET, error = %e, "failed to get user count");
+            warn!(
+                target: TARGET,
+                msg_type = "auth_stats_failed",
+                error = %e,
+                "failed to get user count"
+            );
         }
     }
 
@@ -65,7 +70,12 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
             debug!(target: TARGET, count = roles.len(), "roles");
         }
         Err(e) => {
-            error!(target: TARGET, error = %e, "failed to get role count");
+            warn!(
+                target: TARGET,
+                msg_type = "auth_stats_failed",
+                error = %e,
+                "failed to get role count"
+            );
         }
     }
 
@@ -74,7 +84,12 @@ pub async fn log_auth_statistics(db: &AuthDatabase) {
             debug!(target: TARGET, ?stats, "audit stats (last 7 days)");
         }
         Err(e) => {
-            error!(target: TARGET, error = %e, "failed to get audit stats");
+            warn!(
+                target: TARGET,
+                msg_type = "auth_stats_failed",
+                error = %e,
+                "failed to get audit stats"
+            );
         }
     }
 
@@ -126,7 +141,12 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
             }
             Ok(_) => {}
             Err(e) => {
-                error!(target: TARGET, error = %e, "failed to clean up audit logs by time");
+                warn!(
+                    target: TARGET,
+                    msg_type = "audit_cleanup_failed",
+                    error = %e,
+                    "failed to clean up audit logs by time"
+                );
             }
         }
     }
@@ -144,7 +164,12 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
             }
             Ok(_) => {}
             Err(e) => {
-                error!(target: TARGET, error = %e, "failed to clean up excess audit logs");
+                warn!(
+                    target: TARGET,
+                    msg_type = "audit_cleanup_failed",
+                    error = %e,
+                    "failed to clean up excess audit logs"
+                );
             }
         }
     }
@@ -155,7 +180,12 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
         }
         Ok(_) => {}
         Err(e) => {
-            error!(target: TARGET, error = %e, "failed to clean up expired API keys");
+            warn!(
+                target: TARGET,
+                msg_type = "apikey_cleanup_failed",
+                error = %e,
+                "failed to clean up expired API keys"
+            );
         }
     }
 
@@ -165,7 +195,12 @@ fn cleanup_old_data_blocking(db: &AuthDatabase) -> Result<(), String> {
         }
         Ok(_) => {}
         Err(e) => {
-            error!(target: TARGET, error = %e, "failed to clean up rate limit entries");
+            warn!(
+                target: TARGET,
+                msg_type = "ratelimit_cleanup_failed",
+                error = %e,
+                "failed to clean up rate limit entries"
+            );
         }
     }
 

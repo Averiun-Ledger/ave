@@ -22,14 +22,14 @@ struct ApiEventWriter {
 
 impl Write for ApiEventWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Acumulamos en memoria para no fragmentar el evento
+        // Buffer in memory to avoid fragmenting the event
         self.buf.extend_from_slice(buf);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         if !self.buf.is_empty() {
-            // Envío no bloqueante; si el canal está lleno, se descarta
+            // Non-blocking send; drop if the channel is full
             let _ = self.tx.try_send(std::mem::take(&mut self.buf));
         }
         Ok(())
@@ -38,7 +38,7 @@ impl Write for ApiEventWriter {
 
 impl Drop for ApiEventWriter {
     fn drop(&mut self) {
-        // Asegura que el evento se empuje aunque no llamen a flush()
+        // Ensure the event is pushed even if flush() is never called
         let _ = self.flush();
     }
 }

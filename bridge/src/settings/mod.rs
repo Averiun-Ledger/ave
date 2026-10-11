@@ -13,12 +13,24 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
         config = config.add_source(config::File::with_name(file));
 
         let config = config.build().map_err(|e| {
-            error!(file = %file, error = %e, "Failed to build configuration");
+            error!(
+                target: "ave::bridge",
+                msg_type = "config_build_failed",
+                file = %file,
+                error = %e,
+                "Failed to build configuration"
+            );
             BridgeError::ConfigBuild(e.to_string())
         })?;
 
         config.try_deserialize().map_err(|e| {
-            error!(file = %file, error = %e, "Failed to deserialize configuration");
+            error!(
+                target: "ave::bridge",
+                msg_type = "config_parse_failed",
+                file = %file,
+                error = %e,
+                "Failed to deserialize configuration"
+            );
             BridgeError::ConfigDeserialize(e.to_string())
         })?
     } else {

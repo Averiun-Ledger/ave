@@ -805,8 +805,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         delivery: Delivery,
     ) -> Result<(), Error> {
         if self.is_safe_mode() {
-            debug!(
+            trace!(
                 target: TARGET,
+                msg_type = "Send",
                 peer_id = %peer,
                 size = message.len(),
                 "safe mode active; dropping outbound message"
@@ -1216,7 +1217,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if let Some(monitor) = self.monitor.as_mut()
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
         {
-            error!(target: TARGET, error = %e, "failed to forward event to monitor");
+            error!(
+                target: TARGET,
+                msg_type = "Monitor",
+                error = %e,
+                "failed to forward event to monitor"
+            );
             self.crash_token.cancel();
         }
     }
@@ -1831,7 +1837,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
         }
 
-        error!(target: TARGET, "helper channel closed; shutting down");
+        error!(
+            target: TARGET,
+            msg_type = "Helper",
+            "helper channel closed; shutting down"
+        );
         self.crash_token.cancel();
     }
 
@@ -2058,7 +2068,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if let Some(metrics) = self.metric_handle() {
                                 metrics.inc_reqres_request_received();
                             }
-                            trace!(target: TARGET, peer_id = %peer_id, "request received");
+                            trace!(
+                                target: TARGET,
+                                msg_type = "ReqRes",
+                                peer_id = %peer_id,
+                                "request received"
+                            );
                             if let Some(channel) = response_channel {
                                 self.add_ephemeral_response(peer_id, channel);
                             }
@@ -2066,7 +2081,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if let Some(metrics) = self.metric_handle() {
                                 metrics.inc_reqres_response_received();
                             }
-                            trace!(target: TARGET, peer_id = %peer_id, "response received");
+                            trace!(
+                                target: TARGET,
+                                msg_type = "ReqRes",
+                                peer_id = %peer_id,
+                                "response received"
+                            );
                         }
 
                         if self.peer_identify.contains(&peer_id) {

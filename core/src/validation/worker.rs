@@ -351,6 +351,7 @@ impl ValiWorker {
             Ok(signature) => signature,
             Err(error) => {
                 debug!(
+                    msg_type = "UnavailableSign",
                     error = %error,
                     request_id = %pending.request_id,
                     "Could not sign unavailability notification"
@@ -2757,7 +2758,7 @@ impl Handler<Self> for ValiWorker {
                 if sender != validation_req.signature().signer
                     || sender != self.node_key
                 {
-                    warn!(
+                    debug!(
                         msg_type = "NetworkRequest",
                         expected_sender = %self.node_key,
                         received_sender = %sender,
@@ -2988,7 +2989,7 @@ impl Handler<Self> for ValiWorker {
                         if sender != approval_res.signature().signer
                             || !collection.approvers.workers.contains(&sender)
                         {
-                            warn!(
+                            debug!(
                                 msg_type = "ApprovalResponse",
                                 sender = %sender,
                                 "Approval abort from an unexpected approver"

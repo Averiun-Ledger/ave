@@ -181,7 +181,11 @@ impl AuthDatabase {
     pub fn audit_async(self: &Arc<Self>, job: QueuedAuditLog) {
         let sender = {
             let mut guard = self.audit_sender.lock().unwrap_or_else(|e| {
-                tracing::warn!("audit sender lock poisoned, recovering");
+                tracing::warn!(
+                    target: "ave::http::auth",
+                    msg_type = "audit_poisoned",
+                    "audit sender lock poisoned, recovering"
+                );
                 e.into_inner()
             });
             if let Some(sender) = guard.as_ref() {
@@ -201,6 +205,8 @@ impl AuthDatabase {
                             .await
                         {
                             tracing::warn!(
+                                target: "ave::http::auth",
+                                msg_type = "audit_failed",
                                 error = %error,
                                 "background audit write failed"
                             );
@@ -212,7 +218,11 @@ impl AuthDatabase {
             }
         };
         if sender.try_send(job).is_err() {
-            tracing::warn!("audit queue full, entry dropped");
+            tracing::warn!(
+                target: "ave::http::auth",
+                msg_type = "audit_dropped",
+                "audit queue full, entry dropped"
+            );
         }
     }
 

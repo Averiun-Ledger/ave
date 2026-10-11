@@ -374,7 +374,7 @@ impl Api {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> Result<(Self, Vec<JoinHandle<()>>), Error> {
-        debug!("Creating Api");
+        info!(msg_type = "ApiStart", "Creating Api");
 
         config.validate().map_err(|e| match e {
             CommonError::InvalidConfiguration { component, reason } => {
@@ -397,7 +397,7 @@ impl Api {
         )
         .await
         .map_err(|e| {
-            error!(error = %e, "Failed to create system");
+            error!(msg_type = "System", error = %e, "Failed to create system");
             e
         })?;
 
@@ -406,7 +406,11 @@ impl Api {
             .create_root_actor("network_monitor", newtork_monitor)
             .await
             .map_err(|e| {
-                error!(error = %e, "Can not create network_monitor actor");
+                error!(
+                    msg_type = "System",
+                    error = %e,
+                    "Can not create network_monitor actor"
+                );
                 Error::ActorCreation {
                     actor: "network_monitor".to_string(),
                     reason: e.to_string(),
@@ -430,7 +434,11 @@ impl Api {
             },
         )
         .map_err(|e| {
-            error!(error = %e, "Can not create networt");
+            error!(msg_type = "System", 
+                msg_type = "NetInit",
+                error = %e,
+                "Can not create network"
+            );
             Error::Network(e.to_string())
         })?;
 
@@ -463,7 +471,11 @@ impl Api {
             )
             .await
             .map_err(|e| {
-                error!(error = %e, "Init system, can not create node actor");
+                error!(
+                    msg_type = "System",
+                    error = %e,
+                    "Init system, can not create node actor"
+                );
                 Error::ActorCreation {
                     actor: "node".to_string(),
                     reason: e.to_string(),
@@ -480,7 +492,7 @@ impl Api {
                     ))
                     .await
                     .map_err(|e| {
-                        error!(
+                        error!(msg_type = "System", 
                             error = %e,
                             "Failed to get manual_distribution actor"
                         );
@@ -493,7 +505,11 @@ impl Api {
             .get_actor(&ActorPath::from("/user/node/auth"))
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get subject_access actor");
+                error!(
+                    msg_type = "System",
+                    error = %e,
+                    "Failed to get subject_access actor"
+                );
                 e
             })?;
 
@@ -501,7 +517,11 @@ impl Api {
             .get_actor(&ActorPath::from("/user/node/subject_manager"))
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get subject_manager actor");
+                error!(
+                    msg_type = "System",
+                    error = %e,
+                    "Failed to get subject_manager actor"
+                );
                 e
             })?;
 
@@ -515,7 +535,11 @@ impl Api {
             )
             .await
             .map_err(|e| {
-                error!(error = %e, "Init system, can not create request actor");
+                error!(
+                    msg_type = "System",
+                    error = %e,
+                    "Init system, can not create request actor"
+                );
                 Error::ActorCreation {
                     actor: "request".to_string(),
                     reason: e.to_string(),
@@ -530,7 +554,11 @@ impl Api {
                     .get_actor(&ActorPath::from("/user/request/tracking"))
                     .await
                     .map_err(|e| {
-                        error!(error = %e, "Failed to get tracking actor");
+                        error!(
+                            msg_type = "System",
+                            error = %e,
+                            "Failed to get tracking actor"
+                        );
                         e
                     })?,
             )
@@ -538,7 +566,7 @@ impl Api {
 
         let Some(ext_db) = system.get_helper::<Arc<ExternalDB>>("ext_db")
         else {
-            error!("External database helper not found");
+            error!(msg_type = "System", "External database helper not found");
             return Err(Error::MissingResource {
                 name: "ext_db".to_string(),
                 reason: "External database helper not found".to_string(),
@@ -591,7 +619,11 @@ impl Api {
     ) -> Result<MonitorNetworkState, Error> {
         let response =
             self.monitor.ask(MonitorMessage::State).await.map_err(|e| {
-                warn!(error = %e, "Unable to retrieve network state");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Unable to retrieve network state"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::NetworkState(e.to_string())
                 })
@@ -600,7 +632,10 @@ impl Api {
         match response {
             MonitorResponse::State(state) => Ok(state),
             _ => {
-                warn!("Unexpected response from network monitor");
+                error!(
+                    msg_type = "NetState",
+                    "Unexpected response from network monitor"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "network_monitor".to_string(),
                     expected: "State".to_string(),
@@ -621,14 +656,21 @@ impl Api {
             .ask(RequestHandlerMessage::RequestInManager)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Request processing failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Request processing failed"
+                );
                 actor_communication_error("request", e)
             })?;
 
         match response {
             RequestHandlerResponse::RequestInManager(request) => Ok(request),
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "RequestInManager".to_string(),
@@ -650,7 +692,11 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Request processing failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Request processing failed"
+                );
                 actor_communication_error("request", e)
             })?;
 
@@ -659,7 +705,10 @@ impl Api {
                 Ok(request)
             }
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "RequestInManagerSubjectId".to_string(),
@@ -682,14 +731,21 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Request processing failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Request processing failed"
+                );
                 actor_communication_error("request", e)
             })?;
 
         match response {
             RequestHandlerResponse::Ok(request_data) => Ok(request_data),
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "Ok".to_string(),
@@ -712,7 +768,11 @@ impl Api {
             )))
             .await
             .map_err(|e| {
-                warn!(error = %e, "Node was unable to sign the request");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Node was unable to sign the request"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::SigningFailed(e.to_string())
                 })
@@ -721,7 +781,7 @@ impl Api {
         let signature = match response {
             NodeResponse::SignRequest(signature) => signature,
             _ => {
-                warn!("Unexpected response from node");
+                warn!(msg_type = "ApiRequest", "Unexpected response from node");
                 return Err(Error::UnexpectedResponse {
                     actor: "node".to_string(),
                     expected: "SignRequest".to_string(),
@@ -739,14 +799,21 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to send request");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to send request"
+                );
                 actor_communication_error("request", e)
             })?;
 
         match response {
             RequestHandlerResponse::Ok(request_data) => Ok(request_data),
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "Ok".to_string(),
@@ -767,14 +834,21 @@ impl Api {
             .ask(RequestHandlerMessage::GetApproval { state, subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get approval request");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get approval request"
+                );
                 actor_communication_error("request", e)
             })?;
 
         match response {
             RequestHandlerResponse::Approval(data) => Ok(data),
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "Approval".to_string(),
@@ -795,7 +869,11 @@ impl Api {
             .ask(RequestHandlerMessage::GetAllApprovals { state })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get approval requests");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get approval requests"
+                );
                 actor_communication_error("request", e)
             })?;
 
@@ -808,7 +886,10 @@ impl Api {
                 }))
             }
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "Approvals".to_string(),
@@ -826,7 +907,10 @@ impl Api {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
         if state == ApprovalStateRes::Obsolete {
-            warn!("Cannot set approval state to Obsolete");
+            warn!(
+                msg_type = "ApiRequest",
+                "Cannot set approval state to Obsolete"
+            );
             return Err(Error::InvalidApprovalState("Obsolete".to_string()));
         }
 
@@ -838,7 +922,11 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to change approval state");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to change approval state"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::ApprovalUpdateFailed(e.to_string())
                 })
@@ -847,7 +935,10 @@ impl Api {
         match response {
             RequestHandlerResponse::Response(res) => Ok(res),
             _ => {
-                warn!("Unexpected response from request handler");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from request handler"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "request".to_string(),
                     expected: "Response".to_string(),
@@ -867,7 +958,11 @@ impl Api {
             .tell(RequestHandlerMessage::AbortRequest { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to abort request");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to abort request"
+                );
                 actor_communication_error("request", e)
             })?;
 
@@ -891,7 +986,11 @@ impl Api {
             .ask(RequestTrackingMessage::SearchRequest(request_id.clone()))
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get request state");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get request state"
+                );
                 actor_communication_error("tracking", e)
             })?;
 
@@ -901,7 +1000,10 @@ impl Api {
                 Err(Error::RequestNotFound(request_id.to_string()))
             }
             _ => {
-                warn!("Unexpected response from tracking");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from tracking"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "tracking".to_string(),
                     expected: "Info".to_string(),
@@ -926,7 +1028,11 @@ impl Api {
             .ask(RequestTrackingMessage::AllRequests)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get all request states");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get all request states"
+                );
                 actor_communication_error("tracking", e)
             })?;
 
@@ -935,7 +1041,10 @@ impl Api {
                 Ok(page_sorted(state, limit, offset, |x| x.request_id.clone()))
             }
             _ => {
-                warn!("Unexpected response from tracking");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from tracking"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "tracking".to_string(),
                     expected: "AllInfo".to_string(),
@@ -961,13 +1070,13 @@ impl Api {
         {
             Ok(Ok(_)) => debug!("Clean shutdown marker persisted"),
             Ok(Err(e)) => {
-                warn!(
+                warn!(msg_type = "ApiRequest",
                     error = %e,
                     "Failed to persist clean shutdown marker; next boot will reconcile"
                 );
             }
             Err(_) => {
-                warn!(
+                warn!(msg_type = "ApiRequest",
                     "Timed out persisting clean shutdown marker; next boot will reconcile"
                 );
             }
@@ -982,13 +1091,17 @@ impl Api {
         let response =
             self.node.ask(NodeMessage::PendingTransfers).await.map_err(
                 |e| {
-                    warn!(error = %e, "Failed to get pending transfers");
+                    warn!(
+                        msg_type = "ApiRequest",
+                        error = %e,
+                        "Failed to get pending transfers"
+                    );
                     actor_communication_error("node", e)
                 },
             )?;
 
         let NodeResponse::PendingTransfers(pending) = response else {
-            warn!("Unexpected response from node");
+            warn!(msg_type = "ApiRequest", "Unexpected response from node");
             return Err(Error::UnexpectedResponse {
                 actor: "node".to_string(),
                 expected: "PendingTransfers".to_string(),
@@ -1019,7 +1132,11 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Authorize governance operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Authorize governance operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1028,7 +1145,10 @@ impl Api {
         match response {
             SubjectAccessResponse::None => Ok("Ok".to_owned()),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "None".to_string(),
@@ -1049,7 +1169,11 @@ impl Api {
             .ask(SubjectAccessMessage::DisauthorizeGov { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Disauthorize governance operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Disauthorize governance operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1058,7 +1182,10 @@ impl Api {
         match response {
             SubjectAccessResponse::None => Ok("Ok".to_owned()),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "None".to_string(),
@@ -1076,14 +1203,21 @@ impl Api {
             .ask(SubjectAccessMessage::GetAuthorizedGovs)
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get authorized governances");
+                warn!(
+                    msg_type = "AuthQuery",
+                    error = %e,
+                    "Failed to get authorized governances"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Subjects".to_string(),
@@ -1103,14 +1237,21 @@ impl Api {
             .ask(SubjectAccessMessage::IsGovAuthorized { subject_id })
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to check governance authorization");
+                warn!(
+                    msg_type = "AuthQuery",
+                    error = %e,
+                    "Failed to check governance authorization"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Bool(v) => Ok(v),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Bool".to_string(),
@@ -1131,7 +1272,11 @@ impl Api {
             .ask(SubjectAccessMessage::BanTracker { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Ban tracker operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Ban tracker operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1140,7 +1285,10 @@ impl Api {
         match response {
             SubjectAccessResponse::None => Ok("Ok".to_owned()),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "None".to_string(),
@@ -1161,7 +1309,11 @@ impl Api {
             .ask(SubjectAccessMessage::UnbanTracker { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Unban tracker operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Unban tracker operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1170,7 +1322,10 @@ impl Api {
         match response {
             SubjectAccessResponse::None => Ok("Ok".to_owned()),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "None".to_string(),
@@ -1188,14 +1343,21 @@ impl Api {
             .ask(SubjectAccessMessage::GetBannedTrackers)
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get banned trackers");
+                error!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get banned trackers"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Subjects".to_string(),
@@ -1215,14 +1377,21 @@ impl Api {
             .ask(SubjectAccessMessage::IsTrackerBanned { subject_id })
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to check tracker ban status");
+                error!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to check tracker ban status"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Bool(v) => Ok(v),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Bool".to_string(),
@@ -1248,7 +1417,11 @@ impl Api {
             .tell(SubjectAccessMessage::AddSyncPeers { subject_id, peers })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Add sync peer operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Add sync peer operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1273,7 +1446,11 @@ impl Api {
             .tell(SubjectAccessMessage::RemoveSyncPeers { subject_id, peers })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Remove sync peer operation failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Remove sync peer operation failed"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::AuthOperation(e.to_string())
                 })
@@ -1292,14 +1469,21 @@ impl Api {
             .ask(SubjectAccessMessage::GetSyncPeers { subject_id })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get sync peers");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get sync peers"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Peers(peers) => Ok(peers),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Peers".to_string(),
@@ -1317,14 +1501,21 @@ impl Api {
             .ask(SubjectAccessMessage::GetSubjectsWithSyncPeers)
             .await
             .map_err(|e| {
-                error!(error = %e, "Failed to get subjects with sync peers");
+                error!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get subjects with sync peers"
+                );
                 actor_communication_error("subject_access", e)
             })?;
 
         match response {
             SubjectAccessResponse::Subjects(subjects) => Ok(subjects),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "Subjects".to_string(),
@@ -1357,7 +1548,11 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to update subject");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to update subject"
+                );
                 preserve_functional_actor_error(e, |e| {
                     Error::UpdateFailed(subject_id.to_string(), e.to_string())
                 })
@@ -1366,7 +1561,10 @@ impl Api {
         match response {
             SubjectAccessResponse::None => Ok("Update in progress".to_owned()),
             _ => {
-                warn!("Unexpected response from subject_access");
+                warn!(
+                    msg_type = "ApiRequest",
+                    "Unexpected response from subject_access"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "subject_access".to_string(),
                     expected: "None".to_string(),
@@ -1392,7 +1590,11 @@ impl Api {
             .ask(ManualDistributionMessage::Update(subject_id.clone()))
             .await
             .map_err(|e| {
-                warn!(error = %e, "Manual distribution failed");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Manual distribution failed"
+                );
                 preserve_functional_actor_error(e, |_| {
                     Error::DistributionFailed(subject_id.to_string())
                 })
@@ -1431,7 +1633,7 @@ impl Api {
                 match actor.ask(SinkManagerMessage::GetDetailedStatus).await {
                     Ok(SinkManagerResponse::DetailedStatus(status)) => Ok(Some(status)),
                     Ok(other) => {
-                        warn!(
+                        warn!(msg_type = "ApiRequest",
                             manager = ?target,
                             response = ?other,
                             "Unexpected response from sink manager"
@@ -1443,7 +1645,12 @@ impl Api {
                         })
                     }
                     Err(e) => {
-                        warn!(manager = ?target, error = %e, "Failed to query sink manager status");
+                        warn!(
+                            msg_type = "ApiRequest",
+                            manager = ?target,
+                            error = %e,
+                            "Failed to query sink manager status"
+                        );
                         Err(actor_communication_error("sink_manager", e))
                     }
                 }
@@ -1456,7 +1663,11 @@ impl Api {
         > = HashMap::new();
         while let Some(res) = set.join_next().await {
             let response = res.map_err(|e| {
-                warn!(error = %e, "Sink manager status task panicked");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Sink manager status task panicked"
+                );
                 Error::Internal(format!("sink manager status task failed: {e}"))
             })?;
             let Some(status) = response? else {
@@ -1582,7 +1793,11 @@ impl Api {
         let registry =
             self.system.get_actor::<SinkRegistry>(&path).await.map_err(
                 |e| {
-                    warn!(error = %e, "Failed to get sink registry actor");
+                    warn!(
+                        msg_type = "ApiRequest",
+                        error = %e,
+                        "Failed to get sink registry actor"
+                    );
                     actor_communication_error("sink_registry", e)
                 },
             )?;
@@ -1590,13 +1805,21 @@ impl Api {
             .ask(SinkRegistryMessage::GetSinkRegistry)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to query sink registry");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to query sink registry"
+                );
                 actor_communication_error("sink_registry", e)
             })?;
         match response {
             SinkRegistryResponse::Registry(regs) => Ok(regs),
             other => {
-                warn!(response = ?other, "Unexpected response from sink registry");
+                warn!(
+                    msg_type = "ApiRequest",
+                    response = ?other,
+                    "Unexpected response from sink registry"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "sink_registry".to_string(),
                     expected: "Registry".to_string(),
@@ -1614,7 +1837,11 @@ impl Api {
         let registry =
             self.system.get_actor::<SinkRegistry>(&path).await.map_err(
                 |e| {
-                    warn!(error = %e, "Failed to get sink registry actor");
+                    warn!(
+                        msg_type = "ApiRequest",
+                        error = %e,
+                        "Failed to get sink registry actor"
+                    );
                     actor_communication_error("sink_registry", e)
                 },
             )?;
@@ -1624,7 +1851,12 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %name, "Failed to query sink registry");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %name,
+                    "Failed to query sink registry"
+                );
                 actor_communication_error("sink_registry", e)
             })?;
         match response {
@@ -1633,7 +1865,12 @@ impl Api {
                 Err(Error::SinkNotFound(name.to_string()))
             }
             other => {
-                warn!(response = ?other, sink = %name, "Unexpected response from sink registry");
+                warn!(
+                    msg_type = "ApiRequest",
+                    response = ?other,
+                    sink = %name,
+                    "Unexpected response from sink registry"
+                );
                 Err(Error::UnexpectedResponse {
                     actor: "sink_registry".to_string(),
                     expected: "Sink".to_string(),
@@ -1648,7 +1885,11 @@ impl Api {
         let registry =
             self.system.get_actor::<SinkRegistry>(&path).await.map_err(
                 |e| {
-                    warn!(error = %e, "Failed to get sink registry actor");
+                    warn!(
+                        msg_type = "ApiRequest",
+                        error = %e,
+                        "Failed to get sink registry actor"
+                    );
                     actor_communication_error("sink_registry", e)
                 },
             )?;
@@ -1658,7 +1899,12 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %name, "Failed to unregister sink");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %name,
+                    "Failed to unregister sink"
+                );
                 actor_communication_error("sink_registry", e)
             })?;
         Ok(())
@@ -1675,7 +1921,12 @@ impl Api {
             .get_actor::<SinkManager>(&path)
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to get sink manager actor"
+                );
                 actor_communication_error("sink_manager", e)
             })?;
         manager
@@ -1684,7 +1935,12 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to unblock sink");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to unblock sink"
+                );
                 actor_communication_error("sink_manager", e)
             })?;
         Ok(())
@@ -1710,7 +1966,12 @@ impl Api {
             .get_actor::<SinkManager>(&path)
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to get sink manager actor"
+                );
                 actor_communication_error("sink_manager", e)
             })?;
 
@@ -1720,7 +1981,12 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to reset sink cursors");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to reset sink cursors"
+                );
                 actor_communication_error("sink_manager", e)
             })?;
 
@@ -1776,7 +2042,11 @@ impl Api {
                     // The sink name is lost here because get_sink_registration failed
                     // before returning it. We log the error; the individual items for
                     // this sink will be reported below using the request data.
-                    warn!(error = %e, "Failed to resolve sink for replay");
+                    warn!(
+                        msg_type = "ApiRequest",
+                        error = %e,
+                        "Failed to resolve sink for replay"
+                    );
                 }
             }
         }
@@ -1793,7 +2063,7 @@ impl Api {
                             by_manager.entry(path).or_default().push(item);
                         }
                         Err(e) => {
-                            warn!(
+                            warn!(msg_type = "ApiRequest",
                                 sink = %item.sink,
                                 subject_id = %item.subject_id,
                                 from_sn = %item.from_sn,
@@ -1810,7 +2080,7 @@ impl Api {
                     }
                 }
                 None => {
-                    warn!(
+                    warn!(msg_type = "ApiRequest",
                         sink = %item.sink,
                         subject_id = %item.subject_id,
                         from_sn = %item.from_sn,
@@ -1837,7 +2107,7 @@ impl Api {
             {
                 Ok(manager) => manager,
                 Err(e) => {
-                    warn!(
+                    warn!(msg_type = "ApiRequest",
                         error = %e,
                         path = %path,
                         "Failed to get sink manager actor for replay"
@@ -1864,7 +2134,7 @@ impl Api {
             {
                 Ok(response) => response,
                 Err(e) => {
-                    warn!(
+                    warn!(msg_type = "ApiRequest",
                         error = %e,
                         path = %path,
                         "Failed to send replay request to sink manager"
@@ -1891,7 +2161,7 @@ impl Api {
                     errors.append(&mut res.errors);
                 }
                 other => {
-                    warn!(
+                    warn!(msg_type = "ApiRequest",
                         response = ?other,
                         path = %path,
                         "Unexpected response from sink manager for replay"
@@ -1934,7 +2204,12 @@ impl Api {
             .get_actor::<crate::sink::manager::SinkManager>(&path)
             .await
             .map_err(|e| {
-                warn!(error = %e, sink = %sink_name, "Failed to get sink manager actor");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to get sink manager actor"
+                );
                 actor_communication_error("sink_manager", e)
             })?;
 
@@ -1960,7 +2235,7 @@ impl Api {
                 }
             }),
             Ok(other) => {
-                warn!(
+                warn!(msg_type = "ApiRequest",
                     sink = %sink_name,
                     response = ?other,
                     "Unexpected response from sink manager for test"
@@ -1972,7 +2247,12 @@ impl Api {
                 })
             }
             Err(e) => {
-                warn!(error = %e, sink = %sink_name, "Failed to test sink");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    sink = %sink_name,
+                    "Failed to test sink"
+                );
                 Err(actor_communication_error("sink_manager", e))
             }
         }
@@ -2124,7 +2404,11 @@ impl Api {
             .get_governances(active, limit, offset)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get governances");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get governances"
+                );
                 Error::QueryFailed(e.to_string())
             })
     }
@@ -2152,7 +2436,11 @@ impl Api {
                 Err(Error::GovernanceNotFound(governance_id))
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get subjects");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get subjects"
+                );
                 Err(Error::QueryFailed(e.to_string()))
             }
         }
@@ -2175,7 +2463,11 @@ impl Api {
                 Err(Error::NoEventsFound(subject_id_str))
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get events");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get events"
+                );
                 Err(Error::QueryFailed(e.to_string()))
             }
         }
@@ -2200,7 +2492,11 @@ impl Api {
             })
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to replay sink events");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to replay sink events"
+                );
                 match e {
                     ActorError::NotFound { .. } => {
                         Error::SubjectNotFound(subject_id_str.clone())
@@ -2245,7 +2541,11 @@ impl Api {
             .get_aborts(&subject_id_str, query)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Failed to get aborts");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get aborts"
+                );
                 Error::QueryFailed(e.to_string())
             })
     }
@@ -2256,7 +2556,11 @@ impl Api {
     ) -> Result<Vec<WatchdogIncidentRow>, Error> {
         validate_incidents_query(&query)?;
         self.db.get_recent_incidents(query).await.map_err(|e| {
-            warn!(error = %e, "Failed to get watchdog incidents");
+            warn!(
+                msg_type = "ApiRequest",
+                error = %e,
+                "Failed to get watchdog incidents"
+            );
             Error::QueryFailed(e.to_string())
         })
     }
@@ -2278,7 +2582,11 @@ impl Api {
                 })
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get event");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get event"
+                );
                 Err(Error::QueryFailed(e.to_string()))
             }
         }
@@ -2312,7 +2620,11 @@ impl Api {
                 Err(Error::NoEventsFound(subject_id_str))
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get events");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get events"
+                );
                 Err(Error::QueryFailed(e.to_string()))
             }
         }
@@ -2331,7 +2643,11 @@ impl Api {
                 Err(Error::SubjectNotFound(subject_id_str))
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get subject state");
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to get subject state"
+                );
                 Err(Error::QueryFailed(e.to_string()))
             }
         }

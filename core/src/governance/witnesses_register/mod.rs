@@ -843,7 +843,7 @@ impl WitnessesRegister {
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
-                // Actualmente soy testigo del owner
+                // Currently witnessing for the owner
                 if actual_lo.is_some() {
                     return ActualSearch::End(SnLimit::LastSn);
                 }
@@ -851,7 +851,7 @@ impl WitnessesRegister {
                 if let Some(range) = interval.iter().last()
                     && gov_version <= range.hi
                 {
-                    // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
+                    // range.hi is the top reachable gov_version; resolve its sn
                     better_gov_version = better_gov_version.max(Some(range.hi));
                 }
             }
@@ -891,7 +891,7 @@ impl WitnessesRegister {
             better_gov_version
         };
 
-        // todos los esquemas
+        // all schemas
         if let Some(witness_data) = self
             .witnesses
             .get(&(node.clone(), SchemaType::TrackerSchemas))
@@ -931,7 +931,7 @@ impl WitnessesRegister {
                 )
             });
 
-        // todos los esquemas
+        // all schemas
         if let Some(witness_data) = self
             .witnesses
             .get(&(node.clone(), SchemaType::TrackerSchemas))
@@ -963,16 +963,17 @@ impl WitnessesRegister {
         if let Some((interval, actual_lo)) =
             witnesses_creator.get(&WitnessesType::User(node.clone()))
         {
-            // Actualmente soy testigo del owner
+            // Currently witnessing for the owner
             if actual_lo.is_some() {
                 return ActualSearch::End(SnLimit::LastSn);
             }
-            // Ya no soy testigo del owner, mira mi último intervalo, si era testigo cuando él empezó
-            // a ser owner puedo recibir la copia hasta que dejé de ser testigo, mi rango.hi
+            // No longer their witness: look at my last interval; if I
+            // witnessed when they became owner I can still receive the
+            // copy up to when I stopped, my range.hi.
             if let Some(range) = interval.iter().last()
                 && owner_gov_version <= range.hi
             {
-                // range.hi es la máxima gov_version que puede acceder, hay que pedir cual es ese sn.
+                // range.hi is the top reachable gov_version; resolve its sn
                 better_gov_version = better_gov_version.max(Some(range.hi));
             }
         }

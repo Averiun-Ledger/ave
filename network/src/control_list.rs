@@ -302,7 +302,11 @@ pub fn build_control_lists_updaters(
     metrics: Option<Arc<NetworkMetrics>>,
 ) -> Option<Receiver<Event>> {
     if config.enable {
-        debug!(target: TARGET, "control list enabled");
+        debug!(
+            target: TARGET,
+            msg_type = "ControlList",
+            "control list enabled"
+        );
 
         let (sender, receiver) = mpsc::channel(8);
         let update_interval = config.interval_request;
@@ -319,7 +323,13 @@ pub fn build_control_lists_updaters(
             {
                 Ok(client) => client,
                 Err(e) => {
-                    warn!(target: TARGET, error = %e, "failed to build control-list http client, falling back to default client");
+                    warn!(
+                        target: TARGET,
+                        msg_type = "ControlList",
+                        error = %e,
+                        "failed to build control-list http client,
+                        falling back to default client"
+                    );
                     reqwest::Client::new()
                 }
             };
@@ -362,13 +372,22 @@ pub fn build_control_lists_updaters(
                     }
                     last_allow_success = Some(now);
                     if let Err(e) = sender.send(Event::AllowListUpdated(vec_allow_peers)).await {
-                        debug!(target: TARGET, error = %e, "allow-list update dropped: channel closed");
+                        debug!(
+                            target: TARGET,
+                            msg_type = "ControlList",
+                            error = %e,
+                            "allow-list update dropped: channel closed"
+                        );
                     }
                 } else {
                     if let Some(metrics) = metrics_updater.as_deref() {
                         metrics.observe_control_list_allow_update(false);
                     }
-                    warn!(target: TARGET, "allow-list not updated: no service responded successfully");
+                    warn!(
+                        target: TARGET,
+                        msg_type = "ControlList",
+                        "allow-list not updated: no service responded"
+                    );
                 }
 
                 // If at least 1 update of the list was possible
@@ -378,13 +397,22 @@ pub fn build_control_lists_updaters(
                     }
                     last_block_success = Some(now);
                     if let Err(e) = sender.send(Event::BlockListUpdated(vec_block_peers)).await {
-                        debug!(target: TARGET, error = %e, "block-list update dropped: channel closed");
+                        debug!(
+                            target: TARGET,
+                            msg_type = "ControlList",
+                            error = %e,
+                            "block-list update dropped: channel closed"
+                        );
                     }
                 } else {
                     if let Some(metrics) = metrics_updater.as_deref() {
                         metrics.observe_control_list_block_update(false);
                     }
-                    warn!(target: TARGET, "block-list not updated: no service responded successfully");
+                    warn!(
+                        target: TARGET,
+                        msg_type = "ControlList",
+                        "block-list not updated: no service responded"
+                    );
                 }
 
                 if let Some(metrics) = metrics_updater.as_deref() {
@@ -400,11 +428,19 @@ pub fn build_control_lists_updaters(
                 }
                     }
                     _ = graceful_token.clone().cancelled_owned() => {
-                        debug!(target: TARGET, "control list updater stopped");
+                        debug!(
+                            target: TARGET,
+                            msg_type = "ControlList",
+                            "control list updater stopped"
+                        );
                         break;
                     }
                     _ = crash_token.clone().cancelled_owned() => {
-                        debug!(target: TARGET, "control list updater stopped");
+                        debug!(
+                            target: TARGET,
+                            msg_type = "ControlList",
+                            "control list updater stopped"
+                        );
                         break;
                     }
                 };
@@ -535,7 +571,12 @@ impl Behaviour {
         if let Some(metrics) = &self.metrics {
             metrics.observe_control_list_denied("not_allowed");
         }
-        debug!(target: TARGET, peer_id = %peer, "connection denied: peer not in allow list");
+        debug!(
+            target: TARGET,
+            msg_type = "ControlList",
+            peer_id = %peer,
+            "connection denied: peer not in allow list"
+        );
         Err(ConnectionDenied::new(NotAllowed { peer: *peer }))
     }
 
@@ -548,7 +589,12 @@ impl Behaviour {
         if let Some(metrics) = &self.metrics {
             metrics.observe_control_list_denied("blocked");
         }
-        debug!(target: TARGET, peer_id = %peer, "connection denied: peer is blocked");
+        debug!(
+            target: TARGET,
+            msg_type = "ControlList",
+            peer_id = %peer,
+            "connection denied: peer is blocked"
+        );
         Err(ConnectionDenied::new(Blocked { peer: *peer }))
     }
 

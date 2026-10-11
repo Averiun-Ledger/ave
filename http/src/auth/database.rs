@@ -330,6 +330,7 @@ impl AuthDatabase {
         if elapsed >= Duration::from_millis(10) {
             warn!(
                 target: TARGET,
+                msg_type = "slow_pool_wait",
                 pool = pool_name,
                 elapsed_ms,
                 "slow auth db pool wait"
@@ -509,6 +510,7 @@ impl AuthDatabase {
 
         debug!(
             target: TARGET,
+            msg_type = "auth_db_request",
             request_kind,
             result,
             elapsed_ms,

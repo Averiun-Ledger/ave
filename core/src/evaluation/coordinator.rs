@@ -175,6 +175,7 @@ impl Handler<Self> for EvalCoordinator {
         match msg {
             EvalCoordinatorMessage::EndRetry => {
                 warn!(
+                    msg_type = "Retry",
                     node_key = %self.node_key,
                     request_id = %self.request_id,
                     version = self.version,
@@ -404,7 +405,7 @@ impl Handler<Self> for EvalCoordinator {
                                 sender = %sender,
                                 "Retry actor not found while closing evaluation coordinator"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
 
@@ -414,7 +415,7 @@ impl Handler<Self> for EvalCoordinator {
                                 error = %e,
                                 "Failed to end retry actor"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
                     }

@@ -365,18 +365,20 @@ impl Subject for Tracker {
         {
             if let ActorError::Functional { description } = e.clone() {
                 warn!(
+                    msg_type = "VerifyLedger",
                     error = %description,
                     subject_id = %self.subject_metadata.subject_id,
                     sn = self.subject_metadata.sn,
                     "Error verifying new ledger events"
                 );
 
-                // Falló en la creación
+                // Failed during creation
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
             } else {
                 error!(
+                    msg_type = "VerifyLedger",
                     error = %e,
                     subject_id = %self.subject_metadata.subject_id,
                     sn = self.subject_metadata.sn,
@@ -418,11 +420,20 @@ impl Subject for Tracker {
                     .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
                     .await
                 {
-                    error!(error = %e, "Failed to notify SinkManager");
+                    warn!(
+                        msg_type = "NotifySink",
+                        error = %e,
+                        "Failed to notify SinkManager"
+                    );
                 }
             }
             Err(e) => {
-                debug!(error = %e, path = %manager_path, "SinkManager not found");
+                debug!(
+                    msg_type = "NotifySink",
+                    error = %e,
+                    path = %manager_path,
+                    "SinkManager not found"
+                );
             }
         }
         Ok(())
@@ -863,12 +874,12 @@ impl Tracker {
                         actual,
                     } = &e
                     {
-                        // El evento que estamos aplicando no es el
-                        // siguiente: se salta en este batch (el sync lo
-                        // re-entrega mientras siga pendiente) pero se
-                        // registra — un salto silencioso es un evento
-                        // perdido sin rastro.
-                        warn!(
+                        // The event being applied is not next: it is
+                        // skipped in this batch (sync re-delivers while
+                        // pending) but it is recorded — a silent skip
+                        // is a lost event with no trace.
+                        debug!(
+                            msg_type = "ApplyBatch",
                             subject_id = %self.subject_metadata.subject_id,
                             expected_sn = expected,
                             event_sn = actual,
@@ -1046,10 +1057,11 @@ impl Actor for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self.init_store("tracker", None, true, ctx).await {
-            error!(
-                error = %e,
-                "Failed to initialize tracker store"
+    if let Err(e) = self.init_store("tracker", None, true, ctx).await {
+        error!(
+            msg_type = "Init",
+            error = %e,
+            "Failed to initialize tracker store"
             );
             return Err(e);
         }
