@@ -17,9 +17,9 @@ use crate::{
 
 use ave_bridge::ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, IncidentsQuery, ListQuery, SinkEventsQuery,
-        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
+        AbortsQuery, ActorTreeQuery, ApprovalQuery, BridgeSignedEventRequest,
+        EventsQuery, FirstEndEvents, GovQuery, IncidentsQuery, ListQuery,
+        SinkEventsQuery, SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     response::{
         ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
@@ -30,10 +30,10 @@ use ave_bridge::{
     ave_common::{
         bridge::request::{ApprovalStateRes, SinksQuery},
         response::{
-            GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
-            RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
-            SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
-            WatchdogIncidentRow,
+            ActorTreeResponse, GovsData, LedgerDB, PaginatorAborts,
+            PaginatorEvents, RequestInfo, RequestsInManager,
+            RequestsInManagerSubject, SinkEventsPage, SinkInfo, SinkStatusInfo,
+            SubjectDB, SubjsData, TransferSubject, WatchdogIncidentRow,
         },
     },
     http::ProxyConfig,
@@ -1088,6 +1088,36 @@ pub async fn post_manual_distribution(
     Ok(Json(bridge.post_manual_distribution(subject_id).await?))
 }
 
+/// Lift subject for sync
+///
+/// Boots a tracker on demand so its boot healing runs (register
+/// reconcile, projection gap-fill, sink cursor review), then
+/// releases it. The subject only stays resident while syncing;
+/// async catch-ups continue through the sink chain on their own.
+#[utoipa::path(
+    post,
+    path = "/subjects/{subject_id}/sync-lift",
+    operation_id = "postSyncLift",
+    tag = "Node",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Subject lifted, synced and released", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn post_sync_lift(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiPath(subject_id): ApiPath<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.lift_subject_for_sync(subject_id).await?))
+}
+
 ///////// Register
 ////////////////////////////
 
@@ -1262,6 +1292,36 @@ pub async fn get_watchdog_incidents(
     ApiQuery(parameters): ApiQuery<IncidentsQuery>,
 ) -> Result<Json<Vec<WatchdogIncidentRow>>, HttpError> {
     Ok(Json(bridge.get_watchdog_incidents(parameters).await?))
+}
+
+/// Get actor tree
+///
+/// Returns a point-in-time snapshot of the live supervision forest
+/// (path + concrete type per node). `subject` prunes to that
+/// subject's subtrees; `limit` truncates in pre-order and the
+/// response flags it instead of failing.
+#[utoipa::path(
+    get,
+    path = "/actor-tree",
+    operation_id = "getActorTree",
+    tag = "Monitoring",
+    params(
+        ActorTreeQuery
+    ),
+    responses(
+        (status = 200, description = "Live supervision forest", body = ActorTreeResponse),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_actor_tree(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ActorTreeQuery>,
+) -> Result<Json<ActorTreeResponse>, HttpError> {
+    Ok(Json(bridge.get_actor_tree(parameters).await?))
 }
 
 /// Get event by sequence number
@@ -1526,6 +1586,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, post, "/subjects/{subject_id}/update", post_update_subject, require NodeSubject Post);
         $callback!($($args)*, delete, "/maintenance/subjects/{subject_id}", delete_subject, require NodeMaintenance Delete);
         $callback!($($args)*, post, "/subjects/{subject_id}/manual-distribution", post_manual_distribution, require NodeSubject Post);
+        $callback!($($args)*, post, "/subjects/{subject_id}/sync-lift", post_sync_lift, require NodeSubject Post);
         $callback!($($args)*, get, "/governances", get_all_govs, require NodeSubject Get);
         $callback!($($args)*, get, "/governances/{governance_id}/subjects", get_all_subjs, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events", get_events, require NodeSubject Get);
@@ -1533,6 +1594,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/subjects/{subject_id}/events/{sn}", get_event_sn, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/aborts", get_aborts, require NodeSubject Get);
         $callback!($($args)*, get, "/watchdog/incidents", get_watchdog_incidents, require NodeManagement Get);
+        $callback!($($args)*, get, "/actor-tree", get_actor_tree, require NodeManagement Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events-first-last", get_first_or_end_events, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/state", get_subject_state, require NodeSubject Get);
         $callback!($($args)*, external_get, "/metrics", metrics_endpoint, require NodeManagement Get);

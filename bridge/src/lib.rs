@@ -4,7 +4,7 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 pub use ave_common::{
     bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkStatusInfo},
+    bridge::response::{ActorTreeResponse, SinkInfo, SinkStatusInfo},
     sink::{
         HttpSinkConfig, KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry,
         SinkServer, SinkTarget, SinkTransportConfig,
@@ -12,10 +12,10 @@ pub use ave_common::{
 };
 use ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalQuery, ApprovalState, ApprovalStateRes,
-        BridgeSignedEventRequest, EventRequestType, EventsQuery, GovQuery,
-        IncidentsQuery, ListQuery, SinkEventsQuery, SinkReplayRequest,
-        SubjectQuery, UpdateSubjectQuery,
+        AbortsQuery, ActorTreeQuery, ApprovalQuery, ApprovalState,
+        ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
+        EventsQuery, GovQuery, IncidentsQuery, ListQuery, SinkEventsQuery,
+        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -586,6 +586,15 @@ impl Bridge {
         Ok(self.api.manual_distribution(subject_id).await?)
     }
 
+    pub async fn lift_subject_for_sync(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        let subject_id = Self::parse_subject_id(subject_id)?;
+
+        Ok(self.api.lift_subject_for_sync(subject_id).await?)
+    }
+
     ///////// Register
     ////////////////////////////
     pub async fn get_all_govs(
@@ -663,6 +672,21 @@ impl Bridge {
         ave_core::validate_incidents_query(&query)?;
 
         Ok(self.api.get_recent_incidents(query).await?)
+    }
+
+    pub async fn get_actor_tree(
+        &self,
+        query: ActorTreeQuery,
+    ) -> Result<ActorTreeResponse, BridgeError> {
+        use ave_common::bridge::request::DEFAULT_TREE_LIMIT;
+        ave_core::validate_actor_tree_query(&query)?;
+        let subject = query
+            .subject
+            .map(Self::parse_subject_id)
+            .transpose()?;
+        let limit = query.limit.unwrap_or(DEFAULT_TREE_LIMIT);
+
+        Ok(self.api.get_actor_tree(subject, limit)?)
     }
 
     pub async fn get_event_sn(

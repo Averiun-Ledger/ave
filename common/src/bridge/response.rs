@@ -142,6 +142,33 @@ pub struct RequestsInManagerSubject {
     pub in_queue: Option<Vec<String>>,
 }
 
+/// One live actor in the supervision forest (ops view; mirrors
+/// `ave_actors::ActorTreeNode` flattened to pre-order so the
+/// response needs no recursive schema).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeNodeView {
+    pub path: String,
+    pub actor_type: String,
+    pub depth: u64,
+}
+
+/// Point-in-time supervision forest: `nodes` carries at most
+/// `limit` entries in pre-order (parent before children, siblings
+/// by path), `total` counts every live node, `truncated` tells
+/// the caller entries were dropped.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeResponse {
+    pub nodes: Vec<ActorTreeNodeView>,
+    pub total: u64,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

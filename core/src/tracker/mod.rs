@@ -1099,6 +1099,87 @@ impl Actor for Tracker {
             return Err(e);
         }
 
+        // Crash backstop: replay ledger events the query projection
+        // missed between persist and projection write, and refresh
+        // the subject state row. Dirty boots only (clean runs
+        // project live); once per boot like the reconcile above.
+        // Skipped for ledgers without history (unknown subject
+        // lifted manually): there is nothing to replay and the
+        // state snapshot needs registers that do not exist.
+        if !self.skip_reconcile
+            && crate::model::common::get_last_event(ctx).await?.is_some()
+        {
+            let state = self.build_subject_db(ctx).await?;
+            if let Err(e) = crate::model::common::fill_projection_gap(
+                ctx,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+                state,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to fill projection gap at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for register-table tails: re-emit this
+        // subject's registration (upsert, idempotent). Dirty boots
+        // only; deleted subjects stay deleted.
+        if !self.skip_reconcile && self.subject_metadata.active {
+            use crate::node::register::RegisterMessage;
+            if let Err(e) = Self::reemit_registration(
+                ctx,
+                RegisterMessage::RegisterSubj {
+                    gov_id: self.governance_id.to_string(),
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    name: self.subject_metadata.name.clone(),
+                    description: self.subject_metadata.description.clone(),
+                },
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to re-emit subject registration at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for quiet subjects: report the ledger tip to
+        // the sink manager so undelivered past events are caught up
+        // even without fresh traffic. Map reads only; the catch-up
+        // chain lifts this subject itself if delivery is needed.
+        // Dirty boots only: on a running node the reconciled set
+        // already gates repeats, and firing on every request-driven
+        // reboot could race slow live acks with duplicate catch-ups.
+        if !self.skip_reconcile {
+            let manager_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/sink_manager",
+                self.governance_id
+            ));
+            if let Err(e) = crate::model::common::review_sink_cursor(
+                ctx.system(),
+                manager_path,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to review sink cursor at boot"
+                );
+                return Err(e);
+            }
+        }
+
         Ok(())
     }
 }

@@ -25,6 +25,7 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
             | ("post", "/subjects/{subject_id}/abort-request")
             | ("post", "/subjects/{subject_id}/update")
             | ("post", "/subjects/{subject_id}/manual-distribution")
+            | ("post", "/subjects/{subject_id}/sync-lift")
             | ("put", "/governances/{subject_id}/authorize")
             | ("delete", "/governances/{subject_id}/authorize")
             | ("put", "/trackers/{subject_id}/ban")
@@ -896,6 +897,15 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "POST",
         &format!("/subjects/{}/manual-distribution", fixture.governance_id),
+        None,
+    )
+    .await;
+    assert_safe_mode_blocked(
+        &client,
+        &env.server,
+        None,
+        "POST",
+        &format!("/subjects/{}/sync-lift", fixture.governance_id),
         None,
     )
     .await;

@@ -242,6 +242,20 @@ impl Actor for SinkWorker {
         OverflowStrategy::Fail
     }
 
+    /// Same generous shutdown deadlines as the subject workers below:
+    /// stopping here waits out their own grace first.
+    fn stop_timeout() -> Option<Duration> {
+        Some(crate::sink::SINK_SHUTDOWN_GRACE)
+    }
+
+    fn mailbox_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
+    fn event_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,

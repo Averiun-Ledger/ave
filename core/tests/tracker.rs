@@ -26,6 +26,7 @@ use crate::common::{
     create_node, emit_fact_signed, get_abort_request, node_running,
     wait_request, wait_request_state,
 };
+use crate::common::sink_setup::example_schema_governance_fact;
 
 #[test(tokio::test)]
 // distribución manual.
@@ -6842,4 +6843,129 @@ async fn test_reconcile_heals_tracker_rotation() {
     .unwrap();
 
     node_running(&api).await.unwrap();
+}
+
+#[test(tokio::test)]
+async fn dirty_restart_repairs_projection_gap() {
+    // Crash backstop: ledger events persisted but never projected are
+    // replayed above max(sn) on dirty boot, plus the state row.
+    // Governances heal on boot; trackers heal once lifted.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let api = node.api.clone();
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
+    emit_fact(
+        &api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    api.get_subject_state(subject_id.clone()).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    // Simulate the crash cut: projection rows gone, ledger intact.
+    {
+        let conn =
+            rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        for id in [&governance_id, &subject_id] {
+            conn.execute(
+                "DELETE FROM events WHERE subject_id = ?1",
+                rusqlite::params![id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM subjects WHERE subject_id = ?1",
+                rusqlite::params![id.to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "DELETE FROM register_govs WHERE governance_id = ?1",
+            rusqlite::params![governance_id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM register_subjects WHERE subject_id = ?1",
+            rusqlite::params![subject_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+
+    // The governance boots with the node: its gap self-heals.
+    api.get_subject_state(governance_id.clone()).await.unwrap();
+    api.get_event_sn(governance_id.clone(), 0).await.unwrap();
+    api.get_event_sn(governance_id.clone(), 1).await.unwrap();
+    assert!(
+        api.all_govs(None, 100, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|gov| gov.governance_id == governance_id.to_string())
+    );
+
+    // The tracker stays down until lifted: the hole is still visible...
+    assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+    // ...and closes once lifted through boot healing.
+    api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+    assert_eq!(state.sn, 2);
+    api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 1).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+    assert!(
+        api.all_subjs(governance_id.clone(), None, None, 100, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|sub| sub.subject_id == subject_id.to_string())
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
 }

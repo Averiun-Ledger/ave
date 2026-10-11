@@ -163,6 +163,7 @@ impl Modify for FeatureGatedPathsAddon {
 
         // ── Distribution ────────────────────────────────────────
         server::post_manual_distribution,
+        server::post_sync_lift,
 
         // ── Register ────────────────────────────────────────────
         server::get_all_govs,
@@ -172,6 +173,7 @@ impl Modify for FeatureGatedPathsAddon {
         server::get_events,
         server::get_aborts,
         server::get_watchdog_incidents,
+        server::get_actor_tree,
         server::get_event_sn,
         server::get_first_or_end_events,
         server::get_subject_state,

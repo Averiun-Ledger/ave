@@ -122,6 +122,14 @@ pub enum SinkManagerMessage {
     ReplayEvents {
         requests: Vec<SinkReplayItem>,
     },
+    /// Boot backstop: a freshly booted subject reports its ledger tip so
+    /// the manager can catch up past events lost to a crash. Pure map
+    /// reads: never boots the subject (the catch-up chain lifts it
+    /// itself only when delivery is actually needed).
+    ReviewSubject {
+        subject_id: String,
+        tip_sn: u64,
+    },
     /// Non-persistent end-to-end test of a sink: health check + test payload
     /// delivery without advancing cursors.
     TestSink {
@@ -170,6 +178,18 @@ pub enum SinkManagerResponse {
     DetailedStatus(SinkManagerDetailedStatus),
     ReplayResult(SinkReplayResponse),
     TestResult(Result<(), SinkTestError>),
+    SubjectReview(Vec<SubjectSinkReview>),
+}
+
+/// Per-sink outcome of a [`SinkManagerMessage::ReviewSubject`]: the
+/// persisted cursor against the reported tip, and whether a
+/// catch-up was triggered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubjectSinkReview {
+    pub sink: String,
+    pub cursor: Option<u64>,
+    pub tip_sn: u64,
+    pub catch_up_triggered: bool,
 }
 
 impl Response for SinkManagerResponse {}
@@ -657,6 +677,20 @@ impl Actor for SinkManager {
         )
     }
 
+    /// Same generous shutdown deadlines as the workers below: stopping
+    /// here waits out their own grace first.
+    fn stop_timeout() -> Option<Duration> {
+        Some(crate::sink::SINK_SHUTDOWN_GRACE)
+    }
+
+    fn mailbox_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
+    fn event_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
     async fn pre_start(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -876,6 +910,14 @@ impl Handler<Self> for SinkManager {
             SinkManagerMessage::ReplayEvents { requests } => {
                 let response = self.handle_replay_events(requests, ctx).await?;
                 return Ok(SinkManagerResponse::ReplayResult(response));
+            }
+            SinkManagerMessage::ReviewSubject {
+                subject_id,
+                tip_sn,
+            } => {
+                let response =
+                    self.handle_review_subject(subject_id, tip_sn, ctx).await?;
+                return Ok(SinkManagerResponse::SubjectReview(response));
             }
             SinkManagerMessage::TestSink { sink } => {
                 let result = self.handle_test_sink(&sink, ctx).await;
@@ -2362,6 +2404,70 @@ impl SinkManager {
             }
         }
         Ok(())
+    }
+
+    /// Boot backstop for quiet subjects: compares the persisted
+    /// delivery cursor against the subject's reported ledger tip and
+    /// triggers an ordered catch-up where behind. Refreshes the
+    /// freshness bound to ledger truth first (a crash may have lost
+    /// the notification that set it). Skips blocked sinks; unknown
+    /// subjects report clean without touching anything.
+    async fn handle_review_subject(
+        &mut self,
+        subject_id: String,
+        tip_sn: u64,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<Vec<SubjectSinkReview>, ActorError> {
+        let mut out = Vec::new();
+        let sinks: Vec<String> =
+            self.sink_servers.keys().cloned().collect();
+        for sink in sinks {
+            let blocked = self.blocked_sinks.contains_key(&sink);
+            let cursor = self
+                .cursors
+                .get(&(sink.clone(), subject_id.clone()))
+                .copied();
+            let behind =
+                cursor.map(|cut| cut < tip_sn).unwrap_or(tip_sn > 0);
+            let mut triggered = false;
+            if behind {
+                // Mark lagging even on blocked sinks (same as the
+                // catch-up rejection path): recovery retries once
+                // the sink is available again.
+                self.try_insert_lagging(&sink, subject_id.clone());
+                if !blocked {
+                    let last = self
+                        .last_seen
+                        .get(&subject_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if tip_sn > last {
+                        self.persist(
+                            SinkManagerEvent::LastSeenUpdated {
+                                subject_id: subject_id.clone(),
+                                sn: tip_sn,
+                            },
+                            ctx,
+                        )
+                        .await?;
+                    }
+                    self.handle_request_catch_up(
+                        sink.clone(),
+                        vec![subject_id.clone()],
+                        ctx,
+                    )
+                    .await?;
+                    triggered = true;
+                }
+            }
+            out.push(SubjectSinkReview {
+                sink,
+                cursor,
+                tip_sn,
+                catch_up_triggered: triggered,
+            });
+        }
+        Ok(out)
     }
 
     /// Ensures the sink worker is running and sends it a catch-up request for

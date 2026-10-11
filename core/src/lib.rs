@@ -40,7 +40,10 @@ use std::sync::Arc;
 use auth::{
     AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse,
 };
-use ave_actors::{ActorError, ActorPath, ActorRef, PersistentActor, SystemRef};
+use ave_actors::{
+    ActorError, ActorPath, ActorRef, ActorTreeNode, PersistentActor,
+    SystemRef,
+};
 use ave_common::Error as CommonError;
 use ave_common::bridge::request::{
     AbortsQuery, ApprovalState, ApprovalStateRes, EventRequestType,
@@ -59,7 +62,8 @@ use ave_common::response::{
 use ave_common::{
     bridge::request::SinksQuery,
     bridge::response::{
-        SinkInfo, SinkManagerTarget, SinkServerView, SinkStatusInfo,
+        ActorTreeNodeView, ActorTreeResponse, SinkInfo, SinkManagerTarget,
+        SinkServerView, SinkStatusInfo,
     },
     sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
@@ -89,9 +93,9 @@ use crate::api_input_validation::page_sorted;
 pub use crate::api_input_validation::{
     DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT, parse_request_id,
     require_non_empty_str, require_positive_u64, require_query_limit,
-    resolve_page, validate_aborts_query, validate_event_request,
-    validate_events_query, validate_governance_id, validate_incidents_query,
-    validate_request_id, validate_sink_events_query,
+    resolve_page, validate_aborts_query, validate_actor_tree_query,
+    validate_event_request, validate_events_query, validate_governance_id,
+    validate_incidents_query, validate_request_id, validate_sink_events_query,
     validate_sink_replay_request, validate_sinks_query, validate_subject_id,
 };
 use crate::approval::request::ApprovalReq;
@@ -111,6 +115,7 @@ use crate::sink::{
     SinkManager, SinkManagerDetailedStatus, SinkManagerMessage,
     SinkManagerResponse,
 };
+use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 
 #[cfg(all(feature = "sqlite", feature = "rocksdb"))]
 compile_error!("Select only one: 'sqlite' or 'rocksdb'");
@@ -167,6 +172,45 @@ impl Drop for SubjectDeletionGuard<'_> {
         {
             *deleting = None;
         }
+    }
+}
+
+/// Collects subtrees rooted at nodes carrying `wanted` as their
+/// last path segment (subject actors are named by subject id).
+fn collect_subject_roots<'a>(
+    node: &'a ActorTreeNode,
+    wanted: &str,
+    matched: &mut Vec<&'a ActorTreeNode>,
+) {
+    if node.path.rsplit('/').next() == Some(wanted) {
+        matched.push(node);
+    } else {
+        for child in &node.children {
+            collect_subject_roots(child, wanted, matched);
+        }
+    }
+}
+
+/// Flattens one subtree in pre-order, appending at most
+/// `*budget` entries so the partial view stays ordered and
+/// parents always precede their children.
+fn flatten_tree_node(
+    node: &ActorTreeNode,
+    depth: u64,
+    budget: &mut u64,
+    out: &mut Vec<ActorTreeNodeView>,
+) {
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    out.push(ActorTreeNodeView {
+        path: node.path.clone(),
+        actor_type: node.actor_type.clone(),
+        depth,
+    });
+    for child in &node.children {
+        flatten_tree_node(child, depth + 1, budget, out);
     }
 }
 
@@ -645,6 +689,59 @@ impl Api {
                 })
             }
         }
+    }
+
+    ///////// Actors
+    ////////////////////////////
+
+    /// Snapshots the live supervision forest for ops: every node
+    /// carries its path and concrete type. `subject` prunes the
+    /// forest to subtrees rooted at that subject id; `limit`
+    /// truncates in pre-order and reports it via `truncated`.
+    pub fn get_actor_tree(
+        &self,
+        subject: Option<DigestIdentifier>,
+        limit: u64,
+    ) -> Result<ActorTreeResponse, Error> {
+        use ave_common::bridge::request::MAX_TREE_LIMIT;
+        if let Some(ref subject) = subject {
+            validate_subject_id(subject)?;
+        }
+        require_positive_u64("limit", limit)?;
+        if limit > MAX_TREE_LIMIT {
+            return Err(Error::InvalidQueryParams(format!(
+                "limit must not exceed {MAX_TREE_LIMIT}"
+            )));
+        }
+        let forest = self.system.actor_tree();
+        let roots: Vec<&ActorTreeNode> = match subject {
+            None => forest.iter().collect(),
+            Some(ref subject) => {
+                let wanted = subject.to_string();
+                let mut matched = Vec::new();
+                for root in &forest {
+                    collect_subject_roots(root, &wanted, &mut matched);
+                }
+                if matched.is_empty() {
+                    return Err(Error::SubjectNotFound(wanted));
+                }
+                matched
+            }
+        };
+        let total: u64 = roots.iter().map(|n| n.size() as u64).sum();
+        let mut nodes = Vec::new();
+        let mut budget = limit;
+        for root in roots {
+            flatten_tree_node(root, 0, &mut budget, &mut nodes);
+            if budget == 0 {
+                break;
+            }
+        }
+        Ok(ActorTreeResponse {
+            nodes,
+            total,
+            truncated: total > limit,
+        })
     }
 
     ///////// Request
@@ -1603,6 +1700,81 @@ impl Api {
             })?;
 
         Ok("Manual distribution in progress".to_owned())
+    }
+
+    /// Lifts a tracker on demand so its boot healing runs (register
+    /// reconcile, projection gap-fill, sink cursor review), then
+    /// releases it. The `Up` round trip completes `pre_start`
+    /// synchronously; async catch-ups continue through the sink
+    /// chain, which lifts the subject itself as needed. Trackers
+    /// only: governance subjects boot with the node, and lifting
+    /// one by id is rejected below.
+    pub async fn lift_subject_for_sync(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<String, Error> {
+        self.ensure_mutations_allowed()?;
+        validate_subject_id(&subject_id)?;
+        const REQUESTER: &str = "manual-sync";
+        match self
+            .subject_manager
+            .ask(SubjectManagerMessage::Up {
+                subject_id: subject_id.clone(),
+                requester: REQUESTER.to_owned(),
+                create_ledger: None,
+            })
+            .await
+        {
+            Ok(SubjectManagerResponse::Up) => {}
+            Ok(other) => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "subject_manager".to_owned(),
+                    expected: "Up".to_owned(),
+                    received: format!("{other:?}"),
+                });
+            }
+            Err(e) => {
+                return Err(actor_communication_error(
+                    "subject_manager",
+                    e,
+                ));
+            }
+        }
+        let lifted_is_tracker = match self
+            .system
+            .get_actor::<Tracker>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{subject_id}"
+            )))
+            .await
+        {
+            Ok(tracker) => {
+                match tracker.ask(TrackerMessage::GetMetadata).await {
+                    Ok(TrackerResponse::Metadata(metadata)) => {
+                        metadata.subject_id == subject_id
+                    }
+                    _ => false,
+                }
+            }
+            Err(_) => false,
+        };
+        if let Err(e) = self
+            .subject_manager
+            .ask(SubjectManagerMessage::Finish {
+                subject_id: subject_id.clone(),
+                requester: REQUESTER.to_owned(),
+            })
+            .await
+        {
+            warn!(
+                msg_type = "ApiRequest",
+                error = %e,
+                "Manual sync lift finished without release"
+            );
+        }
+        if !lifted_is_tracker {
+            return Err(Error::SubjectNotFound(subject_id.to_string()));
+        }
+        Ok(subject_id.to_string())
     }
 
     pub async fn get_sinks(

@@ -5087,6 +5087,77 @@ impl Actor for Governance {
             return Err(e);
         }
 
+        // Crash backstop: replay ledger events the query projection
+        // missed between persist and projection write, and refresh
+        // the subject state row. Dirty boots only (clean runs
+        // project live); once per boot like the reconcile above.
+        if !self.skip_reconcile {
+            let state = SubjectDB::from(&*self);
+            if let Err(e) = crate::model::common::fill_projection_gap(
+                ctx,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+                state,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to fill projection gap at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for register-table tails: re-emit this
+        // governance's registration (upsert, idempotent). Dirty
+        // boots only; deleted governances stay deleted.
+        if !self.skip_reconcile && self.subject_metadata.active {
+            use crate::node::register::RegisterMessage;
+            if let Err(e) = Self::reemit_registration(
+                ctx,
+                RegisterMessage::RegisterGov {
+                    gov_id: self.subject_metadata.subject_id.to_string(),
+                    name: self.subject_metadata.name.clone(),
+                    description: self.subject_metadata.description.clone(),
+                },
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to re-emit governance registration at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for quiet subjects: report the ledger tip to
+        // the node sink manager so undelivered past events are caught
+        // up even without fresh traffic. Map reads only.
+        // Dirty boots only (same reason as above).
+        if !self.skip_reconcile {
+            let node_path = ctx.path().parent().parent();
+            let manager_path = ActorPath::from(format!(
+                "{}/node_sink_manager",
+                node_path
+            ));
+            if let Err(e) = crate::model::common::review_sink_cursor(
+                ctx.system(),
+                manager_path,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to review sink cursor at boot"
+                );
+                return Err(e);
+            }
+        }
+
         if self.service {
             let Some(config): Option<ConfigHelper> =
                 ctx.system().get_helper("config")

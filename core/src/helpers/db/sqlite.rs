@@ -1190,6 +1190,13 @@ impl ReadStore for SqliteLocal {
         self.reader.get_event_sn(subject_id, sn).await
     }
 
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        self.reader.max_event_sn(subject_id).await
+    }
+
     async fn get_first_or_end_events(
         &self,
         subject_id: &str,
@@ -1307,6 +1314,24 @@ impl ReadStore for SqliteReadStore {
         .await
     }
 
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        let subject_id = subject_id.to_owned();
+
+        self.with_reader("max_event_sn", move |conn| {
+            conn.query_row(
+                "SELECT MAX(sn) FROM events WHERE subject_id = ?1",
+                params![subject_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|max| max.and_then(|sn| u64::try_from(sn).ok()))
+            .map_err(|e| DatabaseError::Query(e.to_string()))
+        })
+        .await
+    }
+
     async fn get_first_or_end_events(
         &self,
         subject_id: &str,
@@ -1385,6 +1410,25 @@ impl SqliteLocal {
         subject_id: &str,
     ) -> Result<(), DatabaseError> {
         self.writer.delete_subject(subject_id.to_owned()).await
+    }
+
+    pub(crate) async fn fill_event_gap(
+        &self,
+        events: Vec<Ledger>,
+    ) -> Result<u64, DatabaseError> {
+        let mut filled = 0;
+        for event in events {
+            self.writer.persist_signed_ledger(event).await?;
+            filled += 1;
+        }
+        Ok(filled)
+    }
+
+    pub(crate) async fn upsert_subject_state(
+        &self,
+        state: SubjectDB,
+    ) -> Result<(), DatabaseError> {
+        self.writer.persist_subject_state(state).await
     }
 
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {

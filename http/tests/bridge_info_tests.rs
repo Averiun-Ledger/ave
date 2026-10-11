@@ -2794,3 +2794,122 @@ fn openapi_covers_every_declared_route() {
         "OpenAPI documents routes that are not mounted: {stale:?}"
     );
 }
+
+#[test(tokio::test)]
+async fn test_actor_tree_snapshot_filter_and_truncation() {
+    // GET /actor-tree -> full pre-order snapshot; ?subject= prunes
+    // to matching subtrees; ?limit= truncates with a flag.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let (status, body) =
+        make_request(&client, &server.url("/actor-tree"), "GET", None, None)
+            .await;
+    assert!(status.is_success(), "GET /actor-tree failed: {body}");
+    let total =
+        body.pointer("/total").and_then(serde_json::Value::as_u64).unwrap();
+    let nodes = body
+        .pointer("/nodes")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert!(!nodes.is_empty(), "a live node serves its own tree");
+    assert_eq!(body.pointer("/truncated"), Some(&json!(false)));
+    assert_eq!(total, nodes.len() as u64);
+    for node in nodes {
+        let path = node.pointer("/path").and_then(Value::as_str).unwrap();
+        assert!(path.starts_with("/user/"), "unexpected path: {path}");
+        let actor_type =
+            node.pointer("/actor_type").and_then(Value::as_str).unwrap();
+        assert!(!actor_type.is_empty(), "type missing at {path}");
+    }
+    assert_eq!(nodes[0].pointer("/depth"), Some(&json!(0)));
+
+    // Truncation keeps the pre-order head and flags the cut.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/actor-tree?limit=1"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "truncated tree failed: {body}");
+    assert_eq!(body.pointer("/truncated"), Some(&json!(true)));
+    assert_eq!(body.pointer("/total"), Some(&json!(total)));
+    assert_eq!(
+        body.pointer("/nodes").and_then(Value::as_array).unwrap().len(),
+        1
+    );
+
+    // Subject pruning: unknown ids find no subtree (URL-safe
+    // base64 without padding, 32 zero bytes: valid shape).
+    let unknown = "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let url = reqwest::Url::parse_with_params(
+        &server.url("/actor-tree"),
+        &[("subject", unknown)],
+    )
+    .unwrap();
+    let (status, _) =
+        make_request(&client, url.as_str(), "GET", None, None).await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    // ...and malformed ones are rejected.
+    let (status, _) = make_request(
+        &client,
+        &server.url("/actor-tree?subject=!!!"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    // Degenerate values are rejected, never served partial.
+    for bad in ["limit=0", "limit=5001"] {
+        let (status, _) = make_request(
+            &client,
+            &server.url(&format!("/actor-tree?{bad}")),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[test(tokio::test)]
+async fn test_sync_lift_round_trip() {
+    // POST /subjects/{id}/sync-lift lifts the tracker through boot
+    // healing and releases it; unknown ids (and governance ids,
+    // which boot with the node) report not found.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+    let subject = "BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA";
+
+    let (status, _) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-lift")),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/subjects/not-a-subject!!!/sync-lift"),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}

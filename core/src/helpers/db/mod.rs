@@ -2,8 +2,8 @@ mod error;
 
 use crate::{
     db::check_dir_writable, external_db::DBManager,
-    model::sink::SubjectSinkEvent, node::register::RegisterEvent,
-    request::tracking::RequestTrackingEvent,
+    model::event::Ledger, model::sink::SubjectSinkEvent,
+    node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -59,6 +59,13 @@ pub trait ReadStore {
         subject_id: &str,
         sn: u64,
     ) -> Result<LedgerDB, DatabaseError>;
+
+    /// Highest event sn projected for this subject, if any. Crash
+    /// backstop: boot gap-fill replays the ledger above it.
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError>;
 
     // n first or last events
     async fn get_first_or_end_events(
@@ -213,6 +220,37 @@ impl ExternalDB {
         }
     }
 
+    /// Replays ledger events missed by the live projection (crash
+    /// between ledger persist and projection write). Exact-range
+    /// only: callers replay above `max_event_sn`, so the plain
+    /// `INSERT` never collides. Returns events written.
+    pub(crate) async fn fill_event_gap(
+        &self,
+        events: Vec<Ledger>,
+    ) -> Result<u64, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.fill_event_gap(events).await
+            }
+        }
+    }
+
+    /// Refreshes the subject state row (upsert, idempotent). Crash
+    /// backstop together with [`ExternalDB::fill_event_gap`]: the
+    /// state snapshot publish may have been lost with the same cut.
+    pub(crate) async fn upsert_subject_state(
+        &self,
+        state: SubjectDB,
+    ) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.upsert_subject_state(state).await
+            }
+        }
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -282,6 +320,18 @@ impl ReadStore for ExternalDB {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_event_sn(subject_id, sn).await
+            }
+        }
+    }
+
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.max_event_sn(subject_id).await
             }
         }
     }

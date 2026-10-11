@@ -2003,6 +2003,26 @@ where
         Ok(())
     }
 
+    /// Re-sends a registration to the node register, skipping cleanly
+    /// when the register actor is absent (unit-test systems).
+    /// Crash backstop for register-table tails lost between publish
+    /// and projection write; rows are upserts, so re-emission is
+    /// idempotent. Callers send only for active subjects: re-emitting
+    /// a deleted one would resurrect its listing row.
+    async fn reemit_registration(
+        ctx: &mut ActorContext<Self>,
+        message: RegisterMessage,
+    ) -> Result<(), ActorError> {
+        match Self::register(ctx, message).await {
+            Ok(()) => Ok(()),
+            Err(ActorError::NotFound { .. }) => {
+                debug!("Skipping register re-emit: no register actor");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn event_to_sink(
         &self,
         ctx: &mut ActorContext<Self>,

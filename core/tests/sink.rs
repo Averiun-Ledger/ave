@@ -11367,3 +11367,120 @@ async fn live_delivery_across_worker_idle_shutdowns() {
     );
     assert_subject_sn_sequence(&events, &subject_id_str, 0, 5);
 }
+
+#[traced_test]
+#[tokio::test]
+async fn dirty_restart_review_marks_quiet_subject_lagging() {
+    // Hole 1: a pre-crash undelivered tail on a quiet subject is
+    // noticed by boot review (cursor vs tip) without fresh traffic.
+    // The sink chain lifts the subject itself when delivering.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) = create_subject(
+        &node.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let subject_id_str = subject_id.to_string();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Restart delivering to a healthy sink: cursor reaches the tip.
+    let sink = TestSink::start().await;
+    let sink_url = sink.url();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys.clone(),
+        local_db.clone(),
+        ext_db.clone(),
+        format!("/memory/{}", port),
+        example_sink_config(sink_url.clone(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+    sink.wait_for_count(3, true).await;
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+
+    // Freeze the cursor behind the tip: the failing sink blocks.
+    sink.set_mode(ResponseMode::ClientError).await;
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_blocked(&node.api, "example-sink").await;
+
+    // Dirty restart with the sink still failing, then lift the quiet
+    // tracker: boot review must mark it lagging without fresh traffic.
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(sink_url, Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+    node.api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    wait_for_sink_blocked(&node.api, "example-sink").await;
+    assert_sink_lagging(&node.api, "example-sink", 1).await;
+
+    // Full loop: healthy again, unblock, the tail is delivered.
+    sink.set_mode(ResponseMode::Accept).await;
+    node.api.unblock_sink("example-sink".to_owned()).await.unwrap();
+    wait_for_sink_unblocked(&node.api, "example-sink").await;
+    sink.wait_for_count(4, true).await;
+    assert_subject_sn_sequence(
+        &sink.snapshot().await,
+        &subject_id_str,
+        0,
+        3,
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}

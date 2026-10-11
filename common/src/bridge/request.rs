@@ -174,6 +174,26 @@ pub struct IncidentsQuery {
     pub limit: Option<u64>,
 }
 
+/// Cap for actor-tree snapshots: the tree is an ops/debugging view,
+/// not a paginated ledger, so it allows a larger single response
+/// than [`crate::bridge`] list endpoints but never unbounded.
+pub const MAX_TREE_LIMIT: u64 = 5000;
+
+/// Default actor-tree snapshot size when the caller passes no `limit`.
+pub const DEFAULT_TREE_LIMIT: u64 = 5000;
+
+/// Filters for the actor-tree endpoint (all optional; prunes the
+/// live supervision forest server-side and flags truncation).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeQuery {
+    pub subject: Option<String>,
+    pub limit: Option<u64>,
+}
+
 /// Query for retrieving the first or last events of a subject.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

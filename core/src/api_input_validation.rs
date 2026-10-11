@@ -8,8 +8,8 @@
 use std::str::FromStr;
 
 use ave_common::bridge::request::{
-    AbortsQuery, EventsQuery, IncidentsQuery, SinkEventsQuery,
-    SinkReplayRequest, SinksQuery,
+    AbortsQuery, ActorTreeQuery, EventsQuery, IncidentsQuery,
+    SinkEventsQuery, SinkReplayRequest, SinksQuery,
 };
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
@@ -223,6 +223,23 @@ pub fn validate_incidents_query(query: &IncidentsQuery) -> Result<(), Error> {
         return Err(Error::InvalidQueryParams(
             "from_nanos must not exceed to_nanos".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Validates filters of an [`ActorTreeQuery`]: the tree snapshot is
+/// bounded by its own cap (larger than paged ledgers, still finite).
+pub fn validate_actor_tree_query(query: &ActorTreeQuery) -> Result<(), Error> {
+    use ave_common::bridge::request::{DEFAULT_TREE_LIMIT, MAX_TREE_LIMIT};
+    let limit = query.limit.unwrap_or(DEFAULT_TREE_LIMIT);
+    require_positive_u64("limit", limit)?;
+    if limit > MAX_TREE_LIMIT {
+        return Err(Error::InvalidQueryParams(format!(
+            "limit must not exceed {MAX_TREE_LIMIT}"
+        )));
+    }
+    if let Some(subject) = &query.subject {
+        require_non_empty_str("subject", subject)?;
     }
     Ok(())
 }

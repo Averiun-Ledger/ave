@@ -85,6 +85,11 @@ impl Tracker {
         &self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerReconcileReport, ActorError> {
+        // No ledger history (unknown subject lifted manually): nothing
+        // to replay, and the registers below do not exist either.
+        if crate::model::common::get_last_event(ctx).await?.is_none() {
+            return Ok(TrackerReconcileReport::default());
+        }
         // Order after this tracker's own governance replay: its
         // register entries must exist before writing into them. Other
         // governances reconciling never blocks this tracker.

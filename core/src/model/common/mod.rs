@@ -8,14 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::slice;
-use tracing::{error, warn};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
-    PersistentActor, Store, StoreCommand, StoreResponse,
+    PersistentActor, Store, StoreCommand, StoreResponse, SystemRef,
 };
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::response::SubjectDB;
 
 use crate::governance::model::Quorum;
 use crate::governance::role_register::{
@@ -33,6 +35,8 @@ use crate::governance::witnesses_register::{
     WitnessStatus, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
 };
+use crate::helpers::db::{ExternalDB, ReadStore};
+use crate::model::event::Ledger;
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
 };
@@ -1089,6 +1093,48 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn split_page_fresh_keeps_only_past_frontier() {
+        // Empty table: everything is fresh, frontier jumps to max.
+        let mut done = None;
+        assert_eq!(
+            split_page_fresh(&[0, 1, 2], &mut done),
+            vec![true, true, true]
+        );
+        assert_eq!(done, Some(2));
+
+        // Overlapping boundary (inclusive range): the repeated
+        // event is dropped, never re-inserted.
+        let mut done = Some(2);
+        assert_eq!(
+            split_page_fresh(&[2, 3, 4], &mut done),
+            vec![false, true, true]
+        );
+        assert_eq!(done, Some(4));
+
+        // Fully covered page (stale re-read): nothing fresh, the
+        // caller stops paging.
+        let mut done = Some(4);
+        assert_eq!(
+            split_page_fresh(&[4], &mut done),
+            vec![false]
+        );
+        assert_eq!(done, Some(4));
+
+        // Duplicates inside one page collapse to a single insert.
+        let mut done = Some(4);
+        assert_eq!(
+            split_page_fresh(&[5, 5, 6], &mut done),
+            vec![true, false, true]
+        );
+        assert_eq!(done, Some(6));
+
+        // Empty page leaves the frontier untouched.
+        let mut done = Some(6);
+        assert!(split_page_fresh(&[], &mut done).is_empty());
+        assert_eq!(done, Some(6));
+    }
+
     fn sample_keys(n: usize) -> HashSet<PublicKey> {
         (0..n)
             .map(|_| {
@@ -1219,4 +1265,161 @@ where
             expected: "StoreResponse::Events".to_owned(),
         }),
     }
+}
+
+/// Asks a sink manager to compare its persisted delivery cursor
+/// against the subject's ledger tip and catch up where behind
+/// (boot backstop for quiet subjects: without fresh traffic the
+/// gap would never be noticed). Pure map reads on the manager
+/// side; the catch-up chain lifts the subject itself only when
+/// delivery is actually needed. Unknown manager (no sinks
+/// configured) is a clean no-op.
+pub async fn review_sink_cursor(
+    system: &SystemRef,
+    manager_path: ActorPath,
+    subject_id: &DigestIdentifier,
+    tip_sn: u64,
+) -> Result<(), ActorError> {
+    use crate::sink::manager::{
+        SinkManager, SinkManagerMessage, SinkManagerResponse,
+    };
+    let manager = match system.get_actor::<SinkManager>(&manager_path).await
+    {
+        Ok(manager) => manager,
+        Err(ActorError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match manager
+        .ask(SinkManagerMessage::ReviewSubject {
+            subject_id: subject_id.to_string(),
+            tip_sn,
+        })
+        .await?
+    {
+        SinkManagerResponse::SubjectReview(_) => Ok(()),
+        _ => Err(ActorError::Functional {
+            description: "unexpected sink review response".to_owned(),
+        }),
+    }
+}
+
+/// Splits one inclusive-range ledger page against the projection
+/// frontier, advancing it past every kept event. Everything at or
+/// below `done` is already projected (including the overlapping
+/// boundary event and any in-page duplicate): only strictly newer
+/// sns are kept, so a plain `INSERT` never collides. Pages arrive
+/// ordered by sn. Pure: unit-tested below.
+fn split_page_fresh(sns: &[u64], done: &mut Option<u64>) -> Vec<bool> {
+    let mut mask = Vec::with_capacity(sns.len());
+    for sn in sns {
+        if done.map_or(true, |cut| *sn > cut) {
+            mask.push(true);
+            *done = Some(*sn);
+        } else {
+            mask.push(false);
+        }
+    }
+    mask
+}
+
+/// Replays ledger events above the query-DB projection watermark
+/// into it and refreshes the subject state row (crash backstop:
+/// events persisted to the ledger but never projected after a
+/// power cut, including a subject missing entirely on first
+/// event). Exact-range: events at or below the watermark are
+/// skipped, so the plain `INSERT` never collides, and the state
+/// row is an upsert. Callers gate this on dirty boot; the
+/// watermark check itself makes clean runs a single indexed query.
+/// Returns events written.
+pub async fn fill_projection_gap<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+    tip_sn: u64,
+    state: SubjectDB,
+) -> Result<u64, ActorError>
+where
+    A: PersistentActor<Event = Ledger>,
+{
+    let Some(ext_db): Option<Arc<ExternalDB>> =
+        ctx.system().get_helper("ext_db")
+    else {
+        // No projection configured (unit-test systems): nothing to
+        // fill. Production nodes always register this helper at
+        // build, so a missing helper never hides a real gap there.
+        debug!(
+            "Skipping projection gap-fill: no ext_db helper registered"
+        );
+        return Ok(0);
+    };
+    let watermark = ext_db
+        .max_event_sn(&subject_id.to_string())
+        .await
+        .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+    // No ledger history (unknown subject lifted manually): nothing
+    // persisted, so no projection row may exist either.
+    if get_last_event(ctx).await?.is_none() {
+        return Ok(0);
+    }
+    info!(
+        msg_type = "FillProjectionGapCheck",
+        subject_id = %subject_id,
+        watermark = ?watermark,
+        tip_sn,
+        "Checking query projection against ledger tip"
+    );
+    let floor = watermark.unwrap_or(0);
+    if watermark.is_some() && floor >= tip_sn {
+        return Ok(0);
+    }
+    // Paged reads overlap at the boundary (inclusive range), so the
+    // frontier is what is already projected, not the page start:
+    // re-inserting a boundary event would collide on its primary key.
+    let mut done: Option<u64> = watermark;
+    let mut from = floor;
+    let mut filled = 0;
+    while done.map_or(tip_sn > 0, |cut| cut < tip_sn) {
+        let events: Vec<Ledger> = get_n_events(ctx, from, 256).await?;
+        if events.is_empty() {
+            break;
+        }
+        let sns: Vec<u64> = events.iter().map(|event| event.sn).collect();
+        if let Some(page_max) = sns.iter().max() {
+            from = from.max(*page_max);
+        }
+        let mask = split_page_fresh(&sns, &mut done);
+        if !mask.iter().any(|keep| *keep) {
+            break;
+        }
+        let fresh: Vec<Ledger> = events
+            .into_iter()
+            .zip(mask)
+            .filter(|(_, keep)| *keep)
+            .map(|(event, _)| event)
+            .collect();
+        filled += ext_db
+            .fill_event_gap(fresh)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
+    }
+    ext_db
+        .upsert_subject_state(state)
+        .await
+        .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+    if filled > 0 {
+        info!(
+            msg_type = "FillProjectionGap",
+            subject_id = %subject_id,
+            watermark = ?watermark,
+            tip_sn,
+            filled,
+            "Replayed ledger events missed by the query projection"
+        );
+    }
+    Ok(filled)
 }

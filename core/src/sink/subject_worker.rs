@@ -148,6 +148,20 @@ impl Actor for SinkSubjectWorker {
         self.release_subject(ctx).await;
         Ok(())
     }
+
+    /// Generous shutdown deadlines for slow machines: external sends
+    /// retry with backoff, so the default would abort them mid-batch.
+    fn stop_timeout() -> Option<Duration> {
+        Some(crate::sink::SINK_SHUTDOWN_GRACE)
+    }
+
+    fn mailbox_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
+    fn event_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
 }
 
 #[async_trait]
