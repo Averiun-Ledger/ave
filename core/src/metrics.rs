@@ -258,7 +258,7 @@ impl CoreMetrics {
             self.requests.clone(),
         );
         registry.register(
-            "http_requests_total",
+            "http_requests",
             "HTTP responses served, labeled by route template and status code.",
             self.http_requests.clone(),
         );

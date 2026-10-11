@@ -125,7 +125,7 @@ impl AuthPrometheusMetrics {
             self.request_db_duration_seconds.clone(),
         );
         registry.register(
-            "auth_login_attempts_total",
+            "auth_login_attempts",
             "Login attempts labeled by result.",
             self.login_attempts_total.clone(),
         );
