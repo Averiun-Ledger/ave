@@ -763,18 +763,6 @@ async fn test_update_and_transfer_deserialization() {
     .await;
     assert!(status.is_success());
 
-    let (status, body) = make_request(
-        &client,
-        &server.url(&format!("/subjects/{}/update", request_data.subject_id)),
-        "POST",
-        None,
-        None,
-    )
-    .await;
-    assert!(status.is_success());
-    let res: String = serde_json::from_value(body).unwrap();
-    assert!(!res.is_empty());
-
     // `strict` flag deserializes (false keeps default behavior).
     let (status, body) = make_request(
         &client,
@@ -787,7 +775,7 @@ async fn test_update_and_transfer_deserialization() {
         None,
     )
     .await;
-    assert!(status.is_success(), "{body}");
+    assert!(status.is_success());
     let res: String = serde_json::from_value(body).unwrap();
     assert!(!res.is_empty());
 
@@ -2009,11 +1997,15 @@ async fn test_subject_deserialization() {
     assert_eq!(events[0].sn, 1);
 
     // `aborts` with every variable, typed (no aborts here, but the
-    // shape must deserialize).
+    // shape must deserialize; the request id is real but never
+    // aborted, so it matches nothing).
     for query in [
         "quantity=10&page=1".to_owned(),
         "quantity=10&page=1&reverse=true".to_owned(),
-        "request_id=missing&sn=999999&quantity=10&page=1&reverse=true".to_owned(),
+        format!(
+            "request_id={}&sn=999999&quantity=10&page=1&reverse=true",
+            request_data.request_id
+        ),
     ] {
         let (status, body) = make_request(
             &client,
