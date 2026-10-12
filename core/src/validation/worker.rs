@@ -204,13 +204,15 @@ struct ApprovalRoute {
 }
 
 /// Ledger-anchored identity of the event under validation, shared by
-/// the evidence checks so their signatures stay readable.
-struct EventAnchor<'a> {
-    event_request: &'a Arc<Signed<EventRequest>>,
-    metadata: &'a Metadata,
-    gov_version: u64,
-    req_subject_data_hash: DigestIdentifier,
-    signer: PublicKey,
+/// the evidence checks so their signatures stay readable. Public so
+/// the off-chain verification tool runs the same checks over
+/// replayed state.
+pub struct EventAnchor<'a> {
+    pub event_request: &'a Arc<Signed<EventRequest>>,
+    pub metadata: &'a Metadata,
+    pub gov_version: u64,
+    pub req_subject_data_hash: DigestIdentifier,
+    pub signer: PublicKey,
 }
 
 /// Outcome of merging an approver vote into an approval collection.
@@ -391,19 +393,19 @@ impl ValiWorker {
         }
     }
 
-    fn event_request_hash(
-        &self,
+    pub fn event_request_hash(
+        hash: &HashAlgorithm,
         event_request: &Signed<EventRequest>,
     ) -> Result<DigestIdentifier, ValidatorError> {
-        hash_borsh(&*self.hash.hasher(), event_request).map_err(|e| {
+        hash_borsh(&*hash.hasher(), event_request).map_err(|e| {
             ValidatorError::InternalError {
                 problem: e.to_string(),
             }
         })
     }
 
-    fn viewpoints_hash(
-        &self,
+    pub fn viewpoints_hash(
+        hash: &HashAlgorithm,
         event_request: &EventRequest,
     ) -> Result<DigestIdentifier, ValidatorError> {
         let viewpoints = match event_request {
@@ -411,7 +413,7 @@ impl ValiWorker {
             _ => BTreeSet::new(),
         };
 
-        hash_borsh(&*self.hash.hasher(), &viewpoints).map_err(|e| {
+        hash_borsh(&*hash.hasher(), &viewpoints).map_err(|e| {
             ValidatorError::InternalError {
                 problem: e.to_string(),
             }
@@ -430,8 +432,8 @@ impl ValiWorker {
         self.current_roles.approval.clone()
     }
 
-    fn check_data(
-        &self,
+    pub fn check_data(
+        expected_governance_id: &DigestIdentifier,
         validation_req: &Signed<ValidationReq>,
     ) -> Result<(), ValidatorError> {
         if !validation_req.content().is_valid() {
@@ -447,7 +449,7 @@ impl ValiWorker {
                 value: "governance_id",
             })?;
 
-        if governance_id != self.governance_id {
+        if governance_id != *expected_governance_id {
             return Err(ValidatorError::InvalidData {
                 value: "governance_id",
             });
@@ -473,7 +475,7 @@ impl ValiWorker {
         Ok(())
     }
 
-    fn check_metadata(
+    pub fn check_metadata(
         event_type: &EventRequestType,
         metadata: &Metadata,
         gov_version: u64,
@@ -597,7 +599,7 @@ impl ValiWorker {
         Ok(())
     }
 
-    fn check_basic_data(
+    pub fn check_basic_data(
         request: &Signed<EventRequest>,
         metadata: &Metadata,
         vali_req_signer: &PublicKey,
@@ -660,7 +662,7 @@ impl ValiWorker {
     /// patch) and respect the minimum approval window. The votes are not
     /// checked here: this worker verifies the closed evidence data-only
     /// when it arrives inside the validation request.
-    fn check_approval_req(
+    pub fn check_approval_req(
         approval_req: &Signed<ApprovalReq>,
         metadata: &Metadata,
         gov_version: u64,
@@ -1503,8 +1505,8 @@ impl ValiWorker {
         Ok(())
     }
 
-    fn check_evaluation(
-        &self,
+    pub fn check_evaluation(
+        hash: &HashAlgorithm,
         evaluation: EvaluationData,
         eval_data: RoleDataRegister,
         mut properties: ValueWrapper,
@@ -1589,7 +1591,7 @@ impl ValiWorker {
             });
         }
         let recomputed_req_hash =
-            hash_borsh(&*self.hash.hasher(), &signed_eval_req).map_err(
+            hash_borsh(&*hash.hasher(), &signed_eval_req).map_err(
                 |e| ValidatorError::InternalError {
                     problem: e.to_string(),
                 },
@@ -1639,7 +1641,7 @@ impl ValiWorker {
             ),
         };
 
-        let eval_result_hash = hash_borsh(&*self.hash.hasher(), &eval_result)
+        let eval_result_hash = hash_borsh(&*hash.hasher(), &eval_result)
             .map_err(|e| ValidatorError::InternalError {
             problem: e.to_string(),
         })?;
@@ -1676,7 +1678,7 @@ impl ValiWorker {
                 }
             })?;
 
-            let properties_hash = hash_borsh(&*self.hash.hasher(), &properties)
+            let properties_hash = hash_borsh(&*hash.hasher(), &properties)
                 .map_err(|e| ValidatorError::InternalError {
                     problem: e.to_string(),
                 })?;
@@ -1695,8 +1697,8 @@ impl ValiWorker {
         Ok((appr_required, req_patch, properties))
     }
 
-    fn check_compilation(
-        &self,
+    pub fn check_compilation(
+        hash: &HashAlgorithm,
         compilation: CompilationData,
         comp_data: RoleDataRegister,
         anchor: EventAnchor<'_>,
@@ -1745,7 +1747,7 @@ impl ValiWorker {
             });
         }
         let recomputed_req_hash =
-            hash_borsh(&*self.hash.hasher(), &signed_compile_req).map_err(
+            hash_borsh(&*hash.hasher(), &signed_compile_req).map_err(
                 |e| ValidatorError::InternalError {
                     problem: e.to_string(),
                 },
@@ -1820,7 +1822,7 @@ impl ValiWorker {
         };
 
         let compile_result_hash =
-            hash_borsh(&*self.hash.hasher(), &compile_result).map_err(|e| {
+            hash_borsh(&*hash.hasher(), &compile_result).map_err(|e| {
                 ValidatorError::InternalError {
                     problem: e.to_string(),
                 }
@@ -2036,7 +2038,8 @@ impl ValiWorker {
                 });
             };
 
-            self.check_compilation(
+            Self::check_compilation(
+                &self.hash,
                 compilation,
                 comp_data,
                 EventAnchor {
@@ -2053,7 +2056,8 @@ impl ValiWorker {
             return Ok(None);
         };
 
-        let (appr_required, req_patch, properties) = self.check_evaluation(
+        let (appr_required, req_patch, properties) = Self::check_evaluation(
+            &self.hash,
             evaluation,
             eval_data,
             metadata.properties.clone(),
@@ -2532,9 +2536,11 @@ impl ValiWorker {
                 })?;
 
                 let event_request_hash =
-                    self.event_request_hash(event_request)?;
-                let viewpoints_hash =
-                    self.viewpoints_hash(event_request.content())?;
+                    Self::event_request_hash(&self.hash, event_request)?;
+                let viewpoints_hash = Self::viewpoints_hash(
+                    &self.hash,
+                    event_request.content(),
+                )?;
 
                 Ok(ValidationRes::Response {
                     vali_req_hash,
@@ -2808,7 +2814,7 @@ impl Handler<Self> for ValiWorker {
                 });
 
                 let validation = if let Err(error) =
-                    self.check_data(&validation_req)
+                    Self::check_data(&self.governance_id, &validation_req)
                 {
                     ValidationRes::Abort(error.to_string())
                 } else {
@@ -3657,7 +3663,8 @@ mod tests {
             &self,
             compilation: CompilationData,
         ) -> Result<(), ValidatorError> {
-            self.worker.check_compilation(
+            ValiWorker::check_compilation(
+                &self.worker.hash,
                 compilation,
                 self.roles(&self.compilers),
                 EventAnchor {
@@ -3744,7 +3751,8 @@ mod tests {
             evaluation: EvaluationData,
         ) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
         {
-            self.worker.check_evaluation(
+            ValiWorker::check_evaluation(
+                &self.worker.hash,
                 evaluation,
                 self.roles(&self.evaluators),
                 self.metadata.properties.clone(),
