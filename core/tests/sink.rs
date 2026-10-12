@@ -11484,3 +11484,124 @@ async fn dirty_restart_review_marks_quiet_subject_lagging() {
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
 }
+
+#[traced_test]
+#[tokio::test]
+async fn sink_deliveries_reports_per_subject_cursors() {
+    // Ops audit: per-subject delivery positions with subject/sink
+    // filters. The cursor answers "sink X has subject Y up to N".
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) = create_subject(
+        &node.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let subject_id_str = subject_id.to_string();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(
+            sink.url(),
+            Some(governance_id.to_string()),
+        ),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+    sink.wait_for_count(3, true).await;
+
+    // Full view: the subject row shows cursor at the tip, no lag.
+    let rows = node.api.get_sink_deliveries(None, None).await.unwrap();
+    let row = rows
+        .iter()
+        .find(|row| {
+            row.sink == "example-sink" && row.subject_id == subject_id_str
+        })
+        .unwrap_or_else(|| {
+            panic!("missing deliveries row for subject: {rows:?}")
+        });
+    assert_eq!(row.cursor_sn, Some(2));
+    assert_eq!(row.last_seen_sn, 2);
+    assert!(!row.lagging);
+
+    // Subject filter keeps only that subject's rows.
+    let rows = node
+        .api
+        .get_sink_deliveries(Some(subject_id.clone()), None)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row.subject_id == subject_id_str));
+
+    // Sink filter keeps only that sink's rows.
+    let rows = node
+        .api
+        .get_sink_deliveries(None, Some("example-sink".to_owned()))
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row.sink == "example-sink"));
+
+    // Unknown subject: valid shape, no rows. Unknown sink: error.
+    let unknown = DigestIdentifier::new(HashAlgorithm::Blake3, vec![0u8; 32])
+        .unwrap();
+    let rows = node
+        .api
+        .get_sink_deliveries(Some(unknown), None)
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+    assert!(
+        node.api
+            .get_sink_deliveries(None, Some("no-such-sink".to_owned()))
+            .await
+            .is_err()
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}

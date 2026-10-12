@@ -169,6 +169,22 @@ pub struct ActorTreeResponse {
     pub truncated: bool,
 }
 
+/// One subject's delivery position on one sink, for the ops audit
+/// view backing `GET /sinks/deliveries`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkDeliveryState {
+    pub sink: String,
+    pub subject_id: String,
+    /// Last delivered sn; `None` when the subject is known but
+    /// nothing was delivered yet.
+    pub cursor_sn: Option<u64>,
+    pub last_seen_sn: u64,
+    pub lagging: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

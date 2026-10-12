@@ -19,7 +19,8 @@ use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, BridgeSignedEventRequest,
         EventsQuery, FirstEndEvents, GovQuery, IncidentsQuery, ListQuery,
-        SinkEventsQuery, SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
+        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest, SubjectQuery,
+        UpdateSubjectQuery,
     },
     response::{
         ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
@@ -32,8 +33,9 @@ use ave_bridge::{
         response::{
             ActorTreeResponse, GovsData, LedgerDB, PaginatorAborts,
             PaginatorEvents, RequestInfo, RequestsInManager,
-            RequestsInManagerSubject, SinkEventsPage, SinkInfo, SinkStatusInfo,
-            SubjectDB, SubjsData, TransferSubject, WatchdogIncidentRow,
+            RequestsInManagerSubject, SinkDeliveryState, SinkEventsPage,
+            SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
+            WatchdogIncidentRow,
         },
     },
     http::ProxyConfig,
@@ -564,6 +566,36 @@ pub async fn get_sinks_status(
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<SinkStatusInfo>>, HttpError> {
     Ok(Json(bridge.get_sinks_status().await?))
+}
+
+/// Get sink deliveries
+///
+/// Per-subject delivery positions for the ops audit view: which sink
+/// has delivered which subject up to which sn, and whether it lags.
+/// Optional filters by subject and/or sink; unknown sinks report
+/// not found, unknown subjects simply have no rows.
+#[utoipa::path(
+    get,
+    path = "/sinks/deliveries",
+    operation_id = "getSinkDeliveries",
+    tag = "Sink",
+    params(
+        SinkDeliveriesQuery
+    ),
+    responses(
+        (status = 200, description = "Per-subject delivery positions", body = Vec<SinkDeliveryState>),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 404, description = "Sink not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sink_deliveries(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<SinkDeliveriesQuery>,
+) -> Result<Json<Vec<SinkDeliveryState>>, HttpError> {
+    Ok(Json(bridge.get_sink_deliveries(parameters).await?))
 }
 
 /// Unblock a sink
@@ -1566,6 +1598,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
         $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
+        $callback!($($args)*, get, "/sinks/deliveries", get_sink_deliveries, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/{sink_name}", get_sink, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
         $callback!($($args)*, post, "/sinks/{sink_name}/test", test_sink, require NodeSink Post);

@@ -1191,6 +1191,7 @@ async fn test_manager_role_endpoints_access() {
     let manager_overrides: &[(&str, &str, bool)] = &[
         ("get", "/sinks", false),
         ("get", "/sinks/status", false),
+        ("get", "/sinks/deliveries", false),
         ("get", "/sinks/{sink_name}", false),
         ("get", "/subjects/{subject_id}/sink-events", false),
         ("post", "/sinks/{sink_name}/unblock", false),

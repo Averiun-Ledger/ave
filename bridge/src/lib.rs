@@ -4,7 +4,9 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 pub use ave_common::{
     bridge::request::SinksQuery,
-    bridge::response::{ActorTreeResponse, SinkInfo, SinkStatusInfo},
+    bridge::response::{
+        ActorTreeResponse, SinkDeliveryState, SinkInfo, SinkStatusInfo,
+    },
     sink::{
         HttpSinkConfig, KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry,
         SinkServer, SinkTarget, SinkTransportConfig,
@@ -14,8 +16,8 @@ use ave_common::{
     bridge::request::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, ApprovalState,
         ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
-        EventsQuery, GovQuery, IncidentsQuery, ListQuery, SinkEventsQuery,
-        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
+        EventsQuery, GovQuery, IncidentsQuery, ListQuery, SinkDeliveriesQuery,
+        SinkEventsQuery, SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -373,6 +375,19 @@ impl Bridge {
         &self,
     ) -> Result<Vec<SinkStatusInfo>, BridgeError> {
         Ok(self.api.get_sinks_status().await?)
+    }
+
+    pub async fn get_sink_deliveries(
+        &self,
+        query: SinkDeliveriesQuery,
+    ) -> Result<Vec<SinkDeliveryState>, BridgeError> {
+        let subject =
+            query.subject.map(Self::parse_subject_id).transpose()?;
+        if let Some(ref sink) = query.sink {
+            Self::require_non_empty_str("sink", sink)?;
+        }
+
+        Ok(self.api.get_sink_deliveries(subject, query.sink).await?)
     }
 
     pub async fn unblock_sink(

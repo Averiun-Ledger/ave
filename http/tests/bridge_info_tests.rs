@@ -12,12 +12,15 @@ use utoipa::OpenApi;
 
 use ave_bridge::ave_common::{
     DataToSinkEvent, SchemaType,
-    bridge::request::ApprovalState,
+    bridge::request::{
+        ActorTreeQuery, ApprovalState, SinkDeliveriesQuery,
+    },
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
-        ApprovalEntry, CompResDB, GovsData, LedgerDB, PaginatorAborts,
-        PaginatorEvents, RequestData, RequestEventDB, RequestInfo,
-        RequestInfoExtend, RequestState, SinkEventsPage, SubjectDB,
+        ActorTreeNodeView, ActorTreeResponse, ApprovalEntry, CompResDB,
+        EvalResDB, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
+        RequestData, RequestEventDB, RequestInfo, RequestInfoExtend,
+        RequestState, SinkDeliveryState, SinkEventsPage, SubjectDB,
         SubjsData, TransferSubject, WatchdogIncidentRow,
     },
 };
@@ -2912,4 +2915,326 @@ async fn test_sync_lift_round_trip() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[test(tokio::test)]
+async fn test_sink_deliveries_wiring() {
+    // GET /sinks/deliveries wiring on a fresh node: empty view,
+    // unknown sink 404s, malformed subject 400s. Delivery content
+    // is covered by the core sink e2e.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/deliveries"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "deliveries failed: {body}");
+    assert_eq!(body, json!([]));
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/sinks/deliveries?sink=no-such-sink"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/sinks/deliveries?subject=!!!"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn test_actor_tree_and_deliveries_deserialization() {
+    // Shape stability for the ops views: query filters default to
+    // None, responses round-trip with every combination of
+    // truncation, missing cursors and lag flags.
+    let query: ActorTreeQuery = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(query.subject, None);
+    assert_eq!(query.limit, None);
+    let query: ActorTreeQuery =
+        serde_json::from_value(json!({"subject": "s", "limit": 10})).unwrap();
+    assert_eq!(query.subject.as_deref(), Some("s"));
+    assert_eq!(query.limit, Some(10));
+
+    let query: SinkDeliveriesQuery =
+        serde_json::from_value(json!({})).unwrap();
+    assert_eq!(query.subject, None);
+    assert_eq!(query.sink, None);
+
+    let tree = ActorTreeResponse {
+        nodes: vec![
+            ActorTreeNodeView {
+                path: "/user/a".to_owned(),
+                actor_type: "crate::A".to_owned(),
+                depth: 0,
+            },
+            ActorTreeNodeView {
+                path: "/user/a/b".to_owned(),
+                actor_type: "crate::B".to_owned(),
+                depth: 1,
+            },
+        ],
+        total: 3,
+        truncated: true,
+    };
+    let body: Value = serde_json::to_value(&tree).unwrap();
+    assert_eq!(body.pointer("/nodes/1/depth"), Some(&json!(1)));
+    assert_eq!(body.pointer("/truncated"), Some(&json!(true)));
+    let back: ActorTreeResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(back.nodes.len(), 2);
+    assert_eq!(back.total, 3);
+    assert!(back.truncated);
+
+    let row = SinkDeliveryState {
+        sink: "s".to_owned(),
+        subject_id: "sub".to_owned(),
+        cursor_sn: None,
+        last_seen_sn: 0,
+        lagging: false,
+    };
+    let body: Value = serde_json::to_value(&row).unwrap();
+    assert_eq!(body.pointer("/cursor_sn"), Some(&Value::Null));
+    let back: SinkDeliveryState = serde_json::from_value(body).unwrap();
+    assert_eq!(back.cursor_sn, None);
+    assert!(!back.lagging);
+
+    let row = SinkDeliveryState {
+        sink: "s".to_owned(),
+        subject_id: "sub".to_owned(),
+        cursor_sn: Some(10),
+        last_seen_sn: 10,
+        lagging: false,
+    };
+    let back: SinkDeliveryState =
+        serde_json::from_value(serde_json::to_value(&row).unwrap()).unwrap();
+    assert_eq!(back.cursor_sn, Some(10));
+}
+
+#[test]
+fn test_request_event_db_all_variants_deserialize() {
+    // Every ledger event shape served by the query endpoints must
+    // deserialize with its tag and map to its filter type: a new
+    // variant or a renamed tag breaks clients silently otherwise.
+    use ave_bridge::ave_common::bridge::request::EventRequestType;
+
+    let cases: Vec<(Value, fn(&RequestEventDB))> = vec![
+        (
+            json!({
+                "event": "create",
+                "data": {
+                    "name": "n",
+                    "description": "d",
+                    "schema_id": "S",
+                    "namespace": "ns",
+                },
+            }),
+            |event| {
+                assert!(matches!(event, RequestEventDB::Create { .. }));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Create
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "tracker_fact_full",
+                "data": {
+                    "payload": {"one": 0},
+                    "viewpoints": [],
+                    "evaluation_response": {"Patch": {"one": 0}},
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::TrackerFactFull { .. }
+                ));
+                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
+            },
+        ),
+        (
+            json!({
+                "event": "tracker_fact_opaque",
+                "data": {
+                    "viewpoints": ["a"],
+                    "evaluation_success": true,
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::TrackerFactOpaque { .. }
+                ));
+                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
+            },
+        ),
+        (
+            json!({
+                "event": "governance_fact",
+                "data": {
+                    "payload": {},
+                    "evaluation_response": {"Error": "boom"},
+                    "approval_success": true,
+                    "compilation_response": {
+                        "Ok": {
+                            "contracts": {},
+                            "toolchain_version": "t",
+                        },
+                    },
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::GovernanceFact { .. }
+                ));
+                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
+            },
+        ),
+        (
+            json!({
+                "event": "transfer",
+                "data": {
+                    "evaluation_error": null,
+                    "new_owner": "owner",
+                },
+            }),
+            |event| {
+                assert!(matches!(event, RequestEventDB::Transfer { .. }));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Transfer
+                ));
+            },
+        ),
+        (
+            json!({"event": "tracker_confirm"}),
+            |event| {
+                assert!(matches!(event, RequestEventDB::TrackerConfirm));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Confirm
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "governance_confirm",
+                "data": {
+                    "name_old_owner": null,
+                    "evaluation_response": {"Error": "boom"},
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::GovernanceConfirm { .. }
+                ));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Confirm
+                ));
+            },
+        ),
+        (
+            json!({"event": "reject"}),
+            |event| {
+                assert!(matches!(event, RequestEventDB::Reject));
+                assert!(matches!(event.get_event_type(), EventRequestType::Reject));
+            },
+        ),
+        (
+            json!({"event": "e_o_l"}),
+            |event| {
+                assert!(matches!(event, RequestEventDB::EOL));
+                assert!(matches!(event.get_event_type(), EventRequestType::Eol));
+            },
+        ),
+    ];
+    assert_eq!(cases.len(), 9);
+    for (body, check) in cases {
+        let event: RequestEventDB = serde_json::from_value(body).unwrap();
+        check(&event);
+        // Round-trip: what we serve parses back identically.
+        let back: RequestEventDB =
+            serde_json::from_value(serde_json::to_value(&event).unwrap())
+                .unwrap();
+        check(&back);
+    }
+
+    // Error verdicts keep their shape too.
+    let eval: EvalResDB =
+        serde_json::from_value(json!({"Error": "boom"})).unwrap();
+    assert!(matches!(eval, EvalResDB::Error(_)));
+    let comp: CompResDB = serde_json::from_value(json!({
+        "Error": {"error": "boom", "toolchain_version": "t"},
+    }))
+    .unwrap();
+    assert!(matches!(comp, CompResDB::Error { .. }));
+
+    // Every request state round-trips (terminal or not).
+    let states = vec![
+        json!("InQueue"),
+        json!("Handling"),        json!({"Invalid": {
+            "subject_id": "s",
+            "who": "w",
+            "sn": 1,
+            "error": "e",
+        }}),
+        json!({"Abort": {
+            "subject_id": "s",
+            "who": "w",
+            "sn": null,
+            "error": "e",
+        }}),
+        json!("Reboot"),
+        json!({"RebootDiff": {"seconds": 1, "count": 2}}),
+        json!({"RebootTimeOut": {"seconds": 1, "count": 2}}),
+        json!("Compilation"),
+        json!("Evaluation"),
+        json!("Approval"),
+        json!("Validation"),
+        json!("Distribution"),
+        json!("Finish"),
+    ];
+    assert_eq!(states.len(), 13);
+    for body in states {
+        let state: RequestState = serde_json::from_value(body).unwrap();
+        let back: RequestState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
+    }
+
+    // Approval states keep their snake_case wire shape.
+    for (body, expected) in [
+        (json!("pending"), "pending"),
+        (json!("accepted"), "accepted"),
+        (json!("rejected"), "rejected"),
+        (json!("obsolete"), "obsolete"),
+    ] {
+        let state: ApprovalState = serde_json::from_value(body).unwrap();
+        assert_eq!(state.to_string(), expected);
+    }
 }

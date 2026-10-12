@@ -62,8 +62,8 @@ use ave_common::response::{
 use ave_common::{
     bridge::request::SinksQuery,
     bridge::response::{
-        ActorTreeNodeView, ActorTreeResponse, SinkInfo, SinkManagerTarget,
-        SinkServerView, SinkStatusInfo,
+        ActorTreeNodeView, ActorTreeResponse, SinkDeliveryState, SinkInfo,
+        SinkManagerTarget, SinkServerView, SinkStatusInfo,
     },
     sink::{SinkConfigEntry, SinkServer, SinkTarget},
 };
@@ -1958,6 +1958,88 @@ impl Api {
                 })
                 .collect()
         })
+    }
+
+    /// Per-subject delivery cursors for the ops audit view: which sink
+    /// has delivered which subject up to which sn, and whether it
+    /// lags. Optionally filtered by subject and/or sink; unknown
+    /// sinks report `SinkNotFound`, unknown subjects simply have no
+    /// rows. Read-only: never boots subjects.
+    pub async fn get_sink_deliveries(
+        &self,
+        subject: Option<DigestIdentifier>,
+        sink: Option<String>,
+    ) -> Result<Vec<SinkDeliveryState>, Error> {
+        if let Some(ref subject) = subject {
+            validate_subject_id(subject)?;
+        }
+        if let Some(ref sink) = sink {
+            require_non_empty_str("sink", sink)?;
+        }
+        let mut paths: Vec<ActorPath> = Vec::new();
+        if let Some(ref sink) = sink {
+            let registration = self.get_sink_registration(sink).await?;
+            paths.push(manager_path(&manager_target_from_registration(
+                &registration,
+            )?));
+        } else {
+            let registrations = self.get_sink_registry().await?;
+            let mut targets = HashSet::new();
+            for registration in &registrations {
+                if let Ok(target) =
+                    manager_target_from_registration(registration)
+                {
+                    targets.insert(target);
+                }
+            }
+            for target in targets {
+                paths.push(manager_path(&target));
+            }
+            paths.push(manager_path(&SinkManagerTarget::Node));
+        }
+        paths.sort();
+        paths.dedup();
+        let subject_filter = subject.map(|id| id.to_string());
+        let mut out = Vec::new();
+        for path in paths {
+            let Ok(manager) =
+                self.system.get_actor::<SinkManager>(&path).await
+            else {
+                continue;
+            };
+            let response = manager
+                .ask(crate::sink::SinkManagerMessage::GetDeliveryCursors {
+                    subject: subject_filter.clone(),
+                })
+                .await
+                .map_err(|e| actor_communication_error("sink_manager", e))?;
+            match response {
+                SinkManagerResponse::DeliveryCursors(rows) => {
+                    out.extend(rows.into_iter().map(|row| SinkDeliveryState {
+                        sink: row.sink,
+                        subject_id: row.subject_id,
+                        cursor_sn: row.cursor_sn,
+                        last_seen_sn: row.last_seen_sn,
+                        lagging: row.lagging,
+                    }));
+                }
+                SinkManagerResponse::Ok => {}
+                other => {
+                    return Err(Error::UnexpectedResponse {
+                        actor: "sink_manager".to_owned(),
+                        expected: "DeliveryCursors".to_owned(),
+                        received: format!("{other:?}"),
+                    });
+                }
+            }
+        }
+        if let Some(ref wanted) = sink {
+            out.retain(|row| &row.sink == wanted);
+        }
+        out.sort_by(|a, b| {
+            (&a.sink, &a.subject_id).cmp(&(&b.sink, &b.subject_id))
+        });
+        Ok(out)
     }
 
     async fn get_sink_registry(

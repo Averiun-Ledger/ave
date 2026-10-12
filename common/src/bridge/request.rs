@@ -194,6 +194,18 @@ pub struct ActorTreeQuery {
     pub limit: Option<u64>,
 }
 
+/// Filters for the sink deliveries audit (all optional; no filter
+/// returns every known sink/subject position).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkDeliveriesQuery {
+    pub subject: Option<String>,
+    pub sink: Option<String>,
+}
+
 /// Query for retrieving the first or last events of a subject.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]

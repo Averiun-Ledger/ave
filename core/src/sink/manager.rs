@@ -130,6 +130,13 @@ pub enum SinkManagerMessage {
         subject_id: String,
         tip_sn: u64,
     },
+    /// Ops audit: report per-subject delivery cursors, optionally
+    /// filtered to one subject. Read-only snapshot for the
+    /// deliveries endpoint (which sink is at which sn of which
+    /// subject, and whether it lags).
+    GetDeliveryCursors {
+        subject: Option<String>,
+    },
     /// Non-persistent end-to-end test of a sink: health check + test payload
     /// delivery without advancing cursors.
     TestSink {
@@ -179,6 +186,21 @@ pub enum SinkManagerResponse {
     ReplayResult(SinkReplayResponse),
     TestResult(Result<(), SinkTestError>),
     SubjectReview(Vec<SubjectSinkReview>),
+    DeliveryCursors(Vec<SubjectDeliveryCursor>),
+}
+
+/// One subject's delivery position on one sink, for the ops audit
+/// view: how far this sink has delivered this subject, how far the
+/// manager has seen it, and whether it currently lags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubjectDeliveryCursor {
+    pub sink: String,
+    pub subject_id: String,
+    /// Last delivered sn; `None` when the subject is known but
+    /// nothing was delivered yet.
+    pub cursor_sn: Option<u64>,
+    pub last_seen_sn: u64,
+    pub lagging: bool,
 }
 
 /// Per-sink outcome of a [`SinkManagerMessage::ReviewSubject`]: the
@@ -919,6 +941,11 @@ impl Handler<Self> for SinkManager {
                     self.handle_review_subject(subject_id, tip_sn, ctx).await?;
                 return Ok(SinkManagerResponse::SubjectReview(response));
             }
+            SinkManagerMessage::GetDeliveryCursors { subject } => {
+                return Ok(SinkManagerResponse::DeliveryCursors(
+                    self.delivery_cursors(subject.as_deref()),
+                ));
+            }
             SinkManagerMessage::TestSink { sink } => {
                 let result = self.handle_test_sink(&sink, ctx).await;
                 return Ok(SinkManagerResponse::TestResult(result));
@@ -1220,6 +1247,53 @@ impl SinkManager {
                 last_error: self.last_errors.get(sink_name).cloned(),
             })
             .collect()
+    }
+
+    /// Per-subject delivery positions for the ops audit view:
+    /// configured sinks crossed with every subject this manager
+    /// knows (delivered, seen or lagging). Pure reads, sorted for
+    /// stable output.
+    fn delivery_cursors(&self, subject: Option<&str>) -> Vec<SubjectDeliveryCursor> {
+        let mut subjects: BTreeSet<String> = BTreeSet::new();
+        subjects.extend(self.cursors.keys().map(|(_, id)| id.clone()));
+        subjects.extend(self.last_seen.keys().cloned());
+        for lagging in self.lagging.values() {
+            subjects.extend(lagging.iter().cloned());
+        }
+        let mut out = Vec::new();
+        for subject_id in subjects {
+            if subject.is_some_and(|wanted| wanted != subject_id) {
+                continue;
+            }
+            let mut sinks: BTreeSet<String> = BTreeSet::new();
+            sinks.extend(self.sink_servers.keys().cloned());
+            sinks.extend(
+                self.cursors
+                    .keys()
+                    .filter(|(_, id)| *id == subject_id)
+                    .map(|(sink, _)| sink.clone()),
+            );
+            for sink in sinks {
+                out.push(SubjectDeliveryCursor {
+                    sink: sink.clone(),
+                    subject_id: subject_id.clone(),
+                    cursor_sn: self
+                        .cursors
+                        .get(&(sink.clone(), subject_id.clone()))
+                        .copied(),
+                    last_seen_sn: self
+                        .last_seen
+                        .get(&subject_id)
+                        .copied()
+                        .unwrap_or(0),
+                    lagging: self
+                        .lagging
+                        .get(&sink)
+                        .is_some_and(|set| set.contains(&subject_id)),
+                });
+            }
+        }
+        out
     }
 
     /// Compute the SN distance between `last_seen` and the sink cursor for a

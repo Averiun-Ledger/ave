@@ -17,6 +17,7 @@ use futures::StreamExt;
 pub use manager::{
     SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent,
     SinkManagerInitParams, SinkManagerMessage, SinkManagerResponse, SinkStatus,
+    SubjectDeliveryCursor, SubjectSinkReview,
 };
 pub use registry::{
     SinkRegistration, SinkRegistry, SinkRegistryEvent, SinkRegistryMessage,

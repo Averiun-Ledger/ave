@@ -239,6 +239,7 @@ impl Modify for FeatureGatedPathsAddon {
         server::get_sinks,
         server::get_sink,
         server::get_sinks_status,
+        server::get_sink_deliveries,
         server::unblock_sink,
         server::test_sink,
         server::reset_sink_cursors,
