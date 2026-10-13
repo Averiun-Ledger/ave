@@ -70,13 +70,9 @@ pub struct RoleRegister {
 
 type IntervalData = (IntervalSet, Option<u64>);
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct RoleDataRegister {
-    pub workers: HashSet<PublicKey>,
-    pub quorum: Quorum,
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::RoleDataRegister;
 
 #[derive(Debug, Clone)]
 pub struct CurrentSchemaRoles {

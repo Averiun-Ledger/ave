@@ -60,6 +60,10 @@ use ave_common::{
         hash_borsh,
     },
     request::EventRequest,
+    verify::{
+        EventAnchor, check_approval_req, check_basic_data,
+        event_request_hash, viewpoints_hash,
+    },
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -201,18 +205,6 @@ struct ApprovalRoute {
     request_id: String,
     version: u64,
     subject_id: DigestIdentifier,
-}
-
-/// Ledger-anchored identity of the event under validation, shared by
-/// the evidence checks so their signatures stay readable. Public so
-/// the off-chain verification tool runs the same checks over
-/// replayed state.
-pub struct EventAnchor<'a> {
-    pub event_request: &'a Arc<Signed<EventRequest>>,
-    pub metadata: &'a Metadata,
-    pub gov_version: u64,
-    pub req_subject_data_hash: DigestIdentifier,
-    pub signer: PublicKey,
 }
 
 /// Outcome of merging an approver vote into an approval collection.
@@ -393,33 +385,6 @@ impl ValiWorker {
         }
     }
 
-    pub fn event_request_hash(
-        hash: &HashAlgorithm,
-        event_request: &Signed<EventRequest>,
-    ) -> Result<DigestIdentifier, ValidatorError> {
-        hash_borsh(&*hash.hasher(), event_request).map_err(|e| {
-            ValidatorError::InternalError {
-                problem: e.to_string(),
-            }
-        })
-    }
-
-    pub fn viewpoints_hash(
-        hash: &HashAlgorithm,
-        event_request: &EventRequest,
-    ) -> Result<DigestIdentifier, ValidatorError> {
-        let viewpoints = match event_request {
-            EventRequest::Fact(fact_request) => fact_request.viewpoints.clone(),
-            _ => BTreeSet::new(),
-        };
-
-        hash_borsh(&*hash.hasher(), &viewpoints).map_err(|e| {
-            ValidatorError::InternalError {
-                problem: e.to_string(),
-            }
-        })
-    }
-
     fn current_evaluation_roles(&self) -> RoleDataRegister {
         self.current_roles.evaluation.clone()
     }
@@ -469,269 +434,6 @@ impl ValiWorker {
         {
             return Err(ValidatorError::InvalidSignature {
                 data: "event request",
-            });
-        }
-
-        Ok(())
-    }
-
-    pub fn check_metadata(
-        event_type: &EventRequestType,
-        metadata: &Metadata,
-        gov_version: u64,
-    ) -> Result<(), ValidatorError> {
-        let is_gov = metadata.schema_id.is_gov();
-
-        if let Some(name) = &metadata.name
-            && (name.is_empty() || name.len() > 100)
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata name",
-            });
-        }
-
-        if let Some(description) = &metadata.description
-            && (description.is_empty() || description.len() > 200)
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata description",
-            });
-        }
-
-        if metadata.subject_id.is_empty() {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata subject_id",
-            });
-        }
-
-        if is_gov && metadata.governance_id != metadata.subject_id
-            || !is_gov && metadata.governance_id == metadata.subject_id
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata governance_id",
-            });
-        }
-
-        if is_gov && metadata.genesis_gov_version != 0
-            || !is_gov && metadata.genesis_gov_version == 0
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata genesis_gov_version",
-            });
-        }
-
-        if metadata.genesis_gov_version > gov_version {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata genesis_gov_version",
-            });
-        }
-
-        if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty()
-            || metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty()
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata prev_ledger_event_hash",
-            });
-        };
-
-        if !metadata.schema_id.is_valid_in_request() {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata schema_id",
-            });
-        };
-
-        if is_gov && !metadata.namespace.is_empty() {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata namespace",
-            });
-        }
-
-        if metadata.creator.is_empty() {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata creator",
-            });
-        }
-
-        if metadata.owner.is_empty() {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata owner",
-            });
-        }
-
-        if let Some(new_owner) = &metadata.new_owner
-            && (new_owner.is_empty() || new_owner == &metadata.owner)
-        {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata new owner",
-            });
-        };
-
-        if !metadata.active {
-            return Err(ValidatorError::InvalidData {
-                value: "metadata active",
-            });
-        }
-
-        match event_type {
-            EventRequestType::Create => {
-                return Err(ValidatorError::InvalidData {
-                    value: "Event request type",
-                });
-            }
-            EventRequestType::Confirm | EventRequestType::Reject => {
-                if metadata.new_owner.is_none() {
-                    return Err(ValidatorError::InvalidData {
-                        value: "Event request type",
-                    });
-                }
-            }
-            EventRequestType::Fact
-            | EventRequestType::Transfer
-            | EventRequestType::Eol => {
-                if metadata.new_owner.is_some() {
-                    return Err(ValidatorError::InvalidData {
-                        value: "Event request type",
-                    });
-                }
-            }
-        };
-
-        Ok(())
-    }
-
-    pub fn check_basic_data(
-        request: &Signed<EventRequest>,
-        metadata: &Metadata,
-        vali_req_signer: &PublicKey,
-        gov_version: u64,
-        sn: u64,
-    ) -> Result<(), ValidatorError> {
-        // Check event request.
-
-        if request.verify().is_err() {
-            return Err(ValidatorError::InvalidSignature {
-                data: "event request",
-            });
-        }
-
-        Self::check_metadata(
-            &EventRequestType::from(request.content()),
-            metadata,
-            gov_version,
-        )?;
-
-        if !request.content().check_request_signature(
-            &request.signature().signer,
-            &metadata.owner,
-            &metadata.new_owner,
-        ) {
-            return Err(ValidatorError::InvalidSigner {
-                signer: request.signature().signer.to_string(),
-            });
-        }
-
-        // subject
-        if request.content().get_subject_id() != metadata.subject_id {
-            return Err(ValidatorError::InvalidData {
-                value: "Subject_id",
-            });
-        }
-
-        // vali request signer
-        let signer = metadata
-            .new_owner
-            .clone()
-            .unwrap_or_else(|| metadata.owner.clone());
-
-        if &signer != vali_req_signer {
-            return Err(ValidatorError::InvalidSigner {
-                signer: vali_req_signer.to_string(),
-            });
-        }
-
-        // sn
-        if sn != metadata.sn.saturating_add(1) {
-            return Err(ValidatorError::InvalidData { value: "sn" });
-        }
-        Ok(())
-    }
-
-    /// Static verification of the signed approval request carried by an
-    /// approve variant: it must be signed by the requester, describe
-    /// exactly this event (subject, sn, governance version, evaluated
-    /// patch) and respect the minimum approval window. The votes are not
-    /// checked here: this worker verifies the closed evidence data-only
-    /// when it arrives inside the validation request.
-    pub fn check_approval_req(
-        approval_req: &Signed<ApprovalReq>,
-        metadata: &Metadata,
-        gov_version: u64,
-        patch: &ValueWrapper,
-        signer: &PublicKey,
-        min_window: Duration,
-    ) -> Result<(), ValidatorError> {
-        if approval_req.verify().is_err() {
-            return Err(ValidatorError::InvalidSignature {
-                data: "approval request",
-            });
-        }
-
-        if approval_req.signature().signer != *signer {
-            return Err(ValidatorError::InvalidSigner {
-                signer: approval_req.signature().signer.to_string(),
-            });
-        }
-
-        let req = approval_req.content();
-
-        if req.signer != *signer {
-            return Err(ValidatorError::InvalidSigner {
-                signer: req.signer.to_string(),
-            });
-        }
-
-        if req.subject_id != metadata.subject_id {
-            return Err(ValidatorError::InvalidData {
-                value: "approval subject_id",
-            });
-        }
-
-        if req.sn != metadata.sn.saturating_add(1) {
-            return Err(ValidatorError::InvalidData {
-                value: "approval sn",
-            });
-        }
-
-        if req.gov_version != gov_version {
-            return Err(ValidatorError::InvalidData {
-                value: "approval gov_version",
-            });
-        }
-
-        if &req.patch != patch {
-            return Err(ValidatorError::InvalidData {
-                value: "approval patch",
-            });
-        }
-
-        let min_deadline = TimeStamp::from_nanos(
-            req.issued_at
-                .as_nanos()
-                .saturating_add(min_window.as_nanos() as u64),
-        );
-        if req.deadline < min_deadline {
-            return Err(ValidatorError::InvalidData {
-                value: "approval window",
-            });
-        }
-
-        let now = TimeStamp::now();
-        let skew_limit = TimeStamp::from_nanos(
-            now.as_nanos().saturating_add(CLOCK_SKEW.as_nanos() as u64),
-        );
-        if req.issued_at > skew_limit {
-            return Err(ValidatorError::InvalidData {
-                value: "approval issued_at",
             });
         }
 
@@ -2145,7 +1847,7 @@ impl ValiWorker {
                 })?
                 .min_window_secs,
         );
-        Self::check_approval_req(
+        check_approval_req(
             &signed_approval_req,
             metadata,
             gov_version,
@@ -2457,7 +2159,7 @@ impl ValiWorker {
                 ledger_hash,
             } => {
                 let signer = validation_req.signature().signer.clone();
-                Self::check_basic_data(
+                check_basic_data(
                     event_request,
                     metadata,
                     &signer,
@@ -2536,8 +2238,8 @@ impl ValiWorker {
                 })?;
 
                 let event_request_hash =
-                    Self::event_request_hash(&self.hash, event_request)?;
-                let viewpoints_hash = Self::viewpoints_hash(
+                    event_request_hash(&self.hash, event_request)?;
+                let viewpoints_hash = viewpoints_hash(
                     &self.hash,
                     event_request.content(),
                 )?;
@@ -4115,7 +3817,7 @@ mod tests {
         };
 
         let check = |req: &Signed<ApprovalReq>| {
-            ValiWorker::check_approval_req(
+            check_approval_req(
                 req,
                 &fixture.metadata,
                 fixture.gov_version,

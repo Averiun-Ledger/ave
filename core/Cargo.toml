@@ -15,7 +15,7 @@ rust-version.workspace = true
 async-trait = { workspace = true }
 borsh = { workspace = true }
 ave-build = { path = "../build", version = "0.10.0" }
-ave-common = { workspace = true, features = ["sink-grpc"] }
+ave-common = { workspace = true, features = ["sink-grpc", "verify"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
 json-patch = "4.2.0"
 ave-actors = { workspace = true }

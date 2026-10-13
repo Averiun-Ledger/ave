@@ -19,7 +19,6 @@ use ave_actors::{
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::response::SubjectDB;
 
-use crate::governance::model::Quorum;
 use crate::governance::role_register::{
     RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
     SearchRole,
@@ -69,17 +68,9 @@ pub struct TrackerParams {
     pub actual_sn: Option<u64>,
 }
 
-pub fn check_quorum_signers(
-    signers: &HashSet<PublicKey>,
-    quorum: &Quorum,
-    workers: &HashSet<PublicKey>,
-) -> bool {
-    // Set sizes can not overflow `u32` on any real node, but never truncate
-    // them with `as` in consensus code.
-    let total = u32::try_from(workers.len()).unwrap_or(u32::MAX);
-    let signed = u32::try_from(signers.len()).unwrap_or(u32::MAX);
-    signers.is_subset(workers) && quorum.check_quorum(total, signed)
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::check_quorum_signers;
 
 pub async fn get_actual_roles_register<A>(
     ctx: &mut ActorContext<A>,
@@ -1142,6 +1133,30 @@ mod tests {
                     .public_key()
             })
             .collect()
+    }
+
+    #[test]
+    fn quorum_reexport_matches_common() {
+        use ave_common::governance::Quorum;
+
+        let workers = sample_keys(3);
+        let two: HashSet<PublicKey> =
+            workers.iter().take(2).cloned().collect();
+        // Core path and common path must agree on everything.
+        for quorum in [Quorum::Majority, Quorum::Fixed(2)] {
+            assert_eq!(
+                check_quorum_signers(&two, &quorum, &workers),
+                ave_common::verify::check_quorum_signers(
+                    &two, &quorum, &workers
+                ),
+            );
+        }
+        assert!(check_quorum_signers(&two, &Quorum::Majority, &workers));
+        assert!(!check_quorum_signers(
+            &HashSet::new(),
+            &Quorum::Majority,
+            &workers
+        ));
     }
 
     #[test]

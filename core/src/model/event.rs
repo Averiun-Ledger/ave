@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::{
-    compilation::response::{CompilationError, CompilerResponse},
     evaluation::response::{EvaluatorError, EvaluatorResponse},
     subject::Metadata,
     validation::request::ActualProtocols,
@@ -61,54 +60,9 @@ pub enum EvaluationResponseOpaque {
     Error { result_hash: DigestIdentifier },
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub enum CompilationResponse {
-    Ok {
-        result: CompilerResponse,
-        result_hash: DigestIdentifier,
-        /// rustc version the quorum built with, voted inside the
-        /// result hash: validators compare it against the registry
-        /// entry for the pin (valid ID, wrong toolchain is
-        /// rejected). Always measured, in tests as in production.
-        toolchain_version: String,
-    },
-    Error {
-        result: CompilationError,
-        result_hash: DigestIdentifier,
-        /// Same attestation for deterministic failures.
-        toolchain_version: String,
-    },
-}
-
-impl CompilationResponse {
-    pub const fn is_ok(&self) -> bool {
-        matches!(&self, Self::Ok { .. })
-    }
-}
-
-/// Evidence of the compilation phase of a governance fact.
-///
-/// The owner's
-/// signature over the compilation request, its hash, and one signature
-/// per compiler over the agreed result. Follows the same shape as
-/// `EvaluationData` / `ApprovalData` / `ValidationData`.
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct CompilationData {
-    pub compile_req_signature: Signature,
-    pub compile_req_hash: DigestIdentifier,
-    pub compilers_signatures: Vec<Signature>,
-    pub response: CompilationResponse,
-}
-
-impl CompilationData {
-    pub const fn is_ok(&self) -> bool {
-        matches!(&self.response, CompilationResponse::Ok { .. })
-    }
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::{CompilationData, CompilationResponse};
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -150,31 +104,9 @@ impl EvaluationData {
     }
 }
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct ApprovalData {
-    pub approval_req_signature: Signature,
-    pub approval_req_hash: DigestIdentifier,
-    /// Anchored from the signed `ApprovalReq` so the request can be
-    /// rebuilt exactly during verification.
-    pub issued_at: TimeStamp,
-    pub deadline: TimeStamp,
-    pub approvers_agrees_signatures: Vec<Signature>,
-    pub approvers_disagrees_signatures: Vec<Signature>,
-    /// Approvers that signed both an accept and a reject for the same
-    /// request: excluded from both tallies and counted as absent. The
-    /// pair of signatures is the portable evidence of the misbehavior.
-    pub double_votes: Vec<(Signature, Signature)>,
-    /// Approvers that never answered before the deadline, each with the
-    /// validator-signed timeout attestations (signed `ApprovalRes::TimeOut`)
-    /// that prove the absence instead of leaving it implicit. Sorted by
-    /// approver key, then by validator key. Empty in early closures. An
-    /// approver present here must NOT appear in any of the vote lists
-    /// (a late answer wins over the timeout attestation).
-    pub approvers_timeouts: Vec<(PublicKey, Vec<Signature>)>,
-    pub approved: bool,
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::ApprovalData;
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
