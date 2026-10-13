@@ -468,6 +468,149 @@ async fn seed_ledger_db() {
         }));
     }
 
+    // Tracker Tmixed: half visible, half opaque on the witness.
+    // node1 holds viewpoint "agua" (creator witness grant) but
+    // not "basura": agua facts arrive full, basura facts arrive
+    // opaque. Ok + error on each side, all on one chain.
+    let mut tmixed_entry: Option<Value> = None;
+    if on(&config, "tracker_mixed") {
+        let (tmixed, ..) =
+            create_subject(api0, gov.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        let mut tmixed_records = vec![
+            SnRecord {
+                sn: 0,
+                protocols: "Create",
+                success: true,
+            },
+            SnRecord {
+                sn: 1,
+                protocols: "TrackerFactFull",
+                success: true,
+            },
+        ];
+        emit_fact(api0, tmixed.clone(), json!({"ModOne": {"data": 1}}), true)
+            .await
+            .unwrap();
+        api1
+            .authorize_governance(
+                tmixed.clone(),
+                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+            )
+            .await
+            .unwrap();
+        api1.update_subject(tmixed.clone()).await.unwrap();
+        // Held viewpoint: full on both sides.
+        emit_fact_viewpoints(
+            api0,
+            tmixed.clone(),
+            json!({"ModOne": {"data": 2}}),
+            BTreeSet::from(["agua".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        let witness_events =
+            get_events(api1, tmixed.clone(), 3, true).await.unwrap();
+        assert!(
+            matches!(
+                witness_events[2].event,
+                RequestEventDB::TrackerFactFull { .. }
+            ),
+            "held-viewpoint fact must stay full on the witness"
+        );
+        tmixed_records.push(SnRecord {
+            sn: 2,
+            protocols: "TrackerFactFull",
+            success: true,
+        });
+        // Unheld viewpoint: opaque on the witness.
+        emit_fact_viewpoints(
+            api0,
+            tmixed.clone(),
+            json!({"ModOne": {"data": 3}}),
+            BTreeSet::from(["basura".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        let witness_events =
+            get_events(api1, tmixed.clone(), 4, true).await.unwrap();
+        let opaque = witness_events
+            .iter()
+            .find(|event| event.sn == 3)
+            .expect("witness must hold sn 3");
+        assert_tracker_fact_opaque(&opaque.event, &["basura"])
+            .expect("unheld-viewpoint fact must be opaque");
+        tmixed_records.push(SnRecord {
+            sn: 3,
+            protocols: "TrackerFactFull",
+            success: true,
+        });
+        // Held viewpoint, failed evaluation: full error both sides.
+        emit_fact_viewpoints(
+            api0,
+            tmixed.clone(),
+            json!({"ModOne": {"data": "xx"}}),
+            BTreeSet::from(["agua".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        tmixed_records.push(SnRecord {
+            sn: 4,
+            protocols: "TrackerFactFull",
+            success: false,
+        });
+        // Unheld viewpoint, failed evaluation: opaque error.
+        emit_fact_viewpoints(
+            api0,
+            tmixed.clone(),
+            json!({"ModOne": {"data": "xx"}}),
+            BTreeSet::from(["basura".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        let witness_events =
+            get_events(api1, tmixed.clone(), 6, true).await.unwrap();
+        let opaque_error = witness_events
+            .iter()
+            .find(|event| event.sn == 5)
+            .expect("witness must hold sn 5");
+        assert_tracker_fact_opaque(&opaque_error.event, &["basura"])
+            .expect("unheld-viewpoint error must be opaque");
+        tmixed_records.push(SnRecord {
+            sn: 5,
+            protocols: "TrackerFactFull",
+            success: false,
+        });
+        for event in get_events(api0, tmixed.clone(), tmixed_records.len(), true)
+            .await
+            .unwrap()
+        {
+            let (protocols, success) = protocols_of(&event.event);
+            let record = &tmixed_records[event.sn as usize];
+            assert_eq!(record.sn, event.sn);
+            assert_eq!(record.protocols, protocols, "tmixed sn {}", event.sn);
+            assert_eq!(record.success, success, "tmixed sn {} success", event.sn);
+        }
+        tmixed_entry = Some(serde_json::json!({
+            "name": "tracker_mixed",
+            "kind": "tracker",
+            "subject_id": tmixed.to_string(),
+            "governance_id": gov.to_string(),
+            "db": "node0",
+            "witness_db": "node1",
+            "sns": tmixed_records.iter().map(|record| serde_json::json!({
+                "sn": record.sn,
+                "protocols": record.protocols,
+                "success": record.success,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
     // Tracker T3: failed transfer (outsider without membership
     // or creator role commits failed), then EOL.
     let t3_entry: Option<Value>;
@@ -927,6 +1070,9 @@ async fn seed_ledger_db() {
         subjects.push(entry);
     }
     if let Some(entry) = topaque_entry {
+        subjects.push(entry);
+    }
+    if let Some(entry) = tmixed_entry {
         subjects.push(entry);
     }
     subjects.push(serde_json::json!({
