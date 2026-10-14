@@ -149,6 +149,21 @@ impl Runner {
         }
     }
 
+    /// Offline entry points for the off-chain tool: pure logic over
+    /// caller-supplied data, no actor context needed.
+    pub fn execute_transfer_not_gov_offline(
+        members: &BTreeSet<PublicKey>,
+        creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        new_owner: &PublicKey,
+        old_owner: &PublicKey,
+        namespace: Namespace,
+        schema_id: &SchemaType,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_transfer_not_gov(
+            members, creators, new_owner, old_owner, namespace, schema_id,
+        )
+    }
+
     fn execute_transfer_not_gov(
         members: &BTreeSet<PublicKey>,
         creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -212,6 +227,14 @@ impl Runner {
         })
     }
 
+    /// Offline entry point for the off-chain tool (see above).
+    pub fn execute_transfer_gov_offline(
+        governance: &GovernanceData,
+        new_owner: &PublicKey,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_transfer_gov(governance, new_owner)
+    }
+
     fn execute_transfer_gov(
         governance: &GovernanceData,
         new_owner: &PublicKey,
@@ -259,6 +282,15 @@ impl Runner {
             approval_required: false,
             final_state: ValueWrapper(json!([])),
         })
+    }
+
+    /// Offline entry point for the off-chain tool (see above).
+    pub fn execute_confirm_gov_offline(
+        governance: GovernanceData,
+        old_owner_name: Option<String>,
+        new_owner: &PublicKey,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_confirm_gov(governance, old_owner_name, new_owner)
     }
 
     fn execute_confirm_gov(
@@ -438,6 +470,47 @@ impl Runner {
         }
     }
 
+    /// Offline fact execution: same core as the actor path, but the
+    /// caller supplies runtime and module (the off-chain tool
+    /// rebuilds both itself). No actor context needed.
+    pub async fn execute_fact_offline(
+        contract_runtime: Arc<ContractRuntime>,
+        module: Arc<CompiledModule>,
+        state: ValueWrapper,
+        init_state: ValueWrapper,
+        payload: ValueWrapper,
+        is_owner: bool,
+    ) -> Result<RunnerResult, RunnerError> {
+        let (result, _stats) = Self::execute_bounded(
+            contract_runtime,
+            module,
+            state,
+            init_state,
+            payload,
+            is_owner,
+        )
+        .await?;
+        Self::map_fact_result(result)
+    }
+
+    fn map_fact_result(
+        result: ExecutionResult,
+    ) -> Result<RunnerResult, RunnerError> {
+        if !result.success {
+            return Err(RunnerError::ContractFailed {
+                details: format!(
+                    "Contract execution in running was not successful: {}",
+                    result.error
+                ),
+            });
+        }
+
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: result.final_state,
+        })
+    }
+
     async fn execute_fact_not_gov(
         ctx: &ActorContext<Self>,
         state: &ValueWrapper,
@@ -482,19 +555,17 @@ impl Runner {
         )
         .await?;
 
-        if !result.success {
-            return Err(RunnerError::ContractFailed {
-                details: format!(
-                    "Contract execution in running was not successful: {}",
-                    result.error
-                ),
-            });
-        }
+        Self::map_fact_result(result)
+    }
 
-        Ok(RunnerResult {
-            approval_required: false,
-            final_state: result.final_state,
-        })
+    /// Offline governance-fact execution: pure logic over the
+    /// pre-event governance state, no actor context needed. Used by
+    /// the off-chain tool to reproduce the voted outcome.
+    pub async fn execute_fact_gov_offline(
+        governance: GovernanceData,
+        event: ValueWrapper,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_fact_gov(governance, &event).await
     }
 
     async fn execute_fact_gov(

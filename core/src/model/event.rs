@@ -1,19 +1,16 @@
 //! # Event data model.
 //!
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::{
-    evaluation::response::{EvaluatorError, EvaluatorResponse},
-    subject::Metadata,
-    validation::request::ActualProtocols,
-};
+use crate::validation::request::ActualProtocols;
+
+use ave_common::verify::Metadata;
 
 use ave_common::{
     bridge::request::EventRequestType,
     identity::{
-        DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
+        DigestIdentifier, HashAlgorithm, Signature, Signed,
         TimeStamp, hash_borsh,
     },
     request::{CreateRequest, EventRequest},
@@ -25,128 +22,24 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{LedgerError, ProtocolsError};
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub enum EvaluationResponse {
-    Ok {
-        result: EvaluatorResponse,
-        result_hash: DigestIdentifier,
-    },
-    Error {
-        result: EvaluatorError,
-        result_hash: DigestIdentifier,
-    },
-}
-
-impl EvaluationResponse {
-    pub fn build_opaque(&self) -> EvaluationResponseOpaque {
-        match self.clone() {
-            Self::Ok { result_hash, .. } => {
-                EvaluationResponseOpaque::Ok { result_hash }
-            }
-            Self::Error { result_hash, .. } => {
-                EvaluationResponseOpaque::Error { result_hash }
-            }
-        }
-    }
-}
-
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub enum EvaluationResponseOpaque {
-    Ok { result_hash: DigestIdentifier },
-    Error { result_hash: DigestIdentifier },
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::{
+    EvaluationData, EvaluationDataOpaque, EvaluationResponse,
+    EvaluationResponseOpaque, OpaqueData,
+};
 
 // Single source lives in ave-common (feature `verify`); this
 // re-export keeps every core caller on identical behavior.
 pub use ave_common::verify::{CompilationData, CompilationResponse};
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct EvaluationDataOpaque {
-    pub eval_req_signature: Signature,
-    pub eval_req_hash: DigestIdentifier,
-    pub evaluators_signatures: Vec<Signature>,
-    pub viewpoints: BTreeSet<String>,
-    pub response: EvaluationResponseOpaque,
-}
-
-impl EvaluationDataOpaque {
-    pub const fn is_ok(&self) -> bool {
-        matches!(&self.response, EvaluationResponseOpaque::Ok { .. })
-    }
-}
-
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct EvaluationData {
-    pub eval_req_signature: Signature,
-    pub eval_req_hash: DigestIdentifier,
-    pub evaluators_signatures: Vec<Signature>,
-    pub response: EvaluationResponse,
-}
-
-impl EvaluationData {
-    pub const fn is_ok(&self) -> bool {
-        matches!(&self.response, EvaluationResponse::Ok { .. })
-    }
-
-    pub fn evaluator_response_ok(&self) -> Option<EvaluatorResponse> {
-        match &self.response {
-            EvaluationResponse::Ok { result, .. } => Some(result.clone()),
-            _ => None,
-        }
-    }
-}
-
 // Single source lives in ave-common (feature `verify`); this
 // re-export keeps every core caller on identical behavior.
 pub use ave_common::verify::ApprovalData;
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-pub struct ValidationData {
-    pub validation_req_signature: Signature,
-    pub validation_req_hash: DigestIdentifier,
-    pub validators_signatures: Vec<Signature>,
-    pub validation_metadata: ValidationMetadata,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    Eq,
-    PartialEq,
-    Hash,
-)]
-pub enum ValidationMetadata {
-    ModifiedHash {
-        modified_metadata_without_propierties_hash: DigestIdentifier,
-        propierties_hash: DigestIdentifier,
-        event_request_hash: DigestIdentifier,
-        viewpoints_hash: DigestIdentifier,
-    },
-    Metadata(Box<Metadata>),
-}
-
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
-pub struct OpaqueData {
-    pub subject_id: DigestIdentifier,
-    pub event_request_timestamp: TimeStamp,
-    pub signer: PublicKey,
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::{ValidationData, ValidationMetadata};
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,

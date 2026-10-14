@@ -150,3 +150,23 @@ impl CompilerError {
         }
     }
 }
+
+impl From<ave_common::verify::ContractSourceError> for CompilerError {
+    fn from(error: ave_common::verify::ContractSourceError) -> Self {
+        use ave_common::verify::ContractSourceError as Source;
+        match error {
+            Source::Base64DecodeFailed { details } => {
+                Self::Base64DecodeFailed { details }
+            }
+            Source::SourceDecompressionFailed { details } => {
+                Self::SourceDecompressionFailed { details }
+            }
+            Source::ContractSourceTooLarge { size, max } => {
+                Self::ContractSourceTooLarge { size, max }
+            }
+            Source::SerializationError { context, details } => {
+                Self::SerializationError { context, details }
+            }
+        }
+    }
+}

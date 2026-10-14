@@ -18,8 +18,6 @@ mod tests {
         },
     };
 
-    use super::*;
-
     // Pins that the core paths ARE the common functions: any local
     // redefinition instead of the re-export fails here.
     type RebuildFn = fn(

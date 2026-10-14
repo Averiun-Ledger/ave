@@ -2,7 +2,7 @@
 //! verification tool.
 
 use super::subject_metadata::Metadata;
-use crate::identity::DigestIdentifier;
+use crate::identity::{DigestIdentifier, Signature};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -49,4 +49,35 @@ pub enum ValidationRes {
     /// older code can not deserialize it and treat the message as lost —
     /// the same outcome as the validator not answering.
     Unavailable,
+}
+
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct ValidationData {
+    pub validation_req_signature: Signature,
+    pub validation_req_hash: DigestIdentifier,
+    pub validators_signatures: Vec<Signature>,
+    pub validation_metadata: ValidationMetadata,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+    Eq,
+    PartialEq,
+    Hash,
+)]
+pub enum ValidationMetadata {
+    ModifiedHash {
+        modified_metadata_without_propierties_hash: DigestIdentifier,
+        propierties_hash: DigestIdentifier,
+        event_request_hash: DigestIdentifier,
+        viewpoints_hash: DigestIdentifier,
+    },
+    Metadata(Box<Metadata>),
 }

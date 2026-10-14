@@ -18,6 +18,10 @@ serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }
+anyhow = { version = "1.0", optional = true }
+base64 = { version = "0.23.1", optional = true }
+zstd = { version = "0.13", optional = true }
+json-patch = { version = "4.2.0", optional = true }
 tonic = { workspace = true, optional = true }
 tonic-prost = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
@@ -37,7 +41,7 @@ common = ["ave-identity", "blake3", "value-wrapper"]
 value-wrapper = []
 # Shared ledger-verification cores (quorum, rebuilds, checks).
 # Gated so the wasm32 contract SDK never sees them.
-verify = ["common"]
+verify = ["common", "dep:json-patch", "dep:base64", "dep:zstd", "dep:anyhow"]
 # gRPC sink protobuf types. Optional: tonic does not compile for the
 # wasm32 target used by the contract SDK, which depends on this crate.
 sink-grpc = ["tonic", "tonic-prost", "prost", "tonic-prost-build", "protoc-bin-vendored"]

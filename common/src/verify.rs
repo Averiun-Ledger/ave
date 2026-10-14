@@ -9,14 +9,24 @@ pub mod approval_verify;
 pub mod compilation_data;
 pub mod compilation_request;
 pub mod compilation_response;
+pub mod compilation_sets;
 pub mod compilation_sources;
+pub mod decode;
+pub mod evaluation_data;
+pub mod evaluation_request;
 pub mod evaluation_response;
+pub mod governance;
 pub mod role_data;
 pub mod runner_error;
+pub mod subject_data;
 pub mod subject_metadata;
 pub mod validation_checks;
+pub mod validation_request;
 pub mod validation_response;
 pub mod validator_error;
+pub mod viewpoints;
+
+pub use viewpoints::validate_fact_viewpoints;
 
 pub use approval_data::ApprovalData;
 pub use approval_request::ApprovalReq;
@@ -30,19 +40,42 @@ pub use compilation_request::{CompilationReq, effective_pin};
 pub use compilation_response::{
     CompilationError, CompilationRes, CompilationResult, CompilerResponse,
 };
+pub use compilation_sets::{
+    compilation_set, needs_compilation_evidence, schemas_to_compile,
+};
 pub use compilation_sources::payload_contract_sources;
+pub use decode::{
+    ContractSourceError, MAX_CONTRACT_SOURCE_BYTES, decode_contract_source,
+    hash_bytes, validate_contract_source,
+};
+pub use evaluation_data::{
+    EvaluationData, EvaluationDataOpaque, EvaluationResponse,
+    EvaluationResponseOpaque, OpaqueData,
+};
+pub use evaluation_request::{EvaluateData, EvaluationReq};
 pub use evaluation_response::{
     EvalRunnerError, EvaluationRes, EvaluationResult, EvaluatorError,
     EvaluatorResponse, ResponseSummary,
 };
-pub use role_data::RoleDataRegister;
+pub use governance::{GovernanceData, GovernanceError};
+pub use role_data::{
+    RoleDataRegister, RolesAtVersion, lone_owner_roles,
+};
+pub use subject_data::RequestSubjectData;
 pub use runner_error::{InvalidEventKind, RunnerError};
 pub use subject_metadata::{Metadata, MetadataWithoutProperties};
 pub use validation_checks::{
-    EventAnchor, check_approval_req, check_basic_data, check_metadata,
-    event_request_hash, viewpoints_hash,
+    Check, EventAnchor, approval_data_hash_of, check_approval_req,
+    check_basic_data, check_compilation, check_evaluation,
+    check_genesis_metadata, check_gov_fact_combination, check_metadata,
+    check_opaque_evaluation, check_validation_bundle,
+    check_validation_signatures, check_witness_evaluation,
+    evaluated_patch, event_request_hash, gov_roles_from_pre,
+    req_subject_data_hash, validation_result_from_parts,
+    verify_approval_evidence, verify_compilation_evidence, viewpoints_hash,
 };
-pub use validation_response::ValidationRes;
+pub use validation_request::{ActualProtocols, LastData, ValidationReq};
+pub use validation_response::{ValidationData, ValidationMetadata, ValidationRes};
 pub use validator_error::ValidatorError;
 
 #[cfg(test)]
@@ -51,10 +84,11 @@ mod tests {
     use crate::{
         ValueWrapper,
         identity::{
-            DigestIdentifier, KeyPair, Signature, TimeStamp,
-            keys::Ed25519Signer,
+            DigestIdentifier, HashAlgorithm, KeyPair, Signature, TimeStamp,
+            hash_borsh, keys::Ed25519Signer,
         },
     };
+    use std::collections::{BTreeSet, HashSet};
 
     fn keys(n: usize) -> HashSet<PublicKey> {
         (0..n)
@@ -97,6 +131,38 @@ mod tests {
         let bytes = borsh::to_vec(value).expect("encode");
         let back = T::try_from_slice(&bytes).expect("decode");
         assert_eq!(borsh::to_vec(&back).expect("re-encode"), bytes);
+    }
+
+    #[test]
+    fn subject_wire_roundtrip() {
+        use crate::{Namespace, SchemaType};
+
+        let id = |b: u8| {
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &b).expect("hash")
+        };
+        roundtrip(&RequestSubjectData {
+            subject_id: id(1),
+            governance_id: id(2),
+            namespace: Namespace::new(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            sn: 4,
+            gov_version: 2,
+            signer: keys(1).into_iter().next().expect("key"),
+        });
+        roundtrip(&OpaqueData {
+            subject_id: id(1),
+            event_request_timestamp: TimeStamp::from_nanos(7),
+            signer: keys(1).into_iter().next().expect("key"),
+        });
+        roundtrip(&EvaluationDataOpaque {
+            eval_req_signature: dummy_sig(),
+            eval_req_hash: id(3),
+            evaluators_signatures: vec![dummy_sig()],
+            viewpoints: BTreeSet::from(["agua".to_owned()]),
+            response: EvaluationResponseOpaque::Error {
+                result_hash: id(4),
+            },
+        });
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::{
 use crate::{
     approval::verify::{ApprovalVerification, verify_approval_data},
     governance::{
-        Governance,
+        Governance, GovernanceState,
         data::GovernanceData,
         model::{ProtocolTypes, Quorum},
         role_register::{RoleDataRegister, SearchRole},
@@ -25,7 +25,7 @@ use crate::{
         sink::SubjectSinkEvent,
     },
     node::register::{Register, RegisterMessage, RegisterResponse},
-    tracker::Tracker,
+    tracker::{Tracker, TrackerState},
     validation::{
         request::{ActualProtocols, LastData, ValidationReq},
         response::ValidationRes,
@@ -63,18 +63,9 @@ pub mod error;
 
 impl Event for Ledger {}
 
-#[derive(
-    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
-)]
-pub struct RequestSubjectData {
-    pub subject_id: DigestIdentifier,
-    pub governance_id: DigestIdentifier,
-    pub namespace: Namespace,
-    pub schema_id: SchemaType,
-    pub sn: u64,
-    pub gov_version: u64,
-    pub signer: PublicKey,
-}
+// Single source lives in ave-common (feature `verify`); this
+// re-export keeps every core caller on identical behavior.
+pub use ave_common::verify::RequestSubjectData;
 
 pub struct VerifyNewLedgerEvent<'a> {
     pub new_ledger_event: &'a Ledger,
@@ -115,8 +106,60 @@ impl From<&Governance> for Metadata {
     }
 }
 
+/// Validation metadata view of replayed governance state, for
+/// off-chain verification over stored states.
+impl From<&GovernanceState> for Metadata {
+    fn from(value: &GovernanceState) -> Self {
+        Self {
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.subject_metadata.subject_id.clone(),
+            genesis_gov_version: 0,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: Namespace::new(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
+            active: value.subject_metadata.active,
+            properties: value.properties.to_value_wrapper(),
+        }
+    }
+}
+
 impl From<&Tracker> for Metadata {
     fn from(value: &Tracker) -> Self {
+        Self {
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.governance_id.clone(),
+            genesis_gov_version: value.genesis_gov_version,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: value.namespace.clone(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
+            active: value.subject_metadata.active,
+            properties: value.properties.clone(),
+        }
+    }
+}
+
+/// Validation metadata view of replayed tracker state, for
+/// off-chain verification over stored states.
+impl From<&TrackerState> for Metadata {
+    fn from(value: &TrackerState) -> Self {
         Self {
             name: value.subject_metadata.name.clone(),
             description: value.subject_metadata.description.clone(),

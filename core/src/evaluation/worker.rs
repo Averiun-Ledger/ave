@@ -146,8 +146,11 @@ impl EvalWorker {
         ctx: &mut ActorContext<Self>,
         evaluation_req: &EvaluationReq,
     ) -> Result<RunnerResult, EvaluatorError> {
-        let runner_data = evaluation_req
-            .build_evaluate_info(&self.init_state, &self.context)?;
+        let runner_data = crate::evaluation::request::build_evaluate_info(
+            evaluation_req,
+            &self.init_state,
+            &self.context,
+        )?;
 
         // Mirar la parte final de execute contract.
         let response = self

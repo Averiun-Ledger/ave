@@ -605,7 +605,11 @@ impl CompilerServer {
         // bounded — a hung cargo must not hold a semaphore slot
         // forever.
         let source = pipeline::decode_contract_source(source_b64)
-            .map_err(|e| status_for_build_error(&e))?;
+            .map_err(|e| {
+                status_for_build_error(
+                    &crate::compilation::error::CompilerError::from(e),
+                )
+            })?;
         let (rust_src, rustc_commit) =
             ave_build::query_sysroot(toolchain).await.map_err(|e| {
                 Status::internal(pipeline::map_build_error(e).to_string())
