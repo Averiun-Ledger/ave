@@ -6,6 +6,7 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
+    bridge::response::RequestEventDB,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
@@ -13,9 +14,11 @@ use ave_common::{
 use ave_core::auth::AuthWitness;
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    EXAMPLE_CONTRACT, create_and_authorize_governance,
-    create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
-    emit_reject, emit_transfer, get_subject,
+    EXAMPLE_CONTRACT, assert_tracker_fact_opaque,
+    create_and_authorize_governance, create_nodes_and_connections,
+    create_subject, emit_confirm, emit_eol, emit_fact,
+    emit_fact_viewpoints, emit_reject, emit_transfer, get_events,
+    get_subject, governance_properties,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -6968,4 +6971,417 @@ async fn dirty_restart_repairs_projection_gap() {
 
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
+}
+
+#[test(tokio::test)]
+// Handover a espejo degradado con resync: el espejo que tiene
+// el fact en opaco no puede aceptar; patron del nodo (restart
+// safe-mode, delete, reboot, fetch) y luego confirm + EOL.
+// Presupuesto de 60s: si el resync se atasca, falla en vez de
+// colgar la suite.
+async fn test_tracker_resync_degraded_mirror_confirm_eol() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (mut node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let follower = node2.api.clone();
+        let mirror = node3.api.clone();
+        let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&follower, &mirror])
+                .await;
+
+        // sn1: miembros + schema Example (A) + testigos.
+        let json = json!({
+            "members": {"add": [
+                {"name": "AveNode2", "key": follower.public_key()},
+                {"name": "AveNode3", "key": node3.api.public_key()},
+            ]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2", "AveNode3"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 1);
+
+        // sn2: roles (espejo miembro + creator + witness).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity",
+                         "witnesses": [
+                            {"name": "AveNode2", "viewpoints": ["agua"]},
+                            {"name": "AveNode3", "viewpoints": ["basura"]},
+                        ]},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode3", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [
+                        {"name": "Owner", "namespace": []},
+                        {"name": "AveNode2", "namespace": []},
+                        {"name": "AveNode3", "namespace": []},
+                    ],
+                    "witness": [
+                        {"name": "AveNode2", "namespace": []},
+                        {"name": "AveNode3", "namespace": []},
+                    ],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(2), true)
+                .await
+                .unwrap();
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 2);
+
+        // Tracker del owner + fact full; el espejo (basura)
+        // sincroniza. AveNode2 tambien autoriza (testigo).
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 1}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        mirror
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+        mirror.update_subject(tracker_id.clone()).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        follower
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Fact con viewpoint agua: el espejo (basura) lo ve opaco.
+        emit_fact_viewpoints(
+            &owner,
+            tracker_id.clone(),
+            json!({"ModOne": {"data": 2}}),
+            BTreeSet::from(["agua".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        let mirror_events =
+            get_events(&mirror, tracker_id.clone(), 3, true).await.unwrap();
+        let mirror_agua = mirror_events
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("mirror must hold sn 2");
+        assert_tracker_fact_opaque(&mirror_agua.event, &["agua"])
+            .expect("unheld agua fact mirrors opaque");
+
+        // Transfer al espejo degradado y resync: restart
+        // safe-mode, delete local, reboot, fetch copia full.
+        let mirror_key = PublicKey::from_str(mirror.public_key()).unwrap();
+        emit_transfer(&owner, tracker_id.clone(), mirror_key, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+
+        let mirror_keys = node3.keys.clone();
+        let mirror_db = dirs[4].path().to_path_buf();
+        node3.token.cancel();
+        join_all(node3.handler.iter_mut()).await;
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (safe_node, mut safe_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![],
+            always_accept: true,
+            local_db: Some(mirror_db.clone()),
+            keys: Some(mirror_keys.clone()),
+            safe_mode: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut safe_dirs);
+        node_running(&safe_node.api).await.unwrap();
+        safe_node.api.delete_subject(tracker_id.clone()).await.unwrap();
+        let mut safe_node = safe_node;
+        safe_node.token.cancel();
+        join_all(safe_node.handler.iter_mut()).await;
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (new_node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: node1.api.peer_id().to_string(),
+                address: vec![node1.listen_address.clone()],
+            }],
+            always_accept: true,
+            local_db: Some(mirror_db),
+            keys: Some(mirror_keys),
+            safe_mode: false,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&new_node2.api).await.unwrap();
+        node3 = new_node2;
+        let mirror = node3.api.clone();
+        mirror
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+        mirror.update_subject(tracker_id.clone()).await.unwrap();
+        for _ in 0..3 {
+            match get_subject(&mirror, tracker_id.clone(), Some(3), true).await
+            {
+                Ok(_) => break,
+                Err(_) => {
+                    mirror.update_subject(tracker_id.clone()).await.unwrap();
+                }
+            }
+        }
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+
+        // Con copia full ya acepta: confirm + EOL.
+        emit_confirm(&mirror, tracker_id.clone(), None, true).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+        emit_eol(&mirror, tracker_id.clone(), true).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(5), true)
+            .await
+            .unwrap();
+        assert!(
+            owner.get_pending_transfers(1000, 0).await.unwrap().is_empty()
+        );
+        assert!(
+            mirror.get_pending_transfers(1000, 0).await.unwrap().is_empty()
+        );
+
+        node_running(&node1.api).await.unwrap();
+        node_running(&node2.api).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Fact firmado por una clave ajena (ni miembro ni issuer):
+// se rechaza o aborta sin commitear; el siguiente fact
+// legitimo avanza. Presupuesto de 60s.
+async fn test_tracker_rogue_signature_aborts_without_commit() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example + testigo.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles (issuer Owner).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker + fact legitimo (sn1).
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 1}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // Fact firmado por un ajeno: rechazo en intake o abort,
+        // nunca commit.
+        let rogue_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let rogue = emit_fact_signed(
+            &owner,
+            &rogue_keys,
+            tracker_id.clone(),
+            json!({"ModOne": {"data": 100}}),
+            false,
+        )
+        .await;
+        if let Ok(request_id) = rogue {
+            wait_request_state(
+                &owner,
+                request_id.clone(),
+                Some(RequestState::Abort {
+                    subject_id: String::default(),
+                    who: String::default(),
+                    sn: None,
+                    error: String::default(),
+                }),
+            )
+            .await
+            .unwrap();
+            let aborts =
+                get_abort_request(&owner, tracker_id.clone(), request_id)
+                    .await
+                    .unwrap();
+            assert_eq!(aborts.events.len(), 1);
+        }
+
+        // El sn no avanzo y el fact legitimo commitea sn2.
+        let state = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 1);
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 2}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 2, "two": 0, "three": 0}));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
 }

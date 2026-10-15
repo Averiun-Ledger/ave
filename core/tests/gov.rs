@@ -6262,3 +6262,195 @@ async fn test_gov_invalid_change_aborts_and_next_add_commits() {
     .await
     .expect("test overran its 60s budget");
 }
+
+#[test(tokio::test)]
+// Salto de gov_version con fallidas en medio: el tracker emite,
+// la gov avanza (change ok, dos fallidas que congelan version,
+// dos miembros) y el tracker vuelve a emitir bajo la version
+// nueva. Presupuesto de 60s.
+async fn test_gov_version_skip_with_failures_in_between() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 1);
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(2), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 2);
+
+        // Tracker + fact bajo v2.
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change A -> V2 (v2 -> v3).
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 3);
+
+        // sn4: change a schema inexistente (falla, congela v3).
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "NotASchema",
+                "new_initial_value": {"one": 1},
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(4), true)
+                .await
+                .unwrap();
+        assert_eq!(
+            governance_properties(state.properties).version,
+            3,
+            "failed event must freeze the version"
+        );
+
+        // sn5: add duplicado (falla, congela v3).
+        let json = json!({
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        assert_eq!(
+            governance_properties(state.properties).version,
+            3,
+            "failed event must freeze the version"
+        );
+
+        // Dos miembros (v3 -> v4 -> v5).
+        for name in ["Charlie", "Dave"] {
+            let member_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                .public_key()
+                .to_string();
+            let json = json!({
+                "members": {"add": [{"name": name, "key": member_key}]},
+            });
+            emit_fact(&owner, governance_id.clone(), json, true)
+                .await
+                .unwrap();
+        }
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(7), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 5);
+
+        // El tracker vuelve a emitir: corre V2 bajo v5 (salto
+        // v2 -> v5 con dos fallidas en medio).
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 11}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 11, "two": 0, "three": 0}));
+        // V2 acepta three = 50 (A lo rechaza).
+        emit_fact(&owner, tracker_id.clone(), json!({"ModThree": {"data": 50}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 11, "two": 0, "three": 50}));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
