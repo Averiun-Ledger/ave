@@ -251,7 +251,7 @@ impl DistriWorker {
 
     async fn get_governance_version(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<u64, ActorError> {
         // Deliberately unauthenticated: ex-witnesses and members need
@@ -1328,7 +1328,7 @@ impl DistriWorker {
 
     async fn handle_get_governance_version(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: DigestIdentifier,
         info: ComunicateInfo,
         sender: PublicKey,

@@ -219,8 +219,6 @@ impl Handler<Self> for SinkSubjectWorker {
                             .await
                     }
                 }
-
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::CatchUpBatch {
                 from_sn,
@@ -230,7 +228,6 @@ impl Handler<Self> for SinkSubjectWorker {
                 let generation = self.catch_up_generation;
                 self.run_catch_up_batch(from_sn, batch_size, generation, ctx)
                     .await?;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::ContinueCatchUp {
                 from_sn,
@@ -242,7 +239,6 @@ impl Handler<Self> for SinkSubjectWorker {
                 }
                 self.run_catch_up_batch(from_sn, batch_size, generation, ctx)
                     .await?;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::ProcessNextEvent {
                 data,
@@ -314,12 +310,9 @@ impl Handler<Self> for SinkSubjectWorker {
                             .await;
                     }
                 }
-
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::FlushBatch => {
                 self.flush_pending(ctx, false).await;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Pause => {
                 // Flush best-effort so buffered events are not held in memory
@@ -327,11 +320,9 @@ impl Handler<Self> for SinkSubjectWorker {
                 // already know is unhealthy.
                 self.flush_pending(ctx, true).await;
                 self.paused = true;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Resume => {
                 self.paused = false;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Stop => {
                 // Best-effort flush: a single attempt during teardown. The
@@ -339,9 +330,10 @@ impl Handler<Self> for SinkSubjectWorker {
                 // comes back; retries here would delay actor shutdown.
                 self.flush_pending(ctx, true).await;
                 ctx.stop(None).await;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
         }
+
+        Ok(SinkSubjectWorkerResponse::Ok)
     }
 }
 

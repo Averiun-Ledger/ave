@@ -38,10 +38,12 @@ use ave_common::{
 };
 
 /// Shutdown grace for sink actors (`SinkManager`, `SinkWorker`,
-/// `SinkSubjectWorker`): external deliveries retry with backoff on
-/// top of per-attempt timeouts, so the 5 s framework default can cut
-/// an in-flight batch short on slow machines. These are deadlines,
-/// not fixed waits: an idle actor still stops immediately.
+/// `SinkSubjectWorker`).
+///
+/// External deliveries retry with backoff on top of per-attempt
+/// timeouts, so the 5 s framework default can cut an in-flight
+/// batch short on slow machines. These are deadlines, not fixed
+/// waits: an idle actor still stops immediately.
 pub const SINK_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Parse the `Retry-After` header of a 429 / 5xx response. The value may be

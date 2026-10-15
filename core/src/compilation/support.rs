@@ -1455,7 +1455,6 @@ impl CompilerSupport {
     /// is kept) and reports `Corrupt`, so the caller re-obtains the
     /// artifact. Without metadata there is nothing to verify against —
     /// nothing is served and nothing is discarded.
-
     pub(crate) async fn serve_official_artifact<A: Actor>(
         hash: HashAlgorithm,
         ctx: &ActorContext<A>,

@@ -916,8 +916,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 expired.push(message);
             }
         }
-        let count = expired.len() as u64;
-        count
+        expired.len() as u64
     }
 
     /// Add pending message to peer.
@@ -1084,8 +1083,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         {
             self.pending_inbound_messages.remove(peer);
         }
-        let count = expired.len() as u64;
-        count
+        expired.len() as u64
     }
 
     /// Maximum response channels buffered per peer. A channel answers

@@ -19,10 +19,11 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::Error;
 
-/// Maximum number of items a single query page may request. Shared by every
-/// paginated/limited endpoint (events, aborts, sink events, first/last
-/// events). Keeps a malicious or misconfigured client from forcing
-/// unbounded in-memory reads.
+/// Maximum number of items a single query page may request.
+///
+/// Shared by every paginated/limited endpoint (events, aborts,
+/// sink events, first/last events). Keeps a malicious or
+/// misconfigured client from forcing unbounded in-memory reads.
 pub const MAX_QUERY_LIMIT: u64 = 1000;
 
 /// Page size used when the caller passes no explicit `limit`.

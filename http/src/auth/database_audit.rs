@@ -124,10 +124,12 @@ pub struct AuditLogParams<'a> {
     pub error_message: Option<&'a str>,
 }
 
-/// Owned audit write for the background queue: everything the
-/// middleware needs after the response is already on its way.
-/// Dropped (with a warning) only if the bounded queue is full —
-/// audit writes were already best-effort (failures only logged).
+/// Owned audit write for the background queue.
+///
+/// Everything the middleware needs after the response is already
+/// on its way. Dropped (with a warning) only if the bounded queue
+/// is full — audit writes were already best-effort (failures only
+/// logged).
 pub struct QueuedAuditLog {
     pub user_id: Option<i64>,
     pub api_key_id: Option<String>,
@@ -188,9 +190,7 @@ impl AuthDatabase {
                 );
                 e.into_inner()
             });
-            if let Some(sender) = guard.as_ref() {
-                sender.clone()
-            } else {
+            if guard.is_none() {
                 let (sender, mut receiver) =
                     tokio::sync::mpsc::channel::<QueuedAuditLog>(
                         AUDIT_QUEUE_CAPACITY,
@@ -213,9 +213,9 @@ impl AuthDatabase {
                         }
                     }
                 });
-                guard.replace(sender.clone());
-                sender
+                guard.replace(sender);
             }
+            guard.as_ref().expect("audit sender set above").clone()
         };
         if sender.try_send(job).is_err() {
             tracing::warn!(

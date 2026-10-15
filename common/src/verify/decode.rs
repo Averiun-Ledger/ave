@@ -1,7 +1,9 @@
 //! Contract-source decoding shared by the node and the off-chain
-//! verification tool: base64, then bounded zstd, then size cap.
-//! Build, filesystem and engine errors stay in core: only the
-//! decode/hash shapes move, with a narrow error.
+//! verification tool.
+//!
+//! Base64, then bounded zstd, then size cap. Build, filesystem and
+//! engine errors stay in core: only the decode/hash shapes move,
+//! with a narrow error.
 
 use crate::identity::{DigestIdentifier, HashAlgorithm, hash_borsh};
 
@@ -24,12 +26,13 @@ pub enum ContractSourceError {
 /// Maximum accepted contract source size, like the node enforces.
 pub const MAX_CONTRACT_SOURCE_BYTES: usize = 1024 * 1024;
 
-/// zstd frame magic number (little-endian 0xFD2FB528). A base64-decoded
-/// contract payload starting with these bytes is a compressed source;
-/// anything else is a plain UTF-8 source — a Rust source can never begin
-/// with this non-UTF-8 prefix, so the formats are unambiguous and both
-/// stay accepted (plain payloads in already-committed events keep
-/// replaying).
+/// zstd frame magic number (little-endian 0xFD2FB528).
+///
+/// A base64-decoded contract payload starting with these bytes is
+/// a compressed source; anything else is a plain UTF-8 source — a
+/// Rust source can never begin with this non-UTF-8 prefix, so the
+/// formats are unambiguous and both stay accepted (plain payloads
+/// in already-committed events keep replaying).
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// Decodes a governance-event contract payload into source bytes.

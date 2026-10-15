@@ -48,10 +48,11 @@ use std::sync::Arc;
 
 use json_patch::{Patch, patch};
 
-/// Ledger-anchored identity of the event under validation, shared by
-/// the evidence checks so their signatures stay readable. Public so
-/// the off-chain verification tool runs the same checks over
-/// replayed state.
+/// Ledger-anchored identity of the event under validation.
+///
+/// Shared by the evidence checks so their signatures stay
+/// readable. Public so the off-chain verification tool runs the
+/// same checks over replayed state.
 pub struct EventAnchor<'a> {
     pub event_request: &'a Arc<Signed<EventRequest>>,
     pub metadata: &'a Metadata,
@@ -268,12 +269,14 @@ pub fn check_basic_data(
     Ok(())
 }
 
-/// Static verification of the signed approval request carried by an
-/// approve variant: it must be signed by the requester, describe
-/// exactly this event (subject, sn, governance version, evaluated
-/// patch) and respect the minimum approval window. The votes are not
-/// checked here: this worker verifies the closed evidence data-only
-/// when it arrives inside the validation request.
+/// Static verification of the signed approval request carried by
+/// an approve variant.
+///
+/// It must be signed by the requester, describe exactly this
+/// event (subject, sn, governance version, evaluated patch) and
+/// respect the minimum approval window. The votes are not checked
+/// here: this worker verifies the closed evidence data-only when
+/// it arrives inside the validation request.
 pub fn check_approval_req(
     approval_req: &Signed<ApprovalReq>,
     metadata: &Metadata,
@@ -786,8 +789,9 @@ pub fn approval_data_hash_of(
     }
 }
 
-/// The validation result the validators of an event signed, read
-/// off the event's own stored components (mirrors the subject
+/// The validation result the validators of an event signed.
+///
+/// Read off the event's own stored components (mirrors the subject
 /// verifier: post-state hashes plus the current request and
 /// approval hashes). Genesis carries genesis metadata instead of
 /// a hash bundle.
@@ -848,10 +852,11 @@ pub fn check_validation_signatures(
 }
 
 /// Stored validation bundle against freshly recomputed
-/// post-state: the node commits an event only when the voted
-/// bundle equals the post-state hashes plus the current request
-/// hashes. Catches evidence that is well-signed but describes
-/// another state.
+/// post-state.
+///
+/// The node commits an event only when the voted bundle equals
+/// the post-state hashes plus the current request hashes. Catches
+/// evidence that is well-signed but describes another state.
 pub fn check_validation_bundle(
     hash: &HashAlgorithm,
     validation: &ValidationData,
@@ -899,10 +904,11 @@ pub fn check_validation_bundle(
     })
 }
 
-/// Phase and validator sets for a governance event, read off its
-/// pre-event properties: the node commits gov events against the
-/// historical governance state, never against a later register.
-/// Mirrors the subject verifier exactly.
+/// Phase and validator sets for a governance event.
+///
+/// Read off its pre-event properties: the node commits gov events
+/// against the historical governance state, never against a later
+/// register. Mirrors the subject verifier exactly.
 pub fn gov_roles_from_pre(
     pre_properties: &ValueWrapper,
     need_approval: bool,
@@ -1026,11 +1032,13 @@ pub fn verify_compilation_evidence(
 }
 
 /// Evaluator signatures over the stored result hash plus
-/// their quorum, without rebuilding the evaluation request
-/// (which binds pre-state a diverged witness replay can not
-/// reproduce). Same shape as the opaque evaluation check: it
-/// proves the evaluators stood behind the stored result, while
-/// the validator quorum above vouches for the bundle itself.
+/// their quorum.
+///
+/// Without rebuilding the evaluation request (which binds
+/// pre-state a diverged witness replay can not reproduce). Same
+/// shape as the opaque evaluation check: it proves the evaluators
+/// stood behind the stored result, while the validator quorum
+/// above vouches for the bundle itself.
 pub fn check_witness_evaluation(
     evaluation: &EvaluationData,
     eval_roles: &RoleDataRegister,
@@ -1114,25 +1122,26 @@ pub fn evaluated_patch(
     }
 }
 
-/// Phase combination rules of a governance fact, mirroring the
-/// node constructors: a failed compilation carries neither
-/// evaluation nor approval (nothing to evaluate); otherwise an
-/// evaluation is mandatory, a successful one always travels with
-/// its approval and a failed one never does.
+/// Phase combination rules of a governance fact.
+///
+/// Mirrors the node constructors: a failed compilation carries
+/// neither evaluation nor approval (nothing to evaluate);
+/// otherwise an evaluation is mandatory, a successful one always
+/// travels with its approval and a failed one never does.
 pub fn check_gov_fact_combination(
     compilation: &Option<Box<CompilationData>>,
     evaluation: &Option<EvaluationData>,
     approval: &Option<ApprovalData>,
 ) -> Result<()> {
-    if let Some(compilation) = compilation {
-        if !compilation.is_ok() {
-            if evaluation.is_some() || approval.is_some() {
-                bail!(
-                    "failed compilation carries no evaluation or approval"
-                );
-            }
-            return Ok(());
+    if let Some(compilation) = compilation
+        && !compilation.is_ok()
+    {
+        if evaluation.is_some() || approval.is_some() {
+            bail!(
+                "failed compilation carries no evaluation or approval"
+            );
         }
+        return Ok(());
     }
     match (evaluation, approval) {
         (None, _) => bail!("governance fact without evaluation"),

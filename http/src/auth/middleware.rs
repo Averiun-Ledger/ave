@@ -342,7 +342,7 @@ pub async fn audit_log_middleware(
             let ctx = (*ctx).clone();
             db.audit_async(crate::auth::database_audit::QueuedAuditLog {
                 user_id: Some(ctx.user_id),
-                api_key_id: Some(ctx.api_key_id.clone()),
+                api_key_id: Some(ctx.api_key_id),
                 action_type: "api_request",
                 endpoint: Some(path.clone()),
                 http_method: Some(method.clone()),
@@ -351,7 +351,7 @@ pub async fn audit_log_middleware(
                 request_id: Some(request_id.clone()),
                 details: None,
                 success,
-                error_message: error_message.clone(),
+                error_message,
             });
         } else {
             // No auth context - log as unauthenticated request
@@ -371,7 +371,7 @@ pub async fn audit_log_middleware(
                 request_id: Some(request_id.clone()),
                 details: Some(details),
                 success,
-                error_message: error_message.clone(),
+                error_message,
             });
         }
     }
@@ -443,7 +443,7 @@ pub async fn audit_rejected_request(
         let ctx = (*ctx).clone();
         db.audit_async(crate::auth::database_audit::QueuedAuditLog {
             user_id: Some(ctx.user_id),
-            api_key_id: Some(ctx.api_key_id.clone()),
+            api_key_id: Some(ctx.api_key_id),
             action_type: "api_request",
             endpoint: Some(path),
             http_method: Some(method),

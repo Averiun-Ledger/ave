@@ -479,7 +479,7 @@ impl DistriWorker {
     /// governance was purged mid-sync: the pass is moot, drop it.
     async fn trigger_deferred_acquisition(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) {
         let path = match get_subject_path_and_data(ctx, subject_id).await {

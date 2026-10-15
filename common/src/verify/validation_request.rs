@@ -285,7 +285,7 @@ impl ActualProtocols {
     /// envelope, chain linkage, pre-event metadata and the previous
     /// event. Same atoms the request manager assembles live.
     pub fn rebuild_validation_req(
-        actual_protocols: ActualProtocols,
+        actual_protocols: Self,
         event_request: &Arc<Signed<EventRequest>>,
         ledger_hash: DigestIdentifier,
         metadata: &Metadata,

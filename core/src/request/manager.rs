@@ -2416,7 +2416,7 @@ impl RequestManager {
 
     async fn check_request_roles_after_reboot(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
     ) -> Result<(), RequestManagerError> {
         let Some(request) = self.request.clone() else {
             return Err(RequestManagerError::RequestNotSet);

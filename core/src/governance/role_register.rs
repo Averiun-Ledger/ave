@@ -297,22 +297,21 @@ impl RoleRegister {
                 vec![]
             };
 
-            let mut schema_eval = if let Some(evaluators) =
-                self.evaluators.get(&evaluation.schema_id)
-            {
-                let mut schema_eval = vec![];
-                for (key, namespace) in evaluators {
-                    if namespace
-                        .is_ancestor_or_equal_of(&evaluation.namespace)
-                    {
-                        schema_eval.push(key.clone());
+            let mut schema_eval = self
+                .evaluators
+                .get(&evaluation.schema_id)
+                .map_or_else(Vec::new, |evaluators| {
+                    let mut schema_eval = vec![];
+                    for (key, namespace) in evaluators {
+                        if namespace
+                            .is_ancestor_or_equal_of(&evaluation.namespace)
+                        {
+                            schema_eval.push(key.clone());
+                        }
                     }
-                }
 
-                schema_eval
-            } else {
-                vec![]
-            };
+                    schema_eval
+                });
 
             let quorum = if let Some(quorum_schema) =
                 self.eval_quorum.get(&evaluation.schema_id)
@@ -400,27 +399,26 @@ impl RoleRegister {
             vec![]
         };
 
-        let mut schema_val = if let Some(validators) =
-            self.validators.get(&search.schema_id)
-        {
-            let mut schema_val = vec![];
-            for ((key, namespace), (interval, last)) in validators {
-                if namespace.is_ancestor_or_equal_of(&search.namespace)
-                {
-                    if let Some(last) = last
-                        && last <= &version
+        let mut schema_val = self
+            .validators
+            .get(&search.schema_id)
+            .map_or_else(Vec::new, |validators| {
+                let mut schema_val = vec![];
+                for ((key, namespace), (interval, last)) in validators {
+                    if namespace.is_ancestor_or_equal_of(&search.namespace)
                     {
-                        schema_val.push(key.clone());
-                    } else if interval.contains(version) {
-                        schema_val.push(key.clone());
+                        if let Some(last) = last
+                            && last <= &version
+                        {
+                            schema_val.push(key.clone());
+                        } else if interval.contains(version) {
+                            schema_val.push(key.clone());
+                        }
                     }
                 }
-            }
 
-            schema_val
-        } else {
-            vec![]
-        };
+                schema_val
+            });
 
         'data: {
             let quorum = if let Some(quorum_schema) =

@@ -1283,12 +1283,13 @@ where
 }
 
 /// Asks a sink manager to compare its persisted delivery cursor
-/// against the subject's ledger tip and catch up where behind
-/// (boot backstop for quiet subjects: without fresh traffic the
-/// gap would never be noticed). Pure map reads on the manager
-/// side; the catch-up chain lifts the subject itself only when
-/// delivery is actually needed. Unknown manager (no sinks
-/// configured) is a clean no-op.
+/// against the subject's ledger tip.
+///
+/// Catches up where behind (boot backstop for quiet subjects:
+/// without fresh traffic the gap would never be noticed). Pure map
+/// reads on the manager side; the catch-up chain lifts the subject
+/// itself only when delivery is actually needed. Unknown manager
+/// (no sinks configured) is a clean no-op.
 pub async fn review_sink_cursor(
     system: &SystemRef,
     manager_path: ActorPath,
@@ -1327,7 +1328,7 @@ pub async fn review_sink_cursor(
 fn split_page_fresh(sns: &[u64], done: &mut Option<u64>) -> Vec<bool> {
     let mut mask = Vec::with_capacity(sns.len());
     for sn in sns {
-        if done.map_or(true, |cut| *sn > cut) {
+        if done.is_none_or(|cut| *sn > cut) {
             mask.push(true);
             *done = Some(*sn);
         } else {
@@ -1337,14 +1338,15 @@ fn split_page_fresh(sns: &[u64], done: &mut Option<u64>) -> Vec<bool> {
     mask
 }
 
-/// Replays ledger events above the query-DB projection watermark
-/// into it and refreshes the subject state row (crash backstop:
-/// events persisted to the ledger but never projected after a
-/// power cut, including a subject missing entirely on first
-/// event). Exact-range: events at or below the watermark are
-/// skipped, so the plain `INSERT` never collides, and the state
-/// row is an upsert. Callers gate this on dirty boot; the
-/// watermark check itself makes clean runs a single indexed query.
+/// Replays ledger events above the query-DB projection watermark.
+///
+/// Refreshes the subject state row (crash backstop: events
+/// persisted to the ledger but never projected after a power cut,
+/// including a subject missing entirely on first event).
+/// Exact-range: events at or below the watermark are skipped, so
+/// the plain `INSERT` never collides, and the state row is an
+/// upsert. Callers gate this on dirty boot; the watermark check
+/// itself makes clean runs a single indexed query.
 /// Returns events written.
 pub async fn fill_projection_gap<A>(
     ctx: &mut ActorContext<A>,

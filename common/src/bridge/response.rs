@@ -155,10 +155,11 @@ pub struct ActorTreeNodeView {
     pub depth: u64,
 }
 
-/// Point-in-time supervision forest: `nodes` carries at most
-/// `limit` entries in pre-order (parent before children, siblings
-/// by path), `total` counts every live node, `truncated` tells
-/// the caller entries were dropped.
+/// Point-in-time supervision forest.
+///
+/// `nodes` carries at most `limit` entries in pre-order (parent
+/// before children, siblings by path), `total` counts every live
+/// node, `truncated` tells the caller entries were dropped.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -264,10 +265,11 @@ pub enum EvalResDB {
     Error(String),
 }
 
-/// Compilation verdict stored in the query database, mirroring
-/// `EvalResDB`: only the voted outcome (contracts or deterministic
-/// error) plus the attested toolchain version. Signatures, hashes
-/// and requests stay in the ledger, never here.
+/// Compilation verdict stored in the query database.
+///
+/// Mirrors `EvalResDB`: only the voted outcome (contracts or
+/// deterministic error) plus the attested toolchain version.
+/// Signatures, hashes and requests stay in the ledger, never here.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

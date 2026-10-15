@@ -490,7 +490,7 @@ where
 }
 
 pub(crate) async fn get_subject_path_and_data<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<(ActorPath, SubjectData), ActorError>
 where
