@@ -31,7 +31,8 @@ use ave_core::governance::model::{
 use ave_network::{NodeType, RoutingNode};
 use common::{
     CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
-    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, assert_governance_properties_eq,
+    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
+    assert_governance_properties_eq,
     create_and_authorize_governance, create_nodes_and_connections,
     create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
     emit_reject, emit_transfer, get_events, get_subject, governance_properties,
@@ -5733,4 +5734,531 @@ async fn test_inflight_resume_after_reboot() {
     assert!(properties.members.contains_key("M1"));
 
     node_running(&api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Change de contrato (Example A -> V2) como tercer fact de una
+// gobernanza nueva con tracker y testigos: compila de verdad y
+// commitea sn3. Presupuesto de 60s: si algo se atasca, el test
+// falla en vez de colgar la suite.
+async fn test_gov_change_contract_with_tracker_and_witnesses() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = &node1.api;
+        let witness = &node2.api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema (owner evalua y valida, testigo observa).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker del owner con un fact: hay ledger vivo bajo la gov.
+        let (tracker_id, ..) =
+            create_subject(owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2, commitea sn3.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 3);
+
+        // El contrato que corre es V2: acepta three = 50.
+        emit_fact(owner, tracker_id.clone(), json!({"ModThree": {"data": 50}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 10, "two": 0, "three": 50}));
+
+        // El testigo tambien ve sn3: la distribucion no depende
+        // de su voto.
+        let state = get_subject(witness, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+
+        node_running(owner).await.unwrap();
+        node_running(witness).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change con dos approvers (Owner + AveNode2, votan los dos):
+// el change compila V2 y commitea sn3. Presupuesto de 60s: si
+// algo se atasca, el test falla en vez de colgar la suite.
+async fn test_gov_change_with_two_approvers() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = &node1.api;
+        let witness = &node2.api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema + AveNode2 como approver de gobernanza.
+        let json = json!({
+            "roles": {
+                "governance": {"add": {"approver": ["AveNode2"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                            {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "AveNode2", "namespace": []}],
+                    },
+                }],
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker del owner con un fact.
+        let (tracker_id, ..) =
+            create_subject(owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2. Votan los dos approvers
+        // (aceptacion automatica) y commitea sn3.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+
+        node_running(owner).await.unwrap();
+        node_running(witness).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change con restart del owner en mitad del vuelo: el change
+// debe recuperarse y commitear sn3. Presupuesto de 60s: si la
+// recuperacion se atasca, el test falla en vez de colgar.
+async fn test_gov_change_with_owner_restart_midflight() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let contracts_dir = tempfile::tempdir().unwrap();
+        let (mut node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            contracts_path: Some(contracts_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let peer2 = RoutingNode {
+            peer_id: node2.api.peer_id().to_string(),
+            address: vec![node2.listen_address.clone()],
+        };
+
+        let owner_key = node1.keys.clone();
+        let owner_api = node1.api.clone();
+        let witness_api = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner_api, vec![&witness_api])
+                .await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness_api.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner_api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner_api, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2 sin espera y restart
+        // inmediato del owner: la request sigue en vuelo seguro.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, false)
+            .await
+            .unwrap();
+
+        node1.token.cancel();
+        join_all(node1.handler.iter_mut()).await;
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![peer2],
+            always_accept: true,
+            keys: Some(owner_key),
+            local_db: Some(dirs[0].path().to_path_buf()),
+            ext_db: Some(dirs[1].path().to_path_buf()),
+            contracts_path: Some(contracts_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+
+        let api = new_node.api.clone();
+        node_running(&api).await.unwrap();
+
+        // La request se recupera y el change commitea sn3.
+        let state = get_subject(&api, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 3);
+
+        node_running(&api).await.unwrap();
+        node_running(&witness_api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change a contrato invalido (base64 truncado): aborta sin
+// dejar evento y el siguiente schema-add commitea. Presupuesto
+// de 60s: si el add posterior se atasca tras el abort, el test
+// falla en vez de colgar.
+async fn test_gov_invalid_change_aborts_and_next_add_commits() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: false,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Change a contrato invalido: aborta, no deja sn.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": INVALID_EXAMPLE_CONTRACT,
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+        // El siguiente add (Third) commitea como sn3: el abort
+        // no atasca la gobernanza.
+        let json = json!({
+            "schemas": {"add": [{
+                "id": "Third",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(&owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert!(gov.schemas.contains_key(&SchemaType::Type("Third".to_owned())));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
 }
