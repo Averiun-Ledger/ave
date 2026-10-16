@@ -7578,13 +7578,17 @@ async fn sink_recovers_after_worker_idle_shutdown_while_lagging() {
     sink.set_mode(ResponseMode::Accept).await;
 
     wait_for_sink_caught_up(&node.api, "example-sink").await;
-    sink.wait_for_count(2, true).await;
-    let events = sink.full_snapshot().await;
-    assert_eq!(
-        events.len(),
-        2,
-        "Create + pending fact should be delivered after worker recreation"
-    );
+    // Kill/recreate + catch-up can duplicate one HTTP delivery
+    // (at-least-once across the kill window: the cursor advances
+    // after the send is acked, so a kill in between redelivers).
+    // Wait for both distinct sns, settle, dedup, then assert the
+    // complete ordered sequence: fully deterministic.
+    sink.wait_for_distinct_sn_count(&subject_id_str, 2, true).await;
+    let raw_events = wait_for_sink_events_stable(&sink).await;
+    let events: Vec<_> = deduplicate_events_by_sn(&raw_events)
+        .into_iter()
+        .filter(|event| matches!(event, IncomingSinkEvent::Full(_)))
+        .collect();
     assert_subject_sn_sequence(&events, &subject_id_str, 0, 1);
     assert_event_is_fact_full(
         &events[1],

@@ -6,7 +6,6 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
-    bridge::response::RequestEventDB,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
