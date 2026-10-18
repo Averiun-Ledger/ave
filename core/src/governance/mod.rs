@@ -5543,6 +5543,37 @@ impl PersistentActor for Governance {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
+                    // Same genesis gates as the first-event verification:
+                    // state adopted here must match node-constructed
+                    // defaults, never blind-synced bytes.
+                    if let Some(name) = &metadata.name
+                        && (name.is_empty() || name.len() > 100)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis name is invalid".to_owned() });
+                    }
+                    if let Some(description) = &metadata.description
+                        && (description.is_empty() || description.len() > 200)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis description is invalid".to_owned() });
+                    }
+                    if !metadata.governance_id.is_empty() {
+                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must be empty".to_owned() });
+                    }
+                    if !metadata.namespace.is_empty() {
+                        return Err(ActorError::Functional { description: "In create event, genesis namespace must be empty".to_owned() });
+                    }
+                    if !metadata.schema_id.is_valid_in_request() {
+                        return Err(ActorError::Functional { description: "In create event, genesis schema_id is invalid".to_owned() });
+                    }
+                    if metadata.creator != metadata.owner {
+                        return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
+                    }
+                    if metadata.new_owner.is_some() {
+                        return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
+                    }
+                    if !metadata.active {
+                        return Err(ActorError::Functional { description: "In create event, genesis must be active".to_owned() });
+                    }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = serde_json::from_value::<GovernanceData>(
                         metadata.properties.0.clone(),
@@ -5556,6 +5587,38 @@ impl PersistentActor for Governance {
                         );
                         ActorError::Functional { description: format!("In create event, can not convert properties into GovernanceData: {e}")}
                     })?;
+                    // Genesis toolchain is node-constructed (DEFAULT_PIN):
+                    // reject smuggled pins at state adoption, same as the
+                    // first-event verification.
+                    if inner.properties.toolchain
+                        != ave_common::governance::DEFAULT_PIN
+                    {
+                        error!(
+                            event_type = "Create",
+                            subject_id = %inner.subject_metadata.subject_id,
+                            toolchain = %inner.properties.toolchain,
+                            "Genesis toolchain pin is not the default"
+                        );
+                        return Err(ActorError::Functional { description: format!(
+                            "In create event, genesis toolchain pin is not the default: {}",
+                            inner.properties.toolchain
+                        )});
+                    }
+                    // Whole-state backstop: genesis properties are fully
+                    // node-constructed, so any deviation left is smuggled
+                    // data regardless of which field carries it.
+                    if inner.properties
+                        != GovernanceData::new(
+                            inner.subject_metadata.owner.clone(),
+                        )
+                    {
+                        error!(
+                            event_type = "Create",
+                            subject_id = %inner.subject_metadata.subject_id,
+                            "Genesis properties do not match node-constructed defaults"
+                        );
+                        return Err(ActorError::Functional { description: "In create event, genesis properties do not match node-constructed defaults".to_owned() });
+                    }
 
                     debug!(
                         event_type = "Create",

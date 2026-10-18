@@ -1350,6 +1350,35 @@ impl PersistentActor for Tracker {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
+                    // Same genesis gates as the first-event verification:
+                    // adopted state must match node-constructed defaults
+                    // and requester-controlled fields must pass the create
+                    // validation rules, never blind-synced bytes.
+                    if let Some(name) = &metadata.name
+                        && (name.is_empty() || name.len() > 100)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis name is invalid".to_owned() });
+                    }
+                    if let Some(description) = &metadata.description
+                        && (description.is_empty() || description.len() > 200)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis description is invalid".to_owned() });
+                    }
+                    if metadata.governance_id.is_empty() {
+                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must be set".to_owned() });
+                    }
+                    if !metadata.schema_id.is_valid_in_request() {
+                        return Err(ActorError::Functional { description: "In create event, genesis schema_id is invalid".to_owned() });
+                    }
+                    if metadata.creator != metadata.owner {
+                        return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
+                    }
+                    if metadata.new_owner.is_some() {
+                        return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
+                    }
+                    if !metadata.active {
+                        return Err(ActorError::Functional { description: "In create event, genesis must be active".to_owned() });
+                    }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = metadata.properties.clone();
                     inner.visibility_mode = TrackerVisibilityMode::Full;

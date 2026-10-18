@@ -1870,8 +1870,56 @@ where
             return Err(SubjectError::MetadataMismatch);
         }
 
+        // Requester-controlled genesis fields, mirrored from the create
+        // validation gates: a blind-synced ledger is never re-validated,
+        // so anything not reconstructed here would stick.
+        if let Some(name) = &metadata.name
+            && (name.is_empty() || name.len() > 100)
+        {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "name".to_owned(),
+            });
+        }
+        if let Some(description) = &metadata.description
+            && (description.is_empty() || description.len() > 200)
+        {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "description".to_owned(),
+            });
+        }
+        if !metadata.schema_id.is_valid_in_request() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "schema_id".to_owned(),
+            });
+        }
+        if metadata.creator != metadata.owner {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "creator".to_owned(),
+            });
+        }
+        if metadata.new_owner.is_some() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "new_owner".to_owned(),
+            });
+        }
+        if !metadata.active {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "active".to_owned(),
+            });
+        }
+
         if metadata.schema_id == SchemaType::Governance {
-            serde_json::from_value::<GovernanceData>(
+            if !metadata.governance_id.is_empty() {
+                return Err(SubjectError::InvalidGenesisField {
+                    field: "governance_id".to_owned(),
+                });
+            }
+            if !metadata.namespace.is_empty() {
+                return Err(SubjectError::InvalidGenesisField {
+                    field: "namespace".to_owned(),
+                });
+            }
+            let gov_data = serde_json::from_value::<GovernanceData>(
                 metadata.properties.0.clone(),
             )
             .map_err(|e| {
@@ -1879,6 +1927,26 @@ where
                     details: e.to_string(),
                 }
             })?;
+            // Genesis toolchain is node-constructed (DEFAULT_PIN): the
+            // create envelope carries no pin field, so anything else
+            // here was smuggled through a blind-synced ledger.
+            if gov_data.toolchain != ave_common::governance::DEFAULT_PIN {
+                return Err(SubjectError::InvalidGenesisToolchain {
+                    expected: ave_common::governance::DEFAULT_PIN.to_owned(),
+                    actual: gov_data.toolchain,
+                });
+            }
+            // Whole-state backstop: genesis properties are fully
+            // node-constructed (version, members, roles, policies,
+            // schemas, toolchain), so any deviation left is smuggled
+            // data regardless of which field carries it.
+            if gov_data != GovernanceData::new(metadata.owner.clone()) {
+                return Err(SubjectError::InvalidGenesisState);
+            }
+        } else if metadata.governance_id.is_empty() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "governance_id".to_owned(),
+            });
         }
 
         let validation_res = ValidationRes::Create {

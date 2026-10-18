@@ -69,9 +69,9 @@ static PIN_REGISTRY: &[PinRecord] = &[
         id: PIN_IDS[0],
         info: ToolchainInfo {
             rustc_version: "1.95.0",
-            cargo_config_hash: "10ed106c093be78c7d13394e01b78904155ef70e7e74dc9ce8b69f9cd40f4bea",
+            cargo_config_hash: "4dfdbcd3483c329c76049508de879661cdb2e69f4c04af72b677e2614cb265ad",
             sdk_version: "0.8.0",
-            lock_hash: "3a6c866856a40d2c0af480077bed19666647a48697d00b789a6b174375a16dcf",
+            lock_hash: "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
                 (
@@ -91,9 +91,9 @@ static PIN_REGISTRY: &[PinRecord] = &[
         id: PIN_IDS[1],
         info: ToolchainInfo {
             rustc_version: "1.98.1",
-            cargo_config_hash: "10ed106c093be78c7d13394e01b78904155ef70e7e74dc9ce8b69f9cd40f4bea",
+            cargo_config_hash: "4dfdbcd3483c329c76049508de879661cdb2e69f4c04af72b677e2614cb265ad",
             sdk_version: "0.8.0",
-            lock_hash: "3a6c866856a40d2c0af480077bed19666647a48697d00b789a6b174375a16dcf",
+            lock_hash: "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25",
             builder_image: "averiun/ave-tools@sha256:00401caa6f1e220153229eda04a6a537c8f3db5f2b2af9349f96ac1e3333dcbc",
             cargo_bins: &[
                 (
@@ -112,8 +112,7 @@ static PIN_REGISTRY: &[PinRecord] = &[
 ];
 
 /// Closed toolchain registry: entries are PROMOTED here, never
-/// invented. Content verified 2026-09-28 (both pins re-measured by
-/// `ave-pin`, both architectures, hashes match).
+/// invented.
 pub fn toolchain_info(id: &str) -> Option<ToolchainInfo> {
     PIN_REGISTRY
         .iter()
