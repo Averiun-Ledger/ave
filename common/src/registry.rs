@@ -76,11 +76,11 @@ static PIN_REGISTRY: &[PinRecord] = &[
             cargo_bins: &[
                 (
                     "amd64",
-                    "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32",
+                    "d425d8d9c250f9197027297707fa0f56e803443eeff6a5f18363568ad1d3c351",
                 ),
                 (
                     "arm64",
-                    "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3",
+                    "3ebe9cbfefe20cdb320432c05868c91e2cef6db0708271aef9d4a858a8ecb45d",
                 ),
             ],
         },
@@ -98,11 +98,11 @@ static PIN_REGISTRY: &[PinRecord] = &[
             cargo_bins: &[
                 (
                     "amd64",
-                    "5ba984eb055ef0e606096ed692090f75154784c580d3cd91a98bc1782dc48e32",
+                    "d425d8d9c250f9197027297707fa0f56e803443eeff6a5f18363568ad1d3c351",
                 ),
                 (
                     "arm64",
-                    "59bef027385cf2f4b74d5e2473f52a169648d58a4943f5a97646351ebfaef6a3",
+                    "3ebe9cbfefe20cdb320432c05868c91e2cef6db0708271aef9d4a858a8ecb45d",
                 ),
             ],
         },

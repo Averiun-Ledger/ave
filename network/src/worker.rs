@@ -433,7 +433,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let ResolvedSpec { ram_mb, cpu_cores } =
             resolve_spec(runtime.machine_spec);
 
-        let limits = LimitsConfig::build(ram_mb, cpu_cores);
+        let limits = LimitsConfig::build(
+            ram_mb,
+            cpu_cores,
+            config.max_app_message_bytes,
+            &node_type,
+        );
         let max_app_message_bytes = config.max_app_message_bytes;
         let max_pending_outbound_bytes_per_peer =
             config.max_pending_outbound_bytes_per_peer;

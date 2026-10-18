@@ -32,14 +32,14 @@ axum-server = { workspace = true }
 axum = { workspace = true }
 ip_network = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.7.1", features = ["trace", "cors", "set-header"] }
 utoipa = { workspace = true, features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 tokio-util = { workspace = true }
 
 # Auth system dependencies
 ave-actors = { workspace = true, default-features = false, features = ["export-sqlite"] }
-argon2 = { version = "0.5.3", features = ["std"] }
+argon2 = { version = "0.6.0" }
 sha2 = { workspace = true }
 hex = "0.4.3"
 rand = { workspace = true }

@@ -1,4 +1,4 @@
-use crate::{Error as NetworkError, routing::RoutingNode};
+use crate::{Error as NetworkError, NodeType, routing::RoutingNode};
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use libp2p::{
@@ -110,25 +110,50 @@ impl LimitsConfig {
     ///
     /// - **RAM-driven**: connection counts. Each established connection ≈ 50 KB
     ///   (TCP state ~20 KB + yamux ~4 KB + Noise ~3 KB + bookkeeping ~3 KB).
-    ///   Budget: 10 % of total RAM. Split: 80 % inbound / 20 % outbound.
+    ///   Budget: 10 % of total RAM. Split: 80 % inbound / 20 % outbound for
+    ///   serving nodes (`Bootstrap`, `Addressable`), flipped for `Ephemeral`
+    ///   nodes, which dial out and barely serve inbound.
     ///
     /// - **CPU-driven**: stream concurrency and pending handshakes.
     ///   Noise handshakes (pending connections) are asymmetric-crypto intensive.
     ///   ReqRes concurrent streams are tokio tasks — more cores = more parallelism.
-    pub fn build(ram_mb: u64, cpu_cores: usize) -> Self {
+    ///
+    /// - **RAM-capped streams**: in the worst case every concurrent stream
+    ///   holds a full `max_msg_bytes` message, so streams are additionally
+    ///   capped so that `streams * max_msg_bytes` fits in 25 % of total RAM.
+    ///   This only bites small machines; on large ones the CPU bound wins.
+    pub fn build(
+        ram_mb: u64,
+        cpu_cores: usize,
+        max_msg_bytes: usize,
+        node_type: &NodeType,
+    ) -> Self {
         let cores = cpu_cores.max(1);
+        let max_msg = max_msg_bytes.max(1);
+
+        // Ephemeral nodes consume; serving nodes are dialed.
+        let (in_share, out_share, per_peer) =
+            match node_type {
+                NodeType::Ephemeral => (20, 80, 1),
+                NodeType::Bootstrap | NodeType::Addressable => (80, 20, 2),
+            };
 
         // ── Connection limits (RAM) ──────────────────────────────────────────────
-        let budget_bytes = ram_mb * 1024 * 1024 * 10 / 100;
+        let budget_bytes = ram_mb
+            .saturating_mul(1024 * 1024)
+            .saturating_mul(10)
+            / 100;
         let bytes_per_conn: u64 = 50 * 1024; // ~50 KB per established connection
 
         // Total connections: floor 50, cap 9 000 (file-descriptor & kernel limits)
         let max_total =
             ((budget_bytes / bytes_per_conn) as u32).clamp(50, 9_000);
 
-        // 80 % incoming (nodes are mostly servers), 20 % outgoing
-        let max_incoming = (max_total * 80 / 100).clamp(30, 8_000);
-        let max_outgoing = (max_total * 20 / 100).clamp(20, 1_000);
+        // Split driven by node role (see above).
+        let max_incoming =
+            (max_total * in_share / 100).clamp(30, 8_000);
+        let max_outgoing =
+            (max_total * out_share / 100).clamp(20, 1_000);
 
         // ── Pending connections (CPU) ────────────────────────────────────────────
         // Each pending connection performs a Noise handshake (X25519 + ChaCha20).
@@ -139,14 +164,23 @@ impl LimitsConfig {
             .min(512);
         let pending_outgoing = (max_outgoing / 4).clamp(20, 128);
 
-        // ── Stream concurrency (CPU) ─────────────────────────────────────────────
+        // ── Stream concurrency (CPU, RAM-capped) ──────────────────────────────────
         // Each concurrent ReqRes stream is a tokio task. More cores → more tasks
         // that run in true parallel. ~512 concurrent tasks per core is sensible.
-        let reqres_streams = (cores * 512).clamp(64, 4_096);
+        let cpu_streams = (cores * 512).clamp(64, 4_032);
+        // Worst-case stream buffers must fit in 25 % of total RAM.
+        let ram_bytes = ram_mb.saturating_mul(1024 * 1024);
+        let ram_streams =
+            ((ram_bytes * 25 / 100 / max_msg as u64) as usize)
+                .clamp(64, 4_032);
+        let reqres_streams = cpu_streams.min(ram_streams);
 
         // Yamux per-connection stream limit: must cover the worst case where a
         // single peer saturates the full ReqRes budget, plus routing/kad overhead.
-        let yamux_streams = (reqres_streams + 64).clamp(256, 8_192);
+        // Hard ceiling 4 096 = 1 GiB / 256 KiB (yamux 0.14 default window over
+        // per-stream credit; the libp2p wrapper exposes no window setter).
+        let yamux_streams =
+            (reqres_streams.saturating_add(64)).clamp(256, 4_096);
 
         // ── TCP listen backlog (kernel-managed) ──────────────────────────────────
         // Sized for SYN bursts: 1/8 of max_incoming, floor 128, cap 8 192.
@@ -168,7 +202,7 @@ impl LimitsConfig {
             conn_limmits_max_pending_outgoing: Some(pending_outgoing),
             conn_limmits_max_established_incoming: Some(max_incoming),
             conn_limmits_max_established_outgoing: Some(max_outgoing),
-            conn_limmits_max_established_per_peer: Some(2),
+            conn_limmits_max_established_per_peer: Some(per_peer),
             conn_limmits_max_established_total: Some(max_total),
         }
     }

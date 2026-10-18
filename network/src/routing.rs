@@ -714,7 +714,12 @@ mod tests {
         let peer_id = PeerId::random();
         let config = Config::default();
         let protocol = StreamProtocol::new("/test/routing/1.0.0");
-        let limits = LimitsConfig::build(1024, 1);
+        let limits = LimitsConfig::build(
+            1024,
+            1,
+            1024 * 1024,
+            &NodeType::Bootstrap,
+        );
         Behaviour::new(peer_id, config, protocol, node_type, limits)
     }
 

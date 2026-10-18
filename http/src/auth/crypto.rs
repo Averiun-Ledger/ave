@@ -5,8 +5,7 @@
 use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-        rand_core::OsRng,
+        PasswordHasher, PasswordVerifier, phc::PasswordHash,
     },
 };
 use rand::RngExt;
@@ -58,11 +57,10 @@ fn argon2id() -> CryptoResult<Argon2<'static>> {
 /// # Returns
 /// * `CryptoResult<String>` - The hashed password in PHC format
 pub fn hash_password(password: &str) -> CryptoResult<String> {
-    let salt = SaltString::generate(&mut OsRng);
     let argon2 = argon2id()?;
 
     argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| CryptoError::HashError(e.to_string()))
 }
@@ -85,7 +83,7 @@ pub fn verify_password(password: &str, hash: &str) -> CryptoResult<bool> {
 
     match argon2.verify_password(password.as_bytes(), &parsed_hash) {
         Ok(_) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(e) => Err(CryptoError::VerifyError(e.to_string())),
     }
 }

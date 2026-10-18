@@ -217,12 +217,44 @@ static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Atomic file write: write to a temp sibling, fsync it, rename over
 /// the target and fsync the directory. A crash or power cut leaves
 /// either the old bytes or the new ones, never a truncated file.
+///
+/// Resilient to a concurrent directory removal: abort sweeps delete
+/// staging directories while another task of the same node may still
+/// be writing into them. On `NotFound` the directory is recreated and
+/// the write retried exactly once. Deleters here are single-shot (one
+/// abort sweep, one promotion rename, one boot sweep), so the retry
+/// can not meet the same deleter twice; a second failure is a genuine
+/// disk problem and surfaces exactly as before.
 async fn write_file_atomic(
     dir: &Path,
     file_name: &str,
     bytes: &[u8],
 ) -> Result<(), CompilerError> {
     let target = dir.join(file_name);
+    let result = attempt_atomic_write(dir, &target, file_name, bytes).await;
+    let result = if matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        // Best-effort resurrection: a concurrent sweep removed the
+        // directory after our caller created it. A leftover stage (if
+        // the deleter already finished) follows the documented
+        // leftover policy (boot sweep / next commit touching it).
+        let _ = fs::create_dir_all(dir).await;
+        attempt_atomic_write(dir, &target, file_name, bytes).await
+    } else {
+        result
+    };
+    result.map_err(|e| CompilerError::FileWriteFailed {
+        path: target.to_string_lossy().to_string(),
+        details: e.to_string(),
+    })
+}
+
+/// Single attempt of the atomic write with a fresh temp sibling name.
+async fn attempt_atomic_write(
+    dir: &Path,
+    target: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     let tmp = dir.join(format!(
         "{file_name}.tmp.{}.{}",
         std::process::id(),
@@ -233,7 +265,7 @@ async fn write_file_atomic(
         file.write_all(bytes).await?;
         file.sync_all().await?;
         drop(file);
-        fs::rename(&tmp, &target).await?;
+        fs::rename(&tmp, target).await?;
         fs::File::open(dir).await?.sync_all().await?;
         Ok::<(), std::io::Error>(())
     }
@@ -241,10 +273,7 @@ async fn write_file_atomic(
     if result.is_err() {
         let _ = fs::remove_file(&tmp).await;
     }
-    result.map_err(|e| CompilerError::FileWriteFailed {
-        path: target.to_string_lossy().to_string(),
-        details: e.to_string(),
-    })
+    result
 }
 
 pub async fn load_artifact_wasm(
@@ -872,5 +901,57 @@ mod tests {
             "oversized plain source must fail with ContractSourceTooLarge, \
              got {err}"
         );
+    }
+
+    /// Abort sweeps delete staging directories while a compile worker
+    /// of the same node may still be writing into them (abort lands
+    /// mid-persist). The write must survive: the deleter is single-shot,
+    /// so recreating the directory and rewriting once can not meet it
+    /// twice. Deterministic pin: writing into a missing directory
+    /// succeeds (it failed with `NotFound` before the retry).
+    #[tokio::test]
+    async fn atomic_write_resurrects_missing_directory() {
+        let root = tempfile::tempdir().expect("tempdir must be created");
+        let dir = root.path().join("staging");
+        assert!(
+            !dir.exists(),
+            "test premise: the staging directory must not exist yet"
+        );
+        let bytes = b"contract bytes";
+        write_file_atomic(&dir, "contract.wasm", bytes)
+            .await
+            .expect("write into a missing directory must succeed");
+        let back =
+            fs::read(dir.join("contract.wasm")).await.expect("bytes must be readable");
+        assert_eq!(back, bytes, "resurrected write must hold exact bytes");
+        // No temp siblings leak.
+        let mut entries = fs::read_dir(&dir).await.expect("dir must list");
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.expect("entry must read") {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(
+            names,
+            vec!["contract.wasm".to_owned()],
+            "only the target file must remain, got {names:?}"
+        );
+    }
+
+    /// Normal path unchanged: exact bytes, no temp siblings left behind.
+    #[tokio::test]
+    async fn atomic_write_keeps_exact_bytes() {
+        let root = tempfile::tempdir().expect("tempdir must be created");
+        let dir = root.path().join("staging");
+        fs::create_dir_all(&dir).await.expect("dir must be created");
+        let bytes = vec![7u8; 1024];
+        write_file_atomic(&dir, "contract.wasm", &bytes)
+            .await
+            .expect("write must succeed");
+        write_file_atomic(&dir, "contract.wasm", &bytes)
+            .await
+            .expect("overwrite must succeed");
+        let back =
+            fs::read(dir.join("contract.wasm")).await.expect("bytes must be readable");
+        assert_eq!(back, bytes, "overwrite must hold exact bytes");
     }
 }

@@ -54,7 +54,12 @@ impl Ed25519Signer {
     fn create_encrypted_secret(
         secret_key: &[u8],
     ) -> Result<Arc<EncryptedMem>, CryptoError> {
-        let mut encrypted = EncryptedMem::new();
+        let mut encrypted = EncryptedMem::new().map_err(|e| {
+            CryptoError::InvalidSecretKey(format!(
+                "Failed to allocate encrypted memory: {:?}",
+                e
+            ))
+        })?;
         encrypted.encrypt(&secret_key.to_vec()).map_err(|e| {
             CryptoError::InvalidSecretKey(format!(
                 "Failed to encrypt secret key: {:?}",

@@ -42,7 +42,7 @@ futures = { workspace = true }
 rdkafka = { workspace = true }
 httpdate = "1"
 flate2 = "1"
-zstd = "0.13"
+zstd = "0.14"
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-types = { workspace = true }
@@ -74,7 +74,7 @@ axum-server = { workspace = true }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 aws-lc-rs = { version = "1", features = ["ring-io"] }
-zstd = "0.13"
+zstd = "0.14"
 rusqlite = "0.40"
 
 [features]
