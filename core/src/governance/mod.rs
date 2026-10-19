@@ -167,11 +167,31 @@ pub struct RolesUpdate {
     pub remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 }
 
-// Single source lives in ave-common (feature `verify`); this
-// re-export keeps every core caller on identical behavior.
-pub use ave_common::verify::governance::{
-    RolesUpdateConfirm, RolesUpdateRemove,
-};
+pub struct RolesUpdateConfirm {
+    pub new_approver: Option<PublicKey>,
+    pub remove_approver: PublicKey,
+
+    pub new_compiler: Option<PublicKey>,
+    pub remove_compiler: PublicKey,
+
+    pub new_evaluator: Option<PublicKey>,
+    pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub new_validator: Option<PublicKey>,
+    pub remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+
+    pub remove_creator: HashSet<(SchemaType, String, PublicKey)>,
+    pub remove_witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+}
+
+pub struct RolesUpdateRemove {
+    pub witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub creator: HashSet<(SchemaType, String, PublicKey)>,
+    pub approvers: Vec<PublicKey>,
+    pub compilers: Vec<PublicKey>,
+    pub evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+    pub validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
+}
 
 pub struct CreatorRoleUpdate {
     pub new_creator: HashMap<
@@ -5556,8 +5576,8 @@ impl PersistentActor for Governance {
                     {
                         return Err(ActorError::Functional { description: "In create event, genesis description is invalid".to_owned() });
                     }
-                    if !metadata.governance_id.is_empty() {
-                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must be empty".to_owned() });
+                    if metadata.governance_id != metadata.subject_id {
+                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must match subject_id".to_owned() });
                     }
                     if !metadata.namespace.is_empty() {
                         return Err(ActorError::Functional { description: "In create event, genesis namespace must be empty".to_owned() });

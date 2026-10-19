@@ -5,18 +5,151 @@ use crate::{
 };
 
 use ave_common::{
-    Namespace, ValueWrapper,
-    identity::PublicKey,
+    Namespace, SchemaType, ValueWrapper,
+    identity::{DigestIdentifier, PublicKey, Signed},
     request::EventRequest,
+    schematype::ReservedWords,
 };
 
-use std::collections::{BTreeMap, BTreeSet};
+use crate::governance::data::GovernanceData;
 
-// Single source lives in ave-common (feature `verify`); this
-// re-export keeps every core caller on identical behavior.
-pub use ave_common::verify::evaluation_request::{
-    EvaluateData, EvaluationReq,
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
+
+/// A struct representing an evaluation request.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct EvaluationReq {
+    /// The signed event request.
+    pub event_request: Arc<Signed<EventRequest>>,
+
+    pub governance_id: DigestIdentifier,
+
+    pub data: EvaluateData,
+
+    pub sn: u64,
+
+    pub gov_version: u64,
+
+    pub namespace: Namespace,
+
+    pub schema_id: SchemaType,
+
+    pub signer: PublicKey,
+
+    pub signer_is_owner: bool,
+}
+
+impl EvaluationReq {
+    pub fn validate_fact_viewpoints(
+        fact_viewpoints: &BTreeSet<String>,
+        schema_id: &SchemaType,
+        schema_viewpoints: Option<&BTreeSet<String>>,
+    ) -> Result<(), EvaluatorError> {
+        validate_fact_viewpoints(fact_viewpoints, schema_id, schema_viewpoints)
+            .map_err(EvaluatorError::InvalidEventRequest)
+    }
+}
+
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub enum EvaluateData {
+    GovFact { state: GovernanceData },
+    GovTransfer { state: GovernanceData },
+    GovConfirm { state: GovernanceData },
+    TrackerSchemasFact { state: ValueWrapper },
+    TrackerSchemasTransfer { state: ValueWrapper },
+}
+
+impl EvaluateData {
+    pub const fn is_gov_event(&self) -> bool {
+        match self {
+            Self::GovFact { .. }
+            | Self::GovTransfer { .. }
+            | Self::GovConfirm { .. } => true,
+            Self::TrackerSchemasFact { .. }
+            | Self::TrackerSchemasTransfer { .. } => false,
+        }
+    }
+}
+
+/// Viewpoint rules for evaluation requests: strict shared validation
+/// (governance facts take none; tracker facts need schema-covered,
+/// well-formed viewpoints). Intake keeps its own lenient check in
+/// `crate::model::common::viewpoints`; evaluation (here and the
+/// workers) requires this one — do not unify them without a protocol
+/// decision.
+pub fn validate_fact_viewpoints(
+    fact_viewpoints: &BTreeSet<String>,
+    schema_id: &SchemaType,
+    schema_viewpoints: Option<&BTreeSet<String>>,
+) -> Result<(), String> {
+    if schema_id.is_gov() {
+        if !fact_viewpoints.is_empty() {
+            return Err(
+                "governance fact events cannot define viewpoints".to_owned()
+            );
+        }
+
+        return Ok(());
+    }
+
+    let Some(schema_viewpoints) = schema_viewpoints else {
+        return Err(
+            "tracker fact evaluation is missing schema viewpoints".to_owned()
+        );
+    };
+
+    if schema_viewpoints.is_empty() && !fact_viewpoints.is_empty() {
+        return Err(format!("schema {} does not define viewpoints", schema_id));
+    }
+
+    for viewpoint in fact_viewpoints {
+        if viewpoint.trim().len() != viewpoint.len() {
+            return Err(
+                "viewpoints cannot have surrounding whitespace".to_owned()
+            );
+        }
+
+        if viewpoint.is_empty() {
+            return Err("viewpoints cannot be empty".to_owned());
+        }
+
+        if viewpoint == &ReservedWords::AllViewpoints.to_string() {
+            return Err(
+                "AllViewpoints is not valid in fact requests; use an empty viewpoints set to indicate an unsegmented event"
+                    .to_owned(),
+            );
+        }
+
+        if viewpoint.len() > 100 {
+            return Err(
+                "viewpoints cannot be longer than 100 characters".to_owned()
+            );
+        }
+    }
+
+    if fact_viewpoints.is_empty() {
+        return Ok(());
+    }
+
+    for viewpoint in fact_viewpoints {
+        if !schema_viewpoints.contains(viewpoint) {
+            return Err(format!(
+                "viewpoint '{}' is not defined in schema {}",
+                viewpoint, schema_id
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Default)]
 pub enum EvalWorkerContext {
@@ -178,11 +311,8 @@ mod tests {
         Signed,
         keys::{Ed25519Signer, KeyPair},
     };
-    use ave_common::{
-        SchemaType,
-        identity::DigestIdentifier,
-        verify::governance::GovernanceData,
-    };
+    use ave_common::{SchemaType, identity::DigestIdentifier};
+    use crate::governance::data::GovernanceData;
     use serde_json::json;
     use std::sync::Arc;
 

@@ -2,16 +2,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    governance::model::Quorum,
+    governance::{
+        data::GovernanceData,
+        model::Quorum,
+    },
     model::common::{CeilingMap, IntervalSet, crash_system, purge_storage},
 };
+use anyhow::Result;
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     PersistentActor, Response,
 };
 
-use ave_common::{Namespace, SchemaType, identity::PublicKey};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper, governance::ProtocolTypes,
+    identity::PublicKey,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -70,9 +77,32 @@ pub struct RoleRegister {
 
 type IntervalData = (IntervalSet, Option<u64>);
 
-// Single source lives in ave-common (feature `verify`); this
-// re-export keeps every core caller on identical behavior.
-pub use ave_common::verify::RoleDataRegister;
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct RoleDataRegister {
+    pub workers: HashSet<PublicKey>,
+    pub quorum: Quorum,
+}
+
+/// Role sets for one event: phase sets plus the outer validator
+/// attestation set.
+#[derive(Debug, Clone)]
+pub struct RolesAtVersion {
+    pub evaluation: RoleDataRegister,
+    pub approval: Option<RoleDataRegister>,
+    pub compilation: Option<RoleDataRegister>,
+    pub validators: RoleDataRegister,
+}
+
+/// Single-owner attestation set (governance genesis shape): the
+/// owner alone with Majority, never the register.
+pub fn lone_owner_roles(owner: &PublicKey) -> RoleDataRegister {
+    RoleDataRegister {
+        workers: HashSet::from([owner.clone()]),
+        quorum: Quorum::Majority,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CurrentSchemaRoles {
@@ -1020,3 +1050,33 @@ impl PersistentActor for RoleRegister {
 }
 
 impl Storable for RoleRegister {}
+
+/// Phase and validator sets for a governance event.
+///
+/// Read off its pre-event properties: the node commits gov events
+/// against the historical governance state, never against a later
+/// register. Mirrors the subject verifier exactly.
+pub fn gov_roles_from_pre(
+    pre_properties: &ValueWrapper,
+    need_approval: bool,
+    need_compilation: bool,
+) -> Result<RolesAtVersion> {
+    let gov = GovernanceData::try_from(pre_properties.clone())
+        .map_err(|e| anyhow::anyhow!("governance state: {e}"))?;
+    let set = |role: ProtocolTypes| {
+        gov.get_quorum_and_signers(role, &SchemaType::Governance, Namespace::new())
+            .map(|(workers, quorum)| RoleDataRegister {
+                workers: workers.into_iter().collect::<HashSet<_>>(),
+                quorum,
+            })
+            .map_err(|e| anyhow::anyhow!("gov roles: {e}"))
+    };
+    Ok(RolesAtVersion {
+        evaluation: set(ProtocolTypes::Evaluation)?,
+        approval: need_approval.then(|| set(ProtocolTypes::Approval)).transpose()?,
+        compilation: need_compilation
+            .then(|| set(ProtocolTypes::Compilation))
+            .transpose()?,
+        validators: set(ProtocolTypes::Validation)?,
+    })
+}

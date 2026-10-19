@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     evaluation::{
@@ -28,6 +31,20 @@ use ave_common::{
     },
     request::EventRequest,
 };
+
+use crate::model::{
+    common::check_quorum_signers,
+    event::{
+        EvaluationData, EvaluationDataOpaque, EvaluationResponse,
+        EvaluationResponseOpaque,
+    },
+};
+
+use crate::{
+    governance::role_register::RoleDataRegister, validation::Check,
+};
+
+use anyhow::{Result, bail};
 
 use ave_network::ComunicateInfo;
 use json_patch::diff;
@@ -829,4 +846,83 @@ impl Handler<Self> for EvalWorker {
 
         Ok(())
     }
+}
+
+/// Evaluator signatures over the stored result hash plus
+/// their quorum.
+///
+/// Without rebuilding the evaluation request (which binds
+/// pre-state a diverged witness replay can not reproduce). Same
+/// shape as the opaque evaluation check: it proves the evaluators
+/// stood behind the stored result, while the validator quorum
+/// above vouches for the bundle itself.
+pub fn check_witness_evaluation(
+    evaluation: &EvaluationData,
+    eval_roles: &RoleDataRegister,
+) -> Result<Check> {
+    let result_hash = match &evaluation.response {
+        EvaluationResponse::Ok { result_hash, .. }
+        | EvaluationResponse::Error { result_hash, .. } => result_hash,
+    };
+    for signature in evaluation.evaluators_signatures.iter() {
+        if signature.verify(result_hash).is_err() {
+            bail!("witness evaluator signature invalid");
+        }
+    }
+    let signers: HashSet<PublicKey> = evaluation
+        .evaluators_signatures
+        .iter()
+        .map(|signature| signature.signer.clone())
+        .collect();
+    if signers.is_empty() {
+        bail!("no witness evaluator signatures");
+    }
+    if !check_quorum_signers(
+        &signers,
+        &eval_roles.quorum,
+        &eval_roles.workers,
+    ) {
+        bail!("witness evaluator quorum not reached");
+    }
+    Ok(Check {
+        name: "witness-evaluation-quorum",
+        detail: "evaluator signatures verify with quorum".to_owned(),
+    })
+}
+
+/// Evaluator signatures over an opaque stored result hash plus
+/// their quorum. Same shape as the witness check, under opaque
+/// report names so an opaque event never passes as fully rebuilt.
+pub fn check_opaque_evaluation(
+    evaluation: &EvaluationDataOpaque,
+    eval_roles: &RoleDataRegister,
+) -> Result<Check> {
+    let result_hash = match &evaluation.response {
+        EvaluationResponseOpaque::Ok { result_hash }
+        | EvaluationResponseOpaque::Error { result_hash } => result_hash,
+    };
+    for signature in evaluation.evaluators_signatures.iter() {
+        if signature.verify(result_hash).is_err() {
+            bail!("opaque evaluator signature invalid");
+        }
+    }
+    let signers: HashSet<PublicKey> = evaluation
+        .evaluators_signatures
+        .iter()
+        .map(|signature| signature.signer.clone())
+        .collect();
+    if signers.is_empty() {
+        bail!("no opaque evaluator signatures");
+    }
+    if !check_quorum_signers(
+        &signers,
+        &eval_roles.quorum,
+        &eval_roles.workers,
+    ) {
+        bail!("opaque evaluator quorum not reached");
+    }
+    Ok(Check {
+        name: "opaque-evaluation-quorum",
+        detail: "evaluator signatures verify with quorum".to_owned(),
+    })
 }

@@ -9,8 +9,10 @@ use std::{
 
 use ave_common::{
     ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm},
+    identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
+use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
+use thiserror::Error;
 use ave_contract_sdk::runtime::{
     CompiledModule, ContractRuntime, RuntimeError,
 };
@@ -127,12 +129,86 @@ pub(crate) fn map_build_error(error: ave_build::BuildError) -> CompilerError {
     }
 }
 
-// Single source lives in ave-common (feature `verify`); this
-// re-export keeps every core caller on identical behavior.
-pub use ave_common::verify::decode::{
-    MAX_CONTRACT_SOURCE_BYTES, ZSTD_MAGIC, decode_contract_source,
-    hash_bytes, validate_contract_source,
-};
+/// Decode-stage failures: the caller's bytes never reach a build.
+#[derive(Debug, Error, Clone)]
+pub enum ContractSourceError {
+    #[error("base64 decode failed: {details}")]
+    Base64DecodeFailed { details: String },
+    #[error("contract source decompression failed: {details}")]
+    SourceDecompressionFailed { details: String },
+    #[error("contract source too large: {size} bytes (max {max})")]
+    ContractSourceTooLarge { size: usize, max: usize },
+    #[error("serialization error [{context}]: {details}")]
+    SerializationError { context: String, details: String },
+}
+
+/// Maximum accepted contract source size, like the node enforces.
+pub const MAX_CONTRACT_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// zstd frame magic number (little-endian 0xFD2FB528).
+///
+/// A base64-decoded contract payload starting with these bytes is
+/// a compressed source; anything else is a plain UTF-8 source — a
+/// Rust source can never begin with this non-UTF-8 prefix, so the
+/// formats are unambiguous and both stay accepted (plain payloads
+/// in already-committed events keep replaying).
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Decodes a governance-event contract payload into source bytes.
+///
+/// Base64, then bounded zstd decompression when the decoded payload
+/// carries the
+/// zstd magic number. Deterministic and identical on every node.
+pub fn decode_contract_source(
+    contract: &str,
+) -> Result<Vec<u8>, ContractSourceError> {
+    let decoded = BASE64_STANDARD.decode(contract).map_err(|e| {
+        ContractSourceError::Base64DecodeFailed {
+            details: e.to_string(),
+        }
+    })?;
+    if decoded.starts_with(&ZSTD_MAGIC) {
+        return zstd::bulk::decompress(&decoded, MAX_CONTRACT_SOURCE_BYTES)
+            .map_err(|e| ContractSourceError::SourceDecompressionFailed {
+                details: e.to_string(),
+            });
+    }
+    if decoded.len() > MAX_CONTRACT_SOURCE_BYTES {
+        return Err(ContractSourceError::ContractSourceTooLarge {
+            size: decoded.len(),
+            max: MAX_CONTRACT_SOURCE_BYTES,
+        });
+    }
+    Ok(decoded)
+}
+
+/// Validates that `contract` is a well-formed contract payload: base64
+/// carrying a plain or zstd-compressed source within
+/// [`MAX_CONTRACT_SOURCE_BYTES`].
+///
+/// The node runs this cheap local check before delegating a build to the
+/// compiler: a malformed payload is a request error
+/// ([`ContractSourceError::Base64DecodeFailed`] and friends), not a build
+/// error, and must not be conflated with "the contract does not compile".
+pub fn validate_contract_source(contract: &str) -> Result<(), ContractSourceError> {
+    decode_contract_source(contract).map(|_| ())
+}
+
+pub fn hash_bytes(
+    hash: HashAlgorithm,
+    bytes: &[u8],
+    context: &'static str,
+) -> Result<DigestIdentifier, ContractSourceError> {
+    // Slices serialize exactly like `Vec` in Borsh (length prefix plus raw
+    // bytes), so hashing the slice directly keeps every digest identical
+    // while sparing a multi-megabyte clone on hot paths.
+    hash_borsh(&*hash.hasher(), &bytes).map_err(|e| {
+        ContractSourceError::SerializationError {
+            context: context.to_owned(),
+            details: e.to_string(),
+        }
+    })
+}
 
 #[cfg(feature = "test")]
 fn artifact_wasm_path_in(base_path: &Path) -> PathBuf {
@@ -687,7 +763,6 @@ pub fn map_runtime_error_to_compiler_error(
 mod tests {
     use super::*;
     use ave_common::identity::hash_borsh;
-    use ave_common::verify::decode::ContractSourceError;
     use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 
     /// Distinct fingerprints per case so parallel tests never share a

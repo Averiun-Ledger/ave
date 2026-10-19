@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -16,6 +16,7 @@ use crate::{
         },
     },
     config::ApprovalConfig,
+    evaluation::request::{EvaluateData, EvaluationReq},
     governance::{
         data::GovernanceData,
         role_register::{RoleDataRegister, SearchRole},
@@ -45,17 +46,21 @@ use async_trait::async_trait;
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     bridge::request::EventRequestType,
+    governance::toolchain_info,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, TimeStamp,
         hash_borsh,
     },
     request::EventRequest,
-    verify::{
-        EventAnchor, check_approval_req, check_basic_data, check_compilation,
-        check_evaluation, event_request_hash, viewpoints_hash,
-    },
 };
+use crate::compilation::compilation_set;
+use crate::evaluation::response::EvaluationResult;
+use crate::model::event::{
+    EvaluationData, EvaluationResponse, ValidationData,
+};
+use anyhow::{Result, bail};
 use borsh::{BorshDeserialize, BorshSerialize};
+use json_patch::{Patch, patch};
 
 use ave_network::ComunicateInfo;
 
@@ -67,9 +72,12 @@ use ave_actors::{
 use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
-    Validation, ValidationMessage, request::ValidationReq,
+    Check, Validation, ValidationMessage, request::ValidationReq,
     response::ValidationRes,
 };
+use crate::compilation::request::{CompilationReq, effective_pin};
+use crate::compilation::response::CompilationResult;
+use crate::model::event::{CompilationData, CompilationResponse};
 
 /// A struct representing a ValiWorker actor.
 #[derive(
@@ -2693,6 +2701,819 @@ impl Handler<Self> for ValiWorker {
     }
 }
 
+pub fn check_evaluation(
+    hash: &HashAlgorithm,
+    evaluation: EvaluationData,
+    eval_data: RoleDataRegister,
+    mut properties: ValueWrapper,
+    anchor: EventAnchor<'_>,
+) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
+{
+    let EventAnchor {
+        event_request,
+        metadata,
+        gov_version,
+        req_subject_data_hash,
+        signer,
+    } = anchor;
+    if signer != evaluation.eval_req_signature.signer {
+        return Err(ValidatorError::InvalidSigner {
+            signer: signer.to_string(),
+        });
+    }
+
+    // The evaluation request is fully determined by the event under
+    // validation (signed event request, subject metadata and
+    // governance version), so it is rebuilt here: the stored request
+    // signature must verify cryptographically over it and the stored
+    // request hash must reproduce exactly. The state sent to the
+    // evaluators is the pre-event subject properties, the same data
+    // this validator re-evaluates over.
+    let eval_state = match (
+        metadata.schema_id.is_gov(),
+        EventRequestType::from(event_request.content()),
+    ) {
+        (true, EventRequestType::Fact) => EvaluateData::GovFact {
+            state: GovernanceData::try_from(metadata.properties.clone())
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "evaluation gov state",
+                })?,
+        },
+        (true, EventRequestType::Transfer) => EvaluateData::GovTransfer {
+            state: GovernanceData::try_from(metadata.properties.clone())
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "evaluation gov state",
+                })?,
+        },
+        (true, EventRequestType::Confirm) => EvaluateData::GovConfirm {
+            state: GovernanceData::try_from(metadata.properties.clone())
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "evaluation gov state",
+                })?,
+        },
+        (false, EventRequestType::Fact) => {
+            EvaluateData::TrackerSchemasFact {
+                state: metadata.properties.clone(),
+            }
+        }
+        (false, EventRequestType::Transfer) => {
+            EvaluateData::TrackerSchemasTransfer {
+                state: metadata.properties.clone(),
+            }
+        }
+        _ => {
+            return Err(ValidatorError::InvalidData {
+                value: "evaluation event type",
+            });
+        }
+    };
+    let signed_eval_req = Signed::from_parts(
+        EvaluationReq {
+            event_request: event_request.clone(),
+            governance_id: metadata.governance_id.clone(),
+            data: eval_state,
+            sn: metadata.sn.saturating_add(1),
+            gov_version,
+            namespace: metadata.namespace.clone(),
+            schema_id: metadata.schema_id.clone(),
+            signer: signer.clone(),
+            signer_is_owner: signer == event_request.signature().signer,
+        },
+        evaluation.eval_req_signature.clone(),
+    );
+    if signed_eval_req.verify().is_err() {
+        return Err(ValidatorError::InvalidSignature {
+            data: "evaluation request",
+        });
+    }
+    let recomputed_req_hash =
+        hash_borsh(&*hash.hasher(), &signed_eval_req).map_err(
+            |e| ValidatorError::InternalError {
+                problem: e.to_string(),
+            },
+        )?;
+    if recomputed_req_hash != evaluation.eval_req_hash {
+        return Err(ValidatorError::InvalidData {
+            value: "eval request hash",
+        });
+    }
+
+    if !check_quorum_signers(
+        &evaluation
+            .evaluators_signatures
+            .iter()
+            .map(|x| x.signer.clone())
+            .collect::<HashSet<PublicKey>>(),
+        &eval_data.quorum,
+        &eval_data.workers,
+    ) {
+        return Err(ValidatorError::InvalidOperation {
+            action: "verify evaluation quorum",
+        });
+    }
+
+    let (eval_result, result_hash) = match evaluation.response.clone() {
+        EvaluationResponse::Ok {
+            result,
+            result_hash,
+        } => (
+            EvaluationResult::Ok {
+                response: result,
+                eval_req_hash: evaluation.eval_req_hash.clone(),
+                req_subject_data_hash,
+            },
+            result_hash,
+        ),
+        EvaluationResponse::Error {
+            result,
+            result_hash,
+        } => (
+            EvaluationResult::Error {
+                error: result,
+                eval_req_hash: evaluation.eval_req_hash.clone(),
+                req_subject_data_hash,
+            },
+            result_hash,
+        ),
+    };
+
+    let eval_result_hash = hash_borsh(&*hash.hasher(), &eval_result)
+        .map_err(|e| ValidatorError::InternalError {
+        problem: e.to_string(),
+    })?;
+
+    if eval_result_hash != result_hash {
+        return Err(ValidatorError::InvalidData {
+            value: "eval result hash",
+        });
+    }
+
+    for signature in evaluation.evaluators_signatures.iter() {
+        if signature.verify(&eval_result_hash).is_err() {
+            return Err(ValidatorError::InvalidSignature {
+                data: "evaluation",
+            });
+        }
+    }
+
+    let (appr_required, req_patch) = if let Some(evaluator_res) =
+        evaluation.evaluator_response_ok()
+    {
+        // Keep the patch: it is part of the approval request that
+        // `check_approval` rebuilds and verifies.
+        let req_patch = evaluator_res.patch.clone();
+        let json_patch =
+            serde_json::from_value::<Patch>(evaluator_res.patch.0)
+                .map_err(|_| ValidatorError::InvalidData {
+                    value: "evaluation patch",
+                })?;
+
+        patch(&mut properties.0, &json_patch).map_err(|_| {
+            ValidatorError::InvalidOperation {
+                action: "apply patch",
+            }
+        })?;
+
+        let properties_hash = hash_borsh(&*hash.hasher(), &properties)
+            .map_err(|e| ValidatorError::InternalError {
+                problem: e.to_string(),
+            })?;
+
+        if properties_hash != evaluator_res.properties_hash {
+            return Err(ValidatorError::InvalidData {
+                value: "properties_hash",
+            });
+        }
+
+        (evaluator_res.appr_required, Some(req_patch))
+    } else {
+        (false, None)
+    };
+
+    Ok((appr_required, req_patch, properties))
+}
+
+/// Compilation evidence through the node's own check.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_compilation_evidence(
+    hash: &HashAlgorithm,
+    compilation: &CompilationData,
+    event_request: &Arc<Signed<EventRequest>>,
+    metadata: &Metadata,
+    gov_version: u64,
+    req_subject_data_hash: &DigestIdentifier,
+    signer: &PublicKey,
+    comp_roles: &RoleDataRegister,
+) -> Result<Vec<Check>> {
+    check_compilation(
+        hash,
+        compilation.clone(),
+        comp_roles.clone(),
+        EventAnchor {
+            event_request,
+            metadata,
+            gov_version,
+            req_subject_data_hash: req_subject_data_hash.clone(),
+            signer: signer.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("compilation evidence: {e}"))?;
+    Ok(vec![Check {
+        name: "compilation",
+        detail: "compilation evidence verifies".to_owned(),
+    }])
+}
+
+pub fn check_compilation(
+    hash: &HashAlgorithm,
+    compilation: CompilationData,
+    comp_data: RoleDataRegister,
+    anchor: EventAnchor<'_>,
+) -> Result<(), ValidatorError> {
+    let EventAnchor {
+        event_request,
+        metadata,
+        gov_version,
+        req_subject_data_hash,
+        signer,
+    } = anchor;
+    if signer != compilation.compile_req_signature.signer {
+        return Err(ValidatorError::InvalidSigner {
+            signer: signer.to_string(),
+        });
+    }
+
+    // The compilation request is fully determined by the event under
+    // validation (signed event request, governance, sn, governance
+    // version and effective build pin), so it is rebuilt here: the
+    // stored request signature must verify cryptographically over it
+    // and the stored request hash must reproduce exactly. This
+    // closes the chain from the event request to the compiler votes,
+    // which sign a result hash embedding this request hash (and the
+    // pin through it and through the voted result).
+    let pre = GovernanceData::try_from(metadata.properties.clone())
+        .map_err(|_| ValidatorError::InvalidData {
+            value: "governance state",
+        })?;
+    let signed_compile_req = Signed::from_parts(
+        CompilationReq {
+            event_request: event_request.clone(),
+            governance_id: metadata.governance_id.clone(),
+            sn: metadata.sn.saturating_add(1),
+            gov_version,
+            pin: effective_pin(
+                event_request.content(),
+                &pre.toolchain,
+            ),
+        },
+        compilation.compile_req_signature.clone(),
+    );
+    if signed_compile_req.verify().is_err() {
+        return Err(ValidatorError::InvalidSignature {
+            data: "compilation request",
+        });
+    }
+    let recomputed_req_hash =
+        hash_borsh(&*hash.hasher(), &signed_compile_req).map_err(
+            |e| ValidatorError::InternalError {
+                problem: e.to_string(),
+            },
+        )?;
+    if recomputed_req_hash != compilation.compile_req_hash {
+        return Err(ValidatorError::InvalidData {
+            value: "compile request hash",
+        });
+    }
+
+    if !check_quorum_signers(
+        &compilation
+            .compilers_signatures
+            .iter()
+            .map(|x| x.signer.clone())
+            .collect::<HashSet<PublicKey>>(),
+        &comp_data.quorum,
+        &comp_data.workers,
+    ) {
+        return Err(ValidatorError::InvalidOperation {
+            action: "verify compilation quorum",
+        });
+    }
+
+    // The voted result is rebuilt with the same effective pin: the
+    // hash check below proves the compilers signed exactly this pin,
+    // making divergence attributable.
+    let pin = effective_pin(
+        event_request.content(),
+        &pre.toolchain,
+    );
+    // The voted toolchain version rides the evidence the same way:
+    // the hash binds it, and the check below compares it against
+    // the registry entry for the pin.
+    let toolchain_version = match &compilation.response {
+        CompilationResponse::Ok {
+            toolchain_version, ..
+        }
+        | CompilationResponse::Error {
+            toolchain_version, ..
+        } => toolchain_version.clone(),
+    };
+    let (compile_result, result_hash) = match compilation.response.clone() {
+        CompilationResponse::Ok {
+            result,
+            result_hash,
+            ..
+        } => (
+            CompilationResult::Ok {
+                response: result,
+                compile_req_hash: compilation.compile_req_hash.clone(),
+                req_subject_data_hash,
+                pin: pin.clone(),
+                toolchain_version: toolchain_version.clone(),
+            },
+            result_hash,
+        ),
+        CompilationResponse::Error {
+            result,
+            result_hash,
+            ..
+        } => (
+            CompilationResult::Error {
+                error: result,
+                compile_req_hash: compilation.compile_req_hash.clone(),
+                req_subject_data_hash,
+                pin: pin.clone(),
+                toolchain_version: toolchain_version.clone(),
+            },
+            result_hash,
+        ),
+    };
+
+    let compile_result_hash =
+        hash_borsh(&*hash.hasher(), &compile_result).map_err(|e| {
+            ValidatorError::InternalError {
+                problem: e.to_string(),
+            }
+        })?;
+
+    if compile_result_hash != result_hash {
+        return Err(ValidatorError::InvalidData {
+            value: "compile result hash",
+        });
+    }
+
+    for signature in compilation.compilers_signatures.iter() {
+        if signature.verify(&compile_result_hash).is_err() {
+            return Err(ValidatorError::InvalidSignature {
+                data: "compilation",
+            });
+        }
+    }
+
+    // The toolchain that built the bytes must be the pin's: a valid
+    // ID with another toolchain's bytes is rejected here (no
+    // commit), which an empty version can never smuggle past —
+    // in tests exactly as in production.
+    if toolchain_version.is_empty() {
+        return Err(ValidatorError::InvalidData {
+            value: "compilation toolchain version",
+        });
+    } else {
+        let entry = toolchain_info(&pin).ok_or(
+            ValidatorError::InvalidData {
+                value: "compilation toolchain pin",
+            },
+        )?;
+        if toolchain_version != entry.rustc_version {
+            return Err(ValidatorError::InvalidData {
+                value: "compilation toolchain version",
+            });
+        }
+    }
+
+    // The response must cover exactly the contracts this event sends
+    // through the compilation phase: a missing schema would commit
+    // without a ledger anchor and an extra one would overwrite the
+    // anchor of a contract the event did not touch.
+    if let CompilationResponse::Ok { result, .. } = &compilation.response {
+        let EventRequest::Fact(fact_request) = event_request.content()
+        else {
+            return Err(ValidatorError::InvalidData {
+                value: "event request",
+            });
+        };
+        // Coverage against the committed state: a pin switch
+        // recompiles every existing schema under the new pin.
+        let pre = GovernanceData::try_from(metadata.properties.clone())
+            .map_err(|_| ValidatorError::InvalidData {
+                value: "governance state",
+            })?;
+        let expected = compilation_set(&fact_request.payload, &pre).ok_or(
+            ValidatorError::InvalidData {
+                value: "compilation schemas",
+            },
+        )?;
+        let got = result.contracts.keys().collect::<BTreeSet<_>>();
+        if got != expected.iter().collect::<BTreeSet<_>>() {
+            return Err(ValidatorError::InvalidData {
+                value: "compilation contracts",
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Ledger-anchored identity of the event under validation.
+///
+/// Shared by the evidence checks so their signatures stay
+/// readable. Public so the off-chain verification tool runs the
+/// same checks over replayed state.
+pub struct EventAnchor<'a> {
+    pub event_request: &'a Arc<Signed<EventRequest>>,
+    pub metadata: &'a Metadata,
+    pub gov_version: u64,
+    pub req_subject_data_hash: DigestIdentifier,
+    pub signer: PublicKey,
+}
+
+pub fn event_request_hash(
+    hash: &HashAlgorithm,
+    event_request: &Signed<EventRequest>,
+) -> Result<DigestIdentifier, ValidatorError> {
+    hash_borsh(&*hash.hasher(), event_request).map_err(|e| {
+        ValidatorError::InternalError {
+            problem: e.to_string(),
+        }
+    })
+}
+
+pub fn viewpoints_hash(
+    hash: &HashAlgorithm,
+    event_request: &EventRequest,
+) -> Result<DigestIdentifier, ValidatorError> {
+    let viewpoints = match event_request {
+        EventRequest::Fact(fact_request) => fact_request.viewpoints.clone(),
+        _ => BTreeSet::new(),
+    };
+
+    hash_borsh(&*hash.hasher(), &viewpoints).map_err(|e| {
+        ValidatorError::InternalError {
+            problem: e.to_string(),
+        }
+    })
+}
+
+pub fn check_metadata(
+    event_type: &EventRequestType,
+    metadata: &Metadata,
+    gov_version: u64,
+) -> Result<(), ValidatorError> {
+    let is_gov = metadata.schema_id.is_gov();
+
+    if let Some(name) = &metadata.name
+        && (name.is_empty() || name.len() > 100)
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata name",
+        });
+    }
+
+    if let Some(description) = &metadata.description
+        && (description.is_empty() || description.len() > 200)
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata description",
+        });
+    }
+
+    if metadata.subject_id.is_empty() {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata subject_id",
+        });
+    }
+
+    if is_gov && metadata.governance_id != metadata.subject_id
+        || !is_gov && metadata.governance_id == metadata.subject_id
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata governance_id",
+        });
+    }
+
+    if is_gov && metadata.genesis_gov_version != 0
+        || !is_gov && metadata.genesis_gov_version == 0
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata genesis_gov_version",
+        });
+    }
+
+    if metadata.genesis_gov_version > gov_version {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata genesis_gov_version",
+        });
+    }
+
+    if metadata.sn == 0 && !metadata.prev_ledger_event_hash.is_empty()
+        || metadata.sn != 0 && metadata.prev_ledger_event_hash.is_empty()
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata prev_ledger_event_hash",
+        });
+    };
+
+    if !metadata.schema_id.is_valid_in_request() {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata schema_id",
+        });
+    };
+
+    if is_gov && !metadata.namespace.is_empty() {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata namespace",
+        });
+    }
+
+    if metadata.creator.is_empty() {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata creator",
+        });
+    }
+
+    if metadata.owner.is_empty() {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata owner",
+        });
+    }
+
+    if let Some(new_owner) = &metadata.new_owner
+        && (new_owner.is_empty() || new_owner == &metadata.owner)
+    {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata new owner",
+        });
+    };
+
+    if !metadata.active {
+        return Err(ValidatorError::InvalidData {
+            value: "metadata active",
+        });
+    }
+
+    match event_type {
+        EventRequestType::Create => {
+            return Err(ValidatorError::InvalidData {
+                value: "Event request type",
+            });
+        }
+        EventRequestType::Confirm | EventRequestType::Reject => {
+            if metadata.new_owner.is_none() {
+                return Err(ValidatorError::InvalidData {
+                    value: "Event request type",
+                });
+            }
+        }
+        EventRequestType::Fact
+        | EventRequestType::Transfer
+        | EventRequestType::Eol => {
+            if metadata.new_owner.is_some() {
+                return Err(ValidatorError::InvalidData {
+                    value: "Event request type",
+                });
+            }
+        }
+    };
+
+    Ok(())
+}
+
+pub fn check_basic_data(
+    request: &Signed<EventRequest>,
+    metadata: &Metadata,
+    vali_req_signer: &PublicKey,
+    gov_version: u64,
+    sn: u64,
+) -> Result<(), ValidatorError> {
+    // Check event request.
+
+    if request.verify().is_err() {
+        return Err(ValidatorError::InvalidSignature {
+            data: "event request",
+        });
+    }
+
+    check_metadata(
+        &EventRequestType::from(request.content()),
+        metadata,
+        gov_version,
+    )?;
+
+    if !request.content().check_request_signature(
+        &request.signature().signer,
+        &metadata.owner,
+        &metadata.new_owner,
+    ) {
+        return Err(ValidatorError::InvalidSigner {
+            signer: request.signature().signer.to_string(),
+        });
+    }
+
+    // subject
+    if request.content().get_subject_id() != metadata.subject_id {
+        return Err(ValidatorError::InvalidData {
+            value: "Subject_id",
+        });
+    }
+
+    // vali request signer
+    let signer = metadata
+        .new_owner
+        .clone()
+        .unwrap_or_else(|| metadata.owner.clone());
+
+    if &signer != vali_req_signer {
+        return Err(ValidatorError::InvalidSigner {
+            signer: vali_req_signer.to_string(),
+        });
+    }
+
+    // sn
+    if sn != metadata.sn.saturating_add(1) {
+        return Err(ValidatorError::InvalidData { value: "sn" });
+    }
+    Ok(())
+}
+
+/// Stored validation bundle against freshly recomputed
+/// post-state.
+///
+/// The node commits an event only when the voted bundle equals
+/// the post-state hashes plus the current request hashes. Catches
+/// evidence that is well-signed but describes another state.
+pub fn check_validation_bundle(
+    hash: &HashAlgorithm,
+    validation: &ValidationData,
+    request: &Arc<Signed<EventRequest>>,
+    post_metadata: &Metadata,
+    post_properties: &ValueWrapper,
+) -> Result<Check> {
+    let ValidationMetadata::ModifiedHash {
+        modified_metadata_without_propierties_hash,
+        propierties_hash,
+        event_request_hash: stored_req_hash,
+        viewpoints_hash: stored_viewpoints_hash,
+    } = &validation.validation_metadata
+    else {
+        bail!("non-genesis event without hash metadata");
+    };
+    let recomputed_meta = hash_borsh(
+        &*hash.hasher(),
+        &MetadataWithoutProperties::from(post_metadata.clone()),
+    )
+    .map_err(|e| anyhow::anyhow!("metadata hash: {e}"))?;
+    if recomputed_meta != *modified_metadata_without_propierties_hash {
+        bail!("validation metadata does not match the post-state");
+    }
+    let recomputed_props =
+        hash_borsh(&*hash.hasher(), post_properties)
+            .map_err(|e| anyhow::anyhow!("properties hash: {e}"))?;
+    if recomputed_props != *propierties_hash {
+        bail!("validation properties do not match the post-state");
+    }
+    let recomputed_req = event_request_hash(hash, request)
+        .map_err(|e| anyhow::anyhow!("event request hash: {e}"))?;
+    if recomputed_req != *stored_req_hash {
+        bail!("validation event hash does not match the request");
+    }
+    let recomputed_viewpoints =
+        viewpoints_hash(hash, request.content())
+            .map_err(|e| anyhow::anyhow!("viewpoints hash: {e}"))?;
+    if recomputed_viewpoints != *stored_viewpoints_hash {
+        bail!("validation viewpoints do not match the request");
+    }
+    Ok(Check {
+        name: "validation-metadata",
+        detail: "stored bundle matches the post-state".to_owned(),
+    })
+}
+
+/// Static gates over genesis metadata, mirroring what the node
+/// enforces before anything else exists (empty previous hash is
+/// covered by the chain link check).
+pub fn check_genesis_metadata(metadata: &Metadata) -> Result<()> {
+    if metadata.sn != 0 {
+        bail!("genesis metadata sn is not zero");
+    }
+    if metadata.subject_id.is_empty()
+        || metadata.governance_id.is_empty()
+        || metadata.creator.is_empty()
+        || metadata.owner.is_empty()
+    {
+        bail!("genesis metadata has empty identities");
+    }
+    if !metadata.active {
+        bail!("genesis metadata is inactive");
+    }
+    if !metadata.schema_id.is_valid_in_request() {
+        bail!("genesis schema is not valid");
+    }
+    if metadata.schema_id == SchemaType::Governance {
+        if metadata.governance_id != metadata.subject_id {
+            bail!("genesis governance id mismatch");
+        }
+        if !metadata.namespace.is_empty() {
+            bail!("genesis governance namespace is not empty");
+        }
+    } else if metadata.governance_id == metadata.subject_id {
+        bail!("genesis tracker governance id mismatch");
+    }
+    Ok(())
+}
+
+/// Static verification of the signed approval request carried by
+/// an approve variant.
+///
+/// It must be signed by the requester, describe exactly this
+/// event (subject, sn, governance version, evaluated patch) and
+/// respect the minimum approval window. The votes are not checked
+/// here: this worker verifies the closed evidence data-only when
+/// it arrives inside the validation request.
+pub fn check_approval_req(
+    approval_req: &Signed<ApprovalReq>,
+    metadata: &Metadata,
+    gov_version: u64,
+    patch: &ValueWrapper,
+    signer: &PublicKey,
+    min_window: Duration,
+) -> Result<(), ValidatorError> {
+    if approval_req.verify().is_err() {
+        return Err(ValidatorError::InvalidSignature {
+            data: "approval request",
+        });
+    }
+
+    if approval_req.signature().signer != *signer {
+        return Err(ValidatorError::InvalidSigner {
+            signer: approval_req.signature().signer.to_string(),
+        });
+    }
+
+    let req = approval_req.content();
+
+    if req.signer != *signer {
+        return Err(ValidatorError::InvalidSigner {
+            signer: req.signer.to_string(),
+        });
+    }
+
+    if req.subject_id != metadata.subject_id {
+        return Err(ValidatorError::InvalidData {
+            value: "approval subject_id",
+        });
+    }
+
+    if req.sn != metadata.sn.saturating_add(1) {
+        return Err(ValidatorError::InvalidData {
+            value: "approval sn",
+        });
+    }
+
+    if req.gov_version != gov_version {
+        return Err(ValidatorError::InvalidData {
+            value: "approval gov_version",
+        });
+    }
+
+    if &req.patch != patch {
+        return Err(ValidatorError::InvalidData {
+            value: "approval patch",
+        });
+    }
+
+    let min_deadline = TimeStamp::from_nanos(
+        req.issued_at
+            .as_nanos()
+            .saturating_add(min_window.as_nanos() as u64),
+    );
+    if req.deadline < min_deadline {
+        return Err(ValidatorError::InvalidData {
+            value: "approval window",
+        });
+    }
+
+    let now = TimeStamp::now();
+    let skew_limit = TimeStamp::from_nanos(
+        now.as_nanos().saturating_add(CLOCK_SKEW.as_nanos() as u64),
+    );
+    if req.issued_at > skew_limit {
+        return Err(ValidatorError::InvalidData {
+            value: "approval issued_at",
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2705,14 +3526,18 @@ mod tests {
         governance::{GovernanceEvent, SchemaAdd, SchemasEvent},
         identity::{KeyPair, Signature, keys::Ed25519Signer},
         request::FactRequest,
-        verify::{
-            CompilationData, CompilationResponse, CompilationReq,
-            CompilationResult, CompilerResponse, EvaluateData,
-            EvaluationData, EvaluationReq, EvaluationResponse,
-            EvaluationResult,
-        },
     };
-    use json_patch::{Patch, patch};
+    use crate::model::event::{EvaluationData, EvaluationResponse};
+    use crate::{
+        compilation::{
+            request::CompilationReq,
+            response::{CompilationResult, CompilerResponse},
+        },
+        model::event::{CompilationData, CompilationResponse},
+    };
+use json_patch::{Patch, patch};
+
+use anyhow::Result;
     use std::collections::{BTreeMap, BTreeSet};
     use tokio::sync::mpsc;
 
@@ -3666,6 +4491,95 @@ mod tests {
             ValiWorker::probe_wait_secs(&[u64::MAX], 0, -10),
             u64::MAX - 10
         );
-        assert_eq!(ValiWorker::probe_wait_secs(&[1, 2, 4], 3, 0), 0);
+        assert_eq!(ValiWorker::probe_wait_secs(&[u64::MAX], 3, 0), 0);
+    }
+
+    fn metadata_gate_key() -> PublicKey {
+        KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"))
+            .public_key()
+    }
+
+    fn gov_metadata() -> Metadata {
+        Metadata {
+            name: Some("gov".to_owned()),
+            description: None,
+            subject_id: DigestIdentifier::default(),
+            governance_id: DigestIdentifier::default(),
+            genesis_gov_version: 0,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            schema_id: SchemaType::Governance,
+            namespace: Namespace::new(),
+            sn: 1,
+            creator: metadata_gate_key(),
+            owner: metadata_gate_key(),
+            new_owner: None,
+            active: true,
+            properties: ValueWrapper(serde_json::json!({"one": 0})),
+        }
+    }
+
+    #[test]
+    fn metadata_gates() {
+        // Subject ids must be non-empty: hash fixed bytes.
+        let id = |b: u8| {
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &b).expect("hash")
+        };
+        let mut gov = gov_metadata();
+        gov.subject_id = id(1);
+        gov.governance_id = gov.subject_id.clone();
+        gov.prev_ledger_event_hash = id(2);
+        assert!(
+            check_metadata(&EventRequestType::Fact, &gov, 3).is_ok(),
+            "honest gov metadata passes"
+        );
+
+        let mut tracker = gov.clone();
+        tracker.schema_id = SchemaType::Type("Example".to_owned());
+        tracker.governance_id = id(3);
+        tracker.genesis_gov_version = 1;
+        assert!(
+            check_metadata(&EventRequestType::Fact, &tracker, 3).is_ok(),
+            "honest tracker metadata passes"
+        );
+
+        // Each gate trips alone.
+        let mut bad = gov.clone();
+        bad.name = Some(String::new());
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.subject_id = DigestIdentifier::default();
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.governance_id = id(4);
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.genesis_gov_version = 9;
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.sn = 0;
+        bad.prev_ledger_event_hash = id(5);
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.creator = PublicKey::default();
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.active = false;
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let mut bad = gov.clone();
+        bad.new_owner = Some(metadata_gate_key());
+        assert!(check_metadata(&EventRequestType::Fact, &bad, 3).is_err());
+
+        let bad = gov.clone();
+        assert!(
+            check_metadata(&EventRequestType::Confirm, &bad, 3).is_err(),
+            "confirm needs a pending owner"
+        );
     }
 }

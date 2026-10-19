@@ -19,6 +19,7 @@ use ave_actors::{
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::response::SubjectDB;
 
+use crate::governance::model::Quorum;
 use crate::governance::role_register::{
     RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
     SearchRole,
@@ -68,9 +69,17 @@ pub struct TrackerParams {
     pub actual_sn: Option<u64>,
 }
 
-// Single source lives in ave-common (feature `verify`); this
-// re-export keeps every core caller on identical behavior.
-pub use ave_common::verify::check_quorum_signers;
+pub fn check_quorum_signers(
+    signers: &HashSet<PublicKey>,
+    quorum: &Quorum,
+    workers: &HashSet<PublicKey>,
+) -> bool {
+    // Set sizes can not overflow `u32` on any real node, but never truncate
+    // them with `as` in consensus code.
+    let total = u32::try_from(workers.len()).unwrap_or(u32::MAX);
+    let signed = u32::try_from(signers.len()).unwrap_or(u32::MAX);
+    signers.is_subset(workers) && quorum.check_quorum(total, signed)
+}
 
 pub async fn get_actual_roles_register<A>(
     ctx: &mut ActorContext<A>,
@@ -1136,27 +1145,24 @@ mod tests {
     }
 
     #[test]
-    fn quorum_reexport_matches_common() {
+    fn quorum_table() {
         use ave_common::governance::Quorum;
 
         let workers = sample_keys(3);
         let two: HashSet<PublicKey> =
             workers.iter().take(2).cloned().collect();
-        // Core path and common path must agree on everything.
-        for quorum in [Quorum::Majority, Quorum::Fixed(2)] {
-            assert_eq!(
-                check_quorum_signers(&two, &quorum, &workers),
-                ave_common::verify::check_quorum_signers(
-                    &two, &quorum, &workers
-                ),
-            );
-        }
         assert!(check_quorum_signers(&two, &Quorum::Majority, &workers));
+        assert!(check_quorum_signers(&two, &Quorum::Fixed(2), &workers));
+        assert!(!check_quorum_signers(&two, &Quorum::Fixed(3), &workers));
         assert!(!check_quorum_signers(
             &HashSet::new(),
             &Quorum::Majority,
             &workers
         ));
+        // Count reached but not a subset: still no quorum.
+        let mut outsider = two.clone();
+        outsider.insert(sample_keys(1).into_iter().next().expect("key"));
+        assert!(!check_quorum_signers(&outsider, &Quorum::Fixed(3), &workers));
     }
 
     #[test]

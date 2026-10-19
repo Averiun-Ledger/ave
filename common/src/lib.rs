@@ -64,11 +64,6 @@ pub mod wrapper;
 #[cfg(feature = "compiler-grpc")]
 pub mod compiler;
 
-// Shared ledger-verification cores. Gated so the wasm32
-// contract SDK never sees them.
-#[cfg(feature = "verify")]
-pub mod verify;
-
 // Re-exports
 #[cfg(feature = "common")]
 pub use ave_identity as identity;

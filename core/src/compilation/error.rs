@@ -151,9 +151,9 @@ impl CompilerError {
     }
 }
 
-impl From<ave_common::verify::ContractSourceError> for CompilerError {
-    fn from(error: ave_common::verify::ContractSourceError) -> Self {
-        use ave_common::verify::ContractSourceError as Source;
+impl From<crate::compilation::pipeline::ContractSourceError> for CompilerError {
+    fn from(error: crate::compilation::pipeline::ContractSourceError) -> Self {
+        use crate::compilation::pipeline::ContractSourceError as Source;
         match error {
             Source::Base64DecodeFailed { details } => {
                 Self::Base64DecodeFailed { details }

@@ -51,6 +51,13 @@ pub mod response;
 pub mod schema;
 pub mod worker;
 
+/// One named check and its detail for the report.
+#[derive(Debug, Clone)]
+pub struct Check {
+    pub name: &'static str,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Validation {
     our_key: Arc<PublicKey>,
