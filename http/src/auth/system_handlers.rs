@@ -189,12 +189,15 @@ pub async fn list_system_config(
     )
     .await?;
     let total = config.len() as i64;
-    let start = offset.min(total) as usize;
-    let end = (offset + limit).min(total) as usize;
+    let start = offset.min(total).max(0) as usize;
+    let end = start
+        .checked_add(limit.max(0) as usize)
+        .unwrap_or(usize::MAX)
+        .min(config.len());
     let items = config[start..end].to_vec();
 
     Ok(Json(SystemConfigPage {
-        has_more: offset + (items.len() as i64) < total,
+        has_more: (start as i64).saturating_add(items.len() as i64) < total,
         items,
         limit,
         offset,

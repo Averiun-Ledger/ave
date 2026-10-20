@@ -3251,6 +3251,54 @@ impl Api {
         }
     }
 
+    /// Full ledger events of a tracker up to `hi_sn`, for test
+    /// assertions and forged-message fixtures.
+    pub async fn test_get_tracker_ledger(
+        &self,
+        subject_id: DigestIdentifier,
+        hi_sn: u64,
+    ) -> Result<Vec<crate::model::event::Ledger>, Error> {
+        use crate::node::subject_manager::SubjectManagerMessage;
+        // Trackers stop when no requester holds them: lift explicitly,
+        // read, then release, mirroring the lease pattern.
+        self.subject_manager
+            .ask(SubjectManagerMessage::Up {
+                subject_id: subject_id.clone(),
+                requester: "test-read".to_owned(),
+                create_ledger: None,
+            })
+            .await?;
+        let actor: ActorRef<crate::tracker::Tracker> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{subject_id}"
+            )))
+            .await?;
+        let response = actor
+            .ask(crate::tracker::TrackerMessage::GetLedger {
+                lo_sn: None,
+                hi_sn,
+            })
+            .await?;
+        let _ = self
+            .subject_manager
+            .ask(SubjectManagerMessage::Finish {
+                subject_id: subject_id.clone(),
+                requester: "test-read".to_owned(),
+            })
+            .await;
+        match response {
+            crate::tracker::TrackerResponse::Ledger { ledger, .. } => {
+                Ok(ledger)
+            }
+            _ => Err(Error::UnexpectedResponse {
+                actor: "tracker".to_owned(),
+                expected: "Ledger".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Purges one governance register store, for crash-recovery
     /// tests: wiping derived state is strictly worse than any crash
     /// window, so healing from a purge proves healing from a crash.

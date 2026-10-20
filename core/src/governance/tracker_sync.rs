@@ -914,6 +914,20 @@ impl Handler<Self> for TrackerSync {
                     _ => return Ok(TrackerSyncResponse::None),
                 };
 
+                // Bound inbound page size before per-item DB work: the
+                // server clamps its scan to 1024 entries, so anything
+                // larger is abusive. Truncate to keep cycle progress.
+                let mut items = items;
+                if items.len() > 1024 {
+                    warn!(
+                        governance_id = %self.governance_id,
+                        peer = %peer,
+                        item_count = items.len(),
+                        "Oversized sync page truncated"
+                    );
+                    items.truncate(1024);
+                }
+
                 // Page budget spent but the peer keeps paging: save where
                 // to resume next tick and yield instead of letting one
                 // peer hold the cycle (and the tick loop) forever

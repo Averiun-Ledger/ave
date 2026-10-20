@@ -177,6 +177,11 @@ impl std::str::FromStr for PublicKey {
         let algorithm_char = chars.next().ok_or_else(|| {
             CryptoError::InvalidPublicKey("Empty string".to_string())
         })?;
+        if !algorithm_char.is_ascii() {
+            return Err(CryptoError::InvalidPublicKey(
+                "Non-ASCII algorithm prefix".to_string(),
+            ));
+        }
 
         let algorithm = DSAlgorithm::from_identifier(algorithm_char as u8)?;
 
@@ -243,6 +248,18 @@ mod tests {
         assert!(
             matches!(err, CryptoError::UnknownAlgorithm(_)),
             "expected UnknownAlgorithm, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_public_key_rejects_non_ascii_prefix() {
+        // U+0145 shares its low byte with 'E' (Ed25519).
+        let spoofed = format!("{}abc123", '\u{0145}');
+        let err = spoofed.parse::<PublicKey>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::InvalidPublicKey(_)),
+            "expected InvalidPublicKey, got {:?}",
             err
         );
     }

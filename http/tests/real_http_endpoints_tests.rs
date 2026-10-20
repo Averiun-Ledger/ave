@@ -1385,6 +1385,27 @@ async fn test_list_system_config() {
     assert!(body["has_more"].is_boolean());
 }
 
+/// A huge but well-formed offset must return an empty page, never panic
+/// on the page arithmetic.
+#[test(tokio::test)]
+async fn test_list_system_config_huge_offset_returns_empty_page() {
+    let (app, _dir) = TestApp::build(true, true, None).await;
+    let api_key = login_app(&app, "admin", "AdminPass123!").await.unwrap();
+
+    let (status, body) = make_app_request(
+        &app,
+        "/admin/config?offset=9223372036854775807",
+        "GET",
+        Some(&api_key),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().map(|items| items.len()), Some(0));
+    assert_eq!(body["has_more"], false);
+}
+
 #[test(tokio::test)]
 async fn test_update_system_config() {
     let (app, _dir) = TestApp::build(true, true, None).await;

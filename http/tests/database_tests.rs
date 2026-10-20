@@ -2615,3 +2615,137 @@ async fn concurrent_management_key_issuance_leaves_a_single_active_key() {
         "migration 005 must install the single-active-management-key index"
     );
 }
+
+/// Rotating an already-revoked key must be rejected: the source credential
+/// no longer holds any quota to transfer, and minting successors from it
+/// would fork quota state.
+#[test(tokio::test)]
+async fn test_rotate_revoked_key_is_rejected() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("rot_revoked_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("rot_revoked_key"), None, None, false)
+        .unwrap();
+
+    let rotate = |key_id: &str| {
+        db.rotate_api_key_transactional(RotateApiKeyParams {
+            key_id,
+            name: Some("rot_revoked_next"),
+            description: None,
+            expires_in_seconds: None,
+            revoked_by: Some(1),
+            reason: Some("rotation"),
+            audit: None,
+            owner_check: None,
+        })
+    };
+
+    rotate(&key_info.id).unwrap();
+
+    let err = rotate(&key_info.id).expect_err("rotating a revoked key must fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("revoked"),
+        "unexpected error for revoked rotation source: {message}"
+    );
+}
+
+/// Rotation must return the current plan: the quota move lands after the
+/// insert, so the response has to be reloaded instead of echoing the
+/// pre-move snapshot (which reported a null plan).
+#[test(tokio::test)]
+async fn test_rotate_returns_transferred_plan() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("rot_plan_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("rot_plan_key"), None, None, false)
+        .unwrap();
+    db.create_usage_plan("rotation_current", "Rotation Current", None, 5)
+        .unwrap();
+    db.assign_api_key_plan(&key_info.id, Some("rotation_current"), Some(1))
+        .unwrap();
+
+    let (_new_api_key, new_key_info) = db
+        .rotate_api_key_transactional(RotateApiKeyParams {
+            key_id: &key_info.id,
+            name: Some("rot_plan_next"),
+            description: None,
+            expires_in_seconds: None,
+            revoked_by: Some(1),
+            reason: Some("rotation"),
+            audit: None,
+            owner_check: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        new_key_info.plan_id.as_deref(),
+        Some("rotation_current"),
+        "rotated key info must carry the transferred plan"
+    );
+}
+
+/// Oversized service TTLs are clamped to the service limit instead of
+/// overflowing the expiry computation into an already-expired key.
+#[test(tokio::test)]
+async fn test_service_huge_ttl_clamped_to_limit() {
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("svc_huge_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let max_ttl: i64 = 10 * 365 * 24 * 3600;
+    let (_, huge) = db
+        .create_api_key(
+            user.id,
+            Some("svc_huge"),
+            None,
+            Some(i64::MAX / 2),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        huge.expires_at,
+        Some(huge.created_at + max_ttl),
+        "oversized service TTL must clamp to the service limit"
+    );
+}
+
+/// Quota math at the representable boundary: plan plus extensions at the
+/// cap must account exactly and consume without panicking.
+#[test(tokio::test)]
+async fn test_quota_boundary_math_no_overflow() {
+    const MAX: i64 = 1_000_000_000_000_000;
+
+    let (db, _dirs) = create_test_db();
+    let user = db
+        .create_user("quota_max_user", "TestPass123!", None, None, Some(false))
+        .unwrap();
+
+    let (api_key, key_info) = db
+        .create_api_key(user.id, Some("quota_max_key"), None, None, false)
+        .unwrap();
+    db.create_usage_plan("max_plan", "Max plan", None, MAX).unwrap();
+    db.assign_api_key_plan(&key_info.id, Some("max_plan"), Some(1))
+        .unwrap();
+    db.add_quota_extension(&key_info.id, MAX, None, Some("top-up"), Some(1))
+        .unwrap();
+
+    let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
+    assert_eq!(
+        status.effective_limit,
+        Some(MAX + MAX),
+        "boundary plan plus extension must add up exactly"
+    );
+
+    db.authenticate_api_key_request(&api_key, None, "/peer-id").unwrap();
+    let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
+    assert_eq!(status.used_events, 1);
+    assert_eq!(status.effective_limit, Some(MAX + MAX));
+}

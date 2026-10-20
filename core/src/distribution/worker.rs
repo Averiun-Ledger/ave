@@ -1419,6 +1419,21 @@ impl DistriWorker {
             }
             return Err(DistributorError::EmptyEvents.into());
         }
+        // Bound inbound batch size before spending auth/verify CPU: the
+        // store itself rejects ranges over 10k events, and honest batches
+        // stay near ledger_batch_size. Oversized batches are dropped.
+        if ledger.len() > 10_000 {
+            warn!(
+                msg_type = "LedgerDistribution",
+                sender = %sender,
+                ledger_count = ledger.len(),
+                "Oversized ledger batch rejected"
+            );
+            if let Some(metrics) = crate::metrics::try_core_metrics() {
+                metrics.observe_distribution_failure("oversized_batch");
+            }
+            return Err(DistributorError::ReceiverNoAccess.into());
+        }
         if !ledger.windows(2).all(|w| w[0].sn <= w[1].sn) {
             ledger.sort_by_key(|event| event.sn);
         }

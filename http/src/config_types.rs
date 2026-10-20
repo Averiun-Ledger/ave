@@ -1750,6 +1750,8 @@ pub(crate) fn is_sensitive_header(name: &str) -> bool {
         "api-key",
         "apikey",
         "api_key",
+        "cookie",
+        "set-cookie",
     ]
     .iter()
     .any(|needle| name.contains(needle))
@@ -1776,6 +1778,16 @@ fn redact_sensitive_headers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Session cookies are credentials: the shared header filter must
+    /// treat `Cookie` like any other secret-bearing header.
+    #[test]
+    fn cookie_headers_are_sensitive() {
+        assert!(is_sensitive_header("Cookie"));
+        assert!(is_sensitive_header("cookie"));
+        assert!(is_sensitive_header("Set-Cookie"));
+        assert!(!is_sensitive_header("Content-Type"));
+    }
 
     /// The auth method of a sink must survive the conversion to the HTTP
     /// representation with its tagged shape. TLS and signature settings

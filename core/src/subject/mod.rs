@@ -63,6 +63,19 @@ pub mod error;
 
 impl Event for Ledger {}
 
+/// SQLite stores timestamps as signed 64-bit integers. A seal or request
+/// timestamp beyond that range is valid for the protocol but unrepresentable
+/// downstream, where it used to stop the node. Reject it here as invalid
+/// remote input instead.
+fn check_timestamp_in_sqlite_range(nanos: u64) -> Result<(), SubjectError> {
+    if nanos > i64::MAX as u64 {
+        return Err(SubjectError::Generic(format!(
+            "timestamp {nanos} out of range for SQLite INTEGER (i64)"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
@@ -1169,6 +1182,10 @@ where
             });
         }
 
+        check_timestamp_in_sqlite_range(
+            new_ledger_event.ledger_seal_signature.timestamp.as_nanos(),
+        )?;
+
         let signer = if let Some(new_owner) = &subject_metadata.new_owner {
             new_owner.clone()
         } else {
@@ -1557,6 +1574,10 @@ where
                 });
             }
 
+            check_timestamp_in_sqlite_range(
+                event_request.signature().timestamp.as_nanos(),
+            )?;
+
             let signer = event_request.signature().signer.clone();
             if !event_request.content().check_request_signature(
                 &signer,
@@ -1878,6 +1899,10 @@ where
             });
         }
 
+        check_timestamp_in_sqlite_range(
+            ledger_event.ledger_seal_signature.timestamp.as_nanos(),
+        )?;
+
         if ledger_event.ledger_seal_signature.signer != subject_metadata.owner {
             return Err(SubjectError::IncorrectSigner {
                 expected: subject_metadata.owner.to_string(),
@@ -1901,6 +1926,10 @@ where
                             .to_string(),
                     });
                 }
+
+                check_timestamp_in_sqlite_range(
+                    event_request.signature().timestamp.as_nanos(),
+                )?;
 
                 let event_request_signer =
                     event_request.signature().signer.clone();

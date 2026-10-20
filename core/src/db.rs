@@ -110,8 +110,15 @@ pub(crate) fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
         ancestor
     };
 
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
+    let test_file =
+        target.join(format!(".ave_write_test.{}", std::process::id()));
+    // Exclusive create: never truncate a pre-existing file or follow a
+    // pre-existing symlink at the probe path.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
         }

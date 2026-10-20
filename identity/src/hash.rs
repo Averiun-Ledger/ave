@@ -283,6 +283,11 @@ impl std::str::FromStr for DigestIdentifier {
         let algorithm_char = chars.next().ok_or_else(|| {
             CryptoError::InvalidHashFormat("Empty string".to_string())
         })?;
+        if !algorithm_char.is_ascii() {
+            return Err(CryptoError::InvalidHashFormat(
+                "Non-ASCII algorithm prefix".to_string(),
+            ));
+        }
 
         let algorithm = HashAlgorithm::from_identifier(algorithm_char as u8)?;
 
@@ -382,6 +387,16 @@ mod tests {
         let data = b"Hello, World!";
 
         let hash = hasher.hash(data);
+
+        // Non-ASCII prefixes must not truncate to a valid algorithm byte:
+        // U+0142 shares its low byte with 'B' (Blake3).
+        let spoofed = format!("{}abc", '\u{0142}');
+        let err = spoofed.parse::<DigestIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::InvalidHashFormat(_)),
+            "expected InvalidHashFormat, got {:?}",
+            err
+        );
 
         // Should verify with correct data
         assert!(hash.verify(data));

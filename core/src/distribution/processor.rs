@@ -246,16 +246,16 @@ impl DistriWorker {
                     {
                         Ok(lease) => Some(lease),
                         Err(e) => {
-                            error!(
+                            // Remote-triggered bring-up failure must not stop
+                            // the node: reject the batch, keep local crash
+                            // policy to the caller's taxonomy check.
+                            warn!(
                                 msg_type = "LedgerDistribution",
                                 subject_id = %subject_id,
                                 error = %e,
                                 "Failed to bring up tracker for subject update"
                             );
-                            let error = DistributorError::UpTrackerFailed {
-                                details: e.to_string(),
-                            };
-                            return Err(crash_system(ctx, error.into()).await);
+                            return Err(e);
                         }
                     }
                 } else {
@@ -611,16 +611,13 @@ impl DistriWorker {
                 {
                     Ok(lease) => Some(lease),
                     Err(e) => {
-                        error!(
+                        warn!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
                             error = %e,
                             "Failed to bring up tracker for subject update"
                         );
-                        let error = DistributorError::UpTrackerFailed {
-                            details: e.to_string(),
-                        };
-                        return Err(crash_system(ctx, error.into()).await);
+                        return Err(e);
                     }
                 }
             } else {

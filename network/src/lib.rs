@@ -236,7 +236,7 @@ impl MemoryLimitsConfig {
     pub fn validate(&self) -> Result<(), CommonError> {
         match self {
             Self::Percentage { value } => {
-                if *value <= 0.0 || *value > 1.0 {
+                if !value.is_finite() || *value <= 0.0 || *value > 1.0 {
                     return Err(CommonError::InvalidConfiguration {
                         component: "network.memory_limits".to_string(),
                         reason: format!(
@@ -735,6 +735,18 @@ mod tests {
         );
         assert!(
             MemoryLimitsConfig::Percentage { value: 1.5 }
+                .validate()
+                .is_err()
+        );
+        // Non-finite percentages must not slip through into a zero
+        // threshold that blocks all new connections.
+        assert!(
+            MemoryLimitsConfig::Percentage { value: f64::NAN }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage { value: f64::INFINITY }
                 .validate()
                 .is_err()
         );

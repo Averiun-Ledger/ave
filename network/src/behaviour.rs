@@ -128,7 +128,7 @@ impl Behaviour {
             )),
             MemoryLimitsConfig::Mb { value } => Toggle::from(Some(
                 memory_connection_limits::Behaviour::with_max_bytes(
-                    value * 1024 * 1024,
+                    value.saturating_mul(1024).saturating_mul(1024),
                 ),
             )),
         };

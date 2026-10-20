@@ -41,8 +41,17 @@ pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
         ancestor
     };
 
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
+    let test_file = target.join(format!(
+        ".ave_write_test.{}",
+        std::process::id()
+    ));
+    // Exclusive create: never truncate a pre-existing file or follow a
+    // pre-existing symlink at the probe path.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
         }
@@ -135,8 +144,25 @@ pub fn key_pair(
             // policy as the HTTP auth key files). A leftover `.tmp` after a
             // crash is harmless: the next start regenerates and renames.
             let tmp_path = path.with_extension("der.tmp");
-            fs::write(&tmp_path, enc_pk.as_bytes())
-                .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+            // Drop any stale probe/output first so a pre-existing symlink
+            // can never divert the private key bytes elsewhere.
+            let _ = fs::remove_file(&tmp_path);
+            {
+                use std::io::Write;
+                #[cfg(unix)]
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                opts.mode(0o600);
+                let mut f = opts.open(&tmp_path).map_err(|e| {
+                    BridgeError::KeyWrite(e.to_string())
+                })?;
+                f.write_all(enc_pk.as_bytes())
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+                f.sync_all()
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use ave_actors::{ActorContext, ActorError};
 use ave_common::{
     Namespace, SchemaType,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed},
+    identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    },
     request::EventRequest,
 };
 
@@ -116,6 +118,22 @@ impl TransferVerifier {
                 });
             }
         };
+
+        // 2b. Bind the quorum attestation to the presented request: the
+        // validator signatures above cover the stored request hash, so
+        // recompute it from the presented request. Without this, a valid
+        // quorum block from another event could back a different Transfer.
+        let recomputed_request_hash =
+            hash_borsh(&*self.hash.hasher(), event_request).map_err(|e| {
+                DistributorError::TransferEventInvalid {
+                    details: format!("request hash failed: {}", e),
+                }
+            })?;
+        if recomputed_request_hash != *event_request_hash {
+            return Err(DistributorError::TransferEventInvalid {
+                details: "event request hash mismatch".to_string(),
+            });
+        }
 
         // 3. Verificar firma del ledger_seal.
         let protocols_hash = transfer_event

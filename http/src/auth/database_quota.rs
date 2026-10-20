@@ -11,6 +11,9 @@ use ave_actors::rusqlite::{
 use time::OffsetDateTime;
 
 impl AuthDatabase {
+    /// Upper bound for quota counters so plan + extensions stay in i64.
+    const MAX_QUOTA_EVENTS: i64 = 1_000_000_000_000_000;
+
     fn map_write_error(
         err: rusqlite::Error,
         fallback: fn(String) -> DatabaseError,
@@ -63,7 +66,12 @@ impl AuthDatabase {
                     key_id,
                     &usage_month,
                 )?;
-                let effective_limit = plan_limit + extensions_total;
+                let effective_limit = plan_limit.checked_add(extensions_total)
+                    .ok_or_else(|| {
+                        DatabaseError::RateLimitExceeded(format!(
+                            "Monthly quota exceeded: month={usage_month} used=0 limit=overflow"
+                        ))
+                    })?;
 
                 if effective_limit <= 0 {
                     return Err(DatabaseError::RateLimitExceeded(format!(
@@ -354,6 +362,12 @@ impl AuthDatabase {
                 "monthly_events must be >= 0".to_string(),
             ));
         }
+        if monthly_events > Self::MAX_QUOTA_EVENTS {
+            return Err(DatabaseError::Validation(format!(
+                "monthly_events exceeds maximum {}",
+                Self::MAX_QUOTA_EVENTS
+            )));
+        }
 
         let now = Self::now();
 
@@ -445,6 +459,14 @@ impl AuthDatabase {
             return Err(DatabaseError::Validation(
                 "monthly_events must be >= 0".to_string(),
             ));
+        }
+        if let Some(limit) = monthly_events
+            && limit > Self::MAX_QUOTA_EVENTS
+        {
+            return Err(DatabaseError::Validation(format!(
+                "monthly_events exceeds maximum {}",
+                Self::MAX_QUOTA_EVENTS
+            )));
         }
 
         // Ensure plan exists before update
@@ -631,6 +653,12 @@ impl AuthDatabase {
             return Err(DatabaseError::Validation(
                 "extra_events must be > 0".to_string(),
             ));
+        }
+        if extra_events > Self::MAX_QUOTA_EVENTS {
+            return Err(DatabaseError::Validation(format!(
+                "extra_events exceeds maximum {}",
+                Self::MAX_QUOTA_EVENTS
+            )));
         }
 
         let usage_month = Self::resolve_usage_month(usage_month)?;
@@ -826,7 +854,8 @@ impl AuthDatabase {
                 key_id,
                 &usage_month,
             )?;
-            let effective_limit = plan_limit + extensions_total;
+            let effective_limit =
+                plan_limit.checked_add(extensions_total).unwrap_or(0);
             let remaining = std::cmp::max(0, effective_limit - used_events);
             (
                 Some(plan_id),

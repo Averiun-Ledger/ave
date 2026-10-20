@@ -50,6 +50,9 @@ impl AuthDatabase {
                 ttl
             )));
         }
+        // No upper-bound rejection here: oversized TTLs are clamped to the
+        // per-kind maximum at insert time (management keys must always
+        // expire within their limit; service keys within theirs).
 
         let user = Self::get_user_by_id_internal(conn, user_id)?;
         if !user.is_active {
@@ -165,9 +168,17 @@ impl AuthDatabase {
             let max_ttl = VALIDATION_LIMITS.management_key_max_ttl_seconds;
             Some(effective_ttl.map_or(max_ttl, |ttl| ttl.min(max_ttl)))
         } else {
-            effective_ttl
+            let max_ttl = VALIDATION_LIMITS.service_key_max_ttl_seconds;
+            effective_ttl.map(|ttl| ttl.min(max_ttl))
         };
-        let expires_at = effective_ttl.map(|ttl| now + ttl);
+        let expires_at = match effective_ttl {
+            None => None,
+            Some(ttl) => Some(now.checked_add(ttl).ok_or_else(|| {
+                DatabaseError::Validation(format!(
+                    "TTL expiry out of range: {now} + {ttl}"
+                ))
+            })?),
+        };
 
         // Generate UUID for id
         let key_id = generate_uuid();
@@ -447,6 +458,11 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let existing = Self::get_api_key_info_internal(&tx, key_id)?;
+            if existing.revoked {
+                return Err(DatabaseError::Validation(
+                    "Cannot rotate a revoked API key".to_owned(),
+                ));
+            }
             if let Some((owner_id, is_superadmin)) = owner_check
                 && existing.user_id != owner_id
                 && !is_superadmin
@@ -498,6 +514,10 @@ impl AuthDatabase {
                 &key_info.id,
                 revoked_by,
             )?;
+
+            // Reload after the plan move: the info built at insert time
+            // predates the transfer and would report a stale null plan.
+            let key_info = Self::get_api_key_info_internal(&tx, &key_info.id)?;
 
             if let Some(audit) = audit {
                 Self::create_audit_log_with_conn(

@@ -15,6 +15,59 @@ pub struct LoggingHandle {
     _vec: Vec<WorkerGuard>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Secrets embedded in a log endpoint URL must never reach stderr.
+    #[test]
+    fn log_forwarder_hides_url_secrets() {
+        let with_userinfo = sanitize_url_for_log(
+            "https://user:token123@logs.example.com/events",
+        );
+        assert!(!with_userinfo.contains("token123"), "{with_userinfo}");
+        assert!(with_userinfo.contains("logs.example.com"), "{with_userinfo}");
+
+        let with_query = sanitize_url_for_log(
+            "https://logs.example.com/events?token=abc123",
+        );
+        assert!(!with_query.contains("abc123"), "{with_query}");
+        assert!(with_query.ends_with("?***"), "{with_query}");
+
+        let clean =
+            sanitize_url_for_log("https://logs.example.com/events");
+        assert_eq!(clean, "https://logs.example.com/events");
+    }
+}
+
+/// Redacted URL identity for logs: keeps scheme/host/path, hides
+/// userinfo and query which may carry tokens.
+fn sanitize_url_for_log(url: &str) -> String {
+    let without_userinfo = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let host_part = match rest.split_once('@') {
+                Some((_, after)) => {
+                    // Only treat as userinfo when it precedes any / ? #.
+                    let user = &rest[..rest.len() - after.len() - 1];
+                    if user.contains('/') || user.contains('?') || user.contains('#')
+                    {
+                        rest.to_string()
+                    } else {
+                        format!("***@{after}")
+                    }
+                }
+                None => rest.to_string(),
+            };
+            format!("{scheme}://{host_part}")
+        }
+        None => url.to_string(),
+    };
+    match without_userinfo.split_once('?') {
+        Some((base, _)) => format!("{base}?***"),
+        None => without_userinfo,
+    }
+}
+
 struct ApiEventWriter {
     buf: Vec<u8>,
     tx: Arc<mpsc::Sender<Vec<u8>>>,
@@ -186,8 +239,12 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
             while let Some(bytes) = rx.recv().await {
                 if let Err(err) = client.post(&url).body(bytes).send().await {
                     // stderr on purpose: reporting through tracing would
-                    // re-enter this forwarder recursively.
-                    eprintln!("log forwarder: delivery to {url} failed: {err}");
+                    // re-enter this forwarder recursively. Never print the
+                    // raw URL: it may embed tokens in userinfo or query.
+                    let safe_url = sanitize_url_for_log(&url);
+                    eprintln!(
+                        "log forwarder: delivery to {safe_url} failed: {err}"
+                    );
                 }
             }
         });

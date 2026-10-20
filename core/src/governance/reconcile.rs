@@ -214,7 +214,10 @@ impl Governance {
                 break;
             }
             for event in &events {
-                last_sn = last_sn.max(event.sn);
+                // Advance past the processed event: the store range is
+                // inclusive on both ends, so resuming at max(sn) would
+                // re-apply the boundary event (non-idempotent).
+                last_sn = last_sn.max(event.sn.saturating_add(1));
                 self.reconcile_ledger_event(
                     ctx,
                     event,
