@@ -52,7 +52,7 @@ use async_trait::async_trait;
 use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
-    Message, Response,
+    Message, Response, SystemRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -225,7 +225,7 @@ impl BorshDeserialize for Node {
             hash,
             our_key,
             owner,
-            ledger_batch_size: 100,
+            ledger_batch_size: SINK_REPLAY_LEDGER_BATCH_SIZE,
             owned_subjects,
             known_subjects,
             transfer_subjects,
@@ -237,6 +237,10 @@ impl BorshDeserialize for Node {
         })
     }
 }
+
+/// Ledger page size for sink-event replay scans. Paging only:
+/// any positive value returns the same events.
+pub(crate) const SINK_REPLAY_LEDGER_BATCH_SIZE: u64 = 100;
 
 impl Node {
     fn hash(&self) -> Result<HashAlgorithm, ActorError> {
@@ -490,9 +494,8 @@ impl Node {
         governance_ids.into_iter().collect()
     }
 
-    async fn get_tracker_ledger_batch(
-        ctx: &ActorContext<Self>,
-        actor: &ave_actors::ActorRef<Tracker>,
+    pub(crate) async fn get_tracker_ledger_batch(
+        actor: &ActorRef<Tracker>,
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<Ledger>, bool), ActorError> {
@@ -503,15 +506,14 @@ impl Node {
         match response {
             TrackerResponse::Ledger { ledger, is_all } => Ok((ledger, is_all)),
             _ => Err(ActorError::UnexpectedResponse {
-                path: ctx.path().clone() / "subject_manager",
+                path: actor.path(),
                 expected: "TrackerResponse::Ledger".to_owned(),
             }),
         }
     }
 
-    async fn get_governance_ledger_batch(
-        ctx: &ActorContext<Self>,
-        actor: &ave_actors::ActorRef<Governance>,
+    pub(crate) async fn get_governance_ledger_batch(
+        actor: &ActorRef<Governance>,
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<Ledger>, bool), ActorError> {
@@ -524,26 +526,25 @@ impl Node {
                 Ok((ledger, is_all))
             }
             _ => Err(ActorError::UnexpectedResponse {
-                path: ctx.path().clone() / "subject_manager",
+                path: actor.path(),
                 expected: "GovernanceResponse::Ledger".to_owned(),
             }),
         }
     }
 
-    async fn collect_tracker_ledger(
-        &self,
-        ctx: &ActorContext<Self>,
+    pub(crate) async fn collect_tracker_ledger(
+        system: &SystemRef,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
+        ledger_batch_size: u64,
     ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
         ));
-        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
+        let tracker = system.get_actor::<Tracker>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
-        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
             let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
@@ -551,8 +552,7 @@ impl Node {
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, is_all) = Self::get_tracker_ledger_batch(
-                ctx,
+            let (mut batch, _) = Self::get_tracker_ledger_batch(
                 &tracker,
                 lo_sn,
                 batch_hi_sn,
@@ -563,7 +563,10 @@ impl Node {
             }
             lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
-            if is_all {
+            // Stop on the global objective, not on the page flag: a
+            // page read reports completion of its own range, which
+            // says nothing about the remaining history.
+            if lo_sn.is_some_and(|sn| sn >= hi_sn) {
                 break;
             }
         }
@@ -571,20 +574,19 @@ impl Node {
         Ok(ledger)
     }
 
-    async fn collect_governance_ledger(
-        &self,
-        ctx: &ActorContext<Self>,
+    pub(crate) async fn collect_governance_ledger(
+        system: &SystemRef,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
+        ledger_batch_size: u64,
     ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
         ));
-        let governance = ctx.system().get_actor::<Governance>(&path).await?;
+        let governance = system.get_actor::<Governance>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
-        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
             let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
@@ -592,8 +594,7 @@ impl Node {
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, is_all) = Self::get_governance_ledger_batch(
-                ctx,
+            let (mut batch, _) = Self::get_governance_ledger_batch(
                 &governance,
                 lo_sn,
                 batch_hi_sn,
@@ -604,7 +605,8 @@ impl Node {
             }
             lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
-            if is_all {
+            // Same as above: the page flag only covers its range.
+            if lo_sn.is_some_and(|sn| sn >= hi_sn) {
                 break;
             }
         }
@@ -612,13 +614,24 @@ impl Node {
         Ok(ledger)
     }
 
-    async fn replay_sink_events(
-        &self,
-        ctx: &ActorContext<Self>,
-        subject_id: DigestIdentifier,
+    /// Mailbox-free ledger replay for sink events. This must never
+    /// `await` on the [`Node`] actor: it runs while other actors (or
+    /// no actor, from the API) hold *their* mailboxes, and the
+    /// governance actors it reads may themselves be waiting on
+    /// [`Node`] mid-transfer. Waiting on [`Node`] here would
+    /// deadlock the central actor exactly as the old in-handler
+    /// replay did. The caller resolves [`SubjectData`] locally first
+    /// (a plain map read on [`Node`]).
+    pub(crate) async fn replay_sink_events(
+        system: &SystemRef,
+        subject_manager: &ActorRef<SubjectManager>,
+        our_key: &str,
+        subject_data: SubjectData,
+        subject_id: &DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
         limit: u64,
+        ledger_batch_size: u64,
     ) -> Result<SinkEventsPage, ActorError> {
         if limit == 0 {
             return Err(ActorError::Functional {
@@ -626,7 +639,7 @@ impl Node {
                     .to_owned(),
             });
         }
-        // Same cap as the HTTP edge: the actor joins every event with
+        // Same cap as the HTTP edge: the replay joins every event with
         // per-item buffers, so callers bypassing the edge must not
         // request unbounded batches.
         if limit > crate::api_input_validation::MAX_QUERY_LIMIT {
@@ -646,22 +659,8 @@ impl Node {
             });
         }
 
-        let Some(subject_data) = self
-            .owned_subjects
-            .get(&subject_id)
-            .cloned()
-            .or_else(|| self.known_subjects.get(&subject_id).cloned())
-        else {
-            return Err(ActorError::NotFound {
-                path: ActorPath::from(format!(
-                    "/user/node/subject_manager/{}",
-                    subject_id
-                )),
-            });
-        };
-
         let sink_timestamp = ave_common::identity::TimeStamp::now().as_nanos();
-        let public_key = self.our_key.to_string();
+        let public_key = our_key.to_owned();
 
         match subject_data {
             SubjectData::Governance { .. } => {
@@ -670,7 +669,7 @@ impl Node {
                     subject_id
                 ));
                 let governance =
-                    ctx.system().get_actor::<Governance>(&path).await?;
+                    system.get_actor::<Governance>(&path).await?;
                 let response =
                     governance.ask(GovernanceMessage::GetMetadata).await?;
                 let GovernanceResponse::Metadata(metadata) = response else {
@@ -682,9 +681,13 @@ impl Node {
                 let hi_sn = to_sn
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
-                let ledger = self
-                    .collect_governance_ledger(ctx, &subject_id, hi_sn)
-                    .await?;
+                let ledger = Self::collect_governance_ledger(
+                    system,
+                    subject_id,
+                    hi_sn,
+                    ledger_batch_size,
+                )
+                .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
                     &public_key,
@@ -695,8 +698,6 @@ impl Node {
                 )
             }
             SubjectData::Tracker { governance_id, .. } => {
-                let subject_manager =
-                    ctx.get_child::<SubjectManager>("subject_manager").await?;
                 let requester = format!(
                     "node_replay_sink_events:{}:{}:{}",
                     subject_id, from_sn, limit
@@ -715,8 +716,7 @@ impl Node {
                         governance_id
                     ));
 
-                    let sn = if let Ok(actor) = ctx
-                        .system()
+                    let sn = if let Ok(actor) = system
                         .get_actor::<WitnessesRegister>(&actor_path)
                         .await
                     {
@@ -750,8 +750,7 @@ impl Node {
                             "/user/node/subject_manager/{}",
                             subject_id
                         ));
-                        let tracker = ctx
-                            .system()
+                        let tracker = system
                             .get_actor::<Tracker>(&tracker_path)
                             .await?;
                         let response =
@@ -768,9 +767,13 @@ impl Node {
                     };
 
                     let hi_sn = to_sn.map(|to_sn| to_sn.min(sn)).unwrap_or(sn);
-                    let ledger = self
-                        .collect_tracker_ledger(ctx, &subject_id, hi_sn)
-                        .await?;
+                    let ledger = Self::collect_tracker_ledger(
+                        system,
+                        subject_id,
+                        hi_sn,
+                        ledger_batch_size,
+                    )
+                    .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
                         &public_key,
@@ -794,7 +797,7 @@ impl Node {
                     .is_err()
                     && let Err(e) = subject_manager
                         .ask(SubjectManagerMessage::Finish {
-                            subject_id,
+                            subject_id: subject_id.clone(),
                             requester,
                         })
                         .await
@@ -816,12 +819,6 @@ impl Node {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeMessage {
     GetGovernances,
-    GetSinkEvents {
-        subject_id: DigestIdentifier,
-        from_sn: u64,
-        to_sn: Option<u64>,
-        limit: u64,
-    },
     SignRequest(Box<SignTypesNode>),
     PendingTransfers,
     RegisterSubject {
@@ -875,7 +872,6 @@ impl Message for NodeMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
     Governances(Vec<DigestIdentifier>),
-    SinkEvents(SinkEventsPage),
     SubjectData(Option<SubjectData>),
     GovernanceTrackers(Vec<DigestIdentifier>),
     PendingTransfers(Vec<TransferSubject>),
@@ -1237,15 +1233,6 @@ impl Handler<Self> for Node {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
-            NodeMessage::GetSinkEvents {
-                subject_id,
-                from_sn,
-                to_sn,
-                limit,
-            } => Ok(NodeResponse::SinkEvents(
-                self.replay_sink_events(ctx, subject_id, from_sn, to_sn, limit)
-                    .await?,
-            )),
             NodeMessage::RegisterSubject {
                 owner,
                 subject_id,

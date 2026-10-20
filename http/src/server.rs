@@ -19,8 +19,8 @@ use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, BridgeSignedEventRequest,
         EventsQuery, FirstEndEvents, GovQuery, IncidentsQuery, ListQuery,
-        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest, SubjectQuery,
-        UpdateSubjectQuery,
+        PatchApproval, SinkDeliveriesQuery, SinkEventsQuery,
+        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
     },
     response::{
         ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
@@ -29,7 +29,7 @@ use ave_bridge::ave_common::{
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::{ApprovalStateRes, SinksQuery},
+        bridge::request::{SinksQuery},
         response::{
             ActorTreeResponse, GovsData, LedgerDB, PaginatorAborts,
             PaginatorEvents, RequestInfo, RequestsInManager,
@@ -357,6 +357,9 @@ pub async fn get_approvals(
 /// Update approval state
 ///
 /// Approves or rejects a pending approval for the specified subject.
+/// The vote lands only on the exact request identified by the
+/// expected coordinates returned when consulting: a replaced
+/// request answers 409 instead of receiving a stale vote.
 #[utoipa::path(
     patch,
     path = "/approvals/{subject_id}",
@@ -365,12 +368,12 @@ pub async fn get_approvals(
     params(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
-    request_body = ApprovalStateRes,
+    request_body = PatchApproval,
     responses(
         (status = 200, description = "Approval state updated", body = String),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
         (status = 404, description = "Approval not found", body = ErrorResponse),
-        (status = 409, description = "Invalid approval state transition", body = ErrorResponse),
+        (status = 409, description = "Stale vote: the pending request changed since it was consulted", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -379,9 +382,9 @@ pub async fn patch_approve(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiPath(subject_id): ApiPath<String>,
-    ApiJson(state): ApiJson<ApprovalStateRes>,
+    ApiJson(approval): ApiJson<PatchApproval>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.patch_approve(subject_id, state).await?))
+    Ok(Json(bridge.patch_approve(subject_id, approval).await?))
 }
 
 /// Abort a pending request

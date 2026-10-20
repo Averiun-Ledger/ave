@@ -991,46 +991,132 @@ pub mod tests {
         }
     }
 
+    /// Accepts the pending manual vote with the exact identity seen
+    /// when consulting it, then checks the persisted vote echoes
+    /// that identity back.
+    pub async fn accept_pending_approval(
+        request_actor: &ActorRef<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let RequestHandlerResponse::Approval(Some(stored)) = request_actor
+            .ask(RequestHandlerMessage::GetApproval {
+                subject_id: subject_id.clone(),
+                state: Some(ApprovalState::Pending),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(stored.state.to_string(), "pending");
+
+        let RequestHandlerResponse::Response(res) = request_actor
+            .ask(RequestHandlerMessage::ChangeApprovalState {
+                subject_id: subject_id.clone(),
+                state: ApprovalStateRes::Accepted,
+                expected_request_id: stored.request_id.clone(),
+                expected_version: stored.version,
+                expected_issued_at: stored.request.issued_at.as_nanos(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(
+            res,
+            format!(
+                "The approval request {} (version {}) for subject {} has changed to accepted",
+                stored.request_id, stored.version, subject_id
+            )
+        );
+    }
+
     async fn get_sink_events(
+        system: &SystemRef,
         node_actor: &ActorRef<Node>,
+        our_key: &PublicKey,
         subject_id: &DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
         limit: u64,
     ) -> ave_common::response::SinkEventsPage {
         let response = node_actor
-            .ask(NodeMessage::GetSinkEvents {
-                subject_id: subject_id.clone(),
-                from_sn,
-                to_sn,
-                limit,
-            })
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
             .await
             .unwrap();
 
-        let NodeResponse::SinkEvents(events) = response else {
+        let NodeResponse::SubjectData(Some(subject_data)) = response else {
             panic!("Invalid response")
         };
 
-        events
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+
+        crate::node::Node::replay_sink_events(
+            system,
+            &subject_manager,
+            &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        )
+        .await
+        .unwrap()
     }
 
     async fn get_sink_events_error(
+        system: &SystemRef,
         node_actor: &ActorRef<Node>,
+        our_key: &PublicKey,
         subject_id: &DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
         limit: u64,
     ) -> ActorError {
-        node_actor
-            .ask(NodeMessage::GetSinkEvents {
-                subject_id: subject_id.clone(),
-                from_sn,
-                to_sn,
-                limit,
-            })
+        let response = node_actor
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
             .await
-            .unwrap_err()
+            .unwrap();
+
+        let NodeResponse::SubjectData(Some(subject_data)) = response else {
+            return ActorError::NotFound {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}",
+                    subject_id
+                )),
+            };
+        };
+
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+
+        crate::node::Node::replay_sink_events(
+            system,
+            &subject_manager,
+            &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        )
+        .await
+        .unwrap_err()
     }
 
     async fn get_tracker_metadata(
@@ -1099,6 +1185,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let payload = ValueWrapper(json!({
@@ -1128,37 +1215,7 @@ pub mod tests {
 
         wait_pending_approval(&request_actor, &subject_id).await;
 
-        let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
-            .ask(RequestHandlerMessage::GetApproval {
-                subject_id: subject_id.clone(),
-                state: Some(ApprovalState::Pending),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(state.to_string(), "pending");
-
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         wait_request(&tracking, request_data.request_id).await;
 
@@ -1258,6 +1315,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let payload = ValueWrapper(json!({
@@ -1385,6 +1443,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1411,24 +1470,7 @@ pub mod tests {
         )
         .await;
 
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
@@ -1564,6 +1606,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1590,24 +1633,7 @@ pub mod tests {
         )
         .await;
 
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
@@ -1716,6 +1742,7 @@ pub mod tests {
         ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
+        PublicKey,
     ) {
         let (
             system,
@@ -1726,6 +1753,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1817,37 +1845,7 @@ pub mod tests {
 
         wait_pending_approval(&request_actor, &subject_id).await;
 
-        let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
-            .ask(RequestHandlerMessage::GetApproval {
-                subject_id: subject_id.clone(),
-                state: Some(ApprovalState::Pending),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(state.to_string(), "pending");
-
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         wait_request(&tracking, request_data.request_id).await;
 
@@ -1913,6 +1911,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            node_key,
         )
     }
 
@@ -1930,6 +1929,7 @@ pub mod tests {
         DigestIdentifier,
         DigestIdentifier,
         Vec<TempDir>,
+        PublicKey,
     ) {
         let (
             system,
@@ -1940,6 +1940,7 @@ pub mod tests {
             tracking,
             gov_id,
             _dir,
+            node_key,
         ) = init_gov_with_member_and_schema().await;
 
         let create_request = EventRequest::Create(CreateRequest {
@@ -2038,6 +2039,7 @@ pub mod tests {
             request_data.subject_id,
             gov_id,
             _dir,
+            node_key,
         )
     }
 
@@ -2057,10 +2059,11 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let replay =
-            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.from_sn, 0);
         assert_eq!(replay.to_sn, None);
@@ -2112,6 +2115,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -2136,7 +2140,7 @@ pub mod tests {
         .await;
 
         let first_page =
-            get_sink_events(&node_actor, &subject_id, 0, None, 1).await;
+            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 1).await;
         assert_eq!(first_page.events.len(), 1);
         assert!(first_page.has_more);
         assert_eq!(first_page.next_sn, Some(1));
@@ -2158,7 +2162,7 @@ pub mod tests {
         }
 
         let second_page =
-            get_sink_events(&node_actor, &subject_id, 1, None, 10).await;
+            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 1, None, 10).await;
         assert_eq!(second_page.events.len(), 1);
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
@@ -2197,10 +2201,11 @@ pub mod tests {
             _tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let replay =
-            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2236,6 +2241,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
@@ -2256,7 +2262,7 @@ pub mod tests {
         .await;
 
         let replay =
-            get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 1, Some(1), 100).await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2302,10 +2308,11 @@ pub mod tests {
             subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let error =
-            get_sink_events_error(&node_actor, &subject_id, 5, Some(4), 100)
+            get_sink_events_error(&_system, &node_actor, &_node_key, &subject_id, 5, Some(4), 100)
                 .await;
 
         let ActorError::Functional { description } = error else {
@@ -2325,10 +2332,11 @@ pub mod tests {
             subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let error =
-            get_sink_events_error(&node_actor, &subject_id, 0, None, 0).await;
+            get_sink_events_error(&_system, &node_actor, &_node_key, &subject_id, 0, None, 0).await;
 
         let ActorError::Functional { description } = error else {
             panic!("Expected functional error")
@@ -2347,6 +2355,7 @@ pub mod tests {
             _subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let missing = DigestIdentifier::from_str(
@@ -2355,7 +2364,7 @@ pub mod tests {
         .unwrap();
 
         let error =
-            get_sink_events_error(&node_actor, &missing, 0, None, 100).await;
+            get_sink_events_error(&_system, &node_actor, &_node_key, &missing, 0, None, 100).await;
 
         let ActorError::NotFound { path } = error else {
             panic!("Expected not found error")
@@ -2377,6 +2386,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -2482,6 +2492,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -2591,6 +2602,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
@@ -2718,6 +2730,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {

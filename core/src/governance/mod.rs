@@ -140,6 +140,16 @@ struct SchemaRuntimeRoles<'a> {
     creators_vali: &'a SchemaCreatorsByNamespace,
 }
 
+/// Delay between approver recreate attempts while a draining
+/// predecessor still holds the actor name. Teardown never blocks
+/// waiting for the child, so creation races a fast local drain
+/// (purge + stop of an idle actor), never a stuck one.
+const APPROVER_CREATE_RETRY_DELAY_MS: u64 = 200;
+
+/// Recreate attempts before failing loud. Exhaustion mirrors a
+/// create collision today: the update fails instead of wedging.
+const MAX_APPROVER_CREATE_ATTEMPTS: usize = 10;
+
 pub struct RolesUpdate {
     pub appr_quorum: Option<Quorum>,
     pub new_approvers: Vec<PublicKey>,
@@ -302,6 +312,7 @@ impl Subject for Governance {
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        _event_sn: u64,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -324,6 +335,8 @@ impl Subject for Governance {
         &self,
         ctx: &mut ActorContext<Self>,
         _new_owner: PublicKey,
+        _old_owner: PublicKey,
+        _event_sn: u64,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -733,6 +746,148 @@ impl Governance {
             .await?;
 
         Ok(())
+    }
+
+    /// Non-blocking approver teardown: purge the vote store and stop
+    /// the child without waiting for either. Blocking here (`ask`)
+    /// deadlocks when the child is itself waiting on a metadata read
+    /// from this actor: the child cannot finish its handler to reach
+    /// the purge, and this actor cannot reach its next message to
+    /// answer the read, and neither wait has a timeout. PurgeStorage
+    /// is critical, so the stop drain processes it before stopping;
+    /// this mailbox stays free, so in-flight child queries keep
+    /// getting answered while the teardown lands.
+    async fn retire_approver(
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // Missing child means nothing to tear down (already stopped
+        // or never created): teardown is idempotent, so that is a
+        // success, not a failure.
+        let Ok(actor) = ctx.get_child::<ApprPersist>("approver").await
+        else {
+            return Ok(());
+        };
+        if actor.tell(ApprPersistMessage::PurgeStorage).await.is_err() {
+            warn!(
+                msg_type = "RetireApprover",
+                "Approver gone while purging; stopping anyway"
+            );
+        }
+        actor.tell_stop().await;
+        Ok(())
+    }
+
+    /// Creates the approver child, deferring to a retry when a
+    /// draining predecessor still holds the actor name. Teardown
+    /// never blocks, so a live update can race a fast local stop;
+    /// failing the whole update on that race would wedge every
+    /// ownership or role change.
+    async fn spawn_approver(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        node_key: PublicKey,
+        attempts_left: usize,
+    ) -> Result<(), ActorError> {
+        let always_accept = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config")
+        {
+            config.always_accept
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not Found".to_string(),
+            });
+        };
+        let pass_votation = if always_accept {
+            VotationType::AlwaysAccept
+        } else {
+            VotationType::Manual
+        };
+
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
+        };
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
+        else {
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let init_approver = InitApprPersist {
+            our_key: self.our_key.clone(),
+            node_key,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            pass_votation,
+            helpers: (hash, network),
+            validators: self.current_validator_set(),
+        };
+
+        match ctx
+            .create_child("approver", ApprPersist::initial(init_approver))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(ActorError::Exists { .. }) => {
+                if attempts_left == 0 {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Approver child for governance {} still exists after retries",
+                            self.subject_metadata.subject_id
+                        ),
+                    });
+                }
+                ctx.schedule_once(
+                    Duration::from_millis(APPROVER_CREATE_RETRY_DELAY_MS),
+                    GovernanceMessage::RetryApproverCreate {
+                        attempts_left: attempts_left - 1,
+                    },
+                )?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Recreates the approver after a deferred teardown, recomputing
+    /// from current state whether one is still wanted: a role flap
+    /// may have removed the need while the retry was queued. Mirrors
+    /// the build-time dispatch (owner paths always carry an
+    /// approver, non-owner paths only with the approver role), so a
+    /// stale retry converges instead of resurrecting a removed role.
+    async fn retry_approver_create(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        attempts_left: usize,
+    ) -> Result<(), ActorError> {
+        let owner = *self.our_key == self.subject_metadata.owner;
+        let i_new_owner = self.subject_metadata.new_owner
+            == Some((*self.our_key).clone());
+        let new_owner = self.subject_metadata.new_owner.is_some();
+        // Owner paths always carry an approver; non-owner paths only
+        // with the approver role (same dispatch as build_childs).
+        let owner_path = (owner && !new_owner) || i_new_owner;
+        if !owner_path
+            && !self.properties.has_this_role(HashThisRole::Gov {
+                who: (*self.our_key).clone(),
+                role: RoleTypes::Approver,
+            })
+        {
+            return Ok(());
+        }
+        let node_key = if owner_path {
+            (*self.our_key).clone()
+        } else {
+            self.subject_metadata
+                .new_owner
+                .clone()
+                .unwrap_or_else(|| self.subject_metadata.owner.clone())
+        };
+        self.spawn_approver(ctx, node_key, attempts_left).await
     }
 
     async fn current_validation_roles(
@@ -2528,7 +2683,12 @@ impl Governance {
                         || self.subject_metadata.owner.clone(),
                         |new_owner| new_owner.clone(),
                     );
-                approver
+                // Best effort: the approver may be draining after a
+                // concurrent teardown (retire never blocks for it),
+                // in which case the update is dropped with the actor.
+                // Fresh state arrives with the next recreate or update,
+                // so a failed send must not fail the whole update.
+                if let Err(e) = approver
                     .tell(ApprPersistMessage::Update {
                         validators: current_roles
                             .schema
@@ -2538,7 +2698,14 @@ impl Governance {
                             .collect(),
                         node_key,
                     })
-                    .await?;
+                    .await
+                {
+                    debug!(
+                        msg_type = "UpdateApprover",
+                        error = %e,
+                        "Approver gone while pushing validator update; skipping"
+                    );
+                }
             }
         }
 
@@ -2995,34 +3162,15 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         }) {
-            let always_accept = if let Some(config) =
-                ctx.system().get_helper::<ConfigHelper>("config")
-            {
-                config.always_accept
-            } else {
-                return Err(ActorError::Helper {
-                    name: "config".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let pass_votation = if always_accept {
-                VotationType::AlwaysAccept
-            } else {
-                VotationType::Manual
-            };
-
-            let init_approver = InitApprPersist {
-                our_key: self.our_key.clone(),
-                node_key: node_key.clone(),
-                subject_id: self.subject_metadata.subject_id.clone(),
-                pass_votation,
-                helpers: (*hash, network.clone()),
-                validators: self.current_validator_set(),
-            };
-
-            ctx.create_child("approver", ApprPersist::initial(init_approver))
-                .await?;
+            // A draining predecessor may still hold the name (async
+            // teardown never blocks for it): retry instead of failing
+            // the update.
+            self.spawn_approver(
+                ctx,
+                node_key.clone(),
+                MAX_APPROVER_CREATE_ATTEMPTS,
+            )
+            .await?;
         }
 
         Ok(())
@@ -3174,43 +3322,17 @@ impl Governance {
 
         match (old_appr, new_appr) {
             (true, false) => {
-                let actor = ctx.get_child::<ApprPersist>("approver").await?;
-
-                // Role lost: votes must not survive. Regaining it
-                // recreates the child, which would rehydrate them.
-                actor.ask(ApprPersistMessage::PurgeStorage).await?;
-                actor.ask_stop().await?;
+                // Role lost: votes must not survive. Never wait on
+                // the child here (see `retire_approver`).
+                Self::retire_approver(ctx).await?;
             }
             (false, true) => {
-                let always_accept = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config")
-                {
-                    config.always_accept
-                } else {
-                    return Err(ActorError::Helper {
-                        name: "config".to_owned(),
-                        reason: "Not found".to_owned(),
-                    });
-                };
-
-                let pass_votation = if always_accept {
-                    VotationType::AlwaysAccept
-                } else {
-                    VotationType::Manual
-                };
-
-                let init_approver = InitApprPersist {
-                    our_key: self.our_key.clone(),
-                    node_key: node_key.clone(),
-                    subject_id: self.subject_metadata.subject_id.clone(),
-                    pass_votation,
-                    helpers: (*hash, network.clone()),
-                    validators: self.current_validator_set(),
-                };
-
-                ctx.create_child(
-                    "approver",
-                    ApprPersist::initial(init_approver),
+                // Role gained: a draining predecessor may still hold
+                // the name (async teardown never blocks for it).
+                self.spawn_approver(
+                    ctx,
+                    node_key.clone(),
+                    MAX_APPROVER_CREATE_ATTEMPTS,
                 )
                 .await?;
             }
@@ -3256,11 +3378,9 @@ impl Governance {
             who: (*our_key).clone(),
             role: RoleTypes::Approver,
         }) {
-            let actor = ctx.get_child::<ApprPersist>("approver").await?;
-
-            // Same as the role-diff path: no surviving votes.
-            actor.ask(ApprPersistMessage::PurgeStorage).await?;
-            actor.ask_stop().await?;
+            // Same as the role-diff path: no surviving votes, and
+            // never wait on the child (see `retire_approver`).
+            Self::retire_approver(ctx).await?;
         }
 
         Ok(())
@@ -3272,33 +3392,15 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let always_accept = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
-        {
-            config.always_accept
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_string(),
-                reason: "Not Found".to_string(),
-            });
-        };
-        let pass_votation = if always_accept {
-            VotationType::AlwaysAccept
-        } else {
-            VotationType::Manual
-        };
-
-        let init_approver = InitApprPersist {
-            our_key: self.our_key.clone(),
-            node_key: (*self.our_key).clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            pass_votation,
-            helpers: (*hash, network.clone()),
-            validators: self.current_validator_set(),
-        };
-
-        ctx.create_child("approver", ApprPersist::initial(init_approver))
-            .await?;
+        // A draining predecessor may still hold the name (async
+        // teardown never blocks for it): retry instead of failing
+        // the update.
+        self.spawn_approver(
+            ctx,
+            (*self.our_key).clone(),
+            MAX_APPROVER_CREATE_ATTEMPTS,
+        )
+        .await?;
 
         if self.is_compiler() {
             self.up_compile_worker(ctx, (*self.our_key).clone(), hash, network)
@@ -3312,10 +3414,9 @@ impl Governance {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
-        let actor = ctx.get_child::<ApprPersist>("approver").await?;
-        // Same as the other down paths: no surviving votes.
-        actor.ask(ApprPersistMessage::PurgeStorage).await?;
-        actor.ask_stop().await?;
+        // Same as the other down paths: no surviving votes, and never
+        // wait on the child (see `retire_approver`).
+        Self::retire_approver(ctx).await?;
 
         if !self.is_compiler()
             && let Ok(compiler) =
@@ -4230,7 +4331,7 @@ impl Governance {
                     }
                     EventRequest::Transfer(..) => {}
                     EventRequest::Reject(..) => {
-                        self.reject(ctx, 0).await?;
+                        self.reject(ctx, event.sn, 0).await?;
 
                         self.update_gov_version(ctx).await?;
                     }
@@ -4261,6 +4362,8 @@ impl Governance {
                     self.confirm(
                         ctx,
                         event.ledger_seal_signature.signer.clone(),
+                        self.subject_metadata.owner.clone(),
+                        event.sn,
                         0,
                     )
                     .await?;
@@ -4798,6 +4901,13 @@ pub enum GovernanceMessage {
     /// force a manual governance update round in case this node is so
     /// outdated that it is asking nodes that no longer serve it.
     TriggerGovUpdate,
+    /// Retry an approver creation that collided with a draining
+    /// predecessor (async teardown never blocks for the name to
+    /// free). Carries no identity: the handler recomputes from
+    /// current state whether an approver is still wanted.
+    RetryApproverCreate {
+        attempts_left: usize,
+    },
     HasRole {
         governance_id: DigestIdentifier,
         role_query: HashThisRole,
@@ -5289,6 +5399,10 @@ impl Handler<Self> for Governance {
             }
             GovernanceMessage::TriggerGovUpdate => {
                 self.trigger_gov_update(ctx).await?;
+                Ok(GovernanceResponse::Ok)
+            }
+            GovernanceMessage::RetryApproverCreate { attempts_left } => {
+                self.retry_approver_create(ctx, attempts_left).await?;
                 Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::GetLedger { lo_sn, hi_sn } => {

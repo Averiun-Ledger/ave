@@ -77,10 +77,14 @@ use helpers::network::*;
 use intermediary::Intermediary;
 use manual_distribution::{ManualDistribution, ManualDistributionMessage};
 
-use node::{Node, NodeMessage, NodeResponse, TransferSubject};
+use node::{
+    Node, NodeMessage, NodeResponse, SINK_REPLAY_LEDGER_BATCH_SIZE,
+    TransferSubject,
+};
 use prometheus_client::registry::Registry;
 use request::{
     RequestData, RequestHandler, RequestHandlerMessage, RequestHandlerResponse,
+    error::APPROVAL_CONFLICT_PREFIX,
 };
 use sink::{SinkRegistry, SinkRegistryMessage, SinkRegistryResponse};
 use system::system;
@@ -98,7 +102,7 @@ pub use crate::api_input_validation::{
     validate_incidents_query, validate_request_id, validate_sink_events_query,
     validate_sink_replay_request, validate_sinks_query, validate_subject_id,
 };
-use crate::approval::request::ApprovalReq;
+use crate::approval::request::StoredApproval;
 use crate::helpers::db::{
     DatabaseError as ExternalDatabaseError, ExternalDB, ReadStore,
 };
@@ -926,7 +930,7 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
         state: Option<ApprovalState>,
-    ) -> Result<Option<(ApprovalReq, ApprovalState)>, Error> {
+    ) -> Result<Option<StoredApproval>, Error> {
         validate_subject_id(&subject_id)?;
         let response = self
             .request
@@ -962,7 +966,7 @@ impl Api {
         state: Option<ApprovalState>,
         limit: u64,
         offset: u64,
-    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, Error> {
+    ) -> Result<Vec<StoredApproval>, Error> {
         let response = self
             .request
             .ask(RequestHandlerMessage::GetAllApprovals { state })
@@ -981,7 +985,7 @@ impl Api {
                 // Approvers answer per governance in spawn order, so
                 // sort for stable pages before slicing.
                 Ok(page_sorted(data, limit, offset, |x| {
-                    x.0.subject_id.to_string()
+                    x.request.subject_id.to_string()
                 }))
             }
             _ => {
@@ -1002,6 +1006,9 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
         state: ApprovalStateRes,
+        expected_request_id: String,
+        expected_version: u64,
+        expected_issued_at: u64,
     ) -> Result<String, Error> {
         self.ensure_mutations_allowed()?;
         validate_subject_id(&subject_id)?;
@@ -1018,6 +1025,9 @@ impl Api {
             .ask(RequestHandlerMessage::ChangeApprovalState {
                 subject_id,
                 state,
+                expected_request_id,
+                expected_version,
+                expected_issued_at,
             })
             .await
             .map_err(|e| {
@@ -1026,6 +1036,11 @@ impl Api {
                     error = %e,
                     "Failed to change approval state"
                 );
+                if let ActorError::Functional { description } = &e
+                    && description.starts_with(APPROVAL_CONFLICT_PREFIX)
+                {
+                    return Error::InvalidApprovalState(description.clone());
+                }
                 preserve_functional_actor_error(e, |e| {
                     Error::ApprovalUpdateFailed(e.to_string())
                 })
@@ -2740,35 +2755,51 @@ impl Api {
         let subject_id_str = subject_id.to_string();
         let response = self
             .node
-            .ask(NodeMessage::GetSinkEvents {
-                subject_id,
-                from_sn: query.from_sn.unwrap_or(0),
-                to_sn: query.to_sn,
-                limit: query.limit.unwrap_or(100),
-            })
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
             .await
             .map_err(|e| {
                 warn!(
                     msg_type = "ApiRequest",
                     error = %e,
-                    "Failed to replay sink events"
+                    "Failed to get subject data for sink replay"
                 );
-                match e {
-                    ActorError::NotFound { .. } => {
-                        Error::SubjectNotFound(subject_id_str.clone())
-                    }
-                    _ => Error::from(e),
-                }
+                Error::from(e)
             })?;
-
-        match response {
-            NodeResponse::SinkEvents(events) => Ok(events),
-            _ => Err(Error::UnexpectedResponse {
+        let NodeResponse::SubjectData(subject_data) = response else {
+            warn!(
+                msg_type = "ApiRequest",
+                "Unexpected response from node"
+            );
+            return Err(Error::UnexpectedResponse {
                 actor: "node".to_string(),
-                expected: "SinkEvents".to_string(),
+                expected: "SubjectData".to_string(),
                 received: "other".to_string(),
-            }),
-        }
+            });
+        };
+        let Some(subject_data) = subject_data else {
+            return Err(Error::SubjectNotFound(subject_id_str));
+        };
+
+        Node::replay_sink_events(
+            &self.system,
+            &self.subject_manager,
+            &self.public_key,
+            subject_data,
+            &subject_id,
+            query.from_sn.unwrap_or(0),
+            query.to_sn,
+            query.limit.unwrap_or(100),
+            SINK_REPLAY_LEDGER_BATCH_SIZE,
+        )
+        .await
+        .map_err(|e| {
+            warn!(
+                msg_type = "ApiRequest",
+                error = %e,
+                "Failed to replay sink events"
+            );
+            Error::from(e)
+        })
     }
 
     pub async fn get_aborts(

@@ -151,14 +151,30 @@ async fn accept_approval(
         .await;
 
         if status == StatusCode::OK && !body.is_null() {
+            let (Some(request_id), Some(version), Some(issued_at)) = (
+                body["request_id"].as_str(),
+                body["version"].as_u64(),
+                body["request"]["issued_at"].as_u64(),
+            ) else {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            };
             let (status, body) = make_request(
                 client,
                 &server.url(&format!("/approvals/{subject_id}")),
                 "PATCH",
                 None,
-                Some(json!("accepted")),
+                Some(json!({
+                    "state": "accepted",
+                    "expected_request_id": request_id,
+                    "expected_version": version,
+                    "expected_issued_at": issued_at,
+                })),
             )
             .await;
+            if status == StatusCode::CONFLICT {
+                continue;
+            }
             assert_eq!(status, StatusCode::OK, "{body}");
             return;
         }
@@ -852,7 +868,12 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "PATCH",
         &format!("/approvals/{}", fixture.governance_id),
-        Some(json!("accepted")),
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": "blocked",
+            "expected_version": 0,
+            "expected_issued_at": 0,
+        })),
     )
     .await;
     assert_safe_mode_blocked(

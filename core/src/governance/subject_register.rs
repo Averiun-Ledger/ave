@@ -288,6 +288,19 @@ impl Handler<Self> for SubjectRegister {
                 schema_id,
                 gov_version,
             } => {
+                // Idempotent replay: boot reconciliation re-sends the
+                // genesis create after the tracker journal already
+                // landed, so a second delivery must not fail the quota
+                // check nor journal a duplicate.
+                if self
+                    .register
+                    .get(&(creator.clone(), schema_id.clone(), namespace.clone()))
+                    .is_some_and(|(_, subjects)| {
+                        subjects.contains(&subject_id)
+                    })
+                {
+                    return Ok(SubjectRegisterResponse::Ok);
+                }
                 self.check(&creator, &namespace, &schema_id, gov_version)?;
 
                 self.on_event(
@@ -336,6 +349,24 @@ impl Handler<Self> for SubjectRegister {
                 schema_id,
                 gov_version,
             } => {
+                // Idempotent replay: a resend after the move already
+                // landed must not fail the quota check nor journal a
+                // duplicate. The apply below removes the subject from
+                // every matching owner entry, so converging does not
+                // depend on old_owner being exact.
+                if self
+                    .register
+                    .get(&(
+                        new_owner.clone(),
+                        schema_id.clone(),
+                        namespace.clone(),
+                    ))
+                    .is_some_and(|(_, subjects)| {
+                        subjects.contains(&subject_id)
+                    })
+                {
+                    return Ok(SubjectRegisterResponse::Ok);
+                }
                 self.check(&new_owner, &namespace, &schema_id, gov_version)?;
                 self.on_event(
                     SubjectRegisterEvent::UpdateSubject {
@@ -481,6 +512,21 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
+                // Convergent move: drop the subject from every owner
+                // entry sharing schema and namespace, then insert under
+                // the new owner. Replays with a stale old_owner still
+                // converge, and live moves also clear any residual.
+                let _ = old_owner;
+                for ((owner, entry_schema, entry_ns), (_, subjects)) in
+                    inner.register.iter_mut()
+                {
+                    if entry_schema == schema_id
+                        && entry_ns == namespace
+                        && owner != new_owner
+                    {
+                        subjects.remove(subject_id);
+                    }
+                }
                 inner
                     .register
                     .entry((
@@ -491,17 +537,6 @@ impl PersistentActor for SubjectRegister {
                     .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                     .1
                     .insert(subject_id.to_owned());
-
-                inner
-                    .register
-                    .entry((
-                        old_owner.to_owned(),
-                        schema_id.to_owned(),
-                        namespace.to_owned(),
-                    ))
-                    .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
-                    .1
-                    .remove(subject_id);
 
                 debug!(
                     event_type = "UpdateSubject",

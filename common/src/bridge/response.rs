@@ -33,6 +33,11 @@ pub struct ApprovalEntry {
     pub request: ApprovalReq,
     /// Current state of the approval
     pub state: ApprovalState,
+    /// Collection request id: echo it back when voting so a
+    /// replaced request conflicts instead of receiving the vote.
+    pub request_id: String,
+    /// Collection version: echo it back when voting.
+    pub version: u64,
 }
 
 #[derive(
@@ -916,6 +921,8 @@ mod tests {
                     deadline: 2,
                 },
                 state: state.clone(),
+                request_id: "req1".to_string(),
+                version: 1,
             };
             let json_str = serde_json::to_string(&entry).unwrap();
             let decoded: ApprovalEntry =

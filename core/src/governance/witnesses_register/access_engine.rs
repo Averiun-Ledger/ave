@@ -9,7 +9,7 @@ use crate::model::common::{
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     ActualSearch, CreatorWitnessGrant, GovVersionLimit, HiSnLimit,
@@ -383,24 +383,16 @@ impl WitnessesRegister {
                 gv_idx += 1;
             }
 
+            // Stale SnRegister (e.g. constant gov_version only
+            // records sn 0): fall back to the tip version so a
+            // missing map entry degrades to a possibly wider grant
+            // instead of a delivery gap that wedges sync.
             let gov_version = if gv_idx < gov_versions.len()
                 && gov_versions[gv_idx].0.contains(range_from)
             {
-                Some(gov_versions[gv_idx].1)
+                gov_versions[gv_idx].1
             } else {
-                (range_from == 0).then_some(data.gov_version)
-            };
-
-            let Some(gov_version) = gov_version else {
-                warn!(
-                    msg_type = "BuildTrackerWindow",
-                    subject_id = %subject_id,
-                    node = %node,
-                    range_from = range_from,
-                    range_to = range_to,
-                    "gov_version missing for range"
-                );
-                continue;
+                data.gov_version
             };
 
             let mode = self.event_delivery_mode(

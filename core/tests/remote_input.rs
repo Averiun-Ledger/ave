@@ -690,6 +690,162 @@ async fn remote_future_timestamp_event_is_rejected() {
     drop(bob_dirs);
 }
 
+/// A failed transfer must not open a reception window: the ownership
+/// reconstruction only stages pending transfers whose evaluation was
+/// ok, mirroring the live tracker path. Batch carries no hint; the
+/// reconstruction reads the batch itself.
+#[test(tokio::test)]
+async fn remote_failed_transfer_does_not_open_reception() {
+    let (mut nodes, dirs) = create_nodes_and_connections(
+        CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id = setup_example_governance(
+        &owner,
+        &[MemberSpec {
+            api: &alice,
+            name: "Alice",
+            gov_witness: true,
+            creator: true,
+            issuer: true,
+        }],
+    )
+    .await;
+    // Rita is a member and governance witness, but NOT a creator: the
+    // transfer to her fails evaluation and commits as a failed event.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({"members": {"add": [{
+            "name": "Rita",
+            "key": rita_key.to_string(),
+        }]}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) = create_subject(
+        &alice,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
+        .await
+        .unwrap();
+    // Bounded wait: a failed evaluation commits the event as failed
+    // instead of finishing the request the usual way.
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .expect("failed transfer must still commit its ledger record");
+    let history =
+        alice.test_get_tracker_ledger(subject_id.clone(), 1).await.unwrap();
+    assert_eq!(history.len(), 2);
+    let failed = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        !failed.protocols.is_success(),
+        "premise: the transfer to a non-creator must fail evaluation"
+    );
+
+    // Rita joins only now: no live state, the batch is her only source.
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer,
+            address: vec![boot_addr],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
+            rita_signer,
+        )),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    inject_ledger_batch(
+        &rita,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        history,
+        None,
+    )
+    .await;
+
+    // The failed transfer stages no pending ownership, so there is no
+    // window to admit the batch through.
+    for _ in 0..30 {
+        let advanced = rita
+            .get_subject_state(subject_id.clone())
+            .await
+            .map(|state| state.sn >= 1)
+            .unwrap_or(false);
+        assert!(!advanced, "failed transfer must not admit the subject");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
 /// SLOW: governance recovery must not replay the page-boundary event.
 /// With 257 events the second page overlaps the first under the old
 /// cursor; the duplicate apply used to fail the boot.

@@ -754,6 +754,23 @@ impl AuthDatabase {
             })
     }
 
+    /// Largest window any admission query can consult: the default
+    /// plus every endpoint override. Cleanup must retain at least
+    /// this long, or live counters get deleted while still gating
+    /// requests.
+    pub(crate) fn rate_limit_max_window_seconds(&self) -> i64 {
+        let (_, default_window) = self.rate_limit_defaults();
+        let mut max_window = default_window.max(0);
+        if let Ok(endpoints) = self.rate_limit_sensitive_endpoints() {
+            for endpoint in &endpoints {
+                max_window = max_window
+                    .max(endpoint.window_seconds.unwrap_or(default_window))
+                    .max(0);
+            }
+        }
+        max_window
+    }
+
     pub(crate) fn audit_enabled(&self) -> bool {
         self.runtime_config.audit_enable.load(Ordering::Relaxed)
     }

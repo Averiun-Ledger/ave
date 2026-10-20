@@ -721,6 +721,83 @@ async fn test_update_system_config_applies_rate_limit_immediately() {
 }
 
 #[test(tokio::test)]
+async fn test_cleanup_retains_counters_within_active_window() {
+    // Legacy combo the startup validation would now reject: the
+    // cleanup interval (1h) is shorter than the active window (24h).
+    // Cleanup must still retain live counters instead of silently
+    // lifting the limit early.
+    let (db, dirs) = create_test_db_with_rate_limit(RateLimitConfig {
+        enable: true,
+        window_seconds: 86400,
+        max_requests: 1,
+        limit_by_key: true,
+        limit_by_ip: false,
+        cleanup_interval_seconds: 3600,
+        sensitive_endpoints: vec![],
+    })
+    .await;
+
+    let user = db
+        .create_user("retain", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_, key_info) = db
+        .create_api_key(user.id, Some("retain"), None, None, false)
+        .unwrap();
+
+    assert!(
+        db.check_rate_limit(Some(&key_info.id), None, Some("/keep"))
+            .unwrap()
+    );
+
+    // Age the counter two hours: still inside the 24h window, but
+    // older than the 1h cleanup retention.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    {
+        let conn = ave_actors::rusqlite::Connection::open(
+            dirs.path().join("auth.db"),
+        )
+        .expect("open auth.db");
+        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        conn.execute(
+            "UPDATE rate_limits SET window_start = ?1 WHERE api_key_id = ?2",
+            ave_actors::rusqlite::params![now - 7200, key_info.id],
+        )
+        .unwrap();
+    }
+
+    db.cleanup_rate_limits().unwrap();
+
+    // The aged row must have survived: the quota stays exhausted.
+    assert!(matches!(
+        db.check_rate_limit(Some(&key_info.id), None, Some("/keep")),
+        Err(DatabaseError::RateLimitExceeded(_))
+    ));
+}
+
+#[test(tokio::test)]
+async fn test_update_system_config_rejects_short_retention() {
+    let (db, _dirs) = create_test_db();
+
+    // Shrinking retention below the active 60s default window must fail:
+    // live counters would be deleted while still gating requests.
+    assert!(matches!(
+        db.update_system_config(
+            "rate_limit_cleanup_interval_seconds",
+            "30",
+            Some(1)
+        ),
+        Err(DatabaseError::Validation(_))
+    ));
+
+    // A retention covering the window is accepted.
+    db.update_system_config("rate_limit_cleanup_interval_seconds", "7200", Some(1))
+        .unwrap();
+}
+
+#[test(tokio::test)]
 async fn test_update_system_config_applies_lockout_immediately() {
     let (db, _dirs) = create_test_db();
 

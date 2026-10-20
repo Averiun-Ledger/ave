@@ -277,6 +277,26 @@ impl RateLimitConfig {
                 reason: "must be greater than zero".to_string(),
             });
         }
+        // Retention must cover every window admission queries can
+        // consult; otherwise cleanup deletes live counters. The
+        // runtime enforces the same bound defensively, but a bad
+        // combination should fail fast here instead of silently
+        // weakening the limit.
+        let mut max_window = self.window_seconds;
+        for endpoint in &self.sensitive_endpoints {
+            max_window = max_window.max(
+                endpoint.window_seconds.unwrap_or(self.window_seconds),
+            );
+        }
+        if self.cleanup_interval_seconds < max_window {
+            return Err(Error::InvalidConfiguration {
+                component: "auth.rate_limit.cleanup_interval_seconds"
+                    .to_string(),
+                reason: format!(
+                    "must retain at least the largest active window ({max_window}s), or live counters get deleted early"
+                ),
+            });
+        }
 
         let mut seen = std::collections::HashSet::new();
         for (i, endpoint) in self.sensitive_endpoints.iter().enumerate() {

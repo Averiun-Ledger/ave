@@ -290,6 +290,25 @@ impl Display for ApprovalStateRes {
     }
 }
 
+/// Manual approval decision bound to the exact request the operator
+/// reviewed. The three expected coordinates identify the pending
+/// collection: any accepted replacement changes at least one of
+/// them, so a stale decision conflicts instead of voting wrong.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct PatchApproval {
+    /// Accept or reject the pending request.
+    pub state: ApprovalStateRes,
+    /// Collection request id seen when consulting.
+    pub expected_request_id: String,
+    /// Collection version seen when consulting.
+    pub expected_version: u64,
+    /// Request `issued_at` (nanoseconds) seen when consulting.
+    pub expected_issued_at: u64,
+}
+
 #[derive(
     Default,
     Debug,

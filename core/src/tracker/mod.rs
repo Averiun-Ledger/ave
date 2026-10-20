@@ -15,7 +15,8 @@ use crate::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
             TrackerVisibilityMode, TrackerVisibilityState, crash_system,
-            get_last_event, purge_storage, remove_verified_transfer,
+            get_last_event, get_n_events, purge_storage,
+            remove_verified_transfer,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
@@ -173,6 +174,7 @@ impl Subject for Tracker {
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -199,7 +201,7 @@ impl Subject for Tracker {
         let WitnessesRegisterResponse::Ok = witnesses_register
             .ask(WitnessesRegisterMessage::Reject {
                 subject_id: self.subject_metadata.subject_id.clone(),
-                sn: self.subject_metadata.sn + 1,
+                sn: event_sn,
                 gov_version,
             })
             .await?
@@ -219,6 +221,8 @@ impl Subject for Tracker {
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
+        old_owner: PublicKey,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
@@ -235,7 +239,11 @@ impl Subject for Tracker {
             });
         };
 
-        if self.service || *self.our_key == self.subject_metadata.owner {
+        // Every witness tracks ownership moves for subjects it
+        // observes: distribution-time quota checks run on all
+        // witnesses, so a partial register would reject valid
+        // creations after transfers.
+        {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -247,7 +255,7 @@ impl Subject for Tracker {
             let _ = subject_register
                 .ask(SubjectRegisterMessage::UpdateSubject {
                     new_owner,
-                    old_owner: self.subject_metadata.owner.clone(),
+                    old_owner: old_owner.clone(),
                     subject_id: self.subject_metadata.subject_id.clone(),
                     namespace: self.namespace.to_string(),
                     schema_id: self.subject_metadata.schema_id.clone(),
@@ -266,7 +274,7 @@ impl Subject for Tracker {
         let WitnessesRegisterResponse::Ok = witnesses_register
             .ask(WitnessesRegisterMessage::Confirm {
                 subject_id: self.subject_metadata.subject_id.clone(),
-                sn: self.subject_metadata.sn + 1,
+                sn: event_sn,
                 gov_version,
             })
             .await?
@@ -679,7 +687,10 @@ impl Tracker {
             })
             .await?;
 
-        if self.service || *self.our_key == self.subject_metadata.owner {
+        // Every witness tracks creations it observes: the
+        // distribution-time quota check runs everywhere, so all
+        // witnesses must converge on the same counts.
+        {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -771,9 +782,9 @@ impl Tracker {
                 });
             }
 
+            self.on_event(first.clone(), ctx).await;
             self.create(ctx, first.gov_version).await?;
 
-            self.on_event(first.clone(), ctx).await;
             self.record_visibility_event(ctx, &first, self.visibility_mode)
                 .await?;
 
@@ -898,6 +909,18 @@ impl Tracker {
 
             let event_request = event.get_event_request();
 
+            // Journal first: persist the authoritative event before any
+            // derived write, so a crash can only leave registers behind
+            // (fixed by boot reconciliation), never ahead of the journal.
+            // Capture pre-apply values first: apply bumps sn and, on
+            // confirm, rotates the owner.
+            let pre_sn = self.subject_metadata.sn;
+            let pre_owner = self.subject_metadata.owner.clone();
+            let pre_subject_id = self.subject_metadata.subject_id.clone();
+
+            // Persist event.
+            self.on_event(event.clone(), ctx).await;
+
             if last_event_is_ok {
                 // Failed events only leave their ledger record: every
                 // derived write below mirrors exactly what `apply`
@@ -909,7 +932,22 @@ impl Tracker {
                     if evaluation.evaluator_response_ok().is_some()
                 );
                 if last_gov_version != event_gov_version {
-                    self.register_gov_version_sn(ctx, last_gov_version).await?;
+                    // Transition mapping uses the pre-event sn: the last
+                    // sn of the previous gov version.
+                    let sn_register = ctx
+                        .system()
+                        .get_actor::<SnRegister>(&ActorPath::from(format!(
+                            "/user/node/subject_manager/{}/sn_register",
+                            self.governance_id
+                        )))
+                        .await?;
+                    sn_register
+                        .tell(SnRegisterMessage::RegisterSn {
+                            subject_id: pre_subject_id.clone(),
+                            gov_version: last_gov_version,
+                            sn: pre_sn,
+                        })
+                        .await?;
                 }
                 if let Some(event_request) = &event_request {
                     match event_request {
@@ -931,12 +969,14 @@ impl Tracker {
                         }
                         EventRequest::Transfer(..) => {}
                         EventRequest::Reject(..) => {
-                            self.reject(ctx, event.gov_version).await?;
+                            self.reject(ctx, event.sn, event.gov_version).await?;
                         }
                         EventRequest::Confirm(..) => {
                             self.confirm(
                                 ctx,
                                 event.ledger_seal_signature.signer.clone(),
+                                pre_owner.clone(),
+                                event.sn,
                                 event.gov_version,
                             )
                             .await?;
@@ -961,8 +1001,6 @@ impl Tracker {
                 }
             }
 
-            // Aplicar evento.
-            self.on_event(event.clone(), ctx).await;
             self.record_visibility_event(ctx, &event, self.visibility_mode)
                 .await?;
 
@@ -1080,6 +1118,65 @@ impl Actor for Tracker {
         // persisted state as is.
         if config.safe_mode {
             return Ok(());
+        }
+
+        // Snapshot repair: a snapshot saved before the genesis fields
+        // were adopted keeps an empty governance id (the journal
+        // replay that should have filled it was skipped). Rebuild
+        // them from the genesis event before anything reads the
+        // registers; the next snapshot persists the healed state.
+        // A valid tracker always belongs to a governance, so an
+        // empty id means a stale snapshot, never a legitimate state.
+        if self.governance_id.is_empty() {
+            let genesis: Vec<Ledger> = get_n_events(ctx, 0, 1).await?;
+            let Some(first) = genesis.first() else {
+                // No history (unknown subject lifted manually):
+                // nothing to repair and no registers to read.
+                return Ok(());
+            };
+            if !first.is_create_event() {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: journal tip without genesis create",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            }
+            let Protocols::Create { validation, .. } = &first.protocols
+            else {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis event is not a create",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            };
+            let ValidationMetadata::Metadata(metadata) =
+                &validation.validation_metadata
+            else {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis has no metadata",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            };
+            if metadata.governance_id.is_empty() {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis governance_id is empty",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            }
+            let inner = Arc::make_mut(&mut self.state);
+            inner.governance_id = metadata.governance_id.clone();
+            inner.namespace = metadata.namespace.clone();
+            inner.genesis_gov_version = metadata.genesis_gov_version;
+            debug!(
+                subject_id = %self.subject_metadata.subject_id,
+                "Repaired tracker genesis fields from journal"
+            );
         }
 
         // Boot reconciliation: replay sn registrations and visibility
@@ -1382,6 +1479,14 @@ impl PersistentActor for Tracker {
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = metadata.properties.clone();
                     inner.visibility_mode = TrackerVisibilityMode::Full;
+                    // The create parameters are transient: after a
+                    // snapshot-less recovery the journal replay is the
+                    // only source for these fields, so adopt them from
+                    // the genesis event itself (never blind-synced:
+                    // the gates above already validated them).
+                    inner.governance_id = metadata.governance_id.clone();
+                    inner.namespace = metadata.namespace.clone();
+                    inner.genesis_gov_version = metadata.genesis_gov_version;
 
                     debug!(
                         event_type = "Create",
@@ -1602,3 +1707,159 @@ impl PersistentActor for Tracker {
 }
 
 impl Storable for Tracker {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tracker, TrackerState, TrackerVisibilityMode};
+    use crate::model::event::{Ledger, Protocols, ValidationData, ValidationMetadata};
+    use crate::subject::{Metadata, SubjectMetadata};
+    use ave_common::identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
+        hash_borsh,
+        keys::{DSAlgorithm, Ed25519Signer, KeyPair},
+    };
+    use ave_common::request::{CreateRequest, EventRequest};
+    use ave_common::{Namespace, SchemaType, ValueWrapper};
+    use ave_actors::PersistentActor;
+    use std::sync::Arc;
+
+    fn test_owner() -> (KeyPair, PublicKey) {
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let owner = PublicKey::new(
+            DSAlgorithm::Ed25519,
+            keys.public_key_bytes(),
+        )
+        .unwrap();
+        (keys, owner)
+    }
+
+    fn test_metadata(owner: &PublicKey) -> Metadata {
+        let gov_version = 7u64;
+        let governance_id = hash_borsh(
+            &*HashAlgorithm::Blake3.hasher(),
+            &gov_version,
+        )
+        .unwrap();
+        Metadata {
+            name: Some("Name".to_owned()),
+            description: Some("Description".to_owned()),
+            subject_id: DigestIdentifier::default(),
+            governance_id,
+            genesis_gov_version: gov_version,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            namespace: Namespace::from("ns"),
+            sn: 0,
+            creator: owner.clone(),
+            owner: owner.clone(),
+            new_owner: None,
+            active: true,
+            properties: ValueWrapper::default(),
+        }
+    }
+
+    fn test_create_ledger(
+        metadata: &Metadata,
+        keys: &KeyPair,
+    ) -> Ledger {
+        let request = EventRequest::Create(CreateRequest {
+            name: metadata.name.clone(),
+            description: metadata.description.clone(),
+            governance_id: metadata.governance_id.clone(),
+            schema_id: metadata.schema_id.clone(),
+            namespace: metadata.namespace.clone(),
+        });
+        let signed = Signed::new(request, keys).unwrap();
+        Ledger {
+            gov_version: metadata.genesis_gov_version,
+            sn: 0,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            ledger_seal_signature: signed.signature().clone(),
+            protocols: Protocols::Create {
+                event_request: Arc::new(signed),
+                validation: ValidationData {
+                    validation_req_signature: signed_signature(keys),
+                    validation_req_hash: DigestIdentifier::default(),
+                    validators_signatures: vec![],
+                    validation_metadata:
+                        ValidationMetadata::Metadata(Box::new(
+                            metadata.clone(),
+                        )),
+                },
+            },
+        }
+    }
+
+    fn signed_signature(keys: &KeyPair) -> Signature {
+        let request = EventRequest::Create(CreateRequest {
+            name: None,
+            description: None,
+            governance_id: DigestIdentifier::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            namespace: Namespace::new(),
+        });
+        Signed::new(request, keys).unwrap().into_parts().1
+    }
+
+    // A recovered tracker without a snapshot replays from the journal:
+    // `apply(Create)` must restore the transient linkage (governance,
+    // namespace, genesis version) from the genesis event itself, since
+    // creation parameters are gone by then.
+    #[test]
+    fn create_apply_restores_genesis_linkage() {
+        let (keys, owner) = test_owner();
+        let metadata = test_metadata(&owner);
+        let ledger = test_create_ledger(&metadata, &keys);
+
+        let initial = TrackerState {
+            subject_metadata: SubjectMetadata::new(&Metadata {
+                governance_id: DigestIdentifier::default(),
+                ..test_metadata(&owner)
+            }),
+            governance_id: DigestIdentifier::default(),
+            namespace: Namespace::new(),
+            genesis_gov_version: 0,
+            visibility_mode: TrackerVisibilityMode::Full,
+            properties: ValueWrapper::default(),
+        };
+
+        let applied =
+            <Tracker as PersistentActor>::apply(Arc::new(initial), &ledger)
+                .unwrap();
+        assert_eq!(
+            applied.governance_id, metadata.governance_id,
+            "genesis governance must be adopted from the journal"
+        );
+        assert_eq!(applied.namespace, metadata.namespace);
+        assert_eq!(
+            applied.genesis_gov_version,
+            metadata.genesis_gov_version
+        );
+        assert_eq!(applied.subject_metadata.owner, owner);
+    }
+
+    // The genesis gate rejects an empty governance id instead of
+    // persisting an unlinkable state that would break every
+    // register lookup after a restart.
+    #[test]
+    fn create_apply_rejects_missing_governance() {
+        let (keys, owner) = test_owner();
+        let mut metadata = test_metadata(&owner);
+        metadata.governance_id = DigestIdentifier::default();
+        let ledger = test_create_ledger(&metadata, &keys);
+
+        let initial = TrackerState {
+            subject_metadata: SubjectMetadata::default(),
+            governance_id: DigestIdentifier::default(),
+            namespace: Namespace::new(),
+            genesis_gov_version: 0,
+            visibility_mode: TrackerVisibilityMode::Full,
+            properties: ValueWrapper::default(),
+        };
+
+        assert!(
+            <Tracker as PersistentActor>::apply(Arc::new(initial), &ledger)
+                .is_err()
+        );
+    }
+}

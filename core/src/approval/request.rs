@@ -1,5 +1,6 @@
 use ave_common::{
     ValueWrapper,
+    bridge::request::ApprovalState,
     identity::{DigestIdentifier, PublicKey, TimeStamp},
 };
 
@@ -35,4 +36,29 @@ pub struct ApprovalReq {
     /// Approvers that have not voted by this instant are counted as
     /// absent. Must be at least `issued_at + MIN_APPROVAL_WINDOW`.
     pub deadline: TimeStamp,
+}
+
+/// A stored approval vote with the collection coordinates that
+/// identify exactly which request the decision belongs to. Voters
+/// echo the coordinates back, so a replaced request conflicts
+/// instead of receiving a stale vote.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct StoredApproval {
+    /// The voted approval request.
+    pub request: ApprovalReq,
+    /// Current state of the vote.
+    pub state: ApprovalState,
+    /// Collection request id that produced this vote.
+    pub request_id: String,
+    /// Collection version that produced this vote.
+    pub version: u64,
 }

@@ -830,9 +830,15 @@ impl AuthDatabase {
         Ok(self.rate_limit_defaults())
     }
 
-    /// Cleanup old rate limit entries
+    /// Cleanup old rate limit entries. Retention is the configured
+    /// cleanup interval, raised to the largest window any admission
+    /// query can still consult: deleting a counter its window still
+    /// gates would silently lift the limit before it expires.
     pub fn cleanup_rate_limits(&self) -> Result<usize, DatabaseError> {
-        let cutoff = Self::now() - self.rate_limit_cleanup_interval_seconds();
+        let retention = self
+            .rate_limit_cleanup_interval_seconds()
+            .max(self.rate_limit_max_window_seconds());
+        let cutoff = Self::now() - retention;
         let conn = self.lock_maintenance_conn()?;
         let mut total_deleted = 0usize;
         let batch_size = self.rate_limit_cleanup_batch_size();
@@ -1141,6 +1147,7 @@ impl AuthDatabase {
         let typed_value = key_id.parse_persisted_value(value)?;
         key_id.validate_value(&typed_value)?;
         let persisted_value = key_id.serialize_value(&typed_value)?;
+        self.check_rate_limit_retention(&key_id, &typed_value)?;
 
         let conn = self.lock_conn()?;
         conn.execute(
@@ -1170,6 +1177,7 @@ impl AuthDatabase {
         let typed_value = key_id.parse_persisted_value(value)?;
         key_id.validate_value(&typed_value)?;
         let persisted_value = key_id.serialize_value(&typed_value)?;
+        self.check_rate_limit_retention(&key_id, &typed_value)?;
 
         let mut conn = self.lock_conn()?;
         let tx = conn
@@ -1204,11 +1212,81 @@ impl AuthDatabase {
     ) -> Result<SystemConfig, DatabaseError> {
         let key_id = SystemConfigKey::parse(key)?;
         let persisted_value = key_id.serialize_value(value)?;
+        self.check_rate_limit_retention(&key_id, value)?;
         self.update_system_config_transactional(
             key,
             &persisted_value,
             updated_by,
             audit,
         )
+    }
+
+    /// Cross-key guard for dynamic rate limit updates: retention must
+    /// cover the largest window admission queries can still consult,
+    /// no matter which side of the relation is being changed.
+    fn check_rate_limit_retention(
+        &self,
+        key_id: &SystemConfigKey,
+        value: &SystemConfigValue,
+    ) -> Result<(), DatabaseError> {
+        use crate::auth::system_config::SystemConfigKey::*;
+        // Unrelated keys keep the current (already validated)
+        // combination untouched.
+        if !matches!(
+            key_id,
+            RateLimitWindowSeconds
+                | RateLimitCleanupIntervalSeconds
+                | RateLimitSensitiveEndpoints
+        ) {
+            return Ok(());
+        }
+        // Effective default after this update (unchanged keys keep
+        // their current runtime value).
+        let (_, current_default) = self.rate_limit_defaults();
+        let new_default = match (key_id, value) {
+            (RateLimitWindowSeconds, SystemConfigValue::Integer(window)) => {
+                *window
+            }
+            _ => current_default,
+        }
+        .max(0);
+        // Effective endpoint list after this update.
+        let endpoints: Vec<(String, Option<i64>)> = match (key_id, value) {
+            (
+                RateLimitSensitiveEndpoints,
+                SystemConfigValue::EndpointRateLimits(endpoints),
+            ) => endpoints
+                .iter()
+                .map(|endpoint| {
+                    (endpoint.endpoint.clone(), endpoint.window_seconds)
+                })
+                .collect(),
+            _ => self
+                .rate_limit_sensitive_endpoints()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|endpoint| (endpoint.endpoint, endpoint.window_seconds))
+                .collect(),
+        };
+        let new_max = endpoints
+            .iter()
+            .map(|(_, window)| window.unwrap_or(new_default).max(0))
+            .max()
+            .unwrap_or(0)
+            .max(new_default);
+        let new_interval = match (key_id, value) {
+            (
+                RateLimitCleanupIntervalSeconds,
+                SystemConfigValue::Integer(interval),
+            ) => *interval,
+            _ => self.rate_limit_cleanup_interval_seconds(),
+        }
+        .max(0);
+        if new_interval < new_max {
+            return Err(DatabaseError::Validation(format!(
+                "rate limit retention ({new_interval}s) must cover the largest active window ({new_max}s), or live counters get deleted early"
+            )));
+        }
+        Ok(())
     }
 }

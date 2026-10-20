@@ -1038,6 +1038,7 @@ pub mod tests {
         ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
+        ave_common::identity::PublicKey,
     ) {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
@@ -1222,6 +1223,7 @@ pub mod tests {
             tracking,
             metadata.subject_id,
             _dirs,
+            (*public_key).clone(),
         )
     }
 
@@ -1241,6 +1243,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dirs,
+            _node_key,
         ) = create_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {

@@ -877,10 +877,20 @@ impl DistriWorker {
             {
                 ranges[range_idx].mode.clone()
             } else {
+                let coverage = ranges
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}-{}:{:?}",
+                            r.from_sn, r.to_sn, r.mode
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
                 return Err(ActorError::Functional {
                     description: format!(
-                        "Missing tracker delivery range for sn {}",
-                        event.sn
+                        "Missing tracker delivery range for sn {} (ranges: [{}])",
+                        event.sn, coverage
                     ),
                 });
             };

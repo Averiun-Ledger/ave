@@ -882,7 +882,59 @@ pub async fn emit_approve(
     request_id: DigestIdentifier,
     wait_request_state: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    node.approve(governance_id.clone(), res).await.unwrap();
+    // Bind the vote to the exact pending request: fetch its
+    // collection coordinates first (poll: the collecting validator
+    // registers it asynchronously), then approve with them so a
+    // replaced request conflicts instead of receiving the vote.
+    // Concurrent collections can supersede the stored request
+    // between fetch and vote; that is a stale read, not a lost
+    // vote, so re-fetch and retry a few times (compare-and-swap).
+    let mut attempts_left = 10usize;
+    loop {
+        let stored = {
+            let started = tokio::time::Instant::now();
+            loop {
+                if let Ok(Some(stored)) =
+                    node.get_approval(governance_id.clone(), None).await
+                {
+                    break stored;
+                }
+                if started.elapsed() >= Duration::from_secs(10) {
+                    return Err(
+                        "approval not registered in time".into(),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        match node
+            .approve(
+                governance_id.clone(),
+                res.clone(),
+                stored.request_id,
+                stored.version,
+                stored.request.issued_at.as_nanos(),
+            )
+            .await
+        {
+            Ok(_) => break,
+            Err(e)
+                if attempts_left > 0
+                    && matches!(
+                        &e,
+                        ave_core::error::Error::InvalidApprovalState(
+                            description
+                        ) if description.starts_with(
+                            ave_core::request::error::APPROVAL_CONFLICT_PREFIX
+                        )
+                    ) =>
+            {
+                attempts_left -= 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     // state of request
     if !wait_request_state {

@@ -1393,16 +1393,20 @@ where
         "Checking query projection against ledger tip"
     );
     let floor = watermark.unwrap_or(0);
-    if watermark.is_some() && floor >= tip_sn {
-        return Ok(0);
-    }
+    // No early return when the event watermark already reached the
+    // tip: reaching the tip in `events` does not prove `subjects`
+    // is current (the row is written separately and may have been
+    // cut in between), so the state upsert below always runs. The
+    // loop itself still skips when there is nothing new to copy.
     // Paged reads overlap at the boundary (inclusive range), so the
     // frontier is what is already projected, not the page start:
     // re-inserting a boundary event would collide on its primary key.
     let mut done: Option<u64> = watermark;
     let mut from = floor;
     let mut filled = 0;
-    while done.map_or(tip_sn > 0, |cut| cut < tip_sn) {
+    // A missing watermark with journal history still walks from sn
+    // 0: the genesis event counts as fillable, not as already done.
+    while done.map_or(true, |cut| cut < tip_sn) {
         let events: Vec<Ledger> = get_n_events(ctx, from, 256).await?;
         if events.is_empty() {
             break;

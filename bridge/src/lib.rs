@@ -16,8 +16,9 @@ use ave_common::{
     bridge::request::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, ApprovalState,
         ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
-        EventsQuery, GovQuery, IncidentsQuery, ListQuery, SinkDeliveriesQuery,
-        SinkEventsQuery, SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
+        EventsQuery, GovQuery, IncidentsQuery, ListQuery, PatchApproval,
+        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest,
+        SubjectQuery, UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -269,8 +270,10 @@ impl Bridge {
 
         Ok(self.api.get_approval(subject_id, state).await?.map(|x| {
             ApprovalEntry {
-                request: core_approval_req_to_common(x.0),
-                state: x.1,
+                request: core_approval_req_to_common(x.request),
+                state: x.state,
+                request_id: x.request_id,
+                version: x.version,
             }
         }))
     }
@@ -286,8 +289,10 @@ impl Bridge {
         Ok(res
             .into_iter()
             .map(|x| ApprovalEntry {
-                request: core_approval_req_to_common(x.0),
-                state: x.1,
+                request: core_approval_req_to_common(x.request),
+                state: x.state,
+                request_id: x.request_id,
+                version: x.version,
             })
             .collect())
     }
@@ -295,16 +300,25 @@ impl Bridge {
     pub async fn patch_approve(
         &self,
         subject_id: String,
-        state: ApprovalStateRes,
+        approval: PatchApproval,
     ) -> Result<String, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
-        if state == ApprovalStateRes::Obsolete {
+        if approval.state == ApprovalStateRes::Obsolete {
             return Err(BridgeError::Core(Error::InvalidApprovalState(
                 "Obsolete is not a valid target approval state".to_owned(),
             )));
         }
 
-        Ok(self.api.approve(subject_id, state).await?)
+        Ok(self
+            .api
+            .approve(
+                subject_id,
+                approval.state,
+                approval.expected_request_id,
+                approval.expected_version,
+                approval.expected_issued_at,
+            )
+            .await?)
     }
 
     pub async fn post_manual_request_abort(

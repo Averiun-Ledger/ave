@@ -6,9 +6,11 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
+    bridge::request::SinkEventsQuery,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
+    sink::DataToSinkEvent,
 };
 use ave_core::auth::AuthWitness;
 use ave_network::{NodeType, RoutingNode};
@@ -6973,11 +6975,200 @@ async fn dirty_restart_repairs_projection_gap() {
 }
 
 #[test(tokio::test)]
+async fn dirty_restart_repairs_genesis_only_projection() {
+    // Caso A del gap de proyección: el journal solo contiene el
+    // génesis (sn 0) y no hay watermark. El relleno debe procesar
+    // sn 0 en vez de saltar el bucle, y el upsert debe dejar el
+    // estado consultable. Sin la corrección, el evento 0 nunca se
+    // inserta aunque el estado sí se escriba.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+
+        let api = node.api.clone();
+        let governance_id = create_and_authorize_governance(&api, vec![]).await;
+        emit_fact(
+            &api,
+            governance_id.clone(),
+            example_schema_governance_fact(),
+            true,
+        )
+        .await
+        .unwrap();
+        let (subject_id, ..) =
+            create_subject(&api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        api.get_subject_state(subject_id.clone()).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+
+        let keys = node.keys.clone();
+        let local_db = dirs[0].path().to_path_buf();
+        let ext_db = dirs[1].path().to_path_buf();
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        // Simulate the crash cut: projection rows gone, ledger intact.
+        {
+            let conn =
+                rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            for id in [&governance_id, &subject_id] {
+                conn.execute(
+                    "DELETE FROM events WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+                conn.execute(
+                    "DELETE FROM subjects WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        let api = node.api.clone();
+
+        // The tracker stays down until lifted like in the general
+        // case; the genesis event must be there afterwards.
+        assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+        api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+        let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 0);
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+    })
+    .await
+    .expect("test overran its 120s budget");
+}
+
+#[test(tokio::test)]
+async fn dirty_restart_refreshes_stale_subject_state() {
+    // Caso B del gap de proyección: los eventos están al día pero la
+    // fila de estado falta o está atrasada. Sin eventos nuevos que
+    // copiar, la reparación debe refrescar el estado igualmente en
+    // vez de volver antes por tener el tip ya cubierto.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+
+        let api = node.api.clone();
+        let governance_id = create_and_authorize_governance(&api, vec![]).await;
+        emit_fact(
+            &api,
+            governance_id.clone(),
+            example_schema_governance_fact(),
+            true,
+        )
+        .await
+        .unwrap();
+        let (subject_id, ..) =
+            create_subject(&api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        for i in 1..=2 {
+            emit_fact(
+                &api,
+                subject_id.clone(),
+                json!({"ModOne": {"data": i}}),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        api.get_subject_state(subject_id.clone()).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+        let keys = node.keys.clone();
+        let local_db = dirs[0].path().to_path_buf();
+        let ext_db = dirs[1].path().to_path_buf();
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        // Simulate the crash cut: events intact, state rows gone.
+        {
+            let conn =
+                rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            for id in [&governance_id, &subject_id] {
+                conn.execute(
+                    "DELETE FROM subjects WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        let api = node.api.clone();
+
+        // The governance heals at boot: no new events, state back.
+        let state = api.get_subject_state(governance_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 1);
+
+        // The tracker heals once lifted, with its history untouched.
+        assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+        api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+        let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 2);
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 1).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+    })
+    .await
+    .expect("test overran its 120s budget");
+}
+
 // Handover a espejo degradado con resync: el espejo que tiene
 // el fact en opaco no puede aceptar; patron del nodo (restart
 // safe-mode, delete, reboot, fetch) y luego confirm + EOL.
 // Presupuesto de 60s: si el resync se atasca, falla en vez de
 // colgar la suite.
+#[test(tokio::test)]
 async fn test_tracker_resync_degraded_mirror_confirm_eol() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let (node1, mut dirs) = create_node(CreateNodeConfig {
@@ -7380,6 +7571,203 @@ async fn test_tracker_rogue_signature_aborts_without_commit() {
 
         node_running(&owner).await.unwrap();
         node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+async fn tracker_sink_replay_pages_past_sync_batches() {
+    // The sink-events replay must walk the whole ledger up to the
+    // requested tip instead of stopping at the first sync batch: a
+    // collector that trusts the page flag alone returns the first
+    // batch with has_more=false, and a follow-up page from beyond
+    // that batch comes back empty although events exist.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (nodes, _dirs) = create_nodes_and_connections(
+            CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0], vec![0]],
+                always_accept: true,
+                ledger_batch_size: Some(5),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let owner = nodes[0].api.clone();
+        let creator = nodes[1].api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&creator]).await;
+
+        // AveNode2 joins as member, creator and witness; the schema
+        // evaluates with the Owner role like the other suites.
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "AveNode2",
+                        "key": creator.public_key()
+                    }
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": [
+                            "AveNode2"
+                        ]
+                    }
+                },
+                "schema":
+                    [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode2",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Any",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+        let (subject_id, ..) =
+            create_subject(&creator, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+
+        let _state =
+            get_subject(&creator, subject_id.clone(), Some(0), true)
+                .await
+                .unwrap();
+
+        // Ten async facts plus a final sync one flush the queue:
+        // sn 1..=11, twelve events counting the create.
+        for i in 0..10 {
+            emit_fact(
+                &creator,
+                subject_id.clone(),
+                json!({"ModOne": {"data": i}}),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        emit_fact(
+            &creator,
+            subject_id.clone(),
+            json!({"ModOne": {"data": 99}}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state =
+            get_subject(&creator, subject_id.clone(), Some(11), true)
+                .await
+                .unwrap();
+        assert_eq!(state.sn, 11);
+
+        // Full history in one page even though it spans three sync
+        // batches (5 + 5 + 2): all 12 events, nothing more.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 12);
+        assert!(!page.has_more);
+        assert!(page.next_sn.is_none());
+
+        // A tail page starting past the first batch is not empty.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(6),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 6);
+        assert!(matches!(
+            page.events[0].payload,
+            DataToSinkEvent::FactFull { sn: 6, .. }
+        ));
+        assert!(!page.has_more);
+
+        // A short limit reports continuation instead of a false end.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(5),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 5);
+        assert!(page.has_more);
+        assert_eq!(page.next_sn, Some(5));
+
+        node_running(&owner).await.unwrap();
+        node_running(&creator).await.unwrap();
     })
     .await
     .expect("test overran its 60s budget");

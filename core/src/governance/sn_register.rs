@@ -268,6 +268,7 @@ impl Handler<Self> for SnRegister {
 
                 if let Some(register) = self.register.get(&subject_id) {
                     let mut prev_end_sn: Option<u64> = None;
+                    let mut last_gov_version = None;
 
                     for (gov_version, end_sn) in register.iter() {
                         let start_sn = prev_end_sn
@@ -283,11 +284,34 @@ impl Handler<Self> for SnRegister {
                             });
                         }
 
+                        last_gov_version = Some(*gov_version);
                         if *end_sn >= to_sn {
                             break;
                         }
 
                         prev_end_sn = Some(*end_sn);
+                    }
+
+                    // No newer gov version recorded: later sns share
+                    // the last one, so extend the window to the
+                    // requested tip instead of leaving a gap.
+                    if let Some(gov_version) = last_gov_version {
+                        let covered_to = ranges
+                            .last()
+                            .map_or(None, |r| Some(r.to_sn));
+                        let extend_from = covered_to.map_or(
+                            from_sn,
+                            |covered| covered.saturating_add(1).max(from_sn),
+                        );
+                        if extend_from <= to_sn
+                            && covered_to.is_none_or(|c| c < to_sn)
+                        {
+                            ranges.push(SnGovVersionRange {
+                                from_sn: extend_from,
+                                to_sn,
+                                gov_version,
+                            });
+                        }
                     }
                 }
 

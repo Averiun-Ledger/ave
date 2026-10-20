@@ -2202,19 +2202,38 @@ where
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
-        if let Some(lo_sn) = lo_sn {
-            let actual_sn = lo_sn.saturating_add(1);
-            if hi_sn < actual_sn {
-                Ok((Vec::new(), true))
-            } else {
-                Ok((
-                    get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
-                    true,
-                ))
-            }
-        } else {
-            Ok((get_n_events(ctx, 0, hi_sn).await?, true))
+        // The store rejects single reads wider than its page limit,
+        // and the requested window grows with the absolute cursor
+        // (catch-up from a high `from_sn` builds a huge prefix read).
+        // Page internally so every store read stays within the limit;
+        // concatenated pages equal the single read, only bounded.
+        const STORE_READ_PAGE_LEN: u64 = 10_000;
+        let start = lo_sn.map_or(0, |lo| lo.saturating_add(1));
+        if hi_sn < start {
+            return Ok((Vec::new(), true));
         }
+        let mut ledgers = Vec::new();
+        let mut cursor = start;
+        loop {
+            if cursor > hi_sn {
+                break;
+            }
+            let remaining = hi_sn - cursor + 1;
+            let take = remaining.min(STORE_READ_PAGE_LEN);
+            if take == 0 {
+                break;
+            }
+            let chunk =
+                get_n_events(ctx, cursor, take.saturating_sub(1)).await?;
+            let got = chunk.len() as u64;
+            ledgers.extend(chunk);
+            if got < take {
+                // Trimmed at the tip: nothing more to read.
+                break;
+            }
+            cursor = cursor.saturating_add(got);
+        }
+        Ok((ledgers, true))
     }
 
     async fn update_sn(
@@ -2225,6 +2244,7 @@ where
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError>;
 
@@ -2232,6 +2252,8 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
+        old_owner: PublicKey,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError>;
 

@@ -51,8 +51,8 @@ use ave_bridge::ave_common::{
             ApprovalState, ApprovalStateRes, BridgeConfirmRequest,
             BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest,
             BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest,
-            BridgeTransferRequest, EventRequestType, SinkReplayItem,
-            SinkReplayRequest,
+            BridgeTransferRequest, EventRequestType, PatchApproval,
+            SinkReplayItem, SinkReplayRequest,
         },
         signature::BridgeSignature,
     },
@@ -316,6 +316,7 @@ impl Modify for FeatureGatedPathsAddon {
             BridgeConfirmRequest,
             BridgeRejectRequest,
             BridgeSignature,
+            PatchApproval,
             ApprovalStateRes,
             ApprovalState,
 

@@ -349,6 +349,12 @@ pub enum ApprPersistMessage {
     },
     ChangeResponse {
         response: ApprovalStateRes,
+        /// Collection request id the operator reviewed.
+        expected_request_id: String,
+        /// Collection version the operator reviewed.
+        expected_version: u64,
+        /// Request `issued_at` the operator reviewed, in nanoseconds.
+        expected_issued_at: u64,
     }, // Emit an approval event, not just the automatic one
     /// The parent governance pushes the current validator set on every
     /// governance change.
@@ -395,6 +401,16 @@ pub enum ApprPersistResponse {
     Approval {
         request: ApprovalReq,
         state: ApprovalState,
+        request_id: String,
+        version: u64,
+    },
+    /// The pending request changed between consult and vote: the
+    /// stored coordinates identify what the vote would have hit.
+    /// No vote was cast and no state changed.
+    Conflict {
+        request_id: String,
+        version: u64,
+        issued_at: u64,
     },
 }
 
@@ -492,17 +508,17 @@ impl Handler<Self> for ApprPersist {
                 let res = if let Some(req) = &self.request
                     && let Some(req_state) = &self.state
                 {
+                    let entry = || ApprPersistResponse::Approval {
+                        request: req.content().clone(),
+                        state: req_state.clone(),
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                    };
                     state.map_or_else(
-                        || ApprPersistResponse::Approval {
-                            request: req.content().clone(),
-                            state: req_state.clone(),
-                        },
+                        || entry(),
                         |query| {
                             if &query == req_state {
-                                ApprPersistResponse::Approval {
-                                    request: req.content().clone(),
-                                    state: query,
-                                }
+                                entry()
                             } else {
                                 ApprPersistResponse::Ok
                             }
@@ -536,7 +552,12 @@ impl Handler<Self> for ApprPersist {
                     );
                 }
             }
-            ApprPersistMessage::ChangeResponse { response } => {
+            ApprPersistMessage::ChangeResponse {
+                response,
+                expected_request_id,
+                expected_version,
+                expected_issued_at,
+            } => {
                 let Some(state) = self.state.clone() else {
                     warn!(
                         msg_type = "ChangeResponse",
@@ -559,6 +580,46 @@ impl Handler<Self> for ApprPersist {
                     });
                 }
 
+                let Some(approval_req) = self.request.clone() else {
+                    error!(
+                        msg_type = "ChangeResponse",
+                        "Approval request not found"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Can not get approval request"
+                            .to_owned(),
+                    });
+                };
+
+                // Compare-and-swap: the vote lands only on the exact
+                // request the operator reviewed. Any accepted
+                // replacement changes at least one coordinate, so a
+                // stale decision conflicts instead of signing the
+                // wrong patch. Same handler that persists the vote, so
+                // consult and vote cannot interleave here.
+                if self.request_id != expected_request_id
+                    || self.version != expected_version
+                    || approval_req.content().issued_at.as_nanos()
+                        != expected_issued_at
+                {
+                    warn!(
+                        msg_type = "ChangeResponse",
+                        expected_request_id = %expected_request_id,
+                        expected_version = expected_version,
+                        stored_request_id = %self.request_id,
+                        stored_version = self.version,
+                        "Manual vote targets a superseded approval request"
+                    );
+                    return Ok(ApprPersistResponse::Conflict {
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                        issued_at: approval_req
+                            .content()
+                            .issued_at
+                            .as_nanos(),
+                    });
+                }
+
                 if state == ApprovalState::Pending {
                     let (response, state) =
                         if ApprovalStateRes::Accepted == response {
@@ -566,17 +627,6 @@ impl Handler<Self> for ApprPersist {
                         } else {
                             (false, ApprovalState::Rejected)
                         };
-
-                    let Some(approval_req) = self.request.clone() else {
-                        error!(
-                            msg_type = "ChangeResponse",
-                            "Approval request not found"
-                        );
-                        return Err(ActorError::Functional {
-                            description: "Can not get approval request"
-                                .to_owned(),
-                        });
-                    };
 
                     // Persist before emitting: a crash between the vote
                     // and the state write must not allow a second,
@@ -588,8 +638,13 @@ impl Handler<Self> for ApprPersist {
                         "State changed successfully"
                     );
 
-                    self.on_event(ApprPersistEvent::ChangeState { state }, ctx)
-                        .await;
+                    self.on_event(
+                        ApprPersistEvent::ChangeState {
+                            state: state.clone(),
+                        },
+                        ctx,
+                    )
+                    .await;
 
                     // Every validator that asked for this vote receives
                     // it once cast.
@@ -614,7 +669,24 @@ impl Handler<Self> for ApprPersist {
                             return Err(crash_system(ctx, e).await);
                         };
                     }
+
+                    return Ok(ApprPersistResponse::Approval {
+                        request: approval_req.content().clone(),
+                        state,
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                    });
                 }
+
+                // Repeating the same decision on the same request is
+                // idempotent: echo the persisted vote without signing
+                // again.
+                return Ok(ApprPersistResponse::Approval {
+                    request: approval_req.content().clone(),
+                    state,
+                    request_id: self.request_id.clone(),
+                    version: self.version,
+                });
             }
             ApprPersistMessage::NetworkRequest {
                 approval_req,

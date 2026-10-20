@@ -2053,12 +2053,13 @@ async fn test_approval_late_vote_after_close_ignored() {
     // every vote report. The vote echoes the request manager version
     // tracked for the request (the collection gated on it), not the
     // governance version.
-    let (req, _) = nodes[4]
+    let req = nodes[4]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let vote = craft_vote(&req, &governance_id, &nodes[4].data.keys, true);
     let version = owner
         .get_request_state(request_id.clone())
@@ -2135,10 +2136,22 @@ async fn test_approval_late_vote_after_close_ignored() {
     // request is over: depending on the local cleanup timing this is a
     // no-op or an error; either way the network ignores the late vote.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let _ = nodes[4]
+    if let Ok(Some(stored)) = nodes[4]
         .api()
-        .approve(governance_id.clone(), ApprovalStateRes::Accepted)
-        .await;
+        .get_approval(governance_id.clone(), None)
+        .await
+    {
+        let _ = nodes[4]
+            .api()
+            .approve(
+                governance_id.clone(),
+                ApprovalStateRes::Accepted,
+                stored.request_id,
+                stored.version,
+                stored.request.issued_at.as_nanos(),
+            )
+            .await;
+    }
 
     // The next request runs its approval round unaffected.
     emit_fact(
@@ -2217,12 +2230,13 @@ async fn test_approval_double_vote_excluded() {
     )
     .await
     .unwrap();
-    let (req, _) = nodes[2]
+    let req = nodes[2]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let vote = craft_vote(&req, &governance_id, &nodes[2].data.keys, false);
     // The vote must echo the request manager version tracked for the
     // request (the collection gates on it), not the governance version.
@@ -2344,12 +2358,13 @@ async fn test_approval_forged_votes_ignored() {
     // passes the membership gates but the signature check drops it.
     // Forged first, while the collection is guaranteed open: the
     // honest votes below would close it and stop the worker.
-    let (req, _) = nodes[2]
+    let req = nodes[2]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let outsider = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let outsider_pk = outsider.public_key();
     let foreign = craft_vote(&req, &governance_id, &outsider, true);
@@ -2512,12 +2527,13 @@ async fn test_approval_approver_ignores_forged_probes() {
 
     // The real probe lands first: the approver stores it pending.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let (stored, _) = nodes[2]
+    let stored = nodes[2]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let version = owner
         .get_request_state(request_id.clone())
         .await
@@ -2559,12 +2575,13 @@ async fn test_approval_approver_ignores_forged_probes() {
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let (kept, _) = nodes[2]
+    let kept = nodes[2]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     assert_eq!(
         hash_borsh(&*HashAlgorithm::Blake3.hasher(), &kept).unwrap(),
         hash_borsh(&*HashAlgorithm::Blake3.hasher(), &stored).unwrap(),
@@ -3221,12 +3238,13 @@ async fn test_approval_double_vote_partial_observation() {
     // the requester's ephemeral approval-phase worker (the one holding
     // its collection for this request): it is queued before the held
     // accept is released, so the worker always merges the reject first.
-    let (req, _) = nodes[3]
+    let req = nodes[3]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let vote = craft_vote(&req, &governance_id, &nodes[3].data.keys, false);
     // The vote must echo the request manager version tracked for the
     // request (the collection gates on it), not the governance version.
@@ -3695,12 +3713,13 @@ async fn test_approval_non_validator_ask_ignored() {
 
     // Approver2 (not a validator) re-sends the request to Approver1:
     // the delivery and the re-ask are both ignored by the gate.
-    let (req, _) = nodes[2]
+    let req = nodes[2]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let version = req.gov_version;
     let signed_req = Signed::new(req, &nodes[1].data.keys).unwrap();
     for _ in 0..2 {
@@ -3880,12 +3899,13 @@ async fn test_approval_validator_set_follows_governance_changes() {
     .unwrap();
 
     // Validator1 is no longer a validator: its ask is ignored.
-    let (req, _) = nodes[3]
+    let req = nodes[3]
         .api()
         .get_approval(governance_id.clone(), None)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .request;
     let version = req.gov_version;
     let signed_req = Signed::new(req, &nodes[1].data.keys).unwrap();
     inject_ask(
@@ -4874,13 +4894,13 @@ async fn test_approval_close_lost_leaves_no_residue() {
     // the probe below.
     let mut probe_req = None;
     for _ in 0..50 {
-        if let Some((req, _)) = nodes[3]
+        if let Some(stored) = nodes[3]
             .api()
             .get_approval(governance_id.clone(), None)
             .await
             .unwrap()
         {
-            probe_req = Some(req);
+            probe_req = Some(stored.request);
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5038,13 +5058,13 @@ async fn test_approval_governance_commit_purges_stale_state() {
     // Capture the aborted request's approval data for the probe below.
     let mut probe_req = None;
     for _ in 0..50 {
-        if let Some((req, _)) = nodes[4]
+        if let Some(stored) = nodes[4]
             .api()
             .get_approval(governance_id.clone(), None)
             .await
             .unwrap()
         {
-            probe_req = Some(req);
+            probe_req = Some(stored.request);
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5379,13 +5399,13 @@ async fn test_approval_stale_collect_does_not_supplant_live_collection() {
     // craft the stale one.
     let mut live_req = None;
     for _ in 0..50 {
-        if let Some((req, _)) = nodes[3]
+        if let Some(stored) = nodes[3]
             .api()
             .get_approval(governance_id.clone(), None)
             .await
             .unwrap()
         {
-            live_req = Some(req);
+            live_req = Some(stored.request);
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

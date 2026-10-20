@@ -5,9 +5,11 @@
 //! (`InvalidSequenceNumber` → `continue`), losing the fire-forget
 //! bulk writes of skipped events: sn registrations and visibility
 //! records. The replay re-sends them scan-ordered from the ledger.
-//! Rare tells (ownership, register upserts) are ask-confirmed live:
-//! an Ok means the target journaled before replying, so they are
-//! durable and never replay.
+//! Ownership derives (node, subject register, witnesses) run after
+//! the tracker journal live, so a crash can only leave them behind:
+//! the tail replay re-sends them in ledger order. Every target
+//! write is idempotent and convergent, so re-sending heals instead
+//! of corrupting.
 //!
 //! Ordering: the replay waits for its own governance first, so the
 //! governance's own replay (register entries, creators) is done
@@ -23,11 +25,19 @@ use super::Tracker;
 use crate::governance::sn_register::{
     SnRegister, SnRegisterMessage, SnRegisterResponse,
 };
+use crate::governance::subject_register::{
+    SubjectRegister, SubjectRegisterMessage,
+};
+use crate::governance::transfer_verification_register::{
+    TransferVerificationRegister, TransferVerificationRegisterMessage,
+};
 use crate::governance::witnesses_register::{
     WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::model::common::{TrackerVisibilityState, get_n_events};
-use crate::model::event::Ledger;
+use crate::model::event::{Ledger, Protocols};
+use crate::node::{Node, NodeMessage, TransferSubject};
+use ave_common::request::EventRequest;
 
 /// Ledger page size for the reconcile scan.
 const RECONCILE_PAGE: u64 = 256;
@@ -64,11 +74,10 @@ pub struct TrackerReconcileReport {
 }
 
 /// Folded replay state: the previous event (for the
-/// version-transition sn write). Rare tells are ask-confirmed live
-/// and never replay, so no property fold is needed: every replayed
-/// write derives from the event itself, and visibility mode resolves
-/// to tip state (only the current mode is ever read; per-sn range
-/// data is event-intrinsic).
+/// version-transition sn write). Every replayed write derives from
+/// the event itself, and visibility mode resolves to tip state
+/// (only the current mode is ever read; per-sn range data is
+/// event-intrinsic).
 #[derive(Default)]
 struct TrackerReconcileFold {
     prev: Option<(u64, u64)>,
@@ -100,9 +109,10 @@ impl Tracker {
         .await?;
         // Clean boot (or already reconciled this boot): the tip
         // landed everywhere instead of trusting the flag blindly. A
-        // graceful drain processes every critical send — and both
-        // writes below are critical — so tip markers at tip mean
-        // complete. Otherwise fall through to the tail below.
+        // graceful drain processes every critical send, and the live
+        // path awaits every ownership ask before the visibility tell,
+        // so tip markers at tip mean complete. Otherwise fall through
+        // to the tail below.
         if self.skip_reconcile && self.tip_landed(ctx).await? {
             debug!(
                 subject_id = %self.subject_metadata.subject_id,
@@ -347,9 +357,11 @@ impl Tracker {
         ))
     }
 
-    /// Replays one ledger event's sn registration. Visibility is
-    /// handled by the caller loop; ownership tells are ask-confirmed
-    /// live and never replay.
+    /// Replays one ledger event's sn registration, visibility record
+    /// and ownership derives. Ownership mirrors the live path in
+    /// ledger order: node, subject register and witnesses writes that
+    /// may have been lost between the journal persist and their own
+    /// landing. Every write is idempotent and convergent.
     async fn reconcile_ledger_event(
         &self,
         ctx: &ActorContext<Self>,
@@ -369,8 +381,6 @@ impl Tracker {
         // path sends pre-apply sn (ledger sn, dense) at transition
         // and post-apply sn (ledger sn + 1, genesis excluded) at the
         // end; both are map overwrites with identical data.
-        // Ownership events need nothing here: their tells are
-        // ask-confirmed live, hence durable.
         if let Some((prev_gov, _)) = fold.prev
             && event.gov_version != prev_gov
         {
@@ -383,10 +393,180 @@ impl Tracker {
                 .await?;
             report.writes_resent += 1;
         }
+        // Ownership derives mirror the live path in ledger order.
+        // The live path persists the tracker journal first, so a cut
+        // can only leave these behind: re-sending converges. No
+        // gating here (unlike live): any replaying node heals the
+        // shared registers even when the original sender crashed.
+        self.reconcile_ownership_event(ctx, event, report).await?;
         // No per-event post-apply write: every one overwrites the
         // same map entry, so only the last survives. It goes once
         // after the loop, like the witnesses tip cursor below.
         fold.prev = Some((event.gov_version, event.sn));
+        Ok(())
+    }
+
+    /// Re-sends one ledger event's ownership derives. Failed transfer
+    /// events carry no ownership effect, exactly like the live path.
+    async fn reconcile_ownership_event(
+        &self,
+        ctx: &ActorContext<Self>,
+        event: &Ledger,
+        report: &mut TrackerReconcileReport,
+    ) -> Result<(), ActorError> {
+        let subject_id = self.subject_metadata.subject_id.clone();
+        if event.is_create_event() {
+            let owner = event.ledger_seal_signature.signer.clone();
+            let witnesses_register = ctx
+                .system()
+                .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )))
+                .await?;
+            witnesses_register
+                .tell(WitnessesRegisterMessage::Create {
+                    subject_id: subject_id.clone(),
+                    gov_version: event.gov_version,
+                    owner: owner.clone(),
+                })
+                .await?;
+            report.writes_resent += 1;
+            let subject_register = ctx
+                .system()
+                .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/subject_register",
+                    self.governance_id
+                )))
+                .await?;
+            subject_register
+                .tell(SubjectRegisterMessage::CreateSubject {
+                    creator: owner,
+                    subject_id,
+                    namespace: self.namespace.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    gov_version: event.gov_version,
+                })
+                .await?;
+            report.writes_resent += 1;
+            return Ok(());
+        }
+        let Some(event_request) = event.get_event_request() else {
+            return Ok(());
+        };
+        let node = ctx
+            .system()
+            .get_actor::<Node>(&ActorPath::from("/user/node"))
+            .await?;
+        let witnesses_register = ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/witnesses_register",
+                self.governance_id
+            )))
+            .await?;
+        match &event_request {
+            EventRequest::Transfer(transfer_request) => {
+                let transfer_ok = matches!(
+                    &event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
+                if !transfer_ok {
+                    return Ok(());
+                }
+                node.tell(NodeMessage::TransferSubject(TransferSubject {
+                    name: self.subject_metadata.name.clone(),
+                    subject_id: subject_id.clone(),
+                    new_owner: transfer_request.new_owner.clone(),
+                    actual_owner: event.ledger_seal_signature.signer.clone(),
+                }))
+                .await?;
+                report.writes_resent += 1;
+                witnesses_register
+                    .tell(WitnessesRegisterMessage::Transfer {
+                        subject_id: subject_id.clone(),
+                        new_owner: transfer_request.new_owner.clone(),
+                        gov_version: event.gov_version,
+                    })
+                    .await?;
+                report.writes_resent += 1;
+                let transfer_verification_register = ctx
+                    .system()
+                    .get_actor::<TransferVerificationRegister>(
+                        &ActorPath::from(format!(
+                            "/user/node/subject_manager/{}/transfer_verification_register",
+                            self.governance_id
+                        )),
+                    )
+                    .await?;
+                transfer_verification_register
+                    .tell(TransferVerificationRegisterMessage::Remove {
+                        subject_id: subject_id.clone(),
+                    })
+                    .await?;
+                report.writes_resent += 1;
+            }
+            EventRequest::Reject(..) => {
+                node.tell(NodeMessage::RejectTransfer(subject_id.clone()))
+                    .await?;
+                report.writes_resent += 1;
+                witnesses_register
+                    .tell(WitnessesRegisterMessage::Reject {
+                        subject_id,
+                        sn: event.sn,
+                        gov_version: event.gov_version,
+                    })
+                    .await?;
+                report.writes_resent += 1;
+            }
+            EventRequest::Confirm(..) => {
+                node.tell(NodeMessage::ConfirmTransfer(subject_id.clone()))
+                    .await?;
+                report.writes_resent += 1;
+                // Convergent move: the register drops the subject from
+                // every matching owner entry, so the recorded old owner
+                // does not need to be exact on replay.
+                let new_owner =
+                    event.ledger_seal_signature.signer.clone();
+                let subject_register = ctx
+                    .system()
+                    .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/subject_register",
+                        self.governance_id
+                    )))
+                    .await?;
+                subject_register
+                    .tell(SubjectRegisterMessage::UpdateSubject {
+                        new_owner: new_owner.clone(),
+                        old_owner: new_owner,
+                        subject_id: subject_id.clone(),
+                        namespace: self.namespace.to_string(),
+                        schema_id: self.subject_metadata.schema_id.clone(),
+                        gov_version: event.gov_version,
+                    })
+                    .await?;
+                report.writes_resent += 1;
+                witnesses_register
+                    .tell(WitnessesRegisterMessage::Confirm {
+                        subject_id,
+                        sn: event.sn,
+                        gov_version: event.gov_version,
+                    })
+                    .await?;
+                report.writes_resent += 1;
+            }
+            EventRequest::EOL(..) => {
+                node.tell(NodeMessage::EOLSubject {
+                    subject_id,
+                    i_owner: *self.our_key
+                        == self.subject_metadata.owner,
+                })
+                .await?;
+                report.writes_resent += 1;
+            }
+            _ => {}
+        }
         Ok(())
     }
 }

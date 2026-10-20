@@ -403,7 +403,7 @@ async fn test_request_deserialization() {
 async fn test_approval_deserialization() {
     // GET /approvals/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
     // GET /approvals?state={ApprovalState} -> Vec<ApprovalEntry>
-    // PATCH /approvals/{subject_id} + Json<String> -> String
+    // PATCH /approvals/{subject_id} + Json<PatchApproval> -> String
 
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
@@ -458,6 +458,7 @@ async fn test_approval_deserialization() {
     assert_eq!(approval.request.sn, 1);
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
+    assert!(!approval.request_id.is_empty());
 
     let (.., body) = make_request(
         &client,
@@ -508,7 +509,12 @@ async fn test_approval_deserialization() {
         &server.url(&format!("/approvals/{}", request_data.subject_id)),
         "PATCH",
         None,
-        Some(json!("accepted")),
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval.request_id,
+            "expected_version": approval.version,
+            "expected_issued_at": approval.request.issued_at,
+        })),
     )
     .await;
 
@@ -518,8 +524,8 @@ async fn test_approval_deserialization() {
     assert_eq!(
         res,
         format!(
-            "The approval request for subject {} has changed to accepted",
-            request_data.subject_id
+            "The approval request {} (version {}) for subject {} has changed to accepted",
+            approval.request_id, approval.version, request_data.subject_id
         )
     );
 
@@ -570,6 +576,202 @@ async fn test_approval_deserialization() {
     assert!(status.is_success(), "{body}");
     let approvals: Vec<ApprovalEntry> = serde_json::from_value(body).unwrap();
     assert_eq!(approvals.len(), 1);
+}
+
+// --- Manual approval binds the vote to the consulted request ---
+#[test(tokio::test)]
+async fn test_approval_rejects_stale_identity() {
+    // A vote for a superseded request must fail with 409 instead of
+    // signing a change the operator never reviewed; repeating the
+    // same decision on the same request stays accepted.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    async fn poll_pending(
+        client: &Client,
+        server: &TestServer,
+        subject_id: &str,
+    ) -> ApprovalEntry {
+        let started = std::time::Instant::now();
+        loop {
+            let (status, body) = make_request(
+                client,
+                &server.url(&format!("/approvals/{subject_id}")),
+                "GET",
+                None,
+                None,
+            )
+            .await;
+            assert!(status.is_success(), "{body}");
+            let approval: Option<ApprovalEntry> =
+                serde_json::from_value(body).unwrap();
+            if let Some(approval) = approval
+                && approval.state == ApprovalState::Pending
+            {
+                return approval;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "no pending approval for {subject_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    let key_a = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let body = add_governance_member_as_witness(
+        &client,
+        &server,
+        None,
+        &request_data.subject_id,
+        &key_a,
+    )
+    .await;
+    let _request_data: RequestData = serde_json::from_value(body).unwrap();
+
+    let approval_a = poll_pending(&client, &server, &request_data.subject_id).await;
+    assert!(!approval_a.request_id.is_empty());
+
+    // An unknown identity never matches: 409, nothing voted.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": "no-such-request",
+            "expected_version": 0,
+            "expected_issued_at": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("conflict"), "{body}");
+
+    // The consulted identity votes once.
+    let vote_a = json!({
+        "state": "accepted",
+        "expected_request_id": approval_a.request_id,
+        "expected_version": approval_a.version,
+        "expected_issued_at": approval_a.request.issued_at,
+    });
+    let (status, first) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(vote_a.clone()),
+    )
+    .await;
+    assert!(status.is_success(), "{first}");
+
+    // Repeating the same decision on the same request is idempotent.
+    let (status, second) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(vote_a),
+    )
+    .await;
+    assert!(status.is_success(), "{second}");
+    assert_eq!(first, second);
+
+    // A second fact replaces the pending request: the old identity
+    // must now conflict while the fresh one still votes. New member
+    // name on purpose (the shared helper hardcodes "Node1").
+    let key_b = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let (status, body) = make_request(
+        &client,
+        &server.url("/requests"),
+        "POST",
+        None,
+        Some(json!({
+            "request": {
+                "event": "fact",
+                "data": {
+                    "subject_id": request_data.subject_id,
+                    "payload": {
+                        "members": {
+                            "add": [
+                                {
+                                    "name": "Node2",
+                                    "key": key_b
+                                }
+                            ]
+                        },
+                        "roles": {
+                            "governance": {
+                                "add": {
+                                    "witness": ["Node2"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "governance fact failed: {body}");
+    let _request_data: RequestData = serde_json::from_value(body).unwrap();
+
+    let approval_b = poll_pending(&client, &server, &request_data.subject_id).await;
+    assert_ne!(
+        (
+            approval_b.request_id.clone(),
+            approval_b.version,
+            approval_b.request.issued_at
+        ),
+        (
+            approval_a.request_id.clone(),
+            approval_a.version,
+            approval_a.request.issued_at
+        ),
+        "the second fact must open a new approval collection"
+    );
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval_a.request_id,
+            "expected_version": approval_a.version,
+            "expected_issued_at": approval_a.request.issued_at,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval_b.request_id,
+            "expected_version": approval_b.version,
+            "expected_issued_at": approval_b.request.issued_at,
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
 }
 
 // --- SubjectAccess Endpoints ---

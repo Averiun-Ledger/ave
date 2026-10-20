@@ -343,7 +343,12 @@ pub fn materialize_role_test_path(method: &str, path: &str) -> String {
 
 pub fn role_test_request_body(method: &str, path: &str) -> Option<Value> {
     match (method, path) {
-        ("patch", "/approvals/{subject_id}") => Some(json!("Accepted")),
+        ("patch", "/approvals/{subject_id}") => Some(json!({
+            "state": "accepted",
+            "expected_request_id": "blocked",
+            "expected_version": 0,
+            "expected_issued_at": 0,
+        })),
         ("put", "/governances/{subject_id}/authorize") => {
             Some(json!(["ExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI"]))
         }

@@ -7,6 +7,11 @@ use crate::{
     model::error::{LedgerError, ProtocolsError},
 };
 
+/// Machine-readable prefix for stale manual votes: the pending
+/// request changed between consult and vote. Api maps it to a 409
+/// instead of a 500.
+pub const APPROVAL_CONFLICT_PREFIX: &str = "approval conflict";
+
 #[derive(Debug, Error, Clone)]
 pub enum RequestHandlerError {
     /// Helpers (hash algorithm, network sender) are not initialized.
@@ -40,6 +45,19 @@ pub enum RequestHandlerError {
     /// Failed to change approval state.
     #[error("failed to change approval state")]
     ApprovalChangeFailed,
+
+    /// The pending approval changed between consult and vote: no vote
+    /// was cast.
+    #[error(
+        "approval conflict for subject '{subject}': expected request '{expected_request_id}' version {expected_version}, stored request '{stored_request_id}' version {stored_version}"
+    )]
+    ApprovalConflict {
+        subject: String,
+        expected_request_id: String,
+        expected_version: u64,
+        stored_request_id: String,
+        stored_version: u64,
+    },
 
     /// Failed to get approval state.
     #[error("failed to get approval state")]
