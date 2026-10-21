@@ -204,7 +204,19 @@ async fn local_build_wasm(
     build_dir: &std::path::Path,
     root: &std::path::Path,
 ) -> Vec<u8> {
-    local_build_wasm_with_toolchain(source, build_dir, root, "").await
+    local_build_wasm_with_toolchain(source, build_dir, root, "", false).await
+}
+
+/// Direct in-process build through the shared procedure. `sandbox`
+/// selects the production sandbox explicitly: suites default to
+/// `false` so they never depend on namespace support, except the
+/// dedicated sandbox tests.
+async fn local_build_wasm_sandboxed(
+    source: &str,
+    build_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<u8> {
+    local_build_wasm_with_toolchain(source, build_dir, root, "", true).await
 }
 
 async fn local_build_wasm_with_toolchain(
@@ -212,6 +224,7 @@ async fn local_build_wasm_with_toolchain(
     build_dir: &std::path::Path,
     root: &std::path::Path,
     toolchain: &str,
+    sandbox: bool,
 ) -> Vec<u8> {
     use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
     let decoded =
@@ -247,6 +260,7 @@ async fn local_build_wasm_with_toolchain(
         locked: false,
         timeout: None,
         kill_process_group: false,
+        sandbox,
     };
     ave_build::build_contract_wasm(build_dir, &request)
         .await
@@ -714,6 +728,7 @@ async fn compile_pinned_toolchain_matches_local_build() {
             &build_dir,
             root.path(),
             toolchain,
+            false,
         )
         .await;
 
@@ -746,8 +761,10 @@ async fn local_build_is_byte_identical_across_contract_roots() {
     let build_a = root_a.path().join("contracts").join("parity");
     let build_b = root_b.path().join("contracts").join("parity");
 
-    let wasm_a = local_build_wasm(&source, &build_a, root_a.path()).await;
-    let wasm_b = local_build_wasm(&source, &build_b, root_b.path()).await;
+    let wasm_a =
+        local_build_wasm_sandboxed(&source, &build_a, root_a.path()).await;
+    let wasm_b =
+        local_build_wasm_sandboxed(&source, &build_b, root_b.path()).await;
 
     assert_eq!(
         wasm_a, wasm_b,
@@ -776,4 +793,274 @@ async fn local_build_is_byte_identical_across_contract_roots() {
             String::from_utf8_lossy(&needle)
         );
     }
+}
+
+/// Malicious shape (mirrors `example-malicious` in ave-contract-sdk):
+/// reads host env at compile time. The node build environment is
+/// scrubbed, so this must fail to compile even when the outer
+/// process exports the variable.
+const CONTRACT_ENV_SENTINEL: &str = r#"
+use serde::{Serialize, Deserialize};
+use ave_contract_sdk as sdk;
+
+const STOLEN: &str = env!("AVE_SECRET_SENTINEL");
+
+#[derive(Serialize, Deserialize, Clone)]
+struct State {
+    pub four: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+enum StateEvent {
+    ModFour { data: u32 },
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn main_function(
+    state_ptr: i32,
+    init_state_ptr: i32,
+    event_ptr: i32,
+    is_owner: i32,
+) -> u32 {
+    let _ = STOLEN.len();
+    sdk::execute_contract(
+        state_ptr,
+        init_state_ptr,
+        event_ptr,
+        is_owner,
+        contract_logic,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe fn init_check_function(state_ptr: i32) -> u32 {
+    sdk::check_init_data(state_ptr, init_logic)
+}
+
+fn init_logic(
+    _state: &State,
+    contract_result: &mut sdk::ContractInitCheck,
+) {
+    contract_result.success = true;
+}
+
+fn contract_logic(
+    context: &sdk::Context<StateEvent>,
+    contract_result: &mut sdk::ContractResult<State>,
+) {
+    let StateEvent::ModFour { data } = context.event;
+    contract_result.state.four = data;
+}
+"#;
+
+/// Fallible local build through the shared `ave-build` procedure:
+/// same steps as `local_build_wasm` but returns the error instead
+/// of panicking, so negative tests can assert rejection.
+async fn try_local_build_wasm(
+    source_b64: &str,
+    build_dir: &std::path::Path,
+    root: &std::path::Path,
+    sandbox: bool,
+) -> Result<Vec<u8>, String> {
+    use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
+    let decoded = pipeline::decode_contract_source(source_b64)
+        .map_err(|e| e.to_string())?;
+    let (rust_src, rustc_commit) =
+        ave_build::query_sysroot("").await.map_err(|e| e.to_string())?;
+    let manifest_toml = pipeline::compilation_toml();
+    let request = ave_build::BuildRequest {
+        source: &decoded,
+        manifest_toml: &manifest_toml,
+        config_template: CONTRACT_CARGO_CONFIG,
+        lockfile: None,
+        target_dir: std::path::PathBuf::from(".build-target"),
+        vendor_dir: None,
+        cargo_home: root.join(".cargo-home"),
+        toolchain: "",
+        cargo: ave_build::CargoProgram::System,
+        rust_src,
+        rustc_commit,
+        offline: false,
+        locked: false,
+        timeout: None,
+        kill_process_group: false,
+        sandbox,
+    };
+    ave_build::build_contract_wasm(build_dir, &request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Outer environment must not shape artifacts: the same source
+/// built with different `AVE_SECRET_SENTINEL` values produces
+/// byte-identical wasm without the secret embedded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn local_build_ignores_outer_env_sentinel() {
+    let source = source_b64(CONTRACT_D);
+    // Distinct outer values; the build environment is scrubbed, so
+    // both builds must behave as if the variable were absent.
+    // `set_var` is unsafe in Rust 2024; this suite is `#[serial]`.
+    unsafe { std::env::set_var("AVE_SECRET_SENTINEL", "outer-value-a") };
+    let root_a = tempfile::tempdir().expect("failed to create tempdir A");
+    let build_a = root_a.path().join("contracts").join("env-a");
+    let wasm_a =
+        local_build_wasm_sandboxed(&source, &build_a, root_a.path()).await;
+
+    unsafe { std::env::set_var("AVE_SECRET_SENTINEL", "outer-value-b") };
+    let root_b = tempfile::tempdir().expect("failed to create tempdir B");
+    let build_b = root_b.path().join("contracts").join("env-b");
+    let wasm_b =
+        local_build_wasm_sandboxed(&source, &build_b, root_b.path()).await;
+    unsafe { std::env::remove_var("AVE_SECRET_SENTINEL") };
+
+    assert_eq!(
+        wasm_a, wasm_b,
+        "outer env must not shape the artifact bytes"
+    );
+    for sentinel in [b"outer-value-a".as_slice(), b"outer-value-b".as_slice()] {
+        assert!(
+            !wasm_a
+                .windows(sentinel.len())
+                .any(|w| w == sentinel),
+            "the artifact embeds outer env"
+        );
+    }
+}
+
+/// A contract reading host env at compile time is rejected: the
+/// scrubbed build environment hides `AVE_SECRET_SENTINEL`, so
+/// `env!` fails the build instead of embedding the secret.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn local_build_rejects_env_sentinel_contract() {
+    unsafe { std::env::set_var("AVE_SECRET_SENTINEL", "top-secret-value") };
+    let source = source_b64(CONTRACT_ENV_SENTINEL);
+    let root = tempfile::tempdir().expect("failed to create tempdir");
+    let build_dir = root.path().join("contracts").join("env-evil");
+    let result =
+        try_local_build_wasm(&source, &build_dir, root.path(), true).await;
+    unsafe { std::env::remove_var("AVE_SECRET_SENTINEL") };
+
+    assert_eq!(
+        result,
+        Err("cargo build failed".to_owned()),
+        "a contract using env! on host secrets must fail compilation, \
+         not sandbox staging"
+    );
+}
+
+/// Shape shared by the file-exfiltration probes below: identical to
+/// `CONTRACT_D` but embedding an absolute host path at compile time.
+/// The sandbox root contains no such path, so the build must fail
+/// instead of smuggling host bytes into the artifact.
+fn contract_with_included_file(abs_path: &str) -> String {
+    format!(
+        r#"
+use serde::{{Serialize, Deserialize}};
+use ave_contract_sdk as sdk;
+
+const LEAK: &[u8] = include_bytes!("{abs_path}");
+
+#[derive(Serialize, Deserialize, Clone)]
+struct State {{
+    pub four: u32,
+}}
+
+#[derive(Serialize, Deserialize)]
+enum StateEvent {{
+    ModFour {{ data: u32 }},
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe fn main_function(
+    state_ptr: i32,
+    init_state_ptr: i32,
+    event_ptr: i32,
+    is_owner: i32,
+) -> u32 {{
+    let _ = LEAK.len();
+    sdk::execute_contract(
+        state_ptr,
+        init_state_ptr,
+        event_ptr,
+        is_owner,
+        contract_logic,
+    )
+}}
+
+#[unsafe(no_mangle)]
+pub unsafe fn init_check_function(state_ptr: i32) -> u32 {{
+    sdk::check_init_data(state_ptr, init_logic)
+}}
+
+fn init_logic(
+    _state: &State,
+    contract_result: &mut sdk::ContractInitCheck,
+) {{
+    contract_result.success = true;
+}}
+
+fn contract_logic(
+    context: &sdk::Context<StateEvent>,
+    contract_result: &mut sdk::ContractResult<State>,
+) {{
+    let StateEvent::ModFour {{ data }} = context.event;
+    contract_result.state.four = data;
+}}
+"#
+    )
+}
+
+/// A secret placed in the real home directory is unreachable inside
+/// the sandbox: only the toolchain, loader libraries, vendor,
+/// cargo home and build directory exist there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn local_build_cannot_read_home_secret() {
+    let home = std::env::var_os("HOME").expect("HOME must be set");
+    let secret_path =
+        std::path::Path::new(&home).join(".ave-sandbox-test-secret");
+    std::fs::write(&secret_path, b"sandbox-secret-value")
+        .expect("secret fixture must be writable");
+    let source = BASE64_STANDARD.encode(contract_with_included_file(
+        &secret_path.to_string_lossy(),
+    ));
+    let root = tempfile::tempdir().expect("failed to create tempdir");
+    let build_dir = root.path().join("contracts").join("home-evil");
+    let result =
+        try_local_build_wasm(&source, &build_dir, root.path(), true).await;
+    std::fs::remove_file(&secret_path).ok();
+
+    let err = result.expect_err(
+        "a contract including a host file must not compile in the sandbox",
+    );
+    assert_eq!(
+        err, "cargo build failed",
+        "a contract including a host file must fail compilation, \
+         not sandbox staging: {err}"
+    );
+    assert!(
+        !err.contains("sandbox-secret-value"),
+        "the error itself leaks the secret: {err}"
+    );
+}
+
+/// Host identity files are absent from the sandbox root as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn local_build_cannot_read_etc_hostname() {
+    let source = BASE64_STANDARD
+        .encode(contract_with_included_file("/etc/hostname"));
+    let root = tempfile::tempdir().expect("failed to create tempdir");
+    let build_dir = root.path().join("contracts").join("etc-evil");
+    let result =
+        try_local_build_wasm(&source, &build_dir, root.path(), true).await;
+
+    assert_eq!(
+        result,
+        Err("cargo build failed".to_owned()),
+        "a contract including /etc/hostname must fail compilation, \
+         not sandbox staging"
+    );
 }

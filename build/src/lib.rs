@@ -11,6 +11,8 @@
 //! inputs): same inputs in, byte-identical config and procedure
 //! out, on any machine with the pinned toolchain.
 
+pub mod sandbox;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -122,6 +124,66 @@ pub struct BuildRequest<'a> {
     /// whole build tree (cargo + rustc + linker) instead of
     /// orphaning it over a directory that is removed right after.
     pub kill_process_group: bool,
+    /// Run the build inside the unprivileged Linux sandbox (own
+    /// user/mount/UTS namespaces, mirrored minimal root, no host
+    /// network when `offline`). Production compilers and the
+    /// off-chain pin tooling always set this; test harnesses clear
+    /// it so suites never depend on namespace support. Ignored
+    /// outside Linux, where only the environment scrub applies.
+    pub sandbox: bool,
+}
+
+/// Build children run with a scrubbed environment so contract build
+/// scripts can not read host secrets via compile-time `env!`.
+/// Only tool discovery and temp locations survive; every path that
+/// shapes artifacts (`CARGO_HOME`, `SOURCE_DATE_EPOCH`, `RUSTC`) is
+/// set explicitly by the caller after this runs.
+fn isolate_build_env(cmd: &mut Command) {
+    let path = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME");
+    let userprofile = std::env::var_os("USERPROFILE");
+    let systemroot = std::env::var_os("SYSTEMROOT");
+    let windir = std::env::var_os("WINDIR");
+    let comspec = std::env::var_os("ComSpec");
+    let tmpdir = std::env::var_os("TMPDIR");
+    let tmp_var = std::env::var_os("TMP");
+    let temp = std::env::var_os("TEMP");
+    let rustup_home = std::env::var_os("RUSTUP_HOME");
+    let rustup_toolchain = std::env::var_os("RUSTUP_TOOLCHAIN");
+    cmd.env_clear();
+    if let Some(v) = path {
+        cmd.env("PATH", v);
+    }
+    if let Some(v) = home {
+        cmd.env("HOME", v);
+    }
+    if let Some(v) = userprofile {
+        cmd.env("USERPROFILE", v);
+    }
+    if let Some(v) = systemroot {
+        cmd.env("SYSTEMROOT", v);
+    }
+    if let Some(v) = windir {
+        cmd.env("WINDIR", v);
+    }
+    if let Some(v) = comspec {
+        cmd.env("ComSpec", v);
+    }
+    if let Some(v) = tmpdir {
+        cmd.env("TMPDIR", v);
+    }
+    if let Some(v) = tmp_var {
+        cmd.env("TMP", v);
+    }
+    if let Some(v) = temp {
+        cmd.env("TEMP", v);
+    }
+    if let Some(v) = rustup_home {
+        cmd.env("RUSTUP_HOME", v);
+    }
+    if let Some(v) = rustup_toolchain {
+        cmd.env("RUSTUP_TOOLCHAIN", v);
+    }
 }
 
 /// Command running `rustc` of the SELECTED toolchain: `rustup run`
@@ -130,9 +192,12 @@ pub struct BuildRequest<'a> {
 /// One constructor so probes can never query different compilers.
 fn rustc_command(toolchain: &str) -> Command {
     if toolchain.is_empty() {
-        Command::new("rustc")
+        let mut command = Command::new("rustc");
+        isolate_build_env(&mut command);
+        command
     } else {
         let mut command = Command::new("rustup");
+        isolate_build_env(&mut command);
         command.arg("run").arg(toolchain).arg("rustc");
         command
     }
@@ -380,43 +445,71 @@ pub async fn run_cargo_build(
     contract_path: &Path,
     request: &BuildRequest<'_>,
 ) -> Result<(), BuildError> {
-    let cargo = contract_path.join("Cargo.toml");
+    // Absolute program: the sandbox pivot drops every directory that
+    // is not mirrored, so `PATH` lookup must happen in the parent.
+    // (The manifest path is derived from the canonical build dir
+    // below on Linux, from the given dir elsewhere.)
     // A named rustup toolchain runs isolated (`rustup run`), never
     // through process-global env: concurrent builds with different
     // toolchains can not interfere. Empty selects the system cargo.
-    let mut command = match &request.cargo {
-        CargoProgram::System => Command::new("cargo"),
-        CargoProgram::Rustup("") => Command::new("cargo"),
-        CargoProgram::Rustup(name) => {
-            let mut command = Command::new("rustup");
-            command.arg("run").arg(name).arg("cargo");
-            command
-        }
+    let (program, rustup_toolchain) = match &request.cargo {
+        CargoProgram::System => ("cargo".to_owned(), None),
+        CargoProgram::Rustup("") => ("cargo".to_owned(), None),
+        CargoProgram::Rustup(name) => ("rustup".to_owned(), Some(*name)),
         CargoProgram::Pinned(binary) => {
-            let mut command = Command::new(binary);
-            if !request.toolchain.is_empty() {
-                // Pin rustc to the selected toolchain: resolve its
-                // binary path through rustup (empty = system rustc
-                // from PATH, as before).
-                let rustc = rustc_binary(request.toolchain).await?;
-                command.env("RUSTC", rustc);
-            }
-            command
+            (binary.to_string_lossy().into_owned(), None)
         }
+    };
+    // Absolute program path: after the sandbox pivot only mirrored
+    // directories exist, so `PATH` lookup must happen in the parent.
+    // Without the sandbox the ambient lookup applies, as before.
+    // (The manifest path is derived from the canonical build dir
+    // below on Linux, from the given dir elsewhere.)
+    #[cfg(target_os = "linux")]
+    let program = if request.sandbox {
+        sandbox::resolve_in_path(&program)
+            .map(|absolute| absolute.to_string_lossy().into_owned())
+            .ok_or_else(|| BuildError::CargoSpawnFailed {
+                details: format!("build program not found: {program}"),
+            })?
+    } else {
+        program
+    };
+    let mut command = Command::new(&program);
+    isolate_build_env(&mut command);
+    if let Some(name) = rustup_toolchain {
+        command.arg("run").arg(name).arg("cargo");
+    }
+    let rustc_path = if matches!(&request.cargo, CargoProgram::Pinned(_))
+        && !request.toolchain.is_empty()
+    {
+        // Pin rustc to the selected toolchain: resolve its
+        // binary path through rustup (empty = system rustc
+        // from PATH, as before).
+        let rustc = rustc_binary(request.toolchain).await?;
+        command.env("RUSTC", &rustc);
+        Some(PathBuf::from(rustc))
+    } else {
+        None
     };
     command
         .arg("build")
-        .arg(format!("--manifest-path={}", cargo.to_string_lossy()))
         .arg("--target")
         .arg(rules::WASM_TARGET)
         .arg("--release")
-        .current_dir(contract_path)
         .env("CARGO_HOME", &request.cargo_home)
         // Single source of truth (`ave_common::build`): no wall-clock
         // input may shape artifacts.
         .env("SOURCE_DATE_EPOCH", rules::SOURCE_DATE_EPOCH)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    #[cfg(not(target_os = "linux"))]
+    command.arg(format!(
+        "--manifest-path={}",
+        contract_path.join("Cargo.toml").to_string_lossy()
+    ));
+    #[cfg(not(target_os = "linux"))]
+    command.current_dir(contract_path);
 
     if request.offline {
         command.arg("--offline");
@@ -424,6 +517,49 @@ pub async fn run_cargo_build(
     if request.locked {
         command.arg("--locked");
     }
+
+    // Linux sandbox: mirrored minimal root (toolchain, loader libs,
+    // vendor, cargo home, build dir). Identical absolute paths keep
+    // honest artifacts byte-identical; everything else is absent.
+    // Skipped when the caller opts out (test harnesses): the build
+    // then runs with the ambient filesystem, exactly as before.
+    #[cfg(target_os = "linux")]
+    let contract_path = if !request.sandbox {
+        let cargo = contract_path.join("Cargo.toml");
+        command.arg(format!("--manifest-path={}", cargo.to_string_lossy()));
+        contract_path.to_path_buf()
+    } else {
+        let sysroot = request
+            .rust_src
+            .ancestors()
+            .nth(4)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let (spec, canonical_build, host_cc) = sandbox::prepare(
+            Path::new(&program),
+            rustc_path.as_deref(),
+            &sysroot,
+            &request.cargo_home,
+            request.vendor_dir.as_deref(),
+            contract_path,
+            request.offline,
+        )
+        .await
+        .map_err(|e| BuildError::CargoSpawnFailed {
+            details: format!("sandbox staging failed: {e}"),
+        })?;
+        let cargo = canonical_build.join("Cargo.toml");
+        command.arg(format!("--manifest-path={}", cargo.to_string_lossy()));
+        // Absolute C linker for build scripts: no `PATH` lookup or
+        // alternatives chain inside the sandbox.
+        if let Some(cc) = host_cc {
+            command.env("CC", &cc);
+        }
+        sandbox::apply(&mut command, spec);
+        canonical_build
+    };
+    #[cfg(target_os = "linux")]
+    command.current_dir(&contract_path);
 
     #[cfg(unix)]
     if request.kill_process_group {
@@ -537,7 +673,9 @@ fn cargo_config_path(contract_path: &Path) -> PathBuf {
 /// Resolves the rustc binary of a named rustup toolchain
 /// (`rustup which`), for pinning `RUSTC` under an explicit cargo.
 async fn rustc_binary(toolchain: &str) -> Result<String, BuildError> {
-    let output = Command::new("rustup")
+    let mut command = Command::new("rustup");
+    isolate_build_env(&mut command);
+    let output = command
         .arg("which")
         .arg("--toolchain")
         .arg(toolchain)

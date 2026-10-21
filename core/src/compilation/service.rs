@@ -642,6 +642,10 @@ impl CompilerServer {
             locked: false,
             timeout: Some(pipeline::BUILD_TIMEOUT),
             kill_process_group: true,
+            // Test-only pool: suites opt out of namespaces so they
+            // never depend on the host kernel. Production compilers
+            // and the dedicated sandbox tests set this.
+            sandbox: false,
         };
         let build_result = ave_build::build_contract_wasm(&build_dir, &request)
             .await

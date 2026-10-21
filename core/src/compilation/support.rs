@@ -500,6 +500,9 @@ impl CompilerSupport {
             locked,
             timeout: Some(pipeline::BUILD_TIMEOUT),
             kill_process_group: true,
+            // Production compilers always build inside the sandbox.
+            // Test harnesses clear this flag explicitly.
+            sandbox: true,
         };
         let wasm = ave_build::build_contract_wasm(build_dir, &request)
             .await
