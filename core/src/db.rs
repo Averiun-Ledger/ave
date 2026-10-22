@@ -31,22 +31,22 @@ impl Database {
         // Passive permission check before opening the database
         #[cfg(feature = "rocksdb")]
         #[allow(irrefutable_let_patterns)]
-        if let AveInternalDBFeatureConfig::Rocksdb { path } = &config.db {
-            check_dir_writable(path)
+        if let AveInternalDBFeatureConfig::Rocksdb { .. } = &config.db {
+            check_dir_writable(&config.db.path())
                 .map_err(|e| StoreError::CreateStore { reason: e })?;
         }
         #[cfg(feature = "sqlite")]
         #[allow(irrefutable_let_patterns)]
-        if let AveInternalDBFeatureConfig::Sqlite { path } = &config.db {
-            check_dir_writable(path)
+        if let AveInternalDBFeatureConfig::Sqlite { .. } = &config.db {
+            check_dir_writable(&config.db.path())
                 .map_err(|e| StoreError::CreateStore { reason: e })?;
         }
 
         match &config.db {
             #[cfg(feature = "rocksdb")]
-            AveInternalDBFeatureConfig::Rocksdb { path } => {
+            AveInternalDBFeatureConfig::Rocksdb { .. } => {
                 let manager = RocksDbManager::new(
-                    path,
+                    &config.db.path(),
                     if config.durability {
                         Durability::Sync
                     } else {
@@ -57,9 +57,9 @@ impl Database {
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
-            AveInternalDBFeatureConfig::Sqlite { path } => {
+            AveInternalDBFeatureConfig::Sqlite { .. } => {
                 let manager = SqliteManager::new(
-                    path,
+                    &config.db.path(),
                     if config.durability {
                         Durability::Sync
                     } else {

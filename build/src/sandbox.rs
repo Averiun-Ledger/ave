@@ -151,11 +151,16 @@ pub async fn prepare(
         push(dir, false);
     }
     push(sysroot.to_path_buf(), false);
-    // The rustup proxy locates toolchains through `$HOME/.rustup`;
-    // mirror only its settings file, not the whole tree: the
-    // toolchain itself is already mirrored above, and overlapping
-    // binds shadow each other.
-    if let Some(home) = std::env::var_os("HOME") {
+    // The rustup proxy locates toolchains through its home: prefer
+    // the explicit `$RUSTUP_HOME`, fall back to the conventional
+    // `$HOME/.rustup/settings.toml` so dev machines keep working
+    // unchanged. Never mirror a home tree wholesale.
+    if let Some(home) = std::env::var_os("RUSTUP_HOME") {
+        let dir = PathBuf::from(home);
+        if dir.is_dir() {
+            push(dir, false);
+        }
+    } else if let Some(home) = std::env::var_os("HOME") {
         let settings = PathBuf::from(home).join(".rustup/settings.toml");
         if settings.is_file() {
             push(settings, false);
@@ -423,6 +428,18 @@ pub async fn prepare(
             }
         }
     }
+    if std::env::var_os("AVE_SANDBOX_DUMP").is_some() {
+        for m in &mounts {
+            eprintln!(
+                "DBGMOUNT {} -> {} flags={} fstype={:?} best_effort={}",
+                m.source.to_string_lossy(),
+                m.target.to_string_lossy(),
+                m.flags,
+                m.fstype.as_ref().map(|f| f.to_string_lossy().into_owned()),
+                m.best_effort
+            );
+        }
+    }
     let spec_copies: Vec<(CString, Vec<u8>)> = copies
         .into_iter()
         .map(|(path, bytes)| (cstring(&target_of(&path)), bytes))
@@ -562,11 +579,12 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         flags |= libc::CLONE_NEWNET;
     }
     if unsafe { libc::unshare(flags) } != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("DBG unshare: {e}")));
     }
-    write_file(SETGROUPS, DENY)?;
-    write_file(UID_MAP, &spec.uid_map)?;
-    write_file(GID_MAP, &spec.gid_map)?;
+    write_file(SETGROUPS, DENY).map_err(|e| io::Error::new(e.kind(), format!("DBG setgroups: {e}")))?;
+    write_file(UID_MAP, &spec.uid_map).map_err(|e| io::Error::new(e.kind(), format!("DBG uid_map: {e}")))?;
+    write_file(GID_MAP, &spec.gid_map).map_err(|e| io::Error::new(e.kind(), format!("DBG gid_map: {e}")))?;
     // Private mounts: nothing below escapes to the host.
     do_mount(
         NONE,
@@ -592,7 +610,10 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             entry.data.as_deref(),
         );
         if result.is_err() && !entry.best_effort {
-            return result;
+            let e = result.unwrap_err();
+            let src = entry.source.to_string_lossy().into_owned();
+            let tgt = entry.target.to_string_lossy().into_owned();
+            return Err(io::Error::new(e.kind(), format!("DBG mount {src} -> {tgt} flags={}: {e}", entry.flags)));
         }
     }
     // Materialize copied content on top of the binds, before
@@ -603,8 +624,14 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             path.as_c_str(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
             0o644,
-        )?;
-        let result = raw_write(fd, bytes);
+        )
+        .map_err(|e| {
+            let p = path.to_string_lossy().into_owned();
+            io::Error::new(e.kind(), format!("DBG copy-open {p}: {e}"))
+        })?;
+        let result = raw_write(fd, bytes).map_err(|e| {
+            io::Error::new(e.kind(), format!("DBG copy-write: {e}"))
+        });
         raw_close(fd);
         result?;
     }
@@ -620,14 +647,18 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             entry.data.as_deref(),
         );
         if result.is_err() && !entry.best_effort {
-            return result;
+            let e = result.unwrap_err();
+            let src = entry.source.to_string_lossy().into_owned();
+            let tgt = entry.target.to_string_lossy().into_owned();
+            return Err(io::Error::new(e.kind(), format!("DBG mount {src} -> {tgt} flags={}: {e}", entry.flags)));
         }
     }
     // Fixed identity: hostnames never shape artifacts or logs.
     if unsafe { libc::sethostname(spec.hostname.as_ptr(), spec.hostname.as_bytes().len()) }
         != 0
     {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("DBG sethostname: {e}")));
     }
     // `pivot_root` requires the new root to be a mount point.
     do_mount(
@@ -636,7 +667,8 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         None,
         (libc::MS_BIND | libc::MS_REC) as libc::c_ulong,
         None,
-    )?;
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("DBG bindself: {e}")))?;
     // Pivot into the minimal root and drop the host tree.
     let pivoted = unsafe {
         libc::syscall(
@@ -646,14 +678,17 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         )
     };
     if pivoted != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("DBG pivot_root: {e}")));
     }
     const SLASH: &CStr = c"/";
     if unsafe { libc::chdir(SLASH.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("DBG chdir-slash: {e}")));
     }
     if unsafe { libc::umount2(OLD.as_ptr(), libc::MNT_DETACH) } != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("DBG umount_old: {e}")));
     }
     // Enter the build directory here, not only through the caller's
     // `current_dir`: that one runs before the pivot at the latest,
@@ -661,7 +696,9 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     // can not be resolved — and cargo would then miss the manifest's
     // `.cargo/config.toml`.
     if unsafe { libc::chdir(spec.workdir.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        let w = spec.workdir.to_string_lossy().into_owned();
+        return Err(io::Error::new(e.kind(), format!("DBG chdir-work {w}: {e}")));
     }
     Ok(())
 }

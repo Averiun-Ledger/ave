@@ -1,0 +1,364 @@
+# Ave node, RocksDB + compiler role (in-process toolchain).
+# One file builds both architectures WITHOUT emulation: every builder
+# stage runs natively on the host arch and cross-compiles the other
+# arch with the matching cross toolchain.
+# Usage (from the workspace root /home/ale/dev):
+#   docker build --target amd64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
+#   docker build --target arm64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
+
+ARG DEBIAN_AMD64_DIGEST=sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2
+ARG DEBIAN_ARM64_DIGEST=sha256:a66b19aa552f595b4ab276c6b4f9b24fa4546632c5ecd88cccdced4a6866323a
+ARG DISTROLESS_AMD64_DIGEST=sha256:a0426fc2d66bbaa64fa3577e6d654411a671752b8eba243882cc3cc533a00613
+ARG DISTROLESS_ARM64_DIGEST=sha256:76fe70b16ed7943288c1aacecbdb73edfdb5f5e75577ad6ae4de069b966862c9
+ARG RUSTUP_VERSION=1.28.2
+# Active pin: keep in sync with ave-common governance DEFAULT_PIN.
+# Changing the pin means a new image (never redefine).
+ARG PIN=rust-1.95.0_sdk-0.8.0_wasm32
+ARG PIN_LOCKFILE=contract-v1.Cargo.lock
+ARG RUSTC_VERSION=1.95.0
+ARG NODE_RUSTC_VERSION=1.98.1
+ARG CARGO_PROFILE=release
+ARG FEATURES="ext-sqlite rocksdb prometheus toolchain"
+
+# ============================================================================
+# System layers (native build tools; cross toolchains per builder below)
+# ============================================================================
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_AMD64_DIGEST} AS sys-amd64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
+    libssl-dev pkg-config llvm-dev ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_ARM64_DIGEST} AS sys-arm64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
+    libssl-dev pkg-config llvm-dev ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# Rust toolchain layer (pinned rustup + pinned toolchain + wasm target)
+# ============================================================================
+FROM --platform=$BUILDPLATFORM sys-${BUILDARCH} AS rust-base
+ARG RUSTUP_VERSION
+ARG RUSTC_VERSION
+ARG NODE_RUSTC_VERSION
+ARG TARGETARCH
+# Fixed homes so every absolute path below is identical on all
+# hosts and in all images. Toolchains must stay readable for the
+# non-root runtime user; the sandbox remounts them read-only anyway.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo HOME=/home/ave
+ENV PATH="/usr/local/cargo/bin:/usr/local/bin:${PATH}"
+RUN case "$TARGETARCH" in \
+      amd64) RUSTUP_ARCH=x86_64-unknown-linux-gnu ;; \
+      arm64) RUSTUP_ARCH=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" -o /tmp/rustup-init && \
+    chmod +x /tmp/rustup-init && \
+    /tmp/rustup-init -y --default-toolchain none --profile minimal && \
+    rm /tmp/rustup-init && \
+    mkdir -p /home/ave && chown 65532:65532 /home/ave
+# Node toolchain (builds ave-http itself; must satisfy all deps' MSRV)
+# plus the pinned contract toolchain (compiles contracts on-chain).
+# The node binary is built with the default toolchain below.
+# Minimal profile + explicit components: no clippy, rustfmt, docs.
+RUN rustup toolchain install "$NODE_RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo && \
+    rustup toolchain install "$RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo,rust-src && \
+    rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION" && \
+    rustup default "$NODE_RUSTC_VERSION" && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp && \
+    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
+    rm -rf /usr/local/cargo/registry /usr/local/cargo/git && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# ============================================================================
+# Common project sources (shared by both builders)
+# ============================================================================
+# NOTE: keep in sync with the workspace layout. Missing COPYs fail the
+# build early (ave-build, ave-contract-sdk and common/pins are path
+# dependencies and frozen inputs of the node build).
+
+# ============================================================================
+# Builder for AMD64 (x86_64 cross toolchain; native gcc on amd64 hosts)
+# On arm64 hosts the cross packages below are REQUIRED (UNTESTED there).
+# ============================================================================
+FROM --platform=$BUILDPLATFORM rust-base AS builder-amd64
+ARG CARGO_PROFILE
+ARG FEATURES
+ARG PIN
+ARG PIN_LOCKFILE
+ARG RUSTC_VERSION
+ARG NODE_RUSTC_VERSION
+ENV CARGO_PROFILE=$CARGO_PROFILE
+ENV FEATURES=$FEATURES
+ENV CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
+ENV CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
+ENV AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+ENV PKG_CONFIG_ALLOW_CROSS=1
+RUN if [ "$(uname -m)" != "x86_64" ]; then \
+      dpkg --add-architecture amd64 && apt-get update && \
+      apt-get install --no-install-recommends -y \
+        gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+        libc6-dev-amd64-cross libssl-dev:amd64 && \
+      apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi && \
+    mkdir -p /usr/local/bin && \
+    echo "builder-amd64 ready on $(uname -m)"
+
+COPY ./ave/http/Cargo.toml /ave/http/Cargo.toml
+COPY ./ave/identity/Cargo.toml /ave/identity/Cargo.toml
+COPY ./ave/core/Cargo.toml /ave/core/Cargo.toml
+COPY ./ave/bridge/Cargo.toml /ave/bridge/Cargo.toml
+COPY ./ave/network/Cargo.toml /ave/network/Cargo.toml
+COPY ./ave/common/Cargo.toml /ave/common/Cargo.toml
+COPY ./ave/build/Cargo.toml /ave/build/Cargo.toml
+COPY ./ave/Cargo.toml /ave/Cargo.toml
+COPY ./ave/Cargo.lock /ave/Cargo.lock
+COPY ./ave/README.md /ave/README.md
+COPY ./ave/common/pins /ave/common/pins
+COPY ./ave/common/build.rs /ave/common/build.rs
+COPY ./ave/common/proto /ave/common/proto
+
+COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
+COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/README.md ./ave-actors/databases/rocksdb_db/README.md
+COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/README.md ./ave-actors/databases/sqlite_db/README.md
+COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
+COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
+COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
+COPY ./ave-actors/README.md ./ave-actors/README.md
+
+COPY ./ave-contract-sdk/Cargo.toml ./ave-contract-sdk/Cargo.toml
+COPY ./ave-contract-sdk/src ./ave-contract-sdk/src
+
+COPY ./ave-reproducible-wasm/dist/cargo-ave-amd64 /usr/local/bin/cargo-ave-amd64
+COPY ./ave-reproducible-wasm/dist/cargo-ave-arm64 /usr/local/bin/cargo-ave-arm64
+COPY ./ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
+
+COPY ./ave/http/src ./ave/http/src
+COPY ./ave/http/migrations ./ave/http/migrations
+COPY ./ave/src ./ave/src
+COPY ./ave/identity/src ./ave/identity/src
+COPY ./ave/core/src ./ave/core/src
+COPY ./ave/core/migrations ./ave/core/migrations
+COPY ./ave/bridge/src ./ave/bridge/src
+COPY ./ave/network/src ./ave/network/src
+COPY ./ave/common/src ./ave/common/src
+COPY ./ave/build/src ./ave/build/src
+
+COPY ./ave-actors/actor/src ./ave-actors/actor/src
+COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
+COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
+COPY ./ave-actors/store/src ./ave-actors/store/src
+COPY ./ave-actors/src ./ave-actors/src
+
+WORKDIR /ave/http
+RUN cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES"
+
+# Pinned cargo + vendored deps for on-node contract builds.
+# NOTE: the SDK template carries an absolute path (upstream issue #9);
+# it is rewritten here to the in-context SDK copy. Do not "fix" this
+# by symlinking; the day the template uses the published crate this
+# sed goes away.
+RUN test "$(sha256sum /usr/local/bin/cargo-ave-amd64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_AMD64=' /tmp/toolchain.env | cut -d= -f2)" && \
+    mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
+    printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
+    mkdir -p /tmp/contract-template/.cargo && \
+    sed 's#path = "/home/ale/dev/ave-contract-sdk"#path = "/ave-contract-sdk"#' /ave-contract-sdk/src/runtime/contract_Cargo.toml > /tmp/contract-template/Cargo.toml && \
+    cp "/ave/common/pins/${PIN_LOCKFILE}" /tmp/contract-template/Cargo.lock && \
+    cargo vendor --manifest-path /tmp/contract-template/Cargo.toml /contracts/vendor --offline && \
+    printf '[build]\ntarget-dir = "/contracts/target"\n\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/contracts/vendor"\n' > /contracts/vendor-config.toml && \
+    cp /contracts/vendor-config.toml /tmp/contract-template/.cargo/config.toml && \
+    rustup run "$RUSTC_VERSION" cargo build --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline && \
+    rm -rf /contracts/target /tmp/contract-template && \
+    mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
+    if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/registry /usr/local/cargo/git && \
+    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
+    rm -f /usr/local/rustup/toolchains/*/bin/cargo /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
+    chmod -R a+rX /usr/local/rustup && \
+    du -sh /usr/local/rustup && \
+    mkdir -p /cargo-libs && \
+    for lib in $(ldd /usr/local/bin/cargo-ave-amd64 2>/dev/null | grep -o '/[^ ]*'); do \
+      mkdir -p "/cargo-libs$(dirname "$lib")"; cp -L "$lib" "/cargo-libs$lib"; \
+    done && \
+    echo "cargo-libs:" && du -sh /cargo-libs && ls /cargo-libs/usr/lib/x86_64-linux-gnu/ | head -30
+
+# ============================================================================
+# Builder for ARM64 (aarch64 cross toolchain; native gcc on arm64 hosts)
+# ============================================================================
+FROM --platform=$BUILDPLATFORM rust-base AS builder-arm64
+ARG CARGO_PROFILE
+ARG FEATURES
+ARG PIN
+ARG PIN_LOCKFILE
+ARG RUSTC_VERSION
+ARG NODE_RUSTC_VERSION
+ENV CARGO_PROFILE=$CARGO_PROFILE
+ENV FEATURES=$FEATURES
+ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+ENV PKG_CONFIG_ALLOW_CROSS=1
+RUN if [ "$(uname -m)" != "aarch64" ]; then \
+      dpkg --add-architecture arm64 && apt-get update && \
+      apt-get install --no-install-recommends -y \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+        libc6-dev-arm64-cross libssl-dev:arm64 && \
+      apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi && \
+    mkdir -p ~/.cargo && \
+    printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > ~/.cargo/config.toml
+# NOTE: on native arm64 hosts the aarch64 triplet binaries already ship
+# with gcc (same as x86_64 triplets on amd64); no extra packages needed.
+ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/usr/aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
+ENV OPENSSL_DIR_aarch64_unknown_linux_gnu=/usr
+ENV OPENSSL_LIB_DIR_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu
+
+COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
+COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
+COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
+COPY ./ave/bridge/Cargo.toml ./ave/bridge/Cargo.toml
+COPY ./ave/network/Cargo.toml ./ave/network/Cargo.toml
+COPY ./ave/common/Cargo.toml ./ave/common/Cargo.toml
+COPY ./ave/build/Cargo.toml ./ave/build/Cargo.toml
+COPY ./ave/Cargo.toml ./ave/Cargo.toml
+COPY ./ave/Cargo.lock ./ave/Cargo.lock
+COPY ./ave/README.md ./ave/README.md
+COPY ./ave/common/pins ./ave/common/pins
+COPY ./ave/common/build.rs ./ave/common/build.rs
+COPY ./ave/common/proto ./ave/common/proto
+
+COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
+COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
+COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
+COPY ./ave-actors/databases/rocksdb_db/README.md ./ave-actors/databases/rocksdb_db/README.md
+COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
+COPY ./ave-actors/databases/sqlite_db/README.md ./ave-actors/databases/sqlite_db/README.md
+COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
+COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
+COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
+COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
+COPY ./ave-actors/README.md ./ave-actors/README.md
+
+COPY ./ave-contract-sdk/Cargo.toml ./ave-contract-sdk/Cargo.toml
+COPY ./ave-contract-sdk/src ./ave-contract-sdk/src
+
+COPY ./ave-reproducible-wasm/dist/cargo-ave-amd64 /usr/local/bin/cargo-ave-amd64
+COPY ./ave-reproducible-wasm/dist/cargo-ave-arm64 /usr/local/bin/cargo-ave-arm64
+COPY ./ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
+
+COPY ./ave/http/src ./ave/http/src
+COPY ./ave/http/migrations ./ave/http/migrations
+COPY ./ave/src ./ave/src
+COPY ./ave/identity/src ./ave/identity/src
+COPY ./ave/core/src ./ave/core/src
+COPY ./ave/core/migrations ./ave/core/migrations
+COPY ./ave/bridge/src ./ave/bridge/src
+COPY ./ave/network/src ./ave/network/src
+COPY ./ave/common/src ./ave/common/src
+COPY ./ave/build/src ./ave/build/src
+
+COPY ./ave-actors/actor/src ./ave-actors/actor/src
+COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
+COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
+COPY ./ave-actors/store/src ./ave-actors/store/src
+COPY ./ave-actors/src ./ave-actors/src
+
+WORKDIR /ave/http
+RUN cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES"
+
+RUN test "$(sha256sum /usr/local/bin/cargo-ave-arm64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_ARM64=' /tmp/toolchain.env | cut -d= -f2)" && \
+    mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
+    printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
+    mkdir -p /tmp/contract-template/.cargo && \
+    sed 's#path = "/home/ale/dev/ave-contract-sdk"#path = "/ave-contract-sdk"#' /ave-contract-sdk/src/runtime/contract_Cargo.toml > /tmp/contract-template/Cargo.toml && \
+    cp "/ave/common/pins/${PIN_LOCKFILE}" /tmp/contract-template/Cargo.lock && \
+    cargo vendor --manifest-path /tmp/contract-template/Cargo.toml /contracts/vendor --offline && \
+    printf '[build]\ntarget-dir = "/contracts/target"\n\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/contracts/vendor"\n' > /contracts/vendor-config.toml && \
+    cp /contracts/vendor-config.toml /tmp/contract-template/.cargo/config.toml && \
+    rustup run "$RUSTC_VERSION" cargo build --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline && \
+    rm -rf /contracts/target /tmp/contract-template && \
+    mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
+    if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/registry /usr/local/cargo/git && \
+    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
+    rm -f /usr/local/rustup/toolchains/*/bin/cargo /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
+    chmod -R a+rX /usr/local/rustup && \
+    du -sh /usr/local/rustup && \
+    mkdir -p /cargo-libs && \
+    for lib in $(ldd /usr/local/bin/cargo-ave-arm64 2>/dev/null | grep -o '/[^ ]*'); do \
+      mkdir -p "/cargo-libs$(dirname "$lib")"; cp -L "$lib" "/cargo-libs$lib"; \
+    done && \
+    echo "cargo-libs:" && du -sh /cargo-libs
+
+# ============================================================================
+# Runtime dependency set (glibc + ssl + zlib + certs)
+# ============================================================================
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_AMD64_DIGEST} AS libs-amd64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    libssl3t64 zlib1g ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_ARM64_DIGEST} AS libs-arm64
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    libssl3t64 zlib1g ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# Final images (distroless, no shell, non-root)
+# ============================================================================
+FROM --platform=linux/amd64 gcr.io/distroless/cc-debian13@${DISTROLESS_AMD64_DIGEST} AS amd64
+ARG CARGO_PROFILE
+COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs-amd64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder-amd64 /ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-amd64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-amd64 /usr/local/bin/cargo-ave-amd64 /usr/local/bin/cargo-ave-pinned
+COPY --from=builder-amd64 /cargo-libs/lib /lib
+COPY --from=builder-amd64 /usr/local/rustup /usr/local/rustup
+COPY --from=builder-amd64 /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+COPY --from=builder-amd64 --chown=65532:65532 /home/ave /home/ave
+COPY --from=builder-amd64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
+COPY --from=builder-amd64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml
+COPY --from=builder-amd64 /ave/src /home/ale/dev/ave/src
+COPY --from=builder-amd64 /ave/common /home/ale/dev/ave/common
+ENV RUSTUP_HOME=/usr/local/rustup HOME=/home/ave
+ENV PATH="/usr/local/bin:${PATH}"
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/ave-http"]
+
+FROM --platform=linux/arm64 gcr.io/distroless/cc-debian13@${DISTROLESS_ARM64_DIGEST} AS arm64
+ARG CARGO_PROFILE
+COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs-arm64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder-arm64 /ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-arm64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-arm64 /usr/local/bin/cargo-ave-arm64 /usr/local/bin/cargo-ave-pinned
+COPY --from=builder-arm64 /cargo-libs/lib /lib
+COPY --from=builder-arm64 /usr/local/rustup /usr/local/rustup
+COPY --from=builder-arm64 /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+COPY --from=builder-arm64 --chown=65532:65532 /home/ave /home/ave
+COPY --from=builder-arm64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
+COPY --from=builder-arm64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml
+COPY --from=builder-arm64 /ave/src /home/ale/dev/ave/src
+COPY --from=builder-arm64 /ave/common /home/ale/dev/ave/common
+ENV RUSTUP_HOME=/usr/local/rustup HOME=/home/ave
+ENV PATH="/usr/local/bin:${PATH}"
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/ave-http"]

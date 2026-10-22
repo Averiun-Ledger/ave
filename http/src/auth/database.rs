@@ -1101,7 +1101,7 @@ impl AuthDatabase {
         spec: Option<MachineSpec>,
     ) -> Result<Self, DatabaseError> {
         // Create parent directory if it doesn't exist
-        let path = config.database_path.clone();
+        let path = config.database_path();
         if !Path::new(&path).exists() {
             fs::create_dir_all(&path).map_err(|e| {
                 DatabaseError::Initialize(format!(

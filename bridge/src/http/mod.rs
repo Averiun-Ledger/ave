@@ -4,11 +4,18 @@ use ave_common::Error;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     pub http_address: String,
     pub https_address: Option<String>,
+    /// TLS certificate file. TEST BUILDS ONLY (production:
+    /// `TLS_CERT_PATH`, via the self-signed flow or the operator
+    /// mounted file).
+    #[cfg(feature = "test")]
     pub https_cert_path: Option<PathBuf>,
+    /// TLS private key file. TEST BUILDS ONLY (production:
+    /// `TLS_KEY_PATH`).
+    #[cfg(feature = "test")]
     pub https_private_key_path: Option<PathBuf>,
     pub enable_doc: bool,
     pub proxy: ProxyConfig,
@@ -149,13 +156,35 @@ impl Default for HttpConfig {
         Self {
             http_address: "0.0.0.0:3000".to_string(),
             https_address: Default::default(),
+            #[cfg(feature = "test")]
             https_cert_path: Default::default(),
+            #[cfg(feature = "test")]
             https_private_key_path: Default::default(),
             enable_doc: Default::default(),
             proxy: ProxyConfig::default(),
             cors: CorsConfig::default(),
             self_signed_cert: SelfSignedCertConfig::default(),
         }
+    }
+}
+
+impl HttpConfig {
+    /// TLS certificate file: the fixed production path, or the
+    /// custom test one.
+    pub fn https_cert_path(&self) -> Option<PathBuf> {
+        #[cfg(feature = "test")]
+        return self.https_cert_path.clone();
+        #[cfg(not(feature = "test"))]
+        return Some(PathBuf::from(ave_core::config::TLS_CERT_PATH));
+    }
+
+    /// TLS private key file: the fixed production path, or the
+    /// custom test one.
+    pub fn https_private_key_path(&self) -> Option<PathBuf> {
+        #[cfg(feature = "test")]
+        return self.https_private_key_path.clone();
+        #[cfg(not(feature = "test"))]
+        return Some(PathBuf::from(ave_core::config::TLS_KEY_PATH));
     }
 }
 
@@ -181,13 +210,13 @@ impl HttpConfig {
         }
 
         if https_enabled {
-            if self.https_cert_path.is_none() {
+            if self.https_cert_path().is_none() {
                 return Err(Error::InvalidConfiguration {
                     component: "http.https_cert_path".to_string(),
                     reason: "must be set when HTTPS is enabled".to_string(),
                 });
             }
-            if self.https_private_key_path.is_none() {
+            if self.https_private_key_path().is_none() {
                 return Err(Error::InvalidConfiguration {
                     component: "http.https_private_key_path".to_string(),
                     reason: "must be set when HTTPS is enabled".to_string(),

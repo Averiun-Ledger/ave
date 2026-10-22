@@ -67,12 +67,12 @@ pub fn key_pair(
     config: &Config,
     password: &str,
 ) -> Result<KeyPair, BridgeError> {
-    if fs::metadata(&config.keys_path).is_err() {
-        fs::create_dir_all(&config.keys_path)
+    if fs::metadata(&config.keys_path()).is_err() {
+        fs::create_dir_all(&config.keys_path())
             .map_err(|e| BridgeError::KeyDirectoryCreation(e.to_string()))?;
     }
 
-    let path = config.keys_path.join("node_private.der");
+    let path = config.keys_path().join("node_private.der");
     match fs::metadata(&path) {
         Ok(metadata) => {
             // Self-heal permissions of keys written before the owner-only

@@ -8,13 +8,16 @@ use std::path::PathBuf;
 
 /// Authentication system configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     /// Enable or disable authentication
     /// If false, all endpoints are accessible without authentication
     pub enable: bool,
 
-    /// Path to the SQLite database file
+    /// Directory holding the SQLite database file (`auth.db` is
+    /// appended by the implementation). TEST BUILDS ONLY
+    /// (production: `AUTH_DB_DIR`).
+    #[cfg(feature = "test")]
     pub database_path: PathBuf,
 
     /// Durable writes: PRAGMA synchronous=FULL (true) vs NORMAL (false).
@@ -41,7 +44,8 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            database_path: PathBuf::from("auth"),
+            #[cfg(feature = "test")]
+            database_path: PathBuf::from(ave_core::config::AUTH_DB_DIR),
             durability: false,
             superadmin: String::default(),
             api_key: ApiKeyConfig::default(),
@@ -53,7 +57,19 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
+    /// Directory holding the SQLite database file: the fixed
+    /// production constant, or the custom test directory.
+    pub fn database_path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return self.database_path.clone();
+        #[cfg(not(feature = "test"))]
+        return PathBuf::from(ave_core::config::AUTH_DB_DIR);
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
+        // Production directories are constants; test builds validate
+        // their custom ones.
+        #[cfg(feature = "test")]
         if self.database_path.as_os_str().is_empty() {
             return Err(Error::InvalidConfiguration {
                 component: "auth.database_path".to_string(),

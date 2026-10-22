@@ -17,7 +17,8 @@ use utoipa::ToSchema;
 pub struct ConfigHttp {
     /// Core AVE configuration
     pub node: AveConfigHttp,
-    /// Path to cryptographic keys
+    /// Path to cryptographic keys. TEST BUILDS ONLY.
+    #[cfg(feature = "test")]
     pub keys_path: String,
     /// Logging configuration
     pub logging: LoggingHttp,
@@ -55,6 +56,8 @@ impl From<ave_bridge::MachineSpec> for MachineSpecHttp {
 
 impl From<ave_bridge::config::Config> for ConfigHttp {
     fn from(value: ave_bridge::config::Config) -> Self {
+        #[cfg(feature = "test")]
+        let keys_path = value.keys_path().to_string_lossy().to_string();
         let sinks = SinkConfigHttp {
             sinks: value
                 .sinks
@@ -64,7 +67,8 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
         };
         Self {
             node: AveConfigHttp::from(value.node),
-            keys_path: value.keys_path.to_string_lossy().to_string(),
+            #[cfg(feature = "test")]
+            keys_path,
             logging: LoggingHttp::from(value.logging),
             sink: sinks,
             auth: AuthConfigHttp::from(value.auth),
@@ -77,6 +81,8 @@ impl From<ave_bridge::config::Config> for ConfigHttp {
 pub struct AuthConfigHttp {
     pub enable: bool,
     pub durability: bool,
+    /// TEST BUILDS ONLY.
+    #[cfg(feature = "test")]
     pub database_path: String,
     /// Whether a superadmin bootstrap account is configured. The username
     /// itself is never exposed through the API.
@@ -91,7 +97,8 @@ impl From<AuthConfig> for AuthConfigHttp {
     fn from(value: AuthConfig) -> Self {
         Self {
             enable: value.enable,
-            database_path: value.database_path.to_string_lossy().to_string(),
+            #[cfg(feature = "test")]
+            database_path: value.database_path().to_string_lossy().to_string(),
             superadmin_configured: !value.superadmin.is_empty(),
             durability: value.durability,
             api_key: ApiKeyConfigHttp::from(value.api_key),
@@ -201,7 +208,9 @@ impl From<SessionConfig> for SessionConfigHttp {
 pub struct HttpConfigHttp {
     pub http_address: String,
     pub https_address: Option<String>,
+    #[cfg(feature = "test")]
     pub https_cert_path: Option<String>,
+    #[cfg(feature = "test")]
     pub https_private_key_path: Option<String>,
     pub enable_doc: bool,
     pub proxy: ProxyConfigHttp,
@@ -211,15 +220,21 @@ pub struct HttpConfigHttp {
 
 impl From<HttpConfig> for HttpConfigHttp {
     fn from(value: HttpConfig) -> Self {
+        #[cfg(feature = "test")]
+        let https_cert_path = value
+            .https_cert_path()
+            .map(|x| x.to_string_lossy().to_string());
+        #[cfg(feature = "test")]
+        let https_private_key_path = value
+            .https_private_key_path()
+            .map(|x| x.to_string_lossy().to_string());
         Self {
             http_address: value.http_address,
             https_address: value.https_address,
-            https_cert_path: value
-                .https_cert_path
-                .map(|x| x.to_string_lossy().to_string()),
-            https_private_key_path: value
-                .https_private_key_path
-                .map(|x| x.to_string_lossy().to_string()),
+            #[cfg(feature = "test")]
+            https_cert_path,
+            #[cfg(feature = "test")]
+            https_private_key_path,
             enable_doc: value.enable_doc,
             proxy: ProxyConfigHttp::from(value.proxy),
             cors: CorsConfigHttp::from(value.cors),
@@ -343,7 +358,8 @@ pub struct AveConfigHttp {
     pub external_db: AveStoreConfigHttp,
     /// Network configuration
     pub network: NetworkConfigHttp,
-    /// Directory for smart contracts
+    /// Directory for smart contracts. TEST BUILDS ONLY.
+    #[cfg(feature = "test")]
     pub contracts_path: String,
     /// Whether to automatically accept all events (development mode)
     pub always_accept: bool,
@@ -404,13 +420,17 @@ pub struct RebootSyncConfigHttp {
 
 impl From<ave_bridge::AveConfig> for AveConfigHttp {
     fn from(value: ave_bridge::AveConfig) -> Self {
+        #[cfg(feature = "test")]
+        let contracts_path =
+            value.contracts_path().to_string_lossy().to_string();
         Self {
             keypair_algorithm: value.keypair_algorithm.into(),
             hash_algorithm: value.hash_algorithm.into(),
             internal_db: AveStoreConfigHttp::from(value.internal_db),
             external_db: AveStoreConfigHttp::from(value.external_db),
             network: NetworkConfigHttp::from(value.network),
-            contracts_path: value.contracts_path.to_string_lossy().to_string(),
+            #[cfg(feature = "test")]
+            contracts_path,
             always_accept: value.always_accept,
             safe_mode: value.safe_mode,
             tracking_size: value.tracking_size,
@@ -729,7 +749,8 @@ pub struct LoggingHttp {
     pub output: LoggingOutputHttp,
     /// API URL for remote logging (optional)
     pub api_url: Option<String>,
-    /// Path to the log file
+    /// Path to the log file. TEST BUILDS ONLY.
+    #[cfg(feature = "test")]
     pub file_path: String,
     /// Log rotation policy (size, hourly, daily, weekly, monthly, yearly, never)
     pub rotation: LoggingRotationHttp,
@@ -743,10 +764,13 @@ pub struct LoggingHttp {
 
 impl From<ave_bridge::LoggingConfig> for LoggingHttp {
     fn from(value: ave_bridge::LoggingConfig) -> Self {
+        #[cfg(feature = "test")]
+        let file_path = value.file_path().to_string_lossy().to_string();
         Self {
             output: LoggingOutputHttp::from(value.output),
             api_url: value.api_url,
-            file_path: value.file_path.to_string_lossy().to_string(),
+            #[cfg(feature = "test")]
+            file_path,
             rotation: value.rotation.into(),
             max_size: value.max_size,
             max_files: value.max_files,

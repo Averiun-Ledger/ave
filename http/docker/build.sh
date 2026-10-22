@@ -1,31 +1,145 @@
 #!/usr/bin/env bash
-
+# Ave node images: 3 variants x architectures, no emulation.
+# SINGLE entry point: gate checks + seccomp profile + builds.
+# There is deliberately no other script: checks must never be skipped
+# by forgetting to run a separate file.
+#
+# Variants:
+#   rocksdb-compiler  with pinned toolchain + vendor (ONLY compiler role)
+#   rocksdb           no toolchain (light node)
+#   sqlite            no toolchain (light node)
+#
+# Usage (flags or interactive menu — no args on a TTY asks by number,
+# like the original script):
+#   ./build.sh [--prod] [--pin PIN] [--version VERSION]
+#              [--arch amd64|arm64|all|local] [--variant V|all] [--push]
+#              [--profile PROFILE] [--yes]
+#   Experimental (default): free arch choice, `-exp` tag suffix, no push,
+#      no manifests. Push an -exp tag by hand when another box needs it.
+#   --prod (release): no suffix, every arch + every variant (unless
+#      --arch/--variant narrow it), push + multi-arch manifests.
+#      Requires DOCKER_USERNAME (registry namespace) and `docker login`.
+# Defaults: PIN from ave-common governance DEFAULT_PIN, VERSION from
+# ave/Cargo.toml, CARGO_PROFILE experimental (release with --prod).
 set -euo pipefail
-
-# docker run --privileged --rm tonistiigi/binfmt --install arm64
-
-export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+AVE_REPO="$WORKSPACE_ROOT/ave"
 
-DOCKER_USERNAME="${DOCKER_USERNAME:-averiun}"
-DOCKER_REPO="${DOCKER_REPO:-ave-http}"
-NO_CACHE="${NO_CACHE:-false}"
+DOCKER_USERNAME="${DOCKER_USERNAME:-}"
+DOCKER_REPO="${DOCKER_REPO:-ave-node}"
 
-PROD_TAG_ARRAY=("0.12.0-sqlite" "0.12.0-rocksdb")
-PROD_DOCKERFILE_ARRAY=(
-    "$SCRIPT_DIR/Dockerfile.sqlite"
-    "$SCRIPT_DIR/Dockerfile.rocksdb"
-)
-PROD_FEATURES_ARRAY=(
-    "ext-sqlite sqlite prometheus"
-    "ext-sqlite rocksdb prometheus"
-)
+# Pinned moby/profiles commit for the seccomp base (review before bumping).
+MOBY_PROFILES_COMMIT="${MOBY_PROFILES_COMMIT:-6fe7deb1b9fb7c0397a4593480d7d22b9ee8caef}"
+SECCOMP_JSON="$SCRIPT_DIR/seccomp-ave.json"
+SECCOMP_NEED="mount pivot_root sethostname umount2 unshare"
 
-TAG_ARRAY=("${PROD_TAG_ARRAY[@]}")
-DOCKERFILE_ARRAY=("${PROD_DOCKERFILE_ARRAY[@]}")
-FEATURES_ARRAY=("${PROD_FEATURES_ARRAY[@]}")
+PIN=""
+VERSION=""
+PUSH=false
+ARCHS=""
+VARIANT_SEL=""
+PROD=""
+CARGO_PROFILE=""
+YES=false
+EXP_SUFFIX="-exp"
+
+usage() {
+    echo "Usage: $0 [--prod] [--pin PIN] [--version VERSION] [--arch amd64|arm64|all|local] [--variant rocksdb-compiler|rocksdb|sqlite|all] [--profile PROFILE] [--push] [--yes]"
+    exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prod) PROD=true; shift ;;
+        --pin) PIN="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --push) PUSH=true; shift ;;
+        --arch) ARCHS="$2"; shift 2 ;;
+        --variant) VARIANT_SEL="$2"; shift 2 ;;
+        --profile) CARGO_PROFILE="$2"; shift 2 ;;
+        --yes) YES=true; shift ;;
+        -h|--help) usage 0 ;;
+        *) echo "Unknown arg: $1" >&2; usage 1 ;;
+    esac
+done
+
+read_choice() {
+    local prompt="$1"
+    local value
+    read -r -p "$prompt" value
+    printf '%s' "$value"
+}
+
+# Interactive numbered menu (original UX) for anything not passed by flag.
+if [ -t 0 ]; then
+    if [ -z "$PROD" ]; then
+        echo ""
+        echo "Build selection:"
+        echo "1) Experimental (local iteration: -exp suffix, no push)"
+        echo "2) Production (release: no suffix, push + manifests)"
+        case "$(read_choice "Select (1 or 2): ")" in
+            1) PROD=false ;;
+            2) PROD=true ;;
+            *) echo "Error: invalid option." >&2; exit 1 ;;
+        esac
+    fi
+    if [ -z "$ARCHS" ]; then
+        echo ""
+        echo "Architecture selection:"
+        echo "1) AMD64 only"
+        echo "2) ARM64 only"
+        echo "3) Both (AMD64 + ARM64)"
+        echo "4) Local arch only"
+        case "$(read_choice "Select (1-4): ")" in
+            1) ARCHS="amd64" ;;
+            2) ARCHS="arm64" ;;
+            3) ARCHS="all" ;;
+            4) ARCHS="local" ;;
+            *) echo "Error: invalid option." >&2; exit 1 ;;
+        esac
+    fi
+    if [ -z "$VARIANT_SEL" ]; then
+        echo ""
+        echo "Variant selection:"
+        echo "1) rocksdb-compiler only (ONLY compiler role)"
+        echo "2) rocksdb only (light node)"
+        echo "3) sqlite only (light node)"
+        echo "4) All variants"
+        case "$(read_choice "Select (1-4): ")" in
+            1) VARIANT_SEL="rocksdb-compiler" ;;
+            2) VARIANT_SEL="rocksdb" ;;
+            3) VARIANT_SEL="sqlite" ;;
+            4) VARIANT_SEL="all" ;;
+            *) echo "Error: invalid option." >&2; exit 1 ;;
+        esac
+    fi
+else
+    # Non-interactive (CI/pipe): experimental local defaults.
+    [ -z "$PROD" ] && PROD=false
+    [ -z "$ARCHS" ] && ARCHS="local"
+    [ -z "$VARIANT_SEL" ] && VARIANT_SEL="all"
+fi
+
+if [ "$PROD" = true ]; then
+    # Release: no experimental suffix, push + manifests.
+    EXP_SUFFIX=""
+    [ -z "$CARGO_PROFILE" ] && CARGO_PROFILE="release"
+    PUSH=true
+    if [ -z "$DOCKER_USERNAME" ]; then
+        echo "Error: production requires DOCKER_USERNAME (registry namespace)." >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Error: production requires a working docker login/daemon." >&2
+        exit 1
+    fi
+else
+    # Experimental: -exp suffix, never pushed by the script unless
+    # --push is passed by hand (e.g. so another box can pull it).
+    [ -z "$CARGO_PROFILE" ] && CARGO_PROFILE="experimental"
+fi
 
 require_command() {
     local cmd="$1"
@@ -35,355 +149,322 @@ require_command() {
     fi
 }
 
-docker_config_file() {
-    local docker_config_root
-    docker_config_root="${DOCKER_CONFIG:-$HOME/.docker}"
-    printf '%s/config.json' "$docker_config_root"
-}
-
-dockerhub_credentials_configured() {
-    local config_file
-    config_file="$(docker_config_file)"
-
-    if [ ! -f "$config_file" ]; then
-        return 1
-    fi
-
-    if grep -q '"https://index.docker.io/v1/"' "$config_file"; then
-        return 0
-    fi
-
-    if grep -q '"credsStore"' "$config_file"; then
-        return 0
-    fi
-
-    if grep -q '"credHelpers"' "$config_file"; then
-        return 0
-    fi
-
-    return 1
-}
-
-ensure_dockerhub_login() {
-    if ! dockerhub_credentials_configured; then
-        echo "Error: production mode requires Docker Hub credentials configured." >&2
-        echo "Run: docker login" >&2
-        exit 1
-    fi
-}
-
-read_choice() {
-    local prompt="$1"
-    local value
-    read -r -p "$prompt" value
-    printf '%s' "$value"
-}
-
-selected_versions() {
-    local versions=()
-    local seen=""
-    local tag
-    local version
-
-    for tag in "${TAG_ARRAY[@]}"; do
-        version="${tag%%-*}"
-        case " $seen " in
-            *" $version "*) ;;
-            *)
-                versions+=("$version")
-                seen="$seen $version"
-                ;;
-        esac
-    done
-
-    local joined=""
-    for version in "${versions[@]}"; do
-        if [ -n "$joined" ]; then
-            joined="$joined, "
-        fi
-        joined="${joined}${version}"
-    done
-
-    printf '%s' "$joined"
-}
-
-build_image() {
-    local arch="$1"
-    local tag="$2"
-    local dockerfile="$3"
-    local features="$4"
-    local cargo_profile="$5"
-
-    local image_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${arch}-${tag}"
-    local no_cache_args=()
-
-    if [ "$NO_CACHE" = "true" ]; then
-        no_cache_args=(--no-cache)
-    fi
-
-    echo ""
-    echo "Building ${arch^^} with features: $features..."
-    echo "Cargo profile: $cargo_profile"
-
-    docker build \
-        --build-arg CARGO_PROFILE="$cargo_profile" \
-        --build-arg FEATURES="$features" \
-        --target "$arch" \
-        --tag "$image_tag" \
-        "${no_cache_args[@]}" \
-        --file "$dockerfile" \
-        "$WORKSPACE_ROOT"
-
-    echo "${arch^^} completed."
-}
-
-push_image() {
-    local arch="$1"
-    local tag="$2"
-    docker push "${DOCKER_USERNAME}/${DOCKER_REPO}:${arch}-${tag}"
-}
-
-annotate_manifest() {
-    local arch="$1"
-    local tag="$2"
-    docker manifest annotate \
-        "${DOCKER_USERNAME}/${DOCKER_REPO}:${tag}" \
-        "${DOCKER_USERNAME}/${DOCKER_REPO}:${arch}-${tag}" \
-        --os linux \
-        --arch "$arch"
-}
-
 require_command docker
+require_command grep
+require_command sha256sum
+require_command python3
 
-echo "Workspace root: $WORKSPACE_ROOT"
-echo "No cache       : $NO_CACHE"
-echo ""
-echo "Build environment selection:"
-echo "1) Production"
-echo "2) Development"
-ENV_CHOICE="$(read_choice "Select environment (1 or 2): ")"
+fail() {
+    echo "build.sh: FAIL: $*" >&2
+    exit 1
+}
 
-case "$ENV_CHOICE" in
-    1)
-        ENVIRONMENT="production"
-        ;;
-    2)
-        ENVIRONMENT="development"
-        ;;
-    *)
-        echo "Error: invalid option. Please select 1 or 2." >&2
-        exit 1
-        ;;
+# ============================================================================
+# STEP 0. Pre-build gate (was verify-pins.sh): pins, toolchains, registry
+# and frozen inputs must match before any layer is built. Loud on drift.
+# ============================================================================
+gate_pins() {
+    local only_pin="${1:-}"
+    local ave_pin="$WORKSPACE_ROOT/ave-contracts/ave-pin"
+    local ave_repro="$WORKSPACE_ROOT/ave-reproducible-wasm"
+    local sdk_dir="$WORKSPACE_ROOT/ave-contract-sdk"
+    local common_dir="$AVE_REPO/common"
+
+    [ -f "$ave_repro/config/toolchain.env" ] \
+        || fail "toolchain.env not found at $ave_repro/config/toolchain.env"
+    [ -d "$ave_pin/pins" ] || fail "pins dir not found at $ave_pin/pins"
+
+    # shellcheck disable=SC1090
+    . "$ave_repro/config/toolchain.env"
+    echo "gate: toolchain.env loaded (RUST_VERSION=$RUST_VERSION)"
+
+    # cargo-ave binaries match the pinned hashes (exact bytes, not --version).
+    local arch want got bin
+    for arch in amd64 arm64; do
+        bin="$ave_repro/dist/cargo-ave-$arch"
+        [ -f "$bin" ] || fail "missing $bin"
+        case "$arch" in
+            amd64) want="$CARGO_BINARY_SHA256_AMD64" ;;
+            arm64) want="$CARGO_BINARY_SHA256_ARM64" ;;
+        esac
+        [ -n "${want:-}" ] || fail "no expected hash for $arch in toolchain.env"
+        got="$(sha256sum "$bin" | cut -d' ' -f1)"
+        [ "$got" = "$want" ] || fail "hash mismatch for $bin (got $got)"
+        echo "gate: ok cargo-ave-$arch sha256"
+    done
+
+    # SDK version matches the pins that reference it.
+    local sdk_version pin_count pin pin_dir pin_json rustc_version pin_sdk
+    sdk_version="$(grep -m1 '^version' "$sdk_dir/Cargo.toml" | cut -d'"' -f2)"
+    [ -n "$sdk_version" ] || fail "cannot read SDK version"
+
+    # Per-pin checks: rustup toolchain + wasm target, registry entry.
+    pin_count=0
+    for pin_dir in "$ave_pin"/pins/*/; do
+        pin="$(basename "$pin_dir")"
+        if [ -n "$only_pin" ] && [ "$pin" != "$only_pin" ]; then
+            continue
+        fi
+        pin_count=$((pin_count + 1))
+        pin_json="$pin_dir/pin.json"
+        [ -f "$pin_json" ] || fail "missing $pin_json"
+        rustc_version="$(python3 -c "import json;print(json.load(open('$pin_json'))['rustc_version'])")"
+        pin_sdk="$(python3 -c "import json;print(json.load(open('$pin_json'))['sdk_version'])")"
+        [ "$pin_sdk" = "$sdk_version" ] \
+            || fail "pin $pin sdk $pin_sdk != repo sdk $sdk_version"
+        rustup toolchain list 2>/dev/null | grep -q "^$rustc_version" \
+            || fail "rustup toolchain $rustc_version (pin $pin) not installed"
+        rustup target list --installed --toolchain "$rustc_version" 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
+            || fail "wasm32 target missing for toolchain $rustc_version (pin $pin)"
+        grep -q "$pin" "$common_dir/src/registry.rs" \
+            || fail "pin $pin missing from ave-common registry"
+        echo "gate: ok pin $pin (rustc $rustc_version, sdk $pin_sdk)"
+    done
+    [ "$pin_count" -gt 0 ] || fail "no pins checked"
+
+    # Frozen contract sources exist in ave-common.
+    [ -f "$common_dir/pins/contract.rs" ] \
+        || fail "missing common/pins/contract.rs"
+    [ -f "$common_dir/pins/contract-v1.Cargo.lock" ] \
+        || fail "missing common/pins/contract-v1.Cargo.lock"
+
+    # Registry self-verification (lockfile bytes vs registry hashes,
+    # template stability).
+    (
+        cd "$AVE_REPO"
+        cargo test -q -p ave-common --lib governance 2>&1 | tail -3
+    )
+    echo "gate: ALL OK ($pin_count pin(s))"
+}
+
+# ============================================================================
+# STEP 0b. Seccomp profile (was seccomp-make-profile.sh): the custom
+# profile MUST exist and allow exactly the sandbox syscalls, or the
+# sandbox dies with EPERM inside the container. Regenerated from the
+# pinned moby base when missing or stale. Never skipped.
+# ============================================================================
+ensure_seccomp() {
+    local stale=false
+    if [ ! -f "$SECCOMP_JSON" ]; then
+        echo "seccomp: missing $SECCOMP_JSON, regenerating"
+        stale=true
+    else
+        local need
+        for need in $SECCOMP_NEED; do
+            if ! python3 -c "
+import json,sys
+p=json.load(open('$SECCOMP_JSON'))
+rules=[r for r in p.get('syscalls',[]) if r.get('action')=='SCMP_ACT_ALLOW' and '$need' in r.get('names',[])]
+sys.exit(0 if rules else 1)"; then
+                echo "seccomp: unconditional allow for '$need' missing, regenerating"
+                stale=true
+                break
+            fi
+        done
+    fi
+    if [ "$stale" = true ]; then
+        require_command curl
+        local tmp
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        curl -fsSL --max-time 60 \
+            "https://raw.githubusercontent.com/moby/profiles/${MOBY_PROFILES_COMMIT}/seccomp/default.json" \
+            -o "$tmp" \
+            || fail "cannot fetch moby seccomp base (commit $MOBY_PROFILES_COMMIT)"
+        python3 - "$tmp" "$SECCOMP_JSON" <<'PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    profile = json.load(f)
+extra = {
+    "names": ["mount", "pivot_root", "sethostname", "umount2", "unshare"],
+    "action": "SCMP_ACT_ALLOW",
+    "comment": "ave-build sandbox: user+mount namespaces, minimal root pivot, fixed hostname. No CAP_SYS_ADMIN required; every build runs unprivileged and every failure is loud.",
+}
+names = {n for rule in profile.get("syscalls", []) for n in rule.get("names", [])}
+missing = [n for n in extra["names"] if n not in names and n not in ("pivot_root",)]
+assert not missing, f"upstream profile lacks: {missing}"
+profile.setdefault("syscalls", []).append(extra)
+with open(dst, "w") as f:
+    json.dump(profile, f, indent="\t")
+    f.write("\n")
+print(f"wrote {dst}: base + unconditional allow for {', '.join(extra['names'])}")
+PYEOF
+        trap - EXIT
+        rm -f "$tmp"
+    else
+        echo "seccomp: ok $SECCOMP_JSON (allows: $SECCOMP_NEED)"
+    fi
+}
+
+# 0. Fail fast: gate + seccomp before any layer is built.
+if [ -n "$PIN" ]; then
+    gate_pins "$PIN"
+else
+    gate_pins
+fi
+ensure_seccomp
+
+# 1. Defaults from the single sources of truth.
+if [ -z "$PIN" ]; then
+    PIN="$(grep -m1 'pub const DEFAULT_PIN' "$AVE_REPO/common/src/governance.rs" | cut -d'"' -f2)"
+    [ -n "$PIN" ] || { echo "Error: cannot read DEFAULT_PIN" >&2; exit 1; }
+fi
+RUSTC_VERSION="$(python3 -c "import json;print(json.load(open('$WORKSPACE_ROOT/ave-contracts/ave-pin/pins/$PIN/pin.json'))['rustc_version'])")"
+[ -n "$RUSTC_VERSION" ] || { echo "Error: no rustc_version for pin $PIN" >&2; exit 1; }
+NODE_RUSTC_VERSION="$(grep -m1 '^RUST_VERSION=' "$WORKSPACE_ROOT/ave-reproducible-wasm/config/toolchain.env" | cut -d= -f2)"
+[ -n "$NODE_RUSTC_VERSION" ] || { echo "Error: no RUST_VERSION in toolchain.env" >&2; exit 1; }
+PIN_LOCKFILE="contract-v1.Cargo.lock"
+if [ ! -f "$AVE_REPO/common/pins/$PIN_LOCKFILE" ]; then
+    echo "Error: lockfile $PIN_LOCKFILE not found (pin $PIN)" >&2
+    exit 1
+fi
+if [ -z "$VERSION" ]; then
+    VERSION="$(grep -m1 '^version' "$AVE_REPO/Cargo.toml" | cut -d'"' -f2)"
+    [ -n "$VERSION" ] || { echo "Error: cannot read workspace version" >&2; exit 1; }
+fi
+
+LOCAL_ARCH="$(uname -m)"
+case "$LOCAL_ARCH" in
+    x86_64) LOCAL_ARCH=amd64 ;;
+    aarch64) LOCAL_ARCH=arm64 ;;
+    *) echo "Error: unsupported host arch $LOCAL_ARCH" >&2; exit 1 ;;
+esac
+case "$ARCHS" in
+    local) BUILD_ARCHS="$LOCAL_ARCH" ;;
+    amd64|arm64) BUILD_ARCHS="$ARCHS" ;;
+    all) BUILD_ARCHS="amd64 arm64" ;;
+    *) echo "Error: --arch must be amd64, arm64, all or local" >&2; exit 1 ;;
 esac
 
-if [ "$ENVIRONMENT" = "development" ]; then
-    CARGO_PROFILE="experimental"
-
-    echo ""
-    echo "Architecture selection for development:"
-    echo "1) AMD64 only"
-    echo "2) ARM64 only"
-    echo "3) Both (AMD64 and ARM64)"
-    ARCH_CHOICE="$(read_choice "Select architecture (1, 2, or 3): ")"
-
-    case "$ARCH_CHOICE" in
-        1)
-            BUILD_AMD64=true
-            BUILD_ARM64=false
-            ;;
-        2)
-            BUILD_AMD64=false
-            BUILD_ARM64=true
-            ;;
-        3)
-            BUILD_AMD64=true
-            BUILD_ARM64=true
-            ;;
-        *)
-            echo "Error: invalid option. Please select 1, 2, or 3." >&2
-            exit 1
-            ;;
-    esac
-
-    echo ""
-    echo "Database selection for development:"
-    echo "1) SQLite only"
-    echo "2) RocksDB only"
-    echo "3) Both (SQLite and RocksDB)"
-    DB_CHOICE="$(read_choice "Select database (1, 2, or 3): ")"
-
-    case "$DB_CHOICE" in
-        1)
-            BUILD_SQLITE=true
-            BUILD_ROCKSDB=false
-            ;;
-        2)
-            BUILD_SQLITE=false
-            BUILD_ROCKSDB=true
-            ;;
-        3)
-            BUILD_SQLITE=true
-            BUILD_ROCKSDB=true
-            ;;
-        *)
-            echo "Error: invalid option. Please select 1, 2, or 3." >&2
-            exit 1
-            ;;
-    esac
-
-    TAG_ARRAY=()
-    DOCKERFILE_ARRAY=()
-    FEATURES_ARRAY=()
-
-    if [ "$BUILD_SQLITE" = true ]; then
-        TAG_ARRAY+=("${PROD_TAG_ARRAY[0]}-exp")
-        DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[0]}")
-        FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[0]}")
-    fi
-
-    if [ "$BUILD_ROCKSDB" = true ]; then
-        TAG_ARRAY+=("${PROD_TAG_ARRAY[1]}-exp")
-        DOCKERFILE_ARRAY+=("${PROD_DOCKERFILE_ARRAY[1]}")
-        FEATURES_ARRAY+=("${PROD_FEATURES_ARRAY[1]}")
-    fi
-
-    SKIP_PUSH=true
-    SKIP_MANIFEST=true
-
-    echo ""
-    echo "Development mode enabled:"
-    echo "  - Version: $(selected_versions)"
-    echo "  - Tag suffix: -exp"
-    echo "  - Cargo profile: $CARGO_PROFILE"
-    echo "  - Skip Docker Hub push: yes"
-    echo "  - Skip manifest creation: yes"
-    echo "  - Build AMD64: $BUILD_AMD64"
-    echo "  - Build ARM64: $BUILD_ARM64"
-    echo "  - Build SQLite: $BUILD_SQLITE"
-    echo "  - Build RocksDB: $BUILD_ROCKSDB"
-else
-    CARGO_PROFILE="release"
-    BUILD_AMD64=true
-    BUILD_ARM64=true
-    BUILD_SQLITE=true
-    BUILD_ROCKSDB=true
-    SKIP_PUSH=false
-    SKIP_MANIFEST=false
-
-    ensure_dockerhub_login
-
-    echo ""
-    echo "Production mode enabled:"
-    echo "  - Version: $(selected_versions)"
-    echo "  - Cargo profile: $CARGO_PROFILE"
-    echo "  - Full build for both architectures (AMD64 + ARM64)"
-    echo "  - Full build for both databases (SQLite + RocksDB)"
-    echo "  - Push to Docker Hub: yes"
-    echo "  - Create and push manifests: yes"
-    echo "  - Docker Hub credentials: configured"
-fi
-
 echo ""
-CONFIRM="$(read_choice "Continue? (y/n): ")"
-if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
-    echo "Build cancelled."
-    exit 0
+if [ "$PROD" = true ]; then
+    echo "Production mode enabled:"
+else
+    echo "Experimental mode enabled:"
+fi
+echo "  - Version: $VERSION"
+echo "  - Tag suffix: '${EXP_SUFFIX:-<none>}'"
+echo "  - Cargo profile: $CARGO_PROFILE"
+echo "  - Pin: $PIN (rustc $RUSTC_VERSION)"
+echo "  - Node rustc: $NODE_RUSTC_VERSION (ave-reproducible toolchain.env)"
+echo "  - Architectures: $BUILD_ARCHS (host: $LOCAL_ARCH)"
+echo "  - Variant: $VARIANT_SEL"
+echo "  - Push to Docker Hub: $([ "$PUSH" = true ] && echo yes || echo no)"
+echo "  - Manifests: $([ "$PROD" = true ] && echo yes || echo no)"
+echo ""
+
+if [ -t 0 ] && [ "$YES" = false ]; then
+    CONFIRM="$(read_choice "Continue? (y/n): ")"
+    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+        echo "Build cancelled."
+        exit 0
+    fi
 fi
 
-for i in "${!FEATURES_ARRAY[@]}"; do
-    FEATURES="${FEATURES_ARRAY[i]}"
-    TAG="${TAG_ARRAY[i]}"
-    DOCKERFILE="${DOCKERFILE_ARRAY[i]}"
+VARIANT_NAMES=(rocksdb-compiler rocksdb sqlite)
+VARIANT_DOCKERFILES=(Dockerfile.node-rocksdb-compiler Dockerfile.node-rocksdb Dockerfile.node-sqlite)
+VARIANT_FEATURES=("ext-sqlite rocksdb prometheus toolchain" "ext-sqlite rocksdb prometheus" "ext-sqlite sqlite prometheus")
 
-    if [ ! -f "$DOCKERFILE" ]; then
-        echo "Error: Dockerfile not found: $DOCKERFILE" >&2
+build_variant_arch() {
+    local variant="$1" dockerfile="$2" features="$3" arch="$4"
+    local tag
+    if [ -n "$DOCKER_USERNAME" ]; then
+        tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}-${PIN}-${arch}${EXP_SUFFIX}"
+    else
+        tag="${DOCKER_REPO}:${VERSION}-${variant}-${PIN}-${arch}${EXP_SUFFIX}"
+    fi
+    echo ""
+    echo "### Building $tag"
+    docker build \
+        --build-arg "PIN=$PIN" \
+        --build-arg "PIN_LOCKFILE=$PIN_LOCKFILE" \
+        --build-arg "RUSTC_VERSION=$RUSTC_VERSION" \
+        --build-arg "NODE_RUSTC_VERSION=$NODE_RUSTC_VERSION" \
+        --build-arg "CARGO_PROFILE=$CARGO_PROFILE" \
+        --build-arg "FEATURES=$features" \
+        --target "$arch" \
+        --tag "$tag" \
+        --file "$SCRIPT_DIR/$dockerfile" \
+        "$WORKSPACE_ROOT"
+    echo "### Smoke test $tag"
+    if docker run --rm "$tag" --help 2>&1 | grep -qi "shared librar"; then
+        echo "Error: missing shared libraries in $tag" >&2
         exit 1
     fi
-
-    echo "######################################################################"
-    echo "########################## $TAG #########################"
-    echo "######################################################################"
-
-    if [ "$BUILD_ARM64" = true ]; then
-        build_image "arm64" "$TAG" "$DOCKERFILE" "$FEATURES" "$CARGO_PROFILE"
+    docker run --rm "$tag" --help >/dev/null
+    # Compiler images must also run the pinned cargo (libcurl closure).
+    if [ "$variant" = "rocksdb-compiler" ]; then
+        docker run --rm --entrypoint /usr/local/bin/cargo-ave-pinned "$tag" --version >/dev/null \
+            || { echo "Error: cargo-ave-pinned broken in $tag" >&2; exit 1; }
     fi
-
-    if [ "$BUILD_AMD64" = true ]; then
-        build_image "amd64" "$TAG" "$DOCKERFILE" "$FEATURES" "$CARGO_PROFILE"
+    echo "### OK $tag"
+    if [ "$PUSH" = true ]; then
+        docker push "$tag"
     fi
+}
 
-    if [ "$SKIP_PUSH" = false ]; then
-        echo ""
-        echo "Pushing images to Docker Hub..."
-        if [ "$BUILD_ARM64" = true ]; then
-            push_image "arm64" "$TAG"
-        fi
-        if [ "$BUILD_AMD64" = true ]; then
-            push_image "amd64" "$TAG"
-        fi
-    else
-        echo ""
-        echo "Skipping Docker Hub push (development mode)."
+MANIFESTS=""
+for i in "${!VARIANT_NAMES[@]}"; do
+    variant="${VARIANT_NAMES[$i]}"
+    dockerfile="${VARIANT_DOCKERFILES[$i]}"
+    features="${VARIANT_FEATURES[$i]}"
+    if [ "$VARIANT_SEL" != "all" ] && [ "$variant" != "$VARIANT_SEL" ]; then
+        continue
     fi
-
-    if [ "$SKIP_MANIFEST" = false ] && [ "$BUILD_AMD64" = true ] && [ "$BUILD_ARM64" = true ]; then
-        echo ""
-        echo "Creating multi-architecture manifest..."
-        docker manifest rm "${DOCKER_USERNAME}/${DOCKER_REPO}:${TAG}" 2>/dev/null || true
-        docker manifest create "${DOCKER_USERNAME}/${DOCKER_REPO}:${TAG}" \
-            "${DOCKER_USERNAME}/${DOCKER_REPO}:amd64-${TAG}" \
-            "${DOCKER_USERNAME}/${DOCKER_REPO}:arm64-${TAG}"
-
-        annotate_manifest "amd64" "$TAG"
-        annotate_manifest "arm64" "$TAG"
-
-        echo ""
-        echo "Pushing manifest to Docker Hub..."
-        docker manifest push "${DOCKER_USERNAME}/${DOCKER_REPO}:${TAG}"
-    elif [ "$SKIP_MANIFEST" = true ]; then
-        echo ""
-        echo "Skipping manifest creation (development mode)."
-    fi
-
-    echo "Process completed for: $TAG"
+    for arch in $BUILD_ARCHS; do
+        build_variant_arch "$variant" "$dockerfile" "$features" "$arch"
+        MANIFESTS="$MANIFESTS ${VERSION}-${variant}-${PIN}:${arch}"
+    done
 done
 
-echo ""
-echo "######################################################################"
-
-if [ "$ENVIRONMENT" = "production" ]; then
-    echo "############################## CLEANING ##############################"
-    echo "######################################################################"
-
-    for i in "${!TAG_ARRAY[@]}"; do
-        TAG="${TAG_ARRAY[i]}"
-        if [ "$BUILD_AMD64" = true ]; then
-            echo "Removing local image: ${DOCKER_USERNAME}/${DOCKER_REPO}:amd64-${TAG}"
-            docker rmi "${DOCKER_USERNAME}/${DOCKER_REPO}:amd64-${TAG}" || true
+if [ "$PROD" = true ]; then
+    for variant in rocksdb-compiler rocksdb sqlite; do
+        if [ -n "$DOCKER_USERNAME" ]; then
+            base_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}-${PIN}"
+        else
+            base_tag="${DOCKER_REPO}:${VERSION}-${variant}-${PIN}"
         fi
-        if [ "$BUILD_ARM64" = true ]; then
-            echo "Removing local image: ${DOCKER_USERNAME}/${DOCKER_REPO}:arm64-${TAG}"
-            docker rmi "${DOCKER_USERNAME}/${DOCKER_REPO}:arm64-${TAG}" || true
-        fi
-    done
-    echo ""
-    echo "Local images cleaned up. All images available on Docker Hub."
-else
-    echo "########################## BUILD SUMMARY #############################"
-    echo "######################################################################"
-    echo ""
-    echo "Images kept locally (development mode)."
-    echo "Built images:"
-    for i in "${!TAG_ARRAY[@]}"; do
-        TAG="${TAG_ARRAY[i]}"
-        if [ "$BUILD_AMD64" = true ]; then
-            echo "  - ${DOCKER_USERNAME}/${DOCKER_REPO}:amd64-${TAG}"
-        fi
-        if [ "$BUILD_ARM64" = true ]; then
-            echo "  - ${DOCKER_USERNAME}/${DOCKER_REPO}:arm64-${TAG}"
-        fi
+        echo ""
+        echo "### Multi-arch manifest $base_tag"
+        docker manifest rm "$base_tag" 2>/dev/null || true
+        args=""
+        for arch in $BUILD_ARCHS; do
+            args="$args ${base_tag}-${arch}"
+        done
+        # shellcheck disable=SC2086
+        docker manifest create "$base_tag" $args
+        for arch in $BUILD_ARCHS; do
+            docker manifest annotate "$base_tag" "${base_tag}-${arch}" --os linux --arch "$arch"
+        done
+        docker manifest push "$base_tag"
     done
 fi
 
 echo ""
-echo "Build completed!"
+echo "Done. Images (not pushed unless --push):"
+if [ -n "$DOCKER_USERNAME" ]; then
+    docker images --filter "reference=${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-*" --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sort -u
+else
+    docker images --filter "reference=${DOCKER_REPO}:${VERSION}-*" --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sort -u
+fi
+echo ""
+echo "Run a compiler node (sandbox REQUIRES the custom seccomp profile;"
+echo "the default Docker profile denies unshare/mount/pivot_root and the"
+echo "build sandbox fails loud without it):"
+echo ""
+echo "  docker run -d --name ave-node \\"
+echo "    --read-only --tmpfs /tmp --tmpfs /ave/tmp \\"
+echo "    --cap-drop ALL --security-opt no-new-privileges \\"
+echo "    --security-opt seccomp=$SCRIPT_DIR/seccomp-ave.json \\"
+echo "    --user 65532:65532 --memory 8g --cpus 4 \\"
+echo "    -v ave-contracts:/contracts --network host \\"
+echo "    # Map volumes onto the FIXED container paths (production configs"
+echo "    # can not move them: /contracts, /db/*, /keys, /logs; tests keep"
+echo "    # custom dirs via the test feature). Named volumes persist across"
+echo "    # 'docker rm'; make them writable by 65532 once."
+if [ -n "$DOCKER_USERNAME" ]; then
+    echo "    ${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN}-<arch>"
+else
+    echo "    ${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN}-<arch>"
+fi

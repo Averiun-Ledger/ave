@@ -107,7 +107,7 @@ impl Bridge {
             .validate()
             .map_err(|e| BridgeError::ConfigBuild(e.to_string()))?;
 
-        utils::validate_keys_path(&settings.keys_path)
+        utils::validate_keys_path(&settings.keys_path())
             .map_err(BridgeError::KeyPathInvalid)?;
 
         let keys = key_pair(settings, password)?;

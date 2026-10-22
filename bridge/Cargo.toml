@@ -29,6 +29,10 @@ axum = { workspace = true, optional = true }
 ip_network = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency: enables the `test` feature whenever test targets
+# are built, so plain `cargo test` keeps custom config paths without
+# needing `--features test` (same pattern as ave-core).
+ave-bridge = { path = ".", features = ["test"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 

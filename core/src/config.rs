@@ -25,6 +25,22 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_LEDGER_BATCH_SIZE: usize = 1_000_000;
 const MAX_SYNC_PAGE_SIZE: usize = 10_000;
 
+/// Canonical production paths. Production builds fix every filesystem
+/// location to these constants: the config file can not move them (the
+/// fields only exist with the `test` feature, and unknown keys fail
+/// loud). Operators map volumes onto these container paths; tests keep
+/// fully custom directories.
+pub const CONTRACTS_DIR: &str = "/contracts";
+pub const DB_LOCAL_ROCKSDB_DIR: &str = "/db/local/rocksdb";
+pub const DB_LOCAL_SQLITE_DIR: &str = "/db/local/sqlite";
+pub const DB_EXT_SQLITE_DIR: &str = "/db/ext/sqlite";
+pub const PINNED_CARGO_BIN: &str = "/usr/local/bin/cargo-ave-pinned";
+pub const LOGS_DIR: &str = "/logs";
+pub const KEYS_DIR: &str = "/keys";
+pub const AUTH_DB_DIR: &str = "/db/auth";
+pub const TLS_CERT_PATH: &str = "/keys/tls.crt";
+pub const TLS_KEY_PATH: &str = "/keys/tls.key";
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -47,8 +63,13 @@ impl TokenResponse {
 }
 
 /// Node configuration.
+///
+/// Filesystem locations are FIXED in production (see the `CONTRACTS_DIR`
+/// and `DB_*` constants): the path fields below only exist with the
+/// `test` feature. A production config file carrying them fails loud
+/// (`deny_unknown_fields`).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub struct Config {
     /// Key derivator.
@@ -61,7 +82,8 @@ pub struct Config {
     pub external_db: AveExternalDBConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Contract dir.
+    /// Contract dir. TEST BUILDS ONLY (production: `CONTRACTS_DIR`).
+    #[cfg(feature = "test")]
     pub contracts_path: PathBuf,
     /// Approval mode.
     pub always_accept: bool,
@@ -97,8 +119,9 @@ pub struct Config {
     /// otherwise validators reject every build (fail closed, never
     /// silent divergence). Map explicitly in production.
     pub toolchains: BTreeMap<String, String>,
-    /// Pinned reproducible cargo binary: path to a cargo carrying
-    /// the host-metadata fix (rust-lang/cargo#17522 backport) the
+    /// Pinned reproducible cargo binary. TEST BUILDS ONLY (production:
+    /// `PINNED_CARGO_BIN`): path to a cargo carrying the
+    /// host-metadata fix (rust-lang/cargo#17522 backport) the
     /// pins were measured with. When set, every local contract build
     /// runs through it with `RUSTC` pinned to the selected toolchain
     /// — the only way a mixed-architecture network votes identical
@@ -106,7 +129,28 @@ pub struct Config {
     /// networks only). The binary hash must match the registry
     /// `cargo_bins` for this architecture, or the boot fails loud.
     /// Empty by default (today's behavior).
+    #[cfg(feature = "test")]
     pub cargo_bin: Option<PathBuf>,
+}
+
+impl Config {
+    /// Contract dir: the fixed production constant, or the custom
+    /// test directory.
+    pub fn contracts_path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return self.contracts_path.clone();
+        #[cfg(not(feature = "test"))]
+        return PathBuf::from(CONTRACTS_DIR);
+    }
+
+    /// Pinned cargo binary: the fixed production binary, or the
+    /// custom test one.
+    pub fn cargo_bin(&self) -> Option<PathBuf> {
+        #[cfg(feature = "test")]
+        return self.cargo_bin.clone();
+        #[cfg(not(feature = "test"))]
+        return Some(PathBuf::from(PINNED_CARGO_BIN));
+    }
 }
 
 impl Default for Config {
@@ -117,7 +161,8 @@ impl Default for Config {
             internal_db: Default::default(),
             external_db: Default::default(),
             network: Default::default(),
-            contracts_path: PathBuf::from("contracts"),
+            #[cfg(feature = "test")]
+            contracts_path: PathBuf::from(CONTRACTS_DIR),
             always_accept: Default::default(),
             safe_mode: false,
             tracking_size: 100,
@@ -129,6 +174,7 @@ impl Default for Config {
             compiler: Default::default(),
             spec: None,
             toolchains: BTreeMap::new(),
+            #[cfg(feature = "test")]
             cargo_bin: None,
         }
     }
@@ -178,6 +224,9 @@ impl Config {
     /// Validates the node configuration, returning an error describing the
     /// first invalid value found.
     pub fn validate(&self) -> Result<(), Error> {
+        // Production paths are constants (no fields to validate);
+        // test builds validate their custom directories.
+        #[cfg(feature = "test")]
         if self.contracts_path.as_os_str().is_empty() {
             return Err(Error::InvalidConfiguration {
                 component: "node.contracts_path".to_string(),
@@ -860,44 +909,72 @@ impl From<MachineSpec> for ave_actors::MachineSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AveInternalDBConfig {
     #[serde(deserialize_with = "AveInternalDBFeatureConfig::deserialize_db")]
     pub db: AveInternalDBFeatureConfig,
     pub durability: bool,
 }
 
-/// Database configuration.
+/// Database configuration. The engine comes from cargo features; the
+/// directory is FIXED in production (constants below) and only
+/// settable with the `test` feature.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveInternalDBFeatureConfig {
     /// Rocksdb database.
     #[cfg(feature = "rocksdb")]
     Rocksdb {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
     /// Sqlite database.
     #[cfg(feature = "sqlite")]
     Sqlite {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
+}
+
+impl AveInternalDBFeatureConfig {
+    /// Database directory: the fixed production constant, or the
+    /// custom test directory.
+    pub fn path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return match self {
+            #[cfg(feature = "rocksdb")]
+            Self::Rocksdb { path } => path.clone(),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite { path } => path.clone(),
+        };
+        #[cfg(not(feature = "test"))]
+        return match self {
+            #[cfg(feature = "rocksdb")]
+            Self::Rocksdb { .. } => PathBuf::from(DB_LOCAL_ROCKSDB_DIR),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite { .. } => PathBuf::from(DB_LOCAL_SQLITE_DIR),
+        };
+    }
 }
 
 impl Default for AveInternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "rocksdb")]
         return AveInternalDBFeatureConfig::Rocksdb {
-            path: PathBuf::from("db").join("local").join("rocksdb"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_LOCAL_ROCKSDB_DIR),
         };
         #[cfg(feature = "sqlite")]
         return Self::Sqlite {
-            path: PathBuf::from("db").join("local").join("sqlite"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_LOCAL_SQLITE_DIR),
         };
     }
 }
 
 impl AveInternalDBFeatureConfig {
+    #[cfg(feature = "test")]
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "rocksdb")]
         return AveInternalDBFeatureConfig::Rocksdb {
@@ -914,14 +991,24 @@ impl AveInternalDBFeatureConfig {
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
-        #[cfg(feature = "rocksdb")]
-        return Ok(AveInternalDBFeatureConfig::Rocksdb {
-            path: PathBuf::from(path),
-        });
-        #[cfg(feature = "sqlite")]
-        return Ok(Self::Sqlite {
-            path: PathBuf::from(path),
-        });
+        #[cfg(feature = "test")]
+        {
+            #[cfg(feature = "rocksdb")]
+            return Ok(AveInternalDBFeatureConfig::Rocksdb {
+                path: PathBuf::from(path),
+            });
+            #[cfg(feature = "sqlite")]
+            return Ok(Self::Sqlite {
+                path: PathBuf::from(path),
+            });
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = path;
+            return Err(serde::de::Error::custom(
+                "database paths are fixed in production builds",
+            ));
+        }
     }
 }
 
@@ -938,6 +1025,9 @@ impl fmt::Display for AveInternalDBFeatureConfig {
 
 impl AveInternalDBConfig {
     pub fn validate(&self) -> Result<(), Error> {
+        // Production directories are constants; test builds validate
+        // their custom ones.
+        #[cfg(feature = "test")]
         match &self.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
@@ -963,34 +1053,56 @@ impl AveInternalDBConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AveExternalDBConfig {
     #[serde(deserialize_with = "AveExternalDBFeatureConfig::deserialize_db")]
     pub db: AveExternalDBFeatureConfig,
     pub durability: bool,
 }
 
-/// Database configuration.
+/// Database configuration. The engine comes from cargo features; the
+/// directory is FIXED in production and only settable with the
+/// `test` feature.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveExternalDBFeatureConfig {
     /// Sqlite database.
     #[cfg(feature = "ext-sqlite")]
     Sqlite {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
+}
+
+impl AveExternalDBFeatureConfig {
+    /// Database directory: the fixed production constant, or the
+    /// custom test directory.
+    pub fn path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::Sqlite { path } => path.clone(),
+        };
+        #[cfg(not(feature = "test"))]
+        return match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::Sqlite { .. } => PathBuf::from(DB_EXT_SQLITE_DIR),
+        };
+    }
 }
 
 impl Default for AveExternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "ext-sqlite")]
         return Self::Sqlite {
-            path: PathBuf::from("db").join("ext").join("sqlite"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_EXT_SQLITE_DIR),
         };
     }
 }
 
 impl AveExternalDBFeatureConfig {
+    #[cfg(feature = "test")]
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "ext-sqlite")]
         return Self::Sqlite {
@@ -1003,10 +1115,20 @@ impl AveExternalDBFeatureConfig {
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
-        #[cfg(feature = "ext-sqlite")]
-        return Ok(Self::Sqlite {
-            path: PathBuf::from(path),
-        });
+        #[cfg(feature = "test")]
+        {
+            #[cfg(feature = "ext-sqlite")]
+            return Ok(Self::Sqlite {
+                path: PathBuf::from(path),
+            });
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = path;
+            return Err(serde::de::Error::custom(
+                "database paths are fixed in production builds",
+            ));
+        }
     }
 }
 
@@ -1018,6 +1140,9 @@ impl fmt::Display for AveExternalDBFeatureConfig {
 
 impl AveExternalDBConfig {
     pub fn validate(&self) -> Result<(), Error> {
+        // Production directories are constants; test builds validate
+        // their custom ones.
+        #[cfg(feature = "test")]
         match &self.db {
             #[cfg(feature = "ext-sqlite")]
             AveExternalDBFeatureConfig::Sqlite { path } => {
@@ -1078,13 +1203,15 @@ impl Display for LoggingRotation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub output: LoggingOutput,
     /// Endpoint that receives the log batches. `https://` is expected in
     /// production: `http://` is accepted (e.g. collectors on localhost or a
     /// trusted internal network) but ships the logs unencrypted.
     pub api_url: Option<String>,
+    /// Base dir for log files. TEST BUILDS ONLY (production: `LOGS_DIR`).
+    #[cfg(feature = "test")]
     pub file_path: PathBuf, // ruta base de logs
     pub rotation: LoggingRotation,
     pub max_size: usize,  // bytes
@@ -1100,7 +1227,8 @@ impl Default for LoggingConfig {
         Self {
             output: LoggingOutput::default(),
             api_url: None,
-            file_path: PathBuf::from("logs"),
+            #[cfg(feature = "test")]
+            file_path: PathBuf::from(LOGS_DIR),
             rotation: LoggingRotation::default(),
             max_size: 100 * 1024 * 1024,
             max_files: 3,
@@ -1110,6 +1238,14 @@ impl Default for LoggingConfig {
 }
 
 impl LoggingConfig {
+    /// Base dir for log files: the fixed production constant, or the
+    /// custom test directory.
+    pub fn file_path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return self.file_path.clone();
+        #[cfg(not(feature = "test"))]
+        return PathBuf::from(LOGS_DIR);
+    }
     pub const fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
@@ -1132,6 +1268,7 @@ impl LoggingConfig {
         }
 
         if self.output.file {
+            #[cfg(feature = "test")]
             if self.file_path.as_os_str().is_empty() {
                 return Err(Error::InvalidConfiguration {
                     component: "logging.file_path".to_string(),

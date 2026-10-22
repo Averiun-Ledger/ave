@@ -104,12 +104,13 @@ pub async fn init_logging(cfg: &LoggingConfig) -> Option<LoggingHandle> {
     let LoggingConfig {
         output,
         api_url,
-        file_path,
         rotation,
         max_size,
         max_files,
         level,
+        ..
     } = cfg.clone();
+    let file_path = cfg.file_path();
 
     let mut guards: Vec<WorkerGuard> = Vec::new();
 

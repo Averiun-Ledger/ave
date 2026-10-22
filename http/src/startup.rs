@@ -597,13 +597,11 @@ async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
 
     let cert_path = config
         .http
-        .https_cert_path
-        .clone()
+        .https_cert_path()
         .ok_or(StartupError::MissingHttpsCertPath)?;
     let key_path = config
         .http
-        .https_private_key_path
-        .clone()
+        .https_private_key_path()
         .ok_or(StartupError::MissingHttpsKeyPath)?;
 
     let self_signed_config = config.http.self_signed_cert.clone();

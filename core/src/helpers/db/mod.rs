@@ -137,7 +137,8 @@ impl ExternalDB {
     ) -> Result<Self, DatabaseError> {
         match ext_db {
             #[cfg(feature = "ext-sqlite")]
-            AveExternalDBFeatureConfig::Sqlite { path } => {
+            AveExternalDBFeatureConfig::Sqlite { .. } => {
+                let path = ext_db.path();
                 // Passive permission check before creating anything
                 check_dir_writable(&path)
                     .map_err(DatabaseError::PermissionDenied)?;

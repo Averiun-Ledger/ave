@@ -960,13 +960,13 @@ http:
         assert!(config.logging.output.stdout);
         assert!(!config.logging.output.file);
         assert_eq!(config.logging.rotation, LoggingRotation::Size);
-        assert_eq!(config.logging.file_path, PathBuf::from("logs"));
+        assert_eq!(config.logging.file_path, PathBuf::from("/logs"));
         assert_eq!(config.logging.max_files, 3);
         assert_eq!(config.sinks.len(), 0);
 
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
-        assert_eq!(config.node.contracts_path, PathBuf::from("contracts"));
+        assert_eq!(config.node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(
             config.node.internal_db.db,
             AveInternalDBFeatureConfig::default()

@@ -51,6 +51,10 @@ rcgen = "0.14"
 x509-parser = "0.18"
 
 [dev-dependencies]
+# Self dev-dependency: enables the `test` feature whenever test targets
+# are built, so plain `cargo test` keeps custom config paths without
+# needing `--features test` (same pattern as ave-core).
+ave-http = { path = ".", features = ["test"] }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 chrono = "0.4.45"
@@ -63,3 +67,6 @@ sqlite = ["ave-bridge/sqlite"]
 ext-sqlite = ["ave-bridge/ext-sqlite"]
 prometheus = ["ave-bridge/prometheus", "ave-core/prometheus", "dep:prometheus-client"]
 test = ["ave-bridge/test"]
+# In-process contract toolchain (cargo + rustc): only images built
+# with this feature can take the compiler role (light images omit it).
+toolchain = ["ave-core/toolchain"]

@@ -14,16 +14,16 @@ const TARGET: &str = "ave::http::validation";
 /// directory would allow its creation.
 pub fn validate_http_paths(config: &BridgeConfig) -> Result<(), String> {
     // 1. Auth database directory
-    check_dir_writable(&config.auth.database_path, "auth.database_path")?;
+    check_dir_writable(&config.auth.database_path(), "auth.database_path")?;
 
     // 2. TLS certificate
-    if let Some(ref cert_path) = config.http.https_cert_path {
+    if let Some(ref cert_path) = config.http.https_cert_path() {
         let need_write = config.http.self_signed_cert.enabled;
         check_file_or_parent(cert_path, "https_cert_path", need_write)?;
     }
 
     // 3. TLS private key
-    if let Some(ref key_path) = config.http.https_private_key_path {
+    if let Some(ref key_path) = config.http.https_private_key_path() {
         let need_write = config.http.self_signed_cert.enabled;
         check_file_or_parent(key_path, "https_private_key_path", need_write)?;
     }
@@ -40,7 +40,7 @@ pub fn validate_http_paths(config: &BridgeConfig) -> Result<(), String> {
 /// `init_logging` so we fail fast if the log directory is not writable.
 pub fn validate_logging_path(config: &BridgeConfig) -> Result<(), String> {
     if config.logging.output.file {
-        check_dir_writable(&config.logging.file_path, "logging.file_path")?;
+        check_dir_writable(&config.logging.file_path(), "logging.file_path")?;
     }
     Ok(())
 }

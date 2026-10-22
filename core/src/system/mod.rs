@@ -106,7 +106,7 @@ impl ConfigHelper {
     pub fn from_config(config: Config, sinks: Vec<SinkConfigEntry>) -> Self {
         let has_boot_nodes = !config.network.boot_nodes.is_empty();
         Self {
-            contracts_path: config.contracts_path,
+            contracts_path: config.contracts_path(),
             always_accept: config.always_accept,
             safe_mode: config.safe_mode,
             tracking_size: config.tracking_size,
@@ -184,7 +184,7 @@ pub async fn system(
     let toolchains = crate::compilation::support::Toolchains::from_config(
         &config.toolchains,
     )
-    .with_cargo_bin(config.cargo_bin.clone());
+    .with_cargo_bin(config.cargo_bin().clone());
     toolchains.verify().await.map_err(|e| {
         SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
     })?;

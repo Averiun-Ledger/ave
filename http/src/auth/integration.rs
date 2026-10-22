@@ -25,7 +25,7 @@ pub async fn initialize_auth_database(
 
     info!(
         target: TARGET,
-        path = %config.database_path.display(),
+        path = %config.database_path().display(),
         "initializing authentication database"
     );
 
@@ -35,7 +35,7 @@ pub async fn initialize_auth_database(
 
     info!(
         target: TARGET,
-        path = %config.database_path.display(),
+        path = %config.database_path().display(),
         api_key_ttl_s = config.api_key.default_ttl_seconds,
         rate_limiting = config.rate_limit.enable,
         audit_logging = config.session.audit_enable,
