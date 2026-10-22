@@ -314,6 +314,14 @@ pub async fn prepare(
     push(canonical_cargo_home.clone(), true);
     push(canonical_build.clone(), true);
 
+    // Bind parents before children: a parent bind would otherwise cover
+    // an already-bound child, and the child's read-only remount would
+    // then fail (the covered path is no longer a mount point: EINVAL).
+    // Ancestors always have fewer components, so depth order is a valid
+    // topological order (stable sort keeps everything else as-is).
+    // Concrete case: the toolchain sysroot inside `$RUSTUP_HOME`.
+    mirror.sort_by_key(|(path, _)| path.components().count());
+
     let new_root = canonical_build.join("sandbox-root");
     let old_root = new_root.join("old");
     let build_tmp = canonical_build.join("sandbox-tmp");

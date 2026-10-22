@@ -2730,7 +2730,7 @@ async fn test_system_info_deserialization() {
     assert!(!config.logging.output.file);
     assert!(!config.logging.output.api);
     assert!(config.logging.api_url.is_none());
-    assert_eq!(config.logging.file_path, "logs");
+    assert_eq!(config.logging.file_path, "/logs");
     assert_eq!(config.logging.rotation, LoggingRotationHttp::Size);
     assert_eq!(config.logging.max_size, 104_857_600);
     assert_eq!(config.logging.max_files, 3);
