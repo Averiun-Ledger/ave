@@ -69,35 +69,127 @@ pub(crate) fn resolve_in_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Parent dirs of every dynamically loaded library of `exe`.
-async fn loader_dirs(exe: &Path) -> io::Result<Vec<PathBuf>> {
-    let output = tokio::process::Command::new("ldd")
-        .arg(exe)
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(io::Error::other("ldd failed on build program"));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+/// `ldd` is a best effort (distroless images do not ship it): the
+/// caller additionally mirrors the interpreter itself, read straight
+/// from the ELF headers below, so the sandbox never depends on it.
+async fn loader_dirs(exe: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for line in text.lines() {
-        let path = if let Some(pos) = line.find("=>") {
-            line[pos + 2..].split_whitespace().next()
-        } else {
-            line.split_whitespace()
-                .next()
-                .filter(|token| token.starts_with('/'))
-        };
-        if let Some(path) = path {
-            let parent = Path::new(path).parent();
-            if let Some(dir) = parent {
-                let dir = dir.to_path_buf();
-                if !dirs.contains(&dir) {
-                    dirs.push(dir);
-                }
+    let mut push_dir = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+    if let Ok(output) = tokio::process::Command::new("ldd").arg(exe).output().await
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let path = if let Some(pos) = line.find("=>") {
+                line[pos + 2..].split_whitespace().next()
+            } else {
+                line.split_whitespace()
+                    .next()
+                    .filter(|token| token.starts_with('/'))
+            };
+            if let Some(path) = path
+                && let Some(dir) = Path::new(path).parent()
+            {
+                push_dir(dir.to_path_buf());
             }
         }
     }
-    Ok(dirs)
+    // The ELF interpreter (`/lib64/ld-linux-*.so.2`, `/lib/ld-linux-*.so`)
+    // is what the kernel needs to start the binary: without it `exec`
+    // fails with ENOENT even when every library is mirrored. Read it
+    // from the headers so minimal images work without `ldd`.
+    if let Some(interp) = elf_interp(exe)
+        && let Some(dir) = interp.parent()
+    {
+        push_dir(dir.to_path_buf());
+    }
+    dirs
+}
+
+/// `PT_INTERP` path of an ELF binary, if it has one. Minimal parser
+/// (ELF64/ELF32, little-endian): enough for the toolchains we ship,
+/// silent `None` for anything else (the `ldd` path above covers it).
+fn elf_interp(exe: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(exe).ok()?;
+    let (magic, _) = bytes.split_first_chunk::<4>()?;
+    if magic != b"\x7fELF" {
+        return None;
+    }
+    let class = *bytes.get(4)?;
+    let (phoff, phentsize, phnum): (u64, u64, u64) = match class {
+        // ELF64: e_phoff@32, e_phentsize@54, e_phnum@56.
+        2 => {
+            let phoff = u64::from_le_bytes(bytes.get(32..40)?.try_into().ok()?);
+            let phentsize =
+                u16::from_le_bytes(bytes.get(54..56)?.try_into().ok()?) as u64;
+            let phnum =
+                u16::from_le_bytes(bytes.get(56..58)?.try_into().ok()?) as u64;
+            (phoff, phentsize, phnum)
+        }
+        // ELF32: e_phoff@28, e_phentsize@42, e_phnum@44.
+        1 => {
+            let phoff = u32::from_le_bytes(bytes.get(28..32)?.try_into().ok()?) as u64;
+            let phentsize =
+                u16::from_le_bytes(bytes.get(42..44)?.try_into().ok()?) as u64;
+            let phnum =
+                u16::from_le_bytes(bytes.get(44..46)?.try_into().ok()?) as u64;
+            (phoff, phentsize, phnum)
+        }
+        _ => return None,
+    };
+    if !(1..=64).contains(&phnum) || phentsize < 32 {
+        return None;
+    }
+    for i in 0..phnum {
+        let at = phoff.checked_add(i.checked_mul(phentsize)?)? as usize;
+        let entry = bytes.get(at..at + phentsize as usize)?;
+        // p_type (u32) then p_offset (u64/u32); PT_INTERP = 3.
+        let p_type = u32::from_le_bytes(entry.get(..4)?.try_into().ok()?);
+        if p_type != 3 {
+            continue;
+        }
+        let (p_offset, p_filesz) = match class {
+            2 => (
+                u64::from_le_bytes(entry.get(8..16)?.try_into().ok()?),
+                u64::from_le_bytes(entry.get(32..40)?.try_into().ok()?),
+            ),
+            _ => (
+                u32::from_le_bytes(entry.get(4..8)?.try_into().ok()?) as u64,
+                u32::from_le_bytes(entry.get(16..20)?.try_into().ok()?) as u64,
+            ),
+        };
+        if p_filesz == 0 || p_filesz > 4096 {
+            continue;
+        }
+        let raw = bytes.get(p_offset as usize..(p_offset + p_filesz) as usize)?;
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let path = std::str::from_utf8(&raw[..end]).ok()?;
+        if path.starts_with('/') {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+/// Host usr-merge links (`/lib`, `/bin`, ...) resolved to their
+/// physical location. Mount sources are stored physical so the same
+/// tree never binds twice (link path and physical path): the parent
+/// would otherwise cover the child and the covered child's read-only
+/// remount would fail.
+fn physical_path(path: PathBuf, links: &[(PathBuf, PathBuf)]) -> PathBuf {
+    for (link, real) in links {
+        if path == *link {
+            return real.clone();
+        }
+        if let Ok(rest) = path.strip_prefix(link) {
+            return real.join(rest);
+        }
+    }
+    path
 }
 
 /// Stage the sandbox: resolve every dependency, create the mirror
@@ -130,7 +222,31 @@ pub async fn prepare(
         .unwrap_or_else(|_| cargo_home.to_path_buf());
 
     let mut mirror: Vec<(PathBuf, bool)> = Vec::new();
+    // Usr-merge links present on the host (`/lib -> usr/lib`, ...):
+    // replicated inside the skeleton so absolute loader paths keep
+    // resolving, while mount sources are stored by physical location
+    // (see `physical_path`).
+    let mut usrlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for name in ["lib", "lib64", "lib32", "bin", "sbin"] {
+        let link = PathBuf::from("/").join(name);
+        let is_link = std::fs::symlink_metadata(&link)
+            .map(|meta| meta.is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            continue;
+        }
+        let Ok(target) = std::fs::read_link(&link) else {
+            continue;
+        };
+        let absolute = if target.is_absolute() {
+            target
+        } else {
+            PathBuf::from("/").join(target)
+        };
+        usrlinks.push((link, absolute));
+    }
     let mut push = |path: PathBuf, writable: bool| {
+        let path = physical_path(path, &usrlinks);
         if !mirror.iter().any(|(known, _)| known == &path) {
             mirror.push((path, writable));
         }
@@ -143,11 +259,11 @@ pub async fn prepare(
         if let Some(dir) = rustc.parent() {
             push(dir.to_path_buf(), false);
         }
-        for dir in loader_dirs(rustc).await.unwrap_or_default() {
+        for dir in loader_dirs(rustc).await {
             push(dir, false);
         }
     }
-    for dir in loader_dirs(&exe).await.unwrap_or_default() {
+    for dir in loader_dirs(&exe).await {
         push(dir, false);
     }
     push(sysroot.to_path_buf(), false);
@@ -326,26 +442,79 @@ pub async fn prepare(
     let old_root = new_root.join("old");
     let build_tmp = canonical_build.join("sandbox-tmp");
     for dir in [&new_root, &old_root, &build_tmp] {
-        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::create_dir_all(dir).await.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("sandbox staging: roots {}: {e}", dir.display()),
+            )
+        })?;
     }
     // The child bind-mounts the cargo home: it must exist beforehand.
-    tokio::fs::create_dir_all(&canonical_cargo_home).await?;
+    tokio::fs::create_dir_all(&canonical_cargo_home)
+        .await
+        .map_err(|e| {
+            io::Error::new(e.kind(), format!("sandbox staging: cargo home: {e}"))
+        })?;
     // Skeleton for devices, scratch and process table inside.
     for dir in ["dev", "tmp", "proc"] {
-        tokio::fs::create_dir_all(new_root.join(dir)).await?;
+        tokio::fs::create_dir_all(new_root.join(dir))
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("sandbox staging: skeleton {dir}: {e}"),
+                )
+            })?;
     }
     // Device placeholders: the child bind-mounts the host nodes over
     // them, so they must exist as files beforehand.
     for node in ["null", "zero", "full", "urandom"] {
         let target = new_root.join("dev").join(node);
         if tokio::fs::metadata(&target).await.is_err() {
-            tokio::fs::write(&target, []).await?;
+            tokio::fs::write(&target, []).await.map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("sandbox staging: device {node}: {e}"),
+                )
+            })?;
         }
     }
 
     let target_of = |source: &Path| {
         new_root.join(source.strip_prefix("/").unwrap_or(source))
     };
+    // Replicate the host usr-merge links inside the new root,
+    // otherwise absolute loader paths (/lib/<triplet>/...) resolve to
+    // empty skeleton dirs and linking fails with ENOENT. Only these
+    // well-known links: any other layout keeps today's behavior
+    // (plain skeleton dirs).
+    for (link, real) in &usrlinks {
+        let target = target_of(link);
+        if tokio::fs::metadata(&target).await.is_ok() {
+            continue;
+        }
+        // Materialize the link target first: creating directories
+        // *through* a dangling symlink fails with EEXIST (the link
+        // itself already exists). The later bind of the real tree
+        // lands on top of these placeholder dirs.
+        let anchored = new_root.join(real.strip_prefix("/").unwrap_or(real));
+        if tokio::fs::metadata(&anchored).await.is_err() {
+            let _ = tokio::fs::create_dir_all(&anchored).await;
+        }
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("sandbox staging: usrlink parent {}: {e}", parent.display()),
+                )
+            })?;
+        }
+        // Best effort: if the name appears later as a real dir the
+        // binds below still land; a stale link is never traversed
+        // without one.
+        let _ = tokio::fs::symlink(real, &target).await;
+    }
+
     // Dangled symlinks can not be bind-mounted: the kernel follows
     // them on the host, but inside only mirrored paths exist. Files
     // whose target stays outside the mirror (e.g. `/etc/resolv.conf`
@@ -382,15 +551,33 @@ pub async fn prepare(
         if source.is_file() {
             if copies.iter().any(|(known, _)| known == source) {
                 if let Some(parent) = target.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        io::Error::new(
+                            e.kind(),
+                            format!(
+                                "sandbox staging: copy parent {}: {e}",
+                                parent.display()
+                            ),
+                        )
+                    })?;
                 }
                 continue;
             }
             if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("sandbox staging: file parent {}: {e}", parent.display()),
+                    )
+                })?;
             }
             if tokio::fs::metadata(&target).await.is_err() {
-                tokio::fs::write(&target, []).await?;
+                tokio::fs::write(&target, []).await.map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("sandbox staging: file placeholder {}: {e}", target.display()),
+                    )
+                })?;
             }
             mounts.push(MountOp {
                 source: cstring(source),
@@ -412,7 +599,12 @@ pub async fn prepare(
                 best_effort: false,
             });
         } else {
-            tokio::fs::create_dir_all(&target).await?;
+            tokio::fs::create_dir_all(&target).await.map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("sandbox staging: dir {}: {e}", target.display()),
+                )
+            })?;
             mounts.push(MountOp {
                 source: cstring(source),
                 target: cstring(&target),
@@ -434,18 +626,6 @@ pub async fn prepare(
                     best_effort: false,
                 });
             }
-        }
-    }
-    if std::env::var_os("AVE_SANDBOX_DUMP").is_some() {
-        for m in &mounts {
-            eprintln!(
-                "DBGMOUNT {} -> {} flags={} fstype={:?} best_effort={}",
-                m.source.to_string_lossy(),
-                m.target.to_string_lossy(),
-                m.flags,
-                m.fstype.as_ref().map(|f| f.to_string_lossy().into_owned()),
-                m.best_effort
-            );
         }
     }
     let spec_copies: Vec<(CString, Vec<u8>)> = copies
@@ -588,11 +768,11 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     }
     if unsafe { libc::unshare(flags) } != 0 {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("DBG unshare: {e}")));
+        return Err(io::Error::new(e.kind(), format!("unshare namespaces: {e}")));
     }
-    write_file(SETGROUPS, DENY).map_err(|e| io::Error::new(e.kind(), format!("DBG setgroups: {e}")))?;
-    write_file(UID_MAP, &spec.uid_map).map_err(|e| io::Error::new(e.kind(), format!("DBG uid_map: {e}")))?;
-    write_file(GID_MAP, &spec.gid_map).map_err(|e| io::Error::new(e.kind(), format!("DBG gid_map: {e}")))?;
+    write_file(SETGROUPS, DENY).map_err(|e| io::Error::new(e.kind(), format!("deny setgroups: {e}")))?;
+    write_file(UID_MAP, &spec.uid_map).map_err(|e| io::Error::new(e.kind(), format!("write uid_map: {e}")))?;
+    write_file(GID_MAP, &spec.gid_map).map_err(|e| io::Error::new(e.kind(), format!("write gid_map: {e}")))?;
     // Private mounts: nothing below escapes to the host.
     do_mount(
         NONE,
@@ -600,16 +780,17 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         None,
         (libc::MS_PRIVATE | libc::MS_REC) as libc::c_ulong,
         None,
-    )?;
+    )
+    .map_err(|e| {
+        io::Error::new(e.kind(), format!("make mounts private: {e}"))
+    })?;
     // Mirror every dependency at its identical absolute path.
     // (No tmpfs over the skeleton: the mirror already leaves every
     // other host path out, and covering it would hide these binds.)
-    for (index, entry) in spec.mounts.iter().enumerate() {
+    for entry in spec.mounts.iter() {
         if entry.flags & libc::MS_REMOUNT as libc::c_ulong != 0 {
             continue;
         }
-        if index % 4 == 0 {
-                }
         let result = do_mount(
             entry.source.as_c_str(),
             entry.target.as_c_str(),
@@ -621,7 +802,7 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             let e = result.unwrap_err();
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
-            return Err(io::Error::new(e.kind(), format!("DBG mount {src} -> {tgt} flags={}: {e}", entry.flags)));
+            return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));
         }
     }
     // Materialize copied content on top of the binds, before
@@ -635,10 +816,10 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         )
         .map_err(|e| {
             let p = path.to_string_lossy().into_owned();
-            io::Error::new(e.kind(), format!("DBG copy-open {p}: {e}"))
+            io::Error::new(e.kind(), format!("stage copied file {p}: {e}"))
         })?;
         let result = raw_write(fd, bytes).map_err(|e| {
-            io::Error::new(e.kind(), format!("DBG copy-write: {e}"))
+            io::Error::new(e.kind(), format!("write staged file: {e}"))
         });
         raw_close(fd);
         result?;
@@ -658,7 +839,7 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             let e = result.unwrap_err();
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
-            return Err(io::Error::new(e.kind(), format!("DBG mount {src} -> {tgt} flags={}: {e}", entry.flags)));
+            return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));
         }
     }
     // Fixed identity: hostnames never shape artifacts or logs.
@@ -666,7 +847,7 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         != 0
     {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("DBG sethostname: {e}")));
+        return Err(io::Error::new(e.kind(), format!("set hostname: {e}")));
     }
     // `pivot_root` requires the new root to be a mount point.
     do_mount(
@@ -676,7 +857,7 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         (libc::MS_BIND | libc::MS_REC) as libc::c_ulong,
         None,
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("DBG bindself: {e}")))?;
+    .map_err(|e| io::Error::new(e.kind(), format!("bind new root: {e}")))?;
     // Pivot into the minimal root and drop the host tree.
     let pivoted = unsafe {
         libc::syscall(
@@ -687,16 +868,16 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     };
     if pivoted != 0 {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("DBG pivot_root: {e}")));
+        return Err(io::Error::new(e.kind(), format!("pivot_root: {e}")));
     }
     const SLASH: &CStr = c"/";
     if unsafe { libc::chdir(SLASH.as_ptr()) } != 0 {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("DBG chdir-slash: {e}")));
+        return Err(io::Error::new(e.kind(), format!("chdir /: {e}")));
     }
     if unsafe { libc::umount2(OLD.as_ptr(), libc::MNT_DETACH) } != 0 {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("DBG umount_old: {e}")));
+        return Err(io::Error::new(e.kind(), format!("detach old root: {e}")));
     }
     // Enter the build directory here, not only through the caller's
     // `current_dir`: that one runs before the pivot at the latest,
@@ -706,7 +887,7 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     if unsafe { libc::chdir(spec.workdir.as_ptr()) } != 0 {
         let e = io::Error::last_os_error();
         let w = spec.workdir.to_string_lossy().into_owned();
-        return Err(io::Error::new(e.kind(), format!("DBG chdir-work {w}: {e}")));
+        return Err(io::Error::new(e.kind(), format!("chdir workdir {w}: {e}")));
     }
     Ok(())
 }

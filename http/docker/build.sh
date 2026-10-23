@@ -9,11 +9,14 @@
 #   rocksdb           no toolchain (light node)
 #   sqlite            no toolchain (light node)
 #
-# Usage (flags or interactive menu — no args on a TTY asks by number,
-# like the original script):
+# Usage (flags or interactive menus — no args on a TTY asks by number;
+# arch/variant answers accept comma-separated multi-select, e.g. 1,3):
 #   ./build.sh [--prod] [--pin PIN] [--version VERSION]
 #              [--arch amd64|arm64|all|local] [--variant V|all] [--push]
 #              [--profile PROFILE] [--yes]
+# Flags also accept comma lists (--arch amd64,arm64). Anything not
+# passed by flag is asked interactively on a TTY; without a TTY
+# (CI/pipe) experimental local defaults apply.
 #   Experimental (default): free arch choice, `-exp` tag suffix, no push,
 #      no manifests. Push an -exp tag by hand when another box needs it.
 #   --prod (release): no suffix, every arch + every variant (unless
@@ -22,6 +25,10 @@
 # Defaults: PIN from ave-common governance DEFAULT_PIN, VERSION from
 # ave/Cargo.toml, CARGO_PROFILE experimental (release with --prod).
 set -euo pipefail
+
+# Cache mounts (cargo registry + target) need BuildKit. Modern Docker
+# enables it by default; this makes it explicit and loud otherwise.
+export DOCKER_BUILDKIT=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
@@ -72,7 +79,85 @@ read_choice() {
     printf '%s' "$value"
 }
 
-# Interactive numbered menu (original UX) for anything not passed by flag.
+# Multi-select menu answer: "1,3" or "1 3". Prints the chosen numbers,
+# deduplicated, space-separated. Anything else fails loud.
+read_multi() {
+    local prompt="$1" max="$2" raw sel n out
+    raw="$(read_choice "$prompt")"
+    raw="$(printf '%s' "$raw" | tr ',' ' ')"
+    out=""
+    for sel in $raw; do
+        case "$sel" in
+            ''|*[!0-9]*) echo "Error: invalid selection '$sel'." >&2; return 1 ;;
+        esac
+        n="$((10#$sel))"
+        if [ "$n" -lt 1 ] || [ "$n" -gt "$max" ]; then
+            echo "Error: option $n out of range (1-$max)." >&2; return 1
+        fi
+        case " $out " in
+            *" $n "*) ;;
+            *) out="$out $n" ;;
+        esac
+    done
+    [ -n "$out" ] || { echo "Error: empty selection." >&2; return 1; }
+    out="${out# }"
+    printf '%s' "$out"
+}
+
+# Architecture answers (menu numbers or flag words) to build names.
+# Accepts local/all/single names and explicit multi-select lists.
+expand_archs() {
+    local sel="$1" local_arch="$2" out="" a
+    case "$sel" in
+        local) printf '%s' "$local_arch"; return 0 ;;
+        all) printf 'amd64 arm64'; return 0 ;;
+    esac
+    for a in $sel; do
+        case "$a" in
+            amd64|arm64)
+                case " $out " in
+                    *" $a "*) ;;
+                    *) out="$out $a" ;;
+                esac
+                ;;
+            local)
+                echo "Error: 'local' can not be combined with other architectures." >&2
+                return 1
+                ;;
+            *) echo "Error: --arch must be amd64, arm64, all or local (comma-separated ok)." >&2; return 1 ;;
+        esac
+    done
+    [ -n "$out" ] || { echo "Error: empty architecture selection." >&2; return 1; }
+    out="${out# }"
+    printf '%s' "$out"
+}
+
+# Variant answers to build names. "all" expands to the three variants.
+expand_variants() {
+    local sel="$1" out="" v
+    [ "$sel" = "all" ] && sel="rocksdb-compiler rocksdb sqlite"
+    for v in $sel; do
+        case "$v" in
+            rocksdb-compiler|rocksdb|sqlite)
+                case " $out " in
+                    *" $v "*) ;;
+                    *) out="$out $v" ;;
+                esac
+                ;;
+            *) echo "Error: --variant must be rocksdb-compiler, rocksdb, sqlite or all (comma-separated ok)." >&2; return 1 ;;
+        esac
+    done
+    [ -n "$out" ] || { echo "Error: empty variant selection." >&2; return 1; }
+    out="${out# }"
+    printf '%s' "$out"
+}
+
+# Flags accept the same comma lists as the interactive answers.
+ARCHS="$(printf '%s' "$ARCHS" | tr ',' ' ')"
+VARIANT_SEL="$(printf '%s' "$VARIANT_SEL" | tr ',' ' ')"
+
+# Interactive numbered menus for anything not passed by flag.
+# Multi-select with commas: "1,3".
 if [ -t 0 ]; then
     if [ -z "$PROD" ]; then
         echo ""
@@ -87,32 +172,41 @@ if [ -t 0 ]; then
     fi
     if [ -z "$ARCHS" ]; then
         echo ""
-        echo "Architecture selection:"
+        echo "Architecture selection (several allowed: 1,2):"
         echo "1) AMD64 only"
         echo "2) ARM64 only"
         echo "3) Both (AMD64 + ARM64)"
         echo "4) Local arch only"
-        case "$(read_choice "Select (1-4): ")" in
-            1) ARCHS="amd64" ;;
-            2) ARCHS="arm64" ;;
-            3) ARCHS="all" ;;
-            4) ARCHS="local" ;;
-            *) echo "Error: invalid option." >&2; exit 1 ;;
-        esac
+        picks="$(read_multi "Select: " 4)"
+        ARCHS=""
+        for pick in $picks; do
+            case "$pick" in
+                1) ARCHS="$ARCHS amd64" ;;
+                2) ARCHS="$ARCHS arm64" ;;
+                3) ARCHS="$ARCHS amd64 arm64" ;;
+                4) ARCHS="$ARCHS local" ;;
+            esac
+        done
     fi
     if [ -z "$VARIANT_SEL" ]; then
         echo ""
-        echo "Variant selection:"
+        echo "Variant selection (several allowed: 1,3):"
         echo "1) rocksdb-compiler only (ONLY compiler role)"
         echo "2) rocksdb only (light node)"
         echo "3) sqlite only (light node)"
         echo "4) All variants"
-        case "$(read_choice "Select (1-4): ")" in
-            1) VARIANT_SEL="rocksdb-compiler" ;;
-            2) VARIANT_SEL="rocksdb" ;;
-            3) VARIANT_SEL="sqlite" ;;
-            4) VARIANT_SEL="all" ;;
-            *) echo "Error: invalid option." >&2; exit 1 ;;
+        picks="$(read_multi "Select: " 4)"
+        VARIANT_SEL=""
+        for pick in $picks; do
+            case "$pick" in
+                1) VARIANT_SEL="$VARIANT_SEL rocksdb-compiler" ;;
+                2) VARIANT_SEL="$VARIANT_SEL rocksdb" ;;
+                3) VARIANT_SEL="$VARIANT_SEL sqlite" ;;
+                4) VARIANT_SEL="$VARIANT_SEL all" ;;
+            esac
+        done
+        case " $VARIANT_SEL " in
+            *" all "*) VARIANT_SEL="all" ;;
         esac
     fi
 else
@@ -121,6 +215,7 @@ else
     [ -z "$ARCHS" ] && ARCHS="local"
     [ -z "$VARIANT_SEL" ] && VARIANT_SEL="all"
 fi
+VARIANT_SEL="$(expand_variants "$VARIANT_SEL")"
 
 if [ "$PROD" = true ]; then
     # Release: no experimental suffix, push + manifests.
@@ -330,12 +425,7 @@ case "$LOCAL_ARCH" in
     aarch64) LOCAL_ARCH=arm64 ;;
     *) echo "Error: unsupported host arch $LOCAL_ARCH" >&2; exit 1 ;;
 esac
-case "$ARCHS" in
-    local) BUILD_ARCHS="$LOCAL_ARCH" ;;
-    amd64|arm64) BUILD_ARCHS="$ARCHS" ;;
-    all) BUILD_ARCHS="amd64 arm64" ;;
-    *) echo "Error: --arch must be amd64, arm64, all or local" >&2; exit 1 ;;
-esac
+BUILD_ARCHS="$(expand_archs "$ARCHS" "$LOCAL_ARCH")"
 
 echo ""
 if [ "$PROD" = true ]; then
@@ -397,6 +487,10 @@ build_variant_arch() {
     if [ "$variant" = "rocksdb-compiler" ]; then
         docker run --rm --entrypoint /usr/local/bin/cargo-ave-pinned "$tag" --version >/dev/null \
             || { echo "Error: cargo-ave-pinned broken in $tag" >&2; exit 1; }
+        docker run --rm --entrypoint /usr/local/bin/rustc "$tag" --version >/dev/null \
+            || { echo "Error: rustc shim broken in $tag" >&2; exit 1; }
+        docker run --rm --entrypoint /usr/local/bin/cargo "$tag" --version >/dev/null \
+            || { echo "Error: cargo shim broken in $tag" >&2; exit 1; }
     fi
     echo "### OK $tag"
     if [ "$PUSH" = true ]; then
@@ -409,9 +503,10 @@ for i in "${!VARIANT_NAMES[@]}"; do
     variant="${VARIANT_NAMES[$i]}"
     dockerfile="${VARIANT_DOCKERFILES[$i]}"
     features="${VARIANT_FEATURES[$i]}"
-    if [ "$VARIANT_SEL" != "all" ] && [ "$variant" != "$VARIANT_SEL" ]; then
-        continue
-    fi
+    case " $VARIANT_SEL " in
+        *" $variant "*) ;;
+        *) continue ;;
+    esac
     for arch in $BUILD_ARCHS; do
         build_variant_arch "$variant" "$dockerfile" "$features" "$arch"
         MANIFESTS="$MANIFESTS ${VERSION}-${variant}-${PIN}:${arch}"

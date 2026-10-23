@@ -143,13 +143,17 @@ impl Config {
         return PathBuf::from(CONTRACTS_DIR);
     }
 
-    /// Pinned cargo binary: the fixed production binary, or the
-    /// custom test one.
+    /// Pinned cargo binary: the fixed production binary on compiler
+    /// images, the custom test one in tests, and none on light images
+    /// (no `toolchain` feature: nothing to bless, the node stands
+    /// down from compiling by construction).
     pub fn cargo_bin(&self) -> Option<PathBuf> {
         #[cfg(feature = "test")]
         return self.cargo_bin.clone();
-        #[cfg(not(feature = "test"))]
+        #[cfg(all(not(feature = "test"), feature = "toolchain"))]
         return Some(PathBuf::from(PINNED_CARGO_BIN));
+        #[cfg(all(not(feature = "test"), not(feature = "toolchain")))]
+        return None;
     }
 }
 

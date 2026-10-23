@@ -570,7 +570,7 @@ pub async fn run_cargo_build(
     }
     let mut child =
         command.spawn().map_err(|e| BuildError::CargoSpawnFailed {
-            details: e.to_string(),
+            details: format!("spawn {}: {e}", program),
         })?;
 
     let stderr = child.stderr.take();
@@ -597,7 +597,7 @@ pub async fn run_cargo_build(
     let status = match request.timeout {
         Some(limit) => match timeout(limit, child.wait()).await {
             Ok(result) => result.map_err(|e| BuildError::CargoSpawnFailed {
-                details: e.to_string(),
+                details: format!("wait {}: {e}", program),
             })?,
             Err(_) => {
                 kill_build_tree(&mut child).await;
@@ -612,7 +612,7 @@ pub async fn run_cargo_build(
                 .wait()
                 .await
                 .map_err(|e| BuildError::CargoSpawnFailed {
-                    details: e.to_string(),
+                    details: format!("wait {}: {e}", program),
                 })?
         }
     };

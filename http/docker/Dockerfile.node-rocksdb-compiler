@@ -69,7 +69,9 @@ RUN rustup toolchain install "$NODE_RUSTC_VERSION" --profile minimal --component
     rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp && \
     rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
     rm -rf /usr/local/cargo/registry /usr/local/cargo/git && \
-    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
+    mkdir -p /shims && cp -L /usr/local/cargo/bin/cargo /shims/cargo && \
+    ln /shims/cargo /shims/rustc && ln /shims/cargo /shims/rustup
 
 # ============================================================================
 # Common project sources (shared by both builders)
@@ -157,14 +159,22 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES"
-
-# Pinned cargo + vendored deps for on-node contract builds.
-# NOTE: the SDK template carries an absolute path (upstream issue #9);
-# it is rewritten here to the in-context SDK copy. Do not "fix" this
-# by symlinking; the day the template uses the published crate this
-# sed goes away.
-RUN test "$(sha256sum /usr/local/bin/cargo-ave-amd64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_AMD64=' /tmp/toolchain.env | cut -d= -f2)" && \
+# Single build RUN with persistent cargo caches: the registry and the
+# workspace target dir survive across image builds, so rebuilds only
+# recompile changed crates (notably NOT the rocksdb C++ sources).
+# Caches never enter the image — only /out/ave-http, /contracts and
+# /runtime-libs are copied out — so same inputs always give
+# byte-identical outputs, cache hit or not.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/ave/target \
+    cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+    mkdir -p /out && cp /ave/target/x86_64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
+    # Pinned cargo + vendored deps for on-node contract builds.
+    # NOTE: the SDK template carries an absolute path (upstream issue #9);
+    # it is rewritten here to the in-context SDK copy. Do not "fix" this
+    # by symlinking; the day the template uses the published crate this
+    # sed goes away.
+    test "$(sha256sum /usr/local/bin/cargo-ave-amd64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_AMD64=' /tmp/toolchain.env | cut -d= -f2)" && \
     mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
     printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
     mkdir -p /tmp/contract-template/.cargo && \
@@ -178,16 +188,52 @@ RUN test "$(sha256sum /usr/local/bin/cargo-ave-amd64 | cut -d' ' -f1)" = "$(grep
     mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
     if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi && \
-    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/registry /usr/local/cargo/git && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/git && \
     rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
-    rm -f /usr/local/rustup/toolchains/*/bin/cargo /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
+    rm -f /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
     chmod -R a+rX /usr/local/rustup && \
     du -sh /usr/local/rustup && \
-    mkdir -p /cargo-libs && \
-    for lib in $(ldd /usr/local/bin/cargo-ave-amd64 2>/dev/null | grep -o '/[^ ]*'); do \
-      mkdir -p "/cargo-libs$(dirname "$lib")"; cp -L "$lib" "/cargo-libs$lib"; \
+    mkdir -p /runtime-libs/lib /runtime-libs/lib64 /runtime-libs/usr && \
+    TRIPLE=x86_64-linux-gnu && ARCH_LIB=x86_64-linux-gnu && \
+    GCC_PROGS="/usr/bin/cc /usr/bin/gcc /usr/bin/${TRIPLE}-gcc /usr/bin/as /usr/bin/ld /usr/bin/ar" && \
+    for prog in cc1 collect2 lto-wrapper lto1; do \
+      for driver in /usr/bin/gcc /usr/bin/${TRIPLE}-gcc /usr/bin/cc; do \
+        p=$($driver -print-prog-name=$prog 2>/dev/null | grep '^/' || true); \
+        [ -n "$p" ] && GCC_PROGS="$GCC_PROGS $p"; \
+      done; \
     done && \
-    echo "cargo-libs:" && du -sh /cargo-libs && ls /cargo-libs/usr/lib/x86_64-linux-gnu/ | head -30
+    for bin in /usr/local/bin/cargo-ave-amd64 $GCC_PROGS; do \
+      [ -f "$bin" ] || continue; \
+      case "$bin" in *.a|*.o|*.h|*.so|*.so.*|*.spec|*.la) continue ;; esac; \
+      for lib in $(ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true); do \
+        dest="/runtime-libs${lib}"; \
+        if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$lib" "$dest"; fi; \
+      done; \
+      # cargo-ave travels to the final image through its own pinned COPY
+      # below: mirroring it here as well would duplicate 39MB. Its
+      # libraries (scanned above) are still mirrored.
+      case "$bin" in /usr/bin/*|/bin/*|/usr/local/bin/cargo-ave-*) ;; *) \
+        dest="/runtime-libs$bin"; \
+        if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$bin" "$dest"; fi;; \
+      esac; \
+    done && \
+    mkdir -p /runtime-libs/usr/bin && \
+    for t in cc gcc ${TRIPLE}-gcc as ld ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
+    mkdir -p /runtime-libs/usr/lib/gcc && cp -r /usr/lib/gcc/${TRIPLE} /runtime-libs/usr/lib/gcc/ && \
+    rm -rf /runtime-libs/usr/lib/gcc/${TRIPLE}/*/include && \
+    if [ -d /usr/libexec/gcc ]; then cp -r /usr/libexec/gcc /runtime-libs/usr/libexec/; else mkdir -p /runtime-libs/usr/libexec && cp -r /usr/libexec/*-linux-gnu /runtime-libs/usr/libexec/ 2>/dev/null || true; fi && \
+    rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
+    for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a; do \
+      f=$(find /usr/lib/${ARCH_LIB} -maxdepth 1 -name "$crt" 2>/dev/null | head -1); \
+      if [ -n "$f" ]; then d="/runtime-libs$(dirname $f)"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
+    done && \
+    echo "runtime-libs:" && du -sh /runtime-libs
+
+# Fixed node paths (/db, /keys, /logs): empty dirs owned by the runtime
+# user, so fresh named volumes auto-populate with the right owner and
+# no seeding or chown step is ever needed. /contracts travels the
+# same way (baked vendor set, see the COPY --chown below).
+RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
 
 # ============================================================================
 # Builder for ARM64 (aarch64 cross toolchain; native gcc on arm64 hosts)
@@ -276,9 +322,18 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES"
-
-RUN test "$(sha256sum /usr/local/bin/cargo-ave-arm64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_ARM64=' /tmp/toolchain.env | cut -d= -f2)" && \
+# Single build RUN with persistent cargo caches (same scheme as the
+# amd64 builder above): incremental rebuilds, byte-identical outputs.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/ave/target \
+    cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+    mkdir -p /out && cp /ave/target/aarch64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
+    # Pinned cargo + vendored deps for on-node contract builds.
+    # NOTE: the SDK template carries an absolute path (upstream issue #9);
+    # it is rewritten here to the in-context SDK copy. Do not "fix" this
+    # by symlinking; the day the template uses the published crate this
+    # sed goes away.
+    test "$(sha256sum /usr/local/bin/cargo-ave-arm64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_ARM64=' /tmp/toolchain.env | cut -d= -f2)" && \
     mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
     printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
     mkdir -p /tmp/contract-template/.cargo && \
@@ -292,16 +347,51 @@ RUN test "$(sha256sum /usr/local/bin/cargo-ave-arm64 | cut -d' ' -f1)" = "$(grep
     mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
     if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi && \
-    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/registry /usr/local/cargo/git && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/git && \
     rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
-    rm -f /usr/local/rustup/toolchains/*/bin/cargo /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
+    rm -f /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
     chmod -R a+rX /usr/local/rustup && \
     du -sh /usr/local/rustup && \
-    mkdir -p /cargo-libs && \
-    for lib in $(ldd /usr/local/bin/cargo-ave-arm64 2>/dev/null | grep -o '/[^ ]*'); do \
-      mkdir -p "/cargo-libs$(dirname "$lib")"; cp -L "$lib" "/cargo-libs$lib"; \
+    mkdir -p /runtime-libs/lib /runtime-libs/lib64 /runtime-libs/usr && \
+    TRIPLE=aarch64-linux-gnu && ARCH_LIB=aarch64-linux-gnu && \
+    GCC_PROGS="/usr/bin/${TRIPLE}-gcc /usr/bin/${TRIPLE}-as /usr/bin/${TRIPLE}-ld /usr/bin/${TRIPLE}-ar" && \
+    for prog in cc1 collect2 lto-wrapper lto1; do \
+      p=$(/usr/bin/${TRIPLE}-gcc -print-prog-name=$prog 2>/dev/null | grep '^/' || true); \
+      [ -n "$p" ] && GCC_PROGS="$GCC_PROGS $p"; \
     done && \
-    echo "cargo-libs:" && du -sh /cargo-libs
+    for bin in /usr/local/bin/cargo-ave-arm64 $GCC_PROGS; do \
+      [ -f "$bin" ] || continue; \
+      case "$bin" in *.a|*.o|*.h|*.so|*.so.*|*.spec|*.la) continue ;; esac; \
+      for lib in $(ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true); do \
+        dest="/runtime-libs${lib}"; \
+        if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$lib" "$dest"; fi; \
+      done; \
+      # cargo-ave travels to the final image through its own pinned COPY
+      # below: mirroring it here as well would duplicate 39MB. Its
+      # libraries (scanned above) are still mirrored.
+      case "$bin" in /usr/bin/*|/bin/*|/usr/local/bin/cargo-ave-*) ;; *) \
+        dest="/runtime-libs$bin"; \
+        if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$bin" "$dest"; fi;; \
+      esac; \
+    done && \
+    mkdir -p /runtime-libs/usr/bin && \
+    for t in ${TRIPLE}-gcc ${TRIPLE}-as ${TRIPLE}-ld ${TRIPLE}-ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
+    ln -s ${TRIPLE}-gcc /runtime-libs/usr/bin/cc && \
+    mkdir -p /runtime-libs/usr/lib/gcc && cp -r /usr/lib/gcc/${TRIPLE} /runtime-libs/usr/lib/gcc/ && \
+    rm -rf /runtime-libs/usr/lib/gcc/${TRIPLE}/*/include && \
+    if [ -d /usr/libexec/gcc ]; then cp -r /usr/libexec/gcc /runtime-libs/usr/libexec/; else mkdir -p /runtime-libs/usr/libexec && cp -r /usr/libexec/*-linux-gnu /runtime-libs/usr/libexec/ 2>/dev/null || true; fi && \
+    rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
+    for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a; do \
+      f=$(find /usr/lib/${ARCH_LIB} -maxdepth 1 -name "$crt" 2>/dev/null | head -1); \
+      if [ -n "$f" ]; then d="/runtime-libs$(dirname $f)"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
+    done && \
+    echo "runtime-libs:" && du -sh /runtime-libs
+
+# Fixed node paths (/db, /keys, /logs): empty dirs owned by the runtime
+# user, so fresh named volumes auto-populate with the right owner and
+# no seeding or chown step is ever needed. /contracts travels the
+# same way (baked vendor set, see the COPY --chown below).
+RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
 
 # ============================================================================
 # Runtime dependency set (glibc + ssl + zlib + certs)
@@ -325,12 +415,23 @@ COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-lin
 COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs-amd64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-amd64 /ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-amd64 /out/ave-http /usr/local/bin/ave-http
 COPY --from=builder-amd64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/db /db
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/keys /keys
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/logs /logs
 COPY --from=builder-amd64 /usr/local/bin/cargo-ave-amd64 /usr/local/bin/cargo-ave-pinned
-COPY --from=builder-amd64 /cargo-libs/lib /lib
+COPY --from=builder-amd64 /runtime-libs/lib /lib
+COPY --from=builder-amd64 /runtime-libs/lib64 /lib64
+COPY --from=builder-amd64 /runtime-libs/usr /usr
 COPY --from=builder-amd64 /usr/local/rustup /usr/local/rustup
-COPY --from=builder-amd64 /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+COPY --from=builder-amd64 /shims/cargo /usr/local/bin/cargo
+COPY --from=builder-amd64 /shims/rustc /usr/local/bin/rustc
+COPY --from=builder-amd64 /shims/rustup /usr/local/bin/rustup
+# rustup shims: the sandbox resolves the system toolchain (`rustc`,
+# `cargo`) via PATH. Without them every in-image build fails
+# instantly at the toolchain probe (verified failure mode). One real
+# binary plus symlinks: the three proxies are byte-identical.
 COPY --from=builder-amd64 --chown=65532:65532 /home/ave /home/ave
 COPY --from=builder-amd64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
 COPY --from=builder-amd64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml
@@ -347,12 +448,23 @@ COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-l
 COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs-arm64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-arm64 /ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-arm64 /out/ave-http /usr/local/bin/ave-http
 COPY --from=builder-arm64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/db /db
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/keys /keys
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/logs /logs
 COPY --from=builder-arm64 /usr/local/bin/cargo-ave-arm64 /usr/local/bin/cargo-ave-pinned
-COPY --from=builder-arm64 /cargo-libs/lib /lib
+COPY --from=builder-arm64 /runtime-libs/lib /lib
+COPY --from=builder-arm64 /runtime-libs/lib64 /lib64
+COPY --from=builder-arm64 /runtime-libs/usr /usr
 COPY --from=builder-arm64 /usr/local/rustup /usr/local/rustup
-COPY --from=builder-arm64 /usr/local/cargo/bin/rustup /usr/local/bin/rustup
+COPY --from=builder-arm64 /shims/cargo /usr/local/bin/cargo
+COPY --from=builder-arm64 /shims/rustc /usr/local/bin/rustc
+COPY --from=builder-arm64 /shims/rustup /usr/local/bin/rustup
+# rustup shims: the sandbox resolves the system toolchain (`rustc`,
+# `cargo`) via PATH. Without them every in-image build fails
+# instantly at the toolchain probe (verified failure mode). One real
+# binary plus symlinks: the three proxies are byte-identical.
 COPY --from=builder-arm64 --chown=65532:65532 /home/ave /home/ave
 COPY --from=builder-arm64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
 COPY --from=builder-arm64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml

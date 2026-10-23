@@ -114,9 +114,21 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+# Single build RUN with persistent cargo caches (same scheme as the
+# compiler image): incremental rebuilds, byte-identical outputs.
+# Only /out/ave-http and /contracts leave the builder.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/ave/target \
+    cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+    mkdir -p /out && cp /ave/target/x86_64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
     mkdir -p /contracts/contracts /contracts/target && \
     chown -R 65532:65532 /contracts
+
+# Fixed node paths (/db, /keys, /logs): empty dirs for the
+# final image to COPY with the runtime owner, so fresh named
+# volumes auto-populate with the right owner (no seeding,
+# no chown step). /contracts travels the same way.
+RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
 
 FROM --platform=$BUILDPLATFORM rust-base AS builder-arm64
 ARG CARGO_PROFILE
@@ -190,9 +202,21 @@ COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
 WORKDIR /ave/http
-RUN cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+# Single build RUN with persistent cargo caches (same scheme as the
+# compiler image): incremental rebuilds, byte-identical outputs.
+# Only /out/ave-http and /contracts leave the builder.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/ave/target \
+    cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+    mkdir -p /out && cp /ave/target/aarch64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
     mkdir -p /contracts/contracts /contracts/target && \
     chown -R 65532:65532 /contracts
+
+# Fixed node paths (/db, /keys, /logs): empty dirs for the
+# final image to COPY with the runtime owner, so fresh named
+# volumes auto-populate with the right owner (no seeding,
+# no chown step). /contracts travels the same way.
+RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
 
 FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_AMD64_DIGEST} AS libs-amd64
 RUN apt-get update && apt-get install --no-install-recommends -y \
@@ -210,8 +234,11 @@ COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-lin
 COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs-amd64 /usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs-amd64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-amd64 /ave/target/x86_64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-amd64 /out/ave-http /usr/local/bin/ave-http
 COPY --from=builder-amd64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/db /db
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/keys /keys
+COPY --from=builder-amd64 --chown=65532:65532 /volumes/logs /logs
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/ave-http"]
 
@@ -221,7 +248,10 @@ COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-l
 COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs-arm64 /usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs-arm64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-arm64 /ave/target/aarch64-unknown-linux-gnu/${CARGO_PROFILE}/ave-http /usr/local/bin/ave-http
+COPY --from=builder-arm64 /out/ave-http /usr/local/bin/ave-http
 COPY --from=builder-arm64 --chown=65532:65532 /contracts /contracts
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/db /db
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/keys /keys
+COPY --from=builder-arm64 --chown=65532:65532 /volumes/logs /logs
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/ave-http"]
