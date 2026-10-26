@@ -1291,7 +1291,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                     }
                                 }
                             }
-                            if !self.boot_nodes.is_empty() {
+                            if !self.boot_nodes.is_empty()
+                                || !self.retry_boot_nodes.is_empty()
+                            {
                                 self.change_state(NetworkState::Dialing).await;
                                 dialing_round_timeout.as_mut().reset(
                                     Instant::now() + Duration::from_secs(15),
@@ -1336,11 +1338,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             self.boot_nodes.clone_from(&self.retry_boot_nodes);
                             self.retry_boot_nodes.clear();
                             self.change_state(NetworkState::Dial).await;
+                            // Backoff done: redial NOW. Falling through to
+                            // the event wait below would park until an
+                            // unrelated event (or never, with all timers
+                            // disarmed).
+                            continue;
                         }
                         // No more bootnodes to send dial and none was successful
                         else if self.boot_nodes.is_empty()
                             && self.successful_dials == 0
                         {
+                            warn!(target: TARGET, retry_queued = self.retry_boot_nodes.len(), rounds_used = retrys, "bootstrap exhausted: no reachable boot node");
                             self.change_state(NetworkState::Disconnected).await;
                         // No more bootnodes to send dial and one or more was successful
                         } else if self.boot_nodes.is_empty() {
@@ -1461,8 +1469,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     metrics.observe_dial_failure(phase, "peer_condition");
                 }
                 if bootstrap_flow {
-                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met");
-                    return Some((false, vec![]));
+                    // Already connected or dialing: not a failure, the
+                    // in-flight connection resolves it (Identify counts
+                    // from any state). Park for a retry round instead of
+                    // dropping the peer: with fresh peers on both ends
+                    // racing dials at once, failing fast here crashes
+                    // bootstraps that are milliseconds from succeeding.
+                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met; waiting for in-flight connection");
+                    return Some((true, vec![]));
                 }
 
                 None
@@ -1539,25 +1553,54 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         event: SwarmEvent<BehaviourEvent>,
     ) {
         match event {
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                self.boot_nodes.remove(&peer_id);
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                // A duplicate-connection close (simultaneous dials,
+                // discovery redial) must not drop a bootstrap peer while
+                // another connection to it survives: Identify on the
+                // survivor still completes the bootstrap.
+                debug!(target: TARGET, peer_id = %peer_id, num_established, "bootstrap connection closed");
+                if num_established == 0
+                    && let Some(addresses) = self.boot_nodes.remove(&peer_id)
+                {
+                    // Last connection gone, but the peer may still be
+                    // reachable (a redial is already in flight, or the
+                    // far side is dialing us back right now): park it
+                    // for the bounded retry rounds instead of crashing
+                    // the bootstrap.
+                    self.retry_boot_nodes.insert(peer_id, addresses);
+                }
             }
             SwarmEvent::OutgoingConnectionError {
                 peer_id: Some(peer_id),
                 error,
                 ..
             } => {
+                debug!(target: TARGET, peer_id = %peer_id, error = ?error, "bootstrap outgoing connection error");
+                // Transport failures are transient by nature (DNS race,
+                // warming listener, handshake garbage from a restarting
+                // peer): park for the bounded retry rounds even when no
+                // address looks retryable, instead of crashing the
+                // bootstrap on the first attempt. Deterministic config
+                // errors (wrong id, denied, self-dial) keep failing fast.
+                let park_transient =
+                    matches!(error, DialError::Transport(_));
                 let (add_to_retry, new_addresses) = self
                     .handle_dial_error(error, &peer_id, true)
                     .unwrap_or((false, vec![]));
 
-                if let Some(addresses) = self.boot_nodes.remove(&peer_id)
-                    && add_to_retry
-                {
-                    if new_addresses.is_empty() {
+                if let Some(addresses) = self.boot_nodes.remove(&peer_id) {
+                    if add_to_retry {
+                        if new_addresses.is_empty() {
+                            self.retry_boot_nodes.insert(peer_id, addresses);
+                        } else {
+                            self.retry_boot_nodes.insert(peer_id, new_addresses);
+                        }
+                    } else if park_transient {
                         self.retry_boot_nodes.insert(peer_id, addresses);
-                    } else {
-                        self.retry_boot_nodes.insert(peer_id, new_addresses);
                     }
                 }
             }
@@ -1591,6 +1634,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                     if any_address_is_valid {
                         if self.boot_nodes.remove(&peer_id).is_some() {
+                            self.successful_dials += 1;
+                        } else if self
+                            .retry_boot_nodes
+                            .remove(&peer_id)
+                            .is_some()
+                        {
+                            // Identify arrived over a connection that
+                            // outlived its bootstrap round (duplicate
+                            // close parked the peer for retry): the peer
+                            // proved reachable, count it.
                             self.successful_dials += 1;
                         }
                         self.peer_identify.insert(peer_id);
@@ -3171,7 +3224,8 @@ mod tests {
             worker.handle_dial_error(DialError::NoAddresses, &peer, true);
         assert_eq!(result, Some((false, vec![])));
 
-        // DialPeerConditionFalse
+        // DialPeerConditionFalse: already connected/dialing, the
+        // in-flight connection resolves it (parked, not dropped).
         let result = worker.handle_dial_error(
             DialError::DialPeerConditionFalse(
                 libp2p::swarm::dial_opts::PeerCondition::Disconnected,
@@ -3179,7 +3233,7 @@ mod tests {
             &peer,
             true,
         );
-        assert_eq!(result, Some((false, vec![])));
+        assert_eq!(result, Some((true, vec![])));
 
         // Denied
         let result = worker.handle_dial_error(
@@ -3541,6 +3595,138 @@ mod tests {
             })
             .await;
         assert!(!worker.boot_nodes.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_duplicate_close_with_survivor_keeps_peer() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3515".to_owned(),
+        );
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let peer = remote_keys.public().to_peer_id();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // One of two connections to the bootstrap peer closes
+        // (duplicate tie-break after simultaneous dials): the peer
+        // must stay queued so Identify on the survivor still counts.
+        worker
+            .handle_connection_events(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(1),
+                endpoint: test_endpoint(),
+                num_established: 1,
+                cause: None,
+            })
+            .await;
+        assert!(worker.boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 0);
+        // The last connection closes too (survivor not registered
+        // yet): the peer is parked for the bounded retry rounds,
+        // never dropped on the floor.
+        worker
+            .handle_connection_events(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(2),
+                endpoint: test_endpoint(),
+                num_established: 0,
+                cause: None,
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 0);
+        // Late Identify over the redial (or the far side dialling
+        // back) still completes the bootstrap instead of crashing it.
+        worker
+            .handle_connection_events(build_identified_event(
+                peer,
+                remote_keys.public(),
+                ConnectionId::new_unchecked(3),
+            ))
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(!worker.retry_boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 1);
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_transport_error_parks_for_retry() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3516".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // Transport failure with no retryable address (DNS race,
+        // warming listener, handshake garbage): parked for the bounded
+        // retry rounds instead of crashing the bootstrap.
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                connection_id: ConnectionId::new_unchecked(1),
+                error: DialError::Transport(vec![]),
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
+        // Deterministic config errors still drop cleanly (no pointless
+        // retries, no crash either: the caller moves on).
+        let bad = PeerId::random();
+        worker.boot_nodes.insert(bad, vec!["/memory/1".parse().unwrap()]);
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(bad),
+                connection_id: ConnectionId::new_unchecked(2),
+                error: DialError::NoAddresses,
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&bad));
+        assert!(!worker.retry_boot_nodes.contains_key(&bad));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_peer_condition_parks_for_retry() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3517".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // Already connected/dialing (racing dials on both ends): not a
+        // failure, the in-flight connection resolves it. Park for a
+        // retry round instead of crashing the bootstrap.
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                connection_id: ConnectionId::new_unchecked(1),
+                error: DialError::DialPeerConditionFalse(
+                    libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                ),
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
     }
 
     #[test(tokio::test)]
