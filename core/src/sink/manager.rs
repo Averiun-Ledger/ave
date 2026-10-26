@@ -80,6 +80,15 @@ pub enum SinkManagerMessage {
     ResetSinkCursors {
         sink: String,
     },
+    /// Attach configured sinks that arrived after this manager was
+    /// created. A governance learned post-boot (or gaining schemas
+    /// later) had none matching at creation time, so without this its
+    /// sinks would stay silent until a restart. Idempotent: only
+    /// missing servers are added; delivery and catch-up paths are
+    /// unchanged.
+    EnsureSinks {
+        servers: Vec<SinkServer>,
+    },
     GetStatus,
     GetDetailedStatus,
     /// Worker reports it has been idle for sink_worker_idle_timeout_ms.
@@ -860,6 +869,9 @@ impl Handler<Self> for SinkManager {
             }
             SinkManagerMessage::ResetSinkCursors { sink } => {
                 self.handle_reset_sink_cursors(sink, ctx).await?;
+            }
+            SinkManagerMessage::EnsureSinks { servers } => {
+                self.handle_ensure_sinks(servers, ctx).await;
             }
             SinkManagerMessage::GetStatus => {
                 return Ok(SinkManagerResponse::Status(
@@ -2727,6 +2739,54 @@ impl SinkManager {
             self.drain_pending_catch_ups(&sink, ctx).await;
         }
         Ok(())
+    }
+
+    /// Adds configured sinks missing from this manager (see
+    /// `EnsureSinks`): same shape as creation-time wiring, safe to
+    /// repeat on every governance update. Never removes: removals keep
+    /// today's restart-bounded behavior. Returns the newly added sink
+    /// names so the caller can start workers and catch up past events.
+    fn ensure_sink_servers(&mut self, servers: &[SinkServer]) -> Vec<String> {
+        let mut added = Vec::new();
+        for sink in servers {
+            if self.sink_servers.contains_key(&sink.server) {
+                continue;
+            }
+            self.sink_servers.insert(sink.server.clone(), sink.clone());
+            self.active_sinks.insert(sink.server.clone());
+            added.push(sink.server.clone());
+        }
+        added
+    }
+
+    /// Late-attach path for `EnsureSinks`: inserting the config is not
+    /// enough, past events recorded in `last_seen` while the sink was
+    /// missing would stay silent (live notifications take the gap path
+    /// and never trigger catch-up on their own). Rebuilds the lagging
+    /// set and reuses the boot path so newly wired sinks start workers
+    /// and catch up without a restart. Safe mode only records the
+    /// config: no workers run there by design.
+    async fn handle_ensure_sinks(
+        &mut self,
+        servers: Vec<SinkServer>,
+        ctx: &mut ActorContext<Self>,
+    ) {
+        let added = self.ensure_sink_servers(&servers);
+        if added.is_empty() {
+            return;
+        }
+        let safe_mode = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config")
+        {
+            config.safe_mode
+        } else {
+            return;
+        };
+        if safe_mode {
+            return;
+        }
+        self.rebuild_lagging();
+        self.start_workers_and_catch_up(ctx).await;
     }
 
     async fn handle_reset_sink_cursors(

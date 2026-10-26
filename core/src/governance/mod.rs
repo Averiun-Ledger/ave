@@ -575,6 +575,13 @@ impl Subject for Governance {
             self.refresh_version_sync(ctx).await?;
         }
 
+        // Late sink attachment (see `SinkManagerMessage::EnsureSinks`):
+        // the creation-time wiring only sees schemas known then. A
+        // governance synced after boot, or gaining schemas later, would
+        // otherwise never get its configured sinks without a restart.
+        // Best effort only: sink wiring must never fail governance apply.
+        self.upsert_sink_servers(ctx).await;
+
         Ok(())
     }
 
@@ -674,6 +681,65 @@ impl GovernanceState {
 }
 
 impl Governance {
+    /// Attaches configured sinks matching this governance and its
+    /// current schemas to the child sink manager, if any are missing.
+    /// Same filter as the creation-time wiring in `pre_start`, but
+    /// re-evaluated on every applied batch: a governance learned after
+    /// boot starts empty and only gains schemas as events apply.
+    /// Warn-and-continue: sink wiring must never fail governance apply.
+    async fn upsert_sink_servers(&self, ctx: &mut ActorContext<Self>) {
+        let matching = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config")
+        {
+            let schema_ids: std::collections::HashSet<String> = self
+                .properties
+                .schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect();
+            let governance_id = self.subject_metadata.subject_id.to_string();
+            config
+                .sinks
+                .iter()
+                .filter(|entry| {
+                    let SinkTarget::Schema {
+                        schema_id,
+                        governance_id: target_governance_id,
+                    } = &entry.target;
+                    schema_id != "governance"
+                        && schema_ids.contains(schema_id)
+                        && target_governance_id.as_ref() == Some(&governance_id)
+                })
+                .flat_map(|entry| entry.servers.clone())
+                .collect::<Vec<_>>()
+        } else {
+            return;
+        };
+        if matching.is_empty() {
+            return;
+        }
+        let child = match ctx.get_child::<SinkManager>("sink_manager").await
+        {
+            Ok(child) => child,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Sink manager child missing when attaching configured sinks"
+                );
+                return;
+            }
+        };
+        if let Err(e) = child
+            .tell(SinkManagerMessage::EnsureSinks { servers: matching })
+            .await
+        {
+            warn!(
+                error = %e,
+                "Failed to attach configured sinks to sink manager"
+            );
+        }
+    }
+
     async fn ledger_batch_size(
         ctx: &ActorContext<Self>,
     ) -> Result<usize, ActorError> {

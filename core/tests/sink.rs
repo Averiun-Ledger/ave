@@ -11609,3 +11609,98 @@ async fn sink_deliveries_reports_per_subject_cursors() {
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
 }
+
+/// Late sink wiring without a second restart.
+///
+/// A governance created before its schemas exist wires zero tracker sinks
+/// at creation time. Adding the schema later must attach the configured
+/// sink on the fly: the subject created afterwards is delivered without
+/// restarting the node again.
+#[traced_test]
+#[tokio::test]
+async fn sink_attaches_without_restart_when_schema_added_late() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+
+    // Restart once to register the sink config: the governance has no
+    // schemas yet, so its sink manager still wires zero sinks.
+    let sink = TestSink::start().await;
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        example_sink_config(
+            sink.url(),
+            Some(governance_id.to_string()),
+        ),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Adding the schema wires the sink late; no second restart follows.
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let subject_id_str = subject_id.to_string();
+
+    wait_for_sink_caught_up(&node.api, "example-sink").await;
+    sink.wait_for_count(3, true).await;
+    let events = sink.snapshot().await;
+    assert_eq!(events.len(), 3);
+    assert_event_is_create(&events[0], &subject_id_str, 0);
+    for i in 1..=2 {
+        assert_event_is_fact_full(
+            &events[i as usize],
+            &subject_id_str,
+            i,
+            true,
+            Some(json!({"ModOne": {"data": i}})),
+        );
+    }
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, 2);
+    assert_no_duplicate_events(&events);
+    assert_sink_not_lagging(&node.api, "example-sink").await;
+    assert_sink_running(&node.api, "example-sink").await;
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
