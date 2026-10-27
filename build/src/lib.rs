@@ -203,6 +203,72 @@ fn rustc_command(toolchain: &str) -> Command {
     }
 }
 
+/// Runtime host triple (`aarch64-unknown-linux-gnu` on ARM64
+/// Linux): lets toolchain resolution find rustup directories
+/// installed for this machine when the selector carries no triple
+/// suffix.
+#[cfg(target_os = "linux")]
+fn runtime_host_triple() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "aarch64" => Some("aarch64-unknown-linux-gnu"),
+        "x86_64" => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+/// `rustc` binary of a rustup toolchain without invoking the proxy:
+/// `$RUSTUP_HOME/toolchains/<selector>/bin/rustc`, also trying the
+/// triple-suffixed directory for bare selectors (`1.95.0`). Used
+/// when no working `rustup` proxy exists (cross-built images ship
+/// the toolchain but no host proxy); `None` when nothing matches.
+fn toolchain_rustc_direct(toolchain: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("RUSTUP_HOME")?;
+    let dir = Path::new(&home).join("toolchains");
+    let mut candidates = vec![dir.join(toolchain)];
+    #[cfg(target_os = "linux")]
+    if let Some(triple) = runtime_host_triple() {
+        if !toolchain.ends_with(triple) {
+            candidates.push(dir.join(format!("{toolchain}-{triple}")));
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|base| base.join("bin").join("rustc"))
+        .find(|bin| bin.is_file())
+}
+
+/// Runs a `rustc` query for the selected toolchain: through the
+/// `rustup` proxy when one works, else by executing the toolchain
+/// `rustc` directly (same query, same output). A proxy that runs
+/// but reports failure is a real toolchain problem, never papered
+/// over by the fallback.
+async fn rustc_output(
+    toolchain: &str,
+    args: &[&str],
+) -> Result<std::process::Output, BuildError> {
+    let mut primary = rustc_command(toolchain);
+    primary.args(args);
+    match primary.output().await {
+        Ok(output) => Ok(output),
+        Err(first) => {
+            let direct =
+                toolchain_rustc_direct(toolchain).ok_or_else(|| {
+                    BuildError::ToolchainProbeFailed {
+                        details: first.to_string(),
+                    }
+                })?;
+            let mut fallback = Command::new(&direct);
+            isolate_build_env(&mut fallback);
+            fallback.args(args);
+            fallback.output().await.map_err(|e| {
+                BuildError::ToolchainProbeFailed {
+                    details: e.to_string(),
+                }
+            })
+        }
+    }
+}
+
 /// One probe per toolchain: sysroot plus the full `rustc -vV`
 /// output every attestation derives from (commit hash, version,
 /// fingerprint input). Toolchains are static per boot (no hot-swap
@@ -277,14 +343,8 @@ async fn probe_toolchain(toolchain: &str) -> Result<Probe, BuildError> {
 }
 
 async fn probe_toolchain_once(toolchain: &str) -> Result<Probe, BuildError> {
-    let sysroot_output = rustc_command(toolchain)
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .await
-        .map_err(|e| BuildError::ToolchainProbeFailed {
-            details: e.to_string(),
-        })?;
+    let sysroot_output =
+        rustc_output(toolchain, &["--print", "sysroot"]).await?;
     if !sysroot_output.status.success() {
         return Err(BuildError::ToolchainProbeFailed {
             details: String::from_utf8_lossy(&sysroot_output.stderr)
@@ -294,14 +354,8 @@ async fn probe_toolchain_once(toolchain: &str) -> Result<Probe, BuildError> {
     let sysroot = String::from_utf8_lossy(&sysroot_output.stdout)
         .trim()
         .to_owned();
-    let verbose_output = rustc_command(toolchain)
-        .arg("--version")
-        .arg("--verbose")
-        .output()
-        .await
-        .map_err(|e| BuildError::ToolchainProbeFailed {
-            details: e.to_string(),
-        })?;
+    let verbose_output =
+        rustc_output(toolchain, &["--version", "--verbose"]).await?;
     if !verbose_output.status.success() {
         return Err(BuildError::ToolchainProbeFailed {
             details: String::from_utf8_lossy(&verbose_output.stderr)
@@ -670,8 +724,10 @@ fn cargo_config_path(contract_path: &Path) -> PathBuf {
     contract_path.join(".cargo").join("config.toml")
 }
 
-/// Resolves the rustc binary of a named rustup toolchain
-/// (`rustup which`), for pinning `RUSTC` under an explicit cargo.
+/// Resolves the rustc binary of a named rustup toolchain: the
+/// `rustup which` proxy lookup first, falling back to the
+/// deterministic toolchain directory (cross-built images ship no
+/// proxy). Used to pin `RUSTC` under an explicit cargo.
 async fn rustc_binary(toolchain: &str) -> Result<String, BuildError> {
     let mut command = Command::new("rustup");
     isolate_build_env(&mut command);
@@ -681,10 +737,19 @@ async fn rustc_binary(toolchain: &str) -> Result<String, BuildError> {
         .arg(toolchain)
         .arg("rustc")
         .output()
-        .await
-        .map_err(|e| BuildError::ToolchainProbeFailed {
-            details: e.to_string(),
-        })?;
+        .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => {
+            return toolchain_rustc_direct(toolchain)
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| BuildError::ToolchainProbeFailed {
+                    details: format!(
+                        "no rustup proxy and no toolchain dir for {toolchain}"
+                    ),
+                });
+        }
+    };
     if !output.status.success() {
         return Err(BuildError::ToolchainProbeFailed {
             details: String::from_utf8_lossy(&output.stderr).to_string(),

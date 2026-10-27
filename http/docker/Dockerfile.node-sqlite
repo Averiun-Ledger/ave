@@ -54,6 +54,8 @@ ENV CARGO_PROFILE=$CARGO_PROFILE
 ENV FEATURES=$FEATURES
 ENV CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
 ENV CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
+ENV CC=x86_64-linux-gnu-gcc
+ENV CXX=x86_64-linux-gnu-g++
 ENV AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
 ENV PKG_CONFIG_ALLOW_CROSS=1
@@ -61,7 +63,7 @@ RUN if [ "$(uname -m)" != "x86_64" ]; then \
       dpkg --add-architecture amd64 && apt-get update && \
       apt-get install --no-install-recommends -y \
         gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-        libc6-dev-amd64-cross libssl-dev:amd64 && \
+        libc6-dev-amd64-cross libssl-dev:amd64 zlib1g:amd64 && \
       apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -135,6 +137,8 @@ ENV CARGO_PROFILE=$CARGO_PROFILE
 ENV FEATURES=$FEATURES
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+ENV CC=aarch64-linux-gnu-gcc
+ENV CXX=aarch64-linux-gnu-g++
 ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 ENV PKG_CONFIG_ALLOW_CROSS=1
@@ -146,7 +150,7 @@ RUN if [ "$(uname -m)" != "aarch64" ]; then \
       dpkg --add-architecture arm64 && apt-get update && \
       apt-get install --no-install-recommends -y \
         gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-        libc6-dev-arm64-cross libssl-dev:arm64 && \
+        libc6-dev-arm64-cross libssl-dev:arm64 zlib1g:arm64 && \
       apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi && \
     mkdir -p ~/.cargo && \
