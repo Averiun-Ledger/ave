@@ -237,7 +237,7 @@ async fn local_build_wasm_with_toolchain(
         if !vendor_root.exists() {
             None
         } else {
-            ave_common::build::relative_vendor_dir(build_dir, root)
+            ave_common::build::absolute_vendor_dir(build_dir, root)
         }
     };
     let request = ave_build::BuildRequest {
@@ -780,6 +780,166 @@ async fn local_build_is_byte_identical_across_contract_roots() {
         .into_iter()
         .map(|p| p.to_string_lossy().as_bytes().to_vec())
         .collect();
+    forbidden.push(
+        String::from_utf8_lossy(&sysroot.stdout)
+            .trim()
+            .as_bytes()
+            .to_vec(),
+    );
+    for needle in forbidden {
+        assert!(
+            !wasm_a.windows(needle.len()).any(|w| w == needle),
+            "the artifact embeds {}",
+            String::from_utf8_lossy(&needle)
+        );
+    }
+}
+
+/// Copies a directory tree (plants identical vendor sources under
+/// two different roots).
+fn copy_dir_tree(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).expect("create vendor copy");
+    let entries = std::fs::read_dir(src).expect("read vendor sources");
+    for entry in entries {
+        let entry = entry.expect("vendor entry");
+        let to = dst.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_tree(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).expect("copy vendor file");
+        }
+    }
+}
+
+/// Real vendored dep set for the frozen lockfile, generated once per
+/// test process with the system cargo. Content-identical for every
+/// consumer; only the planting path differs.
+async fn shared_vendor_dir() -> std::path::PathBuf {
+    static VENDOR: OnceCell<TempDir> = OnceCell::const_new();
+    let root = VENDOR
+        .get_or_init(|| async {
+            tempfile::tempdir().expect("failed to create vendor tempdir")
+        })
+        .await;
+    let probe = root.path().join("vendor");
+    if !probe.exists() {
+        let project = root.path().join("project");
+        std::fs::create_dir_all(project.join("src"))
+            .expect("create vendor project");
+        std::fs::write(project.join("src").join("lib.rs"), "")
+            .expect("write vendor stub source");
+        std::fs::write(project.join("Cargo.toml"), pipeline::compilation_toml())
+            .expect("write vendor manifest");
+        let frozen = ave_common::build::pin_lockfile(
+            ave_common::governance::DEFAULT_PIN,
+        )
+        .expect("frozen lockfile for the active pin");
+        std::fs::write(project.join("Cargo.lock"), frozen.content)
+            .expect("write vendor lockfile");
+        let status = std::process::Command::new("cargo")
+            .arg("vendor")
+            .arg("--manifest-path")
+            .arg(project.join("Cargo.toml"))
+            .arg(&probe)
+            .status()
+            .expect("cargo vendor should run");
+        assert!(status.success(), "cargo vendor should succeed");
+    }
+    probe
+}
+
+/// Production offline build through the shared procedure: frozen
+/// lockfile, vendored sources, pinned toolchain. No sandbox: suites
+/// never depend on namespace support, and the remap under test is
+/// config-level so it applies either way.
+async fn local_build_wasm_vendored(
+    source: &str,
+    build_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<u8> {
+    use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
+    let decoded =
+        pipeline::decode_contract_source(source).expect("valid payload");
+    let (rust_src, rustc_commit) =
+        ave_build::query_sysroot("1.95.0").await.expect("sysroot");
+    let manifest_toml = pipeline::compilation_toml();
+    let frozen = ave_common::build::pin_lockfile(
+        ave_common::governance::DEFAULT_PIN,
+    )
+    .expect("frozen lockfile for the active pin");
+    let vendor_dir = ave_common::build::absolute_vendor_dir(build_dir, root);
+    assert!(vendor_dir.is_some(), "vendor dir must resolve");
+    let request = ave_build::BuildRequest {
+        source: &decoded,
+        manifest_toml: &manifest_toml,
+        config_template: CONTRACT_CARGO_CONFIG,
+        lockfile: Some(frozen.content),
+        target_dir: std::path::PathBuf::from(".build-target"),
+        vendor_dir,
+        cargo_home: root.join(".cargo-home"),
+        toolchain: "1.95.0",
+        cargo: ave_build::CargoProgram::Rustup("1.95.0"),
+        rust_src,
+        rustc_commit,
+        offline: true,
+        locked: true,
+        timeout: None,
+        kill_process_group: false,
+        sandbox: false,
+    };
+    ave_build::build_contract_wasm(build_dir, &request)
+        .await
+        .expect("vendored build should succeed")
+}
+
+/// Vendored root independence (regression: production offline builds
+/// embedded the absolute vendor path, including the random staging
+/// suffix, so the same source built twice gave different bytes and
+/// multi-compiler quorums could never agree). The same source under
+/// two roots with real vendored deps must give byte-identical wasm,
+/// with dep paths remapped to canonical `/vendor/...` and no
+/// machine-absolute path inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn vendored_build_is_byte_identical_across_contract_roots() {
+    let source = source_b64(CONTRACT_D);
+    let vendor_src = shared_vendor_dir().await;
+
+    let root_a = tempfile::tempdir().expect("failed to create tempdir A");
+    let root_b = tempfile::tempdir().expect("failed to create tempdir B");
+    copy_dir_tree(&vendor_src, &root_a.path().join("vendor"));
+    copy_dir_tree(&vendor_src, &root_b.path().join("vendor"));
+    let build_a = root_a.path().join("contracts").join("parity");
+    let build_b = root_b.path().join("contracts").join("parity");
+
+    let wasm_a =
+        local_build_wasm_vendored(&source, &build_a, root_a.path()).await;
+    let wasm_b =
+        local_build_wasm_vendored(&source, &build_b, root_b.path()).await;
+
+    assert_eq!(
+        wasm_a, wasm_b,
+        "the vendor dir must not shape the artifact bytes"
+    );
+
+    // Canonical remap evidence: vendored dep paths live under /vendor/.
+    assert!(
+        wasm_a.windows(8).any(|w| w == b"/vendor/"),
+        "vendored dep paths must be remapped to /vendor/"
+    );
+    let sysroot = std::process::Command::new("rustup")
+        .args(["run", "1.95.0", "rustc", "--print", "sysroot"])
+        .output()
+        .expect("rustc --print sysroot should run");
+    let mut forbidden: Vec<Vec<u8>> = vec![
+        root_a.path().to_path_buf(),
+        root_b.path().to_path_buf(),
+        root_a.path().join("vendor"),
+        root_b.path().join("vendor"),
+    ]
+    .into_iter()
+    .map(|p| p.to_string_lossy().as_bytes().to_vec())
+    .collect();
     forbidden.push(
         String::from_utf8_lossy(&sysroot.stdout)
             .trim()

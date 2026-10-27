@@ -61,10 +61,13 @@ pub fn compilation_toml() -> String {
     ave_contract_sdk::runtime::CONTRACT_CARGO_TOML.to_owned()
 }
 
-/// Vendor directory for a build, resolved by depth from the build
-/// directory to `<contracts_root>/vendor` — never hardcoded. `None`
-/// when the vendor dir is absent or the build dir escapes the root:
-/// then no vendor section is emitted, same as before.
+/// Absolute vendor directory for a build (`<contracts_root>/vendor`),
+/// for the cargo config above. Absolute so the `{vendor}` remap
+/// matches exactly the prefix cargo records — relative would resolve
+/// against the build dir at compile time and bake the random staging
+/// suffix into artifacts. `None` when the vendor dir is absent or
+/// the build dir escapes the root: then no vendor section is
+/// emitted, same as before.
 pub(crate) fn vendor_dir_for_build(
     build_dir: &Path,
     contracts_root: &Path,
@@ -72,7 +75,7 @@ pub(crate) fn vendor_dir_for_build(
     if !contracts_root.join(VENDOR_DIR).exists() {
         return None;
     }
-    ave_common::build::relative_vendor_dir(build_dir, contracts_root)
+    ave_common::build::absolute_vendor_dir(build_dir, contracts_root)
 }
 
 /// Maps a shared build failure to the node taxonomy. Infrastructure

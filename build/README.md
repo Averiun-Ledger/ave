@@ -17,9 +17,10 @@ Scalar rules (target, epoch, frozen inputs) stay in
   templates, frozen lockfile, target/vendor/cargo-home dirs,
   toolchain selector, `CargoProgram`, sysroot data, offline/locked
   flags, timeout. Paths travel as given (relative or absolute);
-  the vendor dir must be relative to the build dir — the config
-  writes it verbatim and an absolute path would bake the machine
-  into every build.
+  the vendor dir must be absolute and clean — the config writes it
+  verbatim into both the vendored-sources directory and the
+  `{vendor}` remap, and only that exact prefix keeps machine paths
+  (including the random staging suffix) out of artifacts.
 - `CargoProgram::{System, Rustup, Pinned}` — which cargo runs:
   ambient (pre-pins behavior), `rustup run <toolchain>` isolation,
   or an explicit binary with `RUSTC` resolved to the toolchain.

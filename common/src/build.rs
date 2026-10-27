@@ -167,13 +167,18 @@ fn escape_toml(value: &str) -> String {
 
 /// Renders the contract cargo config from the SDK template with
 /// local paths substituted and the vendored-sources section appended
-///
 /// when a vendor dir is given. THE single renderer for the node
 /// pipeline (`ave-core`) and the off-chain gate (`ave-pin`): same
-/// inputs in, byte-identical config out. `vendor_dir` is written
-/// verbatim, so callers pass a path relative to the build directory
-/// (see `relative_vendor_dir`) — no machine-specific absolute path
-/// may shape artifacts.
+/// inputs in, byte-identical config out.
+///
+/// `vendor_dir` must be absolute and lexically clean (see
+/// `absolute_vendor_dir`): cargo resolves it verbatim into the
+/// crate paths rustc records, and the `{vendor}` remap below only
+/// matches that exact prefix. A relative vendor dir would resolve
+/// against the build directory at compile time and bake the
+/// machine-specific build root — including the random staging
+/// suffix — into every artifact. Without a vendor dir the
+/// `{vendor}` remap line is dropped so no placeholder leaks.
 pub fn render_contract_cargo_config(
     template: &str,
     target_dir: &Path,
@@ -189,6 +194,17 @@ pub fn render_contract_cargo_config(
         format!("{{{name}}}")
     }
     let mut config = template.to_owned();
+    if vendor_dir.is_none() {
+        let needle = pattern("vendor");
+        let mut kept = String::new();
+        for line in config.lines() {
+            if !line.contains(&needle) {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+        config = kept;
+    }
     config = config.replace(
         &pattern("target_dir"),
         &escape_toml(&target_dir.to_string_lossy()),
@@ -204,6 +220,10 @@ pub fn render_contract_cargo_config(
     config =
         config.replace(&pattern("rustc_commit"), &escape_toml(rustc_commit));
     if let Some(vendor_dir) = vendor_dir {
+        config = config.replace(
+            &pattern("vendor"),
+            &escape_toml(&vendor_dir.to_string_lossy()),
+        );
         config.push_str(&format!(
             "\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"{}\"\n",
             escape_toml(&vendor_dir.to_string_lossy())
@@ -212,25 +232,41 @@ pub fn render_contract_cargo_config(
     config
 }
 
-/// Relative path from a build directory to the `<root>/vendor`
-/// sibling, for the cargo config above. Depth-derived, never
-/// hardcoded: build layouts differ (node scratch is one level below
-///
-/// the contracts root, the test pool two), and a hardcoded depth
-/// silently points cargo at a foreign directory in the other layout.
-/// `None` when the build dir is not under `root` — then no vendor
-/// section is emitted, same as when the dir is absent.
-pub fn relative_vendor_dir(build_dir: &Path, root: &Path) -> Option<PathBuf> {
-    let depth = build_dir.strip_prefix(root).ok()?.components().count();
-    if depth == 0 {
+/// Lexically clean a path (`..`/`.` resolved, no filesystem
+/// access): the vendor remap only matches the exact prefix cargo
+/// records, so the config must carry the normalized form.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push("/");
+    }
+    out
+}
+
+/// Absolute vendor directory for a build: `<root>/vendor`,
+/// lexically normalized, for the cargo config above. The absolute
+/// form is what cargo records into crate paths, and the `{vendor}`
+/// remap rewrites exactly that prefix to `/vendor` — so artifacts
+/// never carry the machine-specific root or the random staging
+/// suffix. `None` when the build dir is not under `root` — then no
+/// vendor section is emitted. Callers check the dir exists first
+/// (same as before: no vendor on disk, no vendor section).
+pub fn absolute_vendor_dir(build_dir: &Path, root: &Path) -> Option<PathBuf> {
+    build_dir.strip_prefix(root).ok()?;
+    if build_dir == root {
         return None;
     }
-    let mut relative = PathBuf::new();
-    for _ in 0..depth {
-        relative.push("..");
-    }
-    relative.push("vendor");
-    Some(relative)
+    Some(normalize_lexically(&root.join("vendor")))
 }
 
 #[cfg(test)]
@@ -244,11 +280,11 @@ mod tests {
     #[test]
     fn render_contract_cargo_config_is_stable() {
         let template = "[build]\ntarget-dir = \"{target_dir}\"\n\
-            [target.x]\nremap = \"{cargo_home}|{rust_src}|{rustc_commit}\"\n";
+            [target.x]\nremap = \"{cargo_home}|{rust_src}|{rustc_commit}|{vendor}\"\n";
         let rendered = render_contract_cargo_config(
             template,
             Path::new(".build-target"),
-            Some(Path::new("../vendor")),
+            Some(Path::new("/data/contracts/vendor")),
             Path::new("/root/.cargo-home"),
             Path::new("/rustup/sysroot/lib/rustlib/src/rust"),
             "abc123",
@@ -256,10 +292,10 @@ mod tests {
         assert_eq!(
             rendered,
             "[build]\ntarget-dir = \".build-target\"\n\
-            [target.x]\nremap = \"/root/.cargo-home|/rustup/sysroot/lib/rustlib/src/rust|abc123\"\n\
-            \n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"../vendor\"\n"
+            [target.x]\nremap = \"/root/.cargo-home|/rustup/sysroot/lib/rustlib/src/rust|abc123|/data/contracts/vendor\"\n\
+            \n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"/data/contracts/vendor\"\n"
         );
-        // No vendor section without a vendor dir.
+        // No vendor section and no leftover placeholder without a vendor dir.
         let rendered = render_contract_cargo_config(
             template,
             Path::new(".build-target"),
@@ -269,50 +305,59 @@ mod tests {
             "abc123",
         );
         assert!(!rendered.contains("vendored-sources"));
+        assert!(!rendered.contains("{vendor}"));
         // Hostile paths can not break the TOML syntax.
         let rendered = render_contract_cargo_config(
             template,
             Path::new(".build-target"),
-            Some(Path::new("../ven\"dor")),
+            Some(Path::new("/data/ven\"dor")),
             Path::new("/ro\\ot"),
             Path::new("/rust"),
             "abc123",
         );
-        assert!(rendered.contains(r#"directory = "../ven\"dor""#));
-        assert!(rendered.contains(r#"/ro\\ot|/rust|abc123"#));
+        assert!(rendered.contains(r#"directory = "/data/ven\"dor""#));
+        assert!(rendered.contains(r#"/ro\\ot|/rust|abc123|/data/ven\"dor"#));
     }
 
-    /// Depth-derived vendor paths: one level below the root climbs
-    /// once, two levels twice; outside the root there is no vendor.
+    /// Absolute vendor dir under the root whatever the build depth;
+    /// outside the root (or the root itself) there is none.
     #[test]
-    fn relative_vendor_dir_follows_depth() {
+    fn absolute_vendor_dir_points_at_root() {
         assert_eq!(
-            relative_vendor_dir(
+            absolute_vendor_dir(
                 Path::new("/data/contracts/scratch-1"),
                 Path::new("/data/contracts")
             ),
-            Some(PathBuf::from("../vendor"))
+            Some(PathBuf::from("/data/contracts/vendor"))
         );
         assert_eq!(
-            relative_vendor_dir(
+            absolute_vendor_dir(
                 Path::new("/data/work/contracts/job-1"),
                 Path::new("/data/work")
             ),
-            Some(PathBuf::from("../../vendor"))
+            Some(PathBuf::from("/data/work/vendor"))
         );
         assert_eq!(
-            relative_vendor_dir(
+            absolute_vendor_dir(
                 Path::new("/data/contracts"),
                 Path::new("/data/contracts")
             ),
             None
         );
         assert_eq!(
-            relative_vendor_dir(
+            absolute_vendor_dir(
                 Path::new("/elsewhere/build"),
                 Path::new("/data/contracts")
             ),
             None
+        );
+        // Lexical cleanup, no filesystem access.
+        assert_eq!(
+            absolute_vendor_dir(
+                Path::new("/data/contracts//scratch-1"),
+                Path::new("/data/contracts/")
+            ),
+            Some(PathBuf::from("/data/contracts/vendor"))
         );
     }
 }
