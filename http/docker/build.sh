@@ -260,14 +260,12 @@ fail() {
 # ============================================================================
 gate_pins() {
     local only_pin="${1:-}"
-    local ave_pin="$WORKSPACE_ROOT/ave-contracts/ave-pin"
     local ave_repro="$WORKSPACE_ROOT/ave-reproducible-wasm"
     local sdk_dir="$WORKSPACE_ROOT/ave-contract-sdk"
     local common_dir="$AVE_REPO/common"
 
     [ -f "$ave_repro/config/toolchain.env" ] \
         || fail "toolchain.env not found at $ave_repro/config/toolchain.env"
-    [ -d "$ave_pin/pins" ] || fail "pins dir not found at $ave_pin/pins"
 
     # shellcheck disable=SC1090
     . "$ave_repro/config/toolchain.env"
@@ -289,32 +287,36 @@ gate_pins() {
     done
 
     # SDK version matches the pins that reference it.
-    local sdk_version pin_count pin pin_dir pin_json rustc_version pin_sdk
+    local sdk_version pin_count pin rustc_version pin_sdk reg_json
     sdk_version="$(grep -m1 '^version' "$sdk_dir/Cargo.toml" | cut -d'"' -f2)"
     [ -n "$sdk_version" ] || fail "cannot read SDK version"
 
-    # Per-pin checks: rustup toolchain + wasm target, registry entry.
+    # Authority is the ave-common registry, read via its `pins`
+    # example. ave-contracts/ave-pin is an off-chain audit tool: its
+    # records are never build inputs and the build never requires
+    # that checkout.
+    reg_json="$(cd "$AVE_REPO" && cargo run -q -p ave-common --example pins)" \
+        || fail "cannot read registry pins from ave-common"
+    export GATE_REG_JSON="$reg_json"
+
+    # Per-pin checks: rustup toolchain + wasm target.
     pin_count=0
-    for pin_dir in "$ave_pin"/pins/*/; do
-        pin="$(basename "$pin_dir")"
+    for pin in $(python3 -c "import json,os; print(' '.join(json.loads(os.environ['GATE_REG_JSON']).keys()))"); do
         if [ -n "$only_pin" ] && [ "$pin" != "$only_pin" ]; then
             continue
         fi
         pin_count=$((pin_count + 1))
-        pin_json="$pin_dir/pin.json"
-        [ -f "$pin_json" ] || fail "missing $pin_json"
-        rustc_version="$(python3 -c "import json;print(json.load(open('$pin_json'))['rustc_version'])")"
-        pin_sdk="$(python3 -c "import json;print(json.load(open('$pin_json'))['sdk_version'])")"
+        rustc_version="$(python3 -c "import json,os,sys; print(json.loads(os.environ['GATE_REG_JSON'])[sys.argv[1]]['rustc_version'])" "$pin")"
+        pin_sdk="$(python3 -c "import json,os,sys; print(json.loads(os.environ['GATE_REG_JSON'])[sys.argv[1]]['sdk_version'])" "$pin")"
         [ "$pin_sdk" = "$sdk_version" ] \
             || fail "pin $pin sdk $pin_sdk != repo sdk $sdk_version"
         rustup toolchain list 2>/dev/null | grep -q "^$rustc_version" \
             || fail "rustup toolchain $rustc_version (pin $pin) not installed"
         rustup target list --installed --toolchain "$rustc_version" 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
             || fail "wasm32 target missing for toolchain $rustc_version (pin $pin)"
-        grep -q "$pin" "$common_dir/src/registry.rs" \
-            || fail "pin $pin missing from ave-common registry"
         echo "gate: ok pin $pin (rustc $rustc_version, sdk $pin_sdk)"
     done
+    unset GATE_REG_JSON
     [ "$pin_count" -gt 0 ] || fail "no pins checked"
 
     # Frozen contract sources exist in ave-common.
@@ -405,8 +407,8 @@ if [ -z "$PIN" ]; then
     PIN="$(grep -m1 'pub const DEFAULT_PIN' "$AVE_REPO/common/src/governance.rs" | cut -d'"' -f2)"
     [ -n "$PIN" ] || { echo "Error: cannot read DEFAULT_PIN" >&2; exit 1; }
 fi
-RUSTC_VERSION="$(python3 -c "import json;print(json.load(open('$WORKSPACE_ROOT/ave-contracts/ave-pin/pins/$PIN/pin.json'))['rustc_version'])")"
-[ -n "$RUSTC_VERSION" ] || { echo "Error: no rustc_version for pin $PIN" >&2; exit 1; }
+RUSTC_VERSION="$(cd "$AVE_REPO" && cargo run -q -p ave-common --example pins | python3 -c "import json,sys; print(json.load(sys.stdin)['$PIN']['rustc_version'])")"
+[ -n "$RUSTC_VERSION" ] || { echo "Error: no rustc_version for pin $PIN (registry)" >&2; exit 1; }
 NODE_RUSTC_VERSION="$(grep -m1 '^RUST_VERSION=' "$WORKSPACE_ROOT/ave-reproducible-wasm/config/toolchain.env" | cut -d= -f2)"
 [ -n "$NODE_RUSTC_VERSION" ] || { echo "Error: no RUST_VERSION in toolchain.env" >&2; exit 1; }
 PIN_LOCKFILE="contract-v1.Cargo.lock"
