@@ -508,8 +508,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         esac; \
       done && \
       mkdir -p /runtime-libs/usr/bin && \
-      for t in ${TRIPLE}-gcc ${TRIPLE}-as ${TRIPLE}-ld ${TRIPLE}-ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
-      ln -s ${TRIPLE}-gcc /runtime-libs/usr/bin/cc && \
+      for t in cc gcc ${TRIPLE}-gcc as ld ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
       mkdir -p /runtime-libs/usr/lib/gcc && cp -r /usr/lib/gcc/${TRIPLE} /runtime-libs/usr/lib/gcc/ && \
       rm -rf /runtime-libs/usr/lib/gcc/${TRIPLE}/*/include && \
       if [ -d /usr/libexec/gcc ]; then cp -r /usr/libexec/gcc /runtime-libs/usr/libexec/; else mkdir -p /runtime-libs/usr/libexec && cp -r /usr/libexec/*-linux-gnu /runtime-libs/usr/libexec/ 2>/dev/null || true; fi && \
