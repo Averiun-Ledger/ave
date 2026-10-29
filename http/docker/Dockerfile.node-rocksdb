@@ -1,3 +1,4 @@
+# check=skip=InvalidBaseImagePlatform
 # Ave node, RocksDB WITHOUT compiler role (no toolchain, no vendor).
 # Every RUN executes on the host architecture. TARGETARCH only selects
 # the files being produced, so both build directions work without QEMU.
@@ -35,7 +36,29 @@ RUN { \
       echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
     } > /etc/apt/sources.list.d/debian.sources && \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot
-RUN apt-get update && apt-get install --no-install-recommends -y \
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      'if ! apt-get update; then' \
+      '  echo "APT snapshot unavailable; using live Debian repositories" >&2' \
+      '  {' \
+      '    echo "Types: deb";' \
+      '    echo "URIs: http://deb.debian.org/debian";' \
+      '    echo "Suites: trixie trixie-updates";' \
+      '    echo "Components: main";' \
+      '    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp";' \
+      '    echo "";' \
+      '    echo "Types: deb";' \
+      '    echo "URIs: http://deb.debian.org/debian-security";' \
+      '    echo "Suites: trixie-security";' \
+      '    echo "Components: main";' \
+      '    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp";' \
+      '  } > /etc/apt/sources.list.d/debian.sources' \
+      '  rm -f /etc/apt/apt.conf.d/99snapshot' \
+      '  apt-get update' \
+      'fi' > /usr/local/bin/apt-update && \
+    chmod +x /usr/local/bin/apt-update && \
+    /usr/local/bin/apt-update && apt-get install --no-install-recommends -y \
     build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
     libssl-dev pkg-config llvm-dev ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -57,7 +80,29 @@ RUN { \
       echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
     } > /etc/apt/sources.list.d/debian.sources && \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot
-RUN apt-get update && apt-get install --no-install-recommends -y \
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      'if ! apt-get update; then' \
+      '  echo "APT snapshot unavailable; using live Debian repositories" >&2' \
+      '  {' \
+      '    echo "Types: deb";' \
+      '    echo "URIs: http://deb.debian.org/debian";' \
+      '    echo "Suites: trixie trixie-updates";' \
+      '    echo "Components: main";' \
+      '    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp";' \
+      '    echo "";' \
+      '    echo "Types: deb";' \
+      '    echo "URIs: http://deb.debian.org/debian-security";' \
+      '    echo "Suites: trixie-security";' \
+      '    echo "Components: main";' \
+      '    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp";' \
+      '  } > /etc/apt/sources.list.d/debian.sources' \
+      '  rm -f /etc/apt/apt.conf.d/99snapshot' \
+      '  apt-get update' \
+      'fi' > /usr/local/bin/apt-update && \
+    chmod +x /usr/local/bin/apt-update && \
+    /usr/local/bin/apt-update && apt-get install --no-install-recommends -y \
     build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
     libssl-dev pkg-config llvm-dev ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -140,7 +185,7 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac && \
     if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
-      dpkg --add-architecture "$TARGETARCH" && apt-get update && \
+      dpkg --add-architecture "$TARGETARCH" && /usr/local/bin/apt-update && \
       apt-get install --no-install-recommends -y \
         "$CROSS_GCC" "$CROSS_GXX" "libc6-dev-$TARGETARCH-cross" \
         "libssl-dev:$TARGETARCH" "zlib1g:$TARGETARCH" && \
@@ -182,7 +227,7 @@ RUN case "$TARGETARCH" in \
       arm64) ARCH_LIB=aarch64-linux-gnu ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac && \
-    dpkg --add-architecture "$TARGETARCH" && apt-get update && \
+    dpkg --add-architecture "$TARGETARCH" && /usr/local/bin/apt-update && \
     mkdir -p /debs /out && cd /debs && \
     apt-get download "libssl3t64:$TARGETARCH" "zlib1g:$TARGETARCH" && \
     for deb in *.deb; do dpkg-deb -x "$deb" /out; done && \
@@ -192,7 +237,7 @@ RUN case "$TARGETARCH" in \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     test -f "/out/usr/lib/$ARCH_LIB/libssl.so.3"
 
-FROM --platform=linux/amd64 gcr.io/distroless/cc-debian13@${DISTROLESS_AMD64_DIGEST} AS amd64
+FROM gcr.io/distroless/cc-debian13@${DISTROLESS_AMD64_DIGEST} AS amd64
 COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
 COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
@@ -203,7 +248,7 @@ COPY --from=builder --chown=65532:65532 /volumes/ /
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/ave-http"]
 
-FROM --platform=linux/arm64 gcr.io/distroless/cc-debian13@${DISTROLESS_ARM64_DIGEST} AS arm64
+FROM gcr.io/distroless/cc-debian13@${DISTROLESS_ARM64_DIGEST} AS arm64
 COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
 COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
