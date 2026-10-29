@@ -245,9 +245,13 @@ require_command() {
 }
 
 require_command docker
+require_command cargo
 require_command grep
 require_command sha256sum
 require_command python3
+case " $VARIANT_SEL " in
+    *" rocksdb-compiler "*) require_command rustup ;;
+esac
 
 fail() {
     echo "build.sh: FAIL: $*" >&2
@@ -310,10 +314,17 @@ gate_pins() {
         pin_sdk="$(python3 -c "import json,os,sys; print(json.loads(os.environ['GATE_REG_JSON'])[sys.argv[1]]['sdk_version'])" "$pin")"
         [ "$pin_sdk" = "$sdk_version" ] \
             || fail "pin $pin sdk $pin_sdk != repo sdk $sdk_version"
-        rustup toolchain list 2>/dev/null | grep -q "^$rustc_version" \
-            || fail "rustup toolchain $rustc_version (pin $pin) not installed"
-        rustup target list --installed --toolchain "$rustc_version" 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
-            || fail "wasm32 target missing for toolchain $rustc_version (pin $pin)"
+        case " $VARIANT_SEL " in
+            *" rocksdb-compiler "*)
+                rustup toolchain list 2>/dev/null | grep -q "^$rustc_version" \
+                    || fail "rustup toolchain $rustc_version (pin $pin) not installed"
+                rustup target list --installed --toolchain "$rustc_version" 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
+                    || fail "wasm32 target missing for toolchain $rustc_version (pin $pin)"
+                ;;
+            *)
+                echo "gate: local contract toolchain not required without compiler variant"
+                ;;
+        esac
         echo "gate: ok pin $pin (rustc $rustc_version, sdk $pin_sdk)"
     done
     unset GATE_REG_JSON
@@ -463,57 +474,92 @@ fmt_duration() {
     printf '%dm%02ds' $((total / 60)) $((total % 60))
 }
 
+report_image_sizes() {
+    local tag
+    for tag in $BUILT_TAGS; do
+        printf '%s ' "$tag"
+        docker image inspect "$tag" --format 'content-bytes={{.Size}}'
+    done
+}
+
 BUILD_TOTAL_SECS=0
+BUILT_TAGS=""
 
 # Static verification for images of a foreign arch (can not `docker
-# run` them without emulation, which is prohibited): check the
-# image arch plus the ELF machine of every shipped binary.
+# run` them without emulation, which is prohibited): inspect every ELF
+# in the exported rootfs and require the complete compiler tool set.
 smoke_foreign_arch() {
     local tag="$1" arch="$2" variant="$3"
-    local want_machine libssl
+    local want_machine container
     case "$arch" in
-        amd64) want_machine="62"; libssl="/usr/lib/x86_64-linux-gnu/libssl.so.3" ;;
-        arm64) want_machine="183"; libssl="/usr/lib/aarch64-linux-gnu/libssl.so.3" ;;
+        amd64) want_machine="62" ;;
+        arm64) want_machine="183" ;;
+        *) echo "Error: unsupported foreign arch $arch" >&2; exit 1 ;;
     esac
     [ "$(docker image inspect "$tag" --format '{{.Architecture}}')" = "$arch" ] \
         || { echo "Error: $tag reports wrong architecture" >&2; exit 1; }
+    [ "$(docker image inspect "$tag" --format '{{.Config.User}}')" = "65532:65532" ] \
+        || { echo "Error: $tag does not run as 65532:65532" >&2; exit 1; }
     container="$(docker create "$tag")"
-    local tmp
-    tmp="$(mktemp -d)"
+    local tmp_script
+    tmp_script="$(mktemp)"
     # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'; docker rm '$container' >/dev/null 2>&1 || true" RETURN
-    docker cp "$container:/usr/local/bin/ave-http" "$tmp/ave-http" \
-        || { echo "Error: no ave-http in $tag" >&2; exit 1; }
-    docker cp "$container:$libssl" "$tmp/libssl" \
-        || { echo "Error: no $libssl in $tag" >&2; exit 1; }
-    local probes="$tmp/ave-http $tmp/libssl"
-    if [ "$variant" = "rocksdb-compiler" ]; then
-        docker cp "$container:/usr/local/bin/cargo-ave-pinned" "$tmp/cargo-ave" \
-            || { echo "Error: no cargo-ave-pinned in $tag" >&2; exit 1; }
-        docker cp "$container:/usr/local/bin/rustc" "$tmp/rustc-shim" \
-            || { echo "Error: no rustc shim in $tag" >&2; exit 1; }
-        docker cp "$container:/usr/local/bin/cargo" "$tmp/cargo-shim" \
-            || { echo "Error: no cargo shim in $tag" >&2; exit 1; }
-        probes="$probes $tmp/cargo-ave $tmp/rustc-shim $tmp/cargo-shim"
-        for probe in $probes; do
-            [ -s "$probe" ] || { echo "Error: empty $probe in $tag" >&2; exit 1; }
-        done
-    fi
-    # shellcheck disable=SC2086
-    python3 - "$want_machine" $probes <<'PYEOF' || { echo "Error: wrong-arch ELF in $tag" >&2; exit 1; }
-import struct, sys
-want = int(sys.argv[1])
-for path in sys.argv[2:]:
-    with open(path, "rb") as f:
-        magic = f.read(20)
-    assert magic[:4] == b"\x7fELF", f"{path}: not ELF"
-    (machine,) = struct.unpack("<H", magic[18:20])
-    assert machine == want, f"{path}: machine {machine} != {want}"
-print("ELF arch ok")
+    trap "rm -f '$tmp_script'; docker rm '$container' >/dev/null 2>&1 || true" RETURN
+    cat > "$tmp_script" <<'PYEOF'
+import struct, sys, tarfile
+
+want, variant, arch, rustc_version = sys.argv[1:]
+machine_want = int(want)
+gnu = {"amd64": "x86_64-linux-gnu", "arm64": "aarch64-linux-gnu"}[arch]
+rust = {"amd64": "x86_64-unknown-linux-gnu", "arm64": "aarch64-unknown-linux-gnu"}[arch]
+required = {
+    "usr/local/bin/ave-http",
+    f"usr/lib/{gnu}/libssl.so.3",
+}
+if variant == "rocksdb-compiler":
+    loader = "lib64/ld-linux-x86-64.so.2" if arch == "amd64" else "lib/ld-linux-aarch64.so.1"
+    required.update({
+        "usr/local/bin/cargo-ave-pinned",
+        f"usr/local/rustup/toolchains/{rustc_version}-{rust}/bin/cargo",
+        f"usr/local/rustup/toolchains/{rustc_version}-{rust}/bin/rustc",
+        "usr/bin/gcc", "usr/bin/as", "usr/bin/ld", "usr/bin/ar",
+        f"usr/libexec/gcc/{gnu}/14/cc1",
+        f"usr/libexec/gcc/{gnu}/14/collect2",
+        f"usr/libexec/gcc/{gnu}/14/lto1",
+        f"lib/{gnu}/libc.so.6",
+        loader,
+    })
+
+seen = set()
+checked = 0
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
+    for member in archive:
+        name = member.name.removeprefix("./")
+        seen.add(name)
+        assert not name.startswith("usr/local/cargo/registry"), f"registry cache leaked: {name}"
+        assert not name.startswith("ave/target"), f"target cache leaked: {name}"
+        if not member.isfile():
+            continue
+        source = archive.extractfile(member)
+        if source is None:
+            continue
+        header = source.read(20)
+        if header[:4] != b"\x7fELF":
+            continue
+        assert len(header) == 20, f"truncated ELF: {name}"
+        machine = struct.unpack("<H", header[18:20])[0]
+        assert machine == machine_want, f"{name}: ELF machine {machine} != {machine_want}"
+        checked += 1
+
+missing = sorted(required - seen)
+assert not missing, f"missing required files: {missing}"
+assert checked > 0, "no ELF files found"
+print(f"rootfs ELF arch ok ({checked} files); required tool set present")
 PYEOF
+    docker export "$container" | python3 "$tmp_script" "$want_machine" "$variant" "$arch" "$RUSTC_VERSION"
     trap - RETURN
     docker rm "$container" >/dev/null
-    rm -rf "$tmp"
+    rm -f "$tmp_script"
 }
 
 build_variant_arch() {
@@ -529,6 +575,7 @@ build_variant_arch() {
     local start end secs
     start=$(date +%s)
     docker build \
+        --platform "linux/$arch" \
         --build-arg "PIN=$PIN" \
         --build-arg "PIN_LOCKFILE=$PIN_LOCKFILE" \
         --build-arg "RUSTC_VERSION=$RUSTC_VERSION" \
@@ -551,9 +598,9 @@ build_variant_arch() {
             docker run --rm --entrypoint /usr/local/bin/cargo-ave-pinned "$tag" --version >/dev/null \
                 || { echo "Error: cargo-ave-pinned broken in $tag" >&2; exit 1; }
             docker run --rm --entrypoint /usr/local/bin/rustc "$tag" --version >/dev/null \
-                || { echo "Error: rustc shim broken in $tag" >&2; exit 1; }
+                || { echo "Error: target rustc broken in $tag" >&2; exit 1; }
             docker run --rm --entrypoint /usr/local/bin/cargo "$tag" --version >/dev/null \
-                || { echo "Error: cargo shim broken in $tag" >&2; exit 1; }
+                || { echo "Error: target cargo broken in $tag" >&2; exit 1; }
         fi
     else
         smoke_foreign_arch "$tag" "$arch" "$variant"
@@ -562,6 +609,7 @@ build_variant_arch() {
     secs=$((end - start))
     BUILD_TOTAL_SECS=$((BUILD_TOTAL_SECS + secs))
     echo "### OK $tag ($(fmt_duration "$secs"))"
+    BUILT_TAGS="$BUILT_TAGS $tag"
     if [ "$PUSH" = true ]; then
         docker push "$tag"
     fi
@@ -583,7 +631,7 @@ for i in "${!VARIANT_NAMES[@]}"; do
 done
 
 if [ "$PROD" = true ]; then
-    for variant in rocksdb-compiler rocksdb sqlite; do
+    for variant in $VARIANT_SEL; do
         if [ -n "$DOCKER_USERNAME" ]; then
             base_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}-${PIN}"
         else
@@ -607,11 +655,7 @@ fi
 
 echo ""
 echo "Done in $(fmt_duration "$BUILD_TOTAL_SECS"). Images (not pushed unless --push):"
-if [ -n "$DOCKER_USERNAME" ]; then
-    docker images --filter "reference=${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-*" --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sort -u
-else
-    docker images --filter "reference=${DOCKER_REPO}:${VERSION}-*" --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sort -u
-fi
+report_image_sizes
 echo ""
 echo "Run a compiler node (seccomp=unconfined is the pragmatic default:"
 echo "the default Docker profile denies unshare/mount/pivot_root and the"

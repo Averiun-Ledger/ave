@@ -1,20 +1,19 @@
 # Ave node, RocksDB + compiler role (in-process toolchain).
-# Cross-built from ANY host arch to EVERY target arch, no emulation:
-# each builder stage runs natively on the host and installs the
-# CONTRACT toolchain for its TARGET triple (native exec when host
-# and target match, files-only foreign install otherwise). Target
-# images run on their own arch only (arm on arm, amd on amd).
+# Every RUN executes on the host architecture. TARGETARCH only selects
+# the files being produced, so both build directions work without QEMU.
 # Usage (from the workspace root /home/ale/dev):
-#   docker build --target amd64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
-#   docker build --target arm64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
+#   docker build --platform linux/amd64 --target amd64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
+#   docker build --platform linux/arm64 --target arm64 -f ave/http/docker/Dockerfile.node-rocksdb-compiler .
 
 ARG DEBIAN_AMD64_DIGEST=sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2
 ARG DEBIAN_ARM64_DIGEST=sha256:a66b19aa552f595b4ab276c6b4f9b24fa4546632c5ecd88cccdced4a6866323a
+ARG DEBIAN_SNAPSHOT=20261029T082808Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20261029T072456Z
 ARG DISTROLESS_AMD64_DIGEST=sha256:a0426fc2d66bbaa64fa3577e6d654411a671752b8eba243882cc3cc533a00613
 ARG DISTROLESS_ARM64_DIGEST=sha256:76fe70b16ed7943288c1aacecbdb73edfdb5f5e75577ad6ae4de069b966862c9
 ARG RUSTUP_VERSION=1.28.2
-# Active pin: keep in sync with ave-common governance DEFAULT_PIN.
-# Changing the pin means a new image (never redefine).
+ARG RUSTUP_AMD64_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+ARG RUSTUP_ARM64_SHA256=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
 ARG PIN=rust-1.95.0_sdk-0.8.0_wasm32
 ARG PIN_LOCKFILE=contract-v1.Cargo.lock
 ARG RUSTC_VERSION=1.95.0
@@ -22,365 +21,76 @@ ARG NODE_RUSTC_VERSION=1.98.1
 ARG CARGO_PROFILE=release
 ARG FEATURES="ext-sqlite rocksdb prometheus toolchain"
 
-# ============================================================================
-# System layers (native build tools; cross toolchains per builder below)
-# ============================================================================
 FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_AMD64_DIGEST} AS sys-amd64
+ARG DEBIAN_SNAPSHOT
+ARG DEBIAN_SECURITY_SNAPSHOT
+RUN { \
+      echo 'Types: deb'; \
+      echo "URIs: http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT"; \
+      echo 'Suites: trixie trixie-updates'; \
+      echo 'Components: main'; \
+      echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
+      echo ''; \
+      echo 'Types: deb'; \
+      echo "URIs: http://snapshot.debian.org/archive/debian-security/$DEBIAN_SECURITY_SNAPSHOT"; \
+      echo 'Suites: trixie-security'; \
+      echo 'Components: main'; \
+      echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
+    } > /etc/apt/sources.list.d/debian.sources && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot
 RUN apt-get update && apt-get install --no-install-recommends -y \
     build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
     libssl-dev pkg-config llvm-dev ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 FROM --platform=$BUILDPLATFORM debian:trixie-slim@${DEBIAN_ARM64_DIGEST} AS sys-arm64
+ARG DEBIAN_SNAPSHOT
+ARG DEBIAN_SECURITY_SNAPSHOT
+RUN { \
+      echo 'Types: deb'; \
+      echo "URIs: http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT"; \
+      echo 'Suites: trixie trixie-updates'; \
+      echo 'Components: main'; \
+      echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
+      echo ''; \
+      echo 'Types: deb'; \
+      echo "URIs: http://snapshot.debian.org/archive/debian-security/$DEBIAN_SECURITY_SNAPSHOT"; \
+      echo 'Suites: trixie-security'; \
+      echo 'Components: main'; \
+      echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp'; \
+    } > /etc/apt/sources.list.d/debian.sources && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot
 RUN apt-get update && apt-get install --no-install-recommends -y \
     build-essential clang cmake curl gcc g++ libclang-dev libc6-dev \
     libssl-dev pkg-config llvm-dev ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ============================================================================
-# Rust toolchain layer (pinned rustup + node toolchain for the HOST
-# arch: it compiles ave-http below. The CONTRACT toolchain is
-# per-target and lives in each builder: same arch as the host when
-# native, foreign files-only install when crossing).
-# ============================================================================
 FROM --platform=$BUILDPLATFORM sys-${BUILDARCH} AS rust-base
+ARG BUILDARCH
 ARG RUSTUP_VERSION
+ARG RUSTUP_AMD64_SHA256
+ARG RUSTUP_ARM64_SHA256
 ARG NODE_RUSTC_VERSION
-ARG TARGETARCH
-# Fixed homes so every absolute path below is identical on all
-# hosts and in all images.
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo HOME=/home/ave
 ENV PATH="/usr/local/cargo/bin:/usr/local/bin:${PATH}"
-RUN case "$TARGETARCH" in \
-      amd64) RUSTUP_ARCH=x86_64-unknown-linux-gnu ;; \
-      arm64) RUSTUP_ARCH=aarch64-unknown-linux-gnu ;; \
-      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+RUN case "$BUILDARCH" in \
+      amd64) RUSTUP_ARCH=x86_64-unknown-linux-gnu; RUSTUP_SHA256="$RUSTUP_AMD64_SHA256" ;; \
+      arm64) RUSTUP_ARCH=aarch64-unknown-linux-gnu; RUSTUP_SHA256="$RUSTUP_ARM64_SHA256" ;; \
+      *) echo "unsupported BUILDARCH=$BUILDARCH" >&2; exit 1 ;; \
     esac && \
     curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARCH}/rustup-init" -o /tmp/rustup-init && \
+    echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c - && \
     chmod +x /tmp/rustup-init && \
     /tmp/rustup-init -y --default-toolchain none --profile minimal && \
     rm /tmp/rustup-init && \
-    mkdir -p /home/ave && chown 65532:65532 /home/ave
-# Node toolchain (builds ave-http itself; must satisfy all deps' MSRV).
-# Minimal profile + explicit components: no clippy, rustfmt, docs.
-RUN rustup toolchain install "$NODE_RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo && \
-    rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu --toolchain "$NODE_RUSTC_VERSION" && \
+    mkdir -p /home/ave && chown 65532:65532 /home/ave && \
+    rustup toolchain install "$NODE_RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo && \
     rustup default "$NODE_RUSTC_VERSION" && \
-    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp && \
-    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
-    rm -rf /usr/local/cargo/registry /usr/local/cargo/git && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/registry /usr/local/cargo/git \
+      /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
-# ============================================================================
-# Common project sources (shared by both builders)
-# ============================================================================
-# NOTE: keep in sync with the workspace layout. Missing COPYs fail the
-# build early (ave-build, ave-contract-sdk and common/pins are path
-# dependencies and frozen inputs of the node build).
-
-# ============================================================================
-# Builder for AMD64 (native gcc on amd64 hosts, x86_64 cross
-# toolchain elsewhere; the CONTRACT toolchain below is for the
-# TARGET triple — native exec on matching hosts, files-only
-# foreign install when crossing).
-# ============================================================================
-FROM --platform=$BUILDPLATFORM rust-base AS builder-amd64
-ARG CARGO_PROFILE
-ARG FEATURES
-ARG PIN
-ARG PIN_LOCKFILE
-ARG RUSTC_VERSION
-ARG NODE_RUSTC_VERSION
-ENV CARGO_PROFILE=$CARGO_PROFILE
-ENV FEATURES=$FEATURES
-ENV TARGET_TRIPLE=x86_64-unknown-linux-gnu
-ENV NATIVE_MARCH=x86_64
-ENV SYS_TRIPLE=x86_64-linux-gnu
-ENV CC=x86_64-linux-gnu-gcc
-ENV CXX=x86_64-linux-gnu-g++
-ENV CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
-ENV CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
-ENV AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
-ENV PKG_CONFIG_ALLOW_CROSS=1
-RUN if [ "$(uname -m)" != "x86_64" ]; then \
-      dpkg --add-architecture amd64 && apt-get update && \
-      apt-get install --no-install-recommends -y \
-        gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-        libc6-dev-amd64-cross libssl-dev:amd64 zlib1g:amd64 \
-        libcurl4:amd64 && \
-      apt-get clean && rm -rf /var/lib/apt/lists/*; \
-    fi && \
-    mkdir -p /usr/local/bin && \
-    echo "builder-amd64 ready on $(uname -m)"
-# Native x86_64 gcc for the image when crossing (same reason as the
-# arm64 builder below: proc-macro crates link with the HOST cc).
-# Skipped on native hosts. Picked into /runtime-libs by the big RUN.
-RUN if [ "$(uname -m)" != "x86_64" ]; then \
-      mkdir -p /debs-amd64 && \
-      apt-get update && \
-      apt-get -o Dir::Cache::Archives=/debs-amd64 install --download-only -y --no-install-recommends \
-        gcc:amd64 binutils:amd64 libc6-dev:amd64 libstdc++6:amd64 && \
-      mkdir -p /cross-cc && \
-      for deb in /debs-amd64/*.deb; do dpkg-deb -x "$deb" /cross-cc; done && \
-      rm -rf /debs-amd64 && \
-      ls /cross-cc/usr/bin/ | head -n 8; \
-    fi
-
-COPY ./ave/http/Cargo.toml /ave/http/Cargo.toml
-COPY ./ave/identity/Cargo.toml /ave/identity/Cargo.toml
-COPY ./ave/core/Cargo.toml /ave/core/Cargo.toml
-COPY ./ave/bridge/Cargo.toml /ave/bridge/Cargo.toml
-COPY ./ave/network/Cargo.toml /ave/network/Cargo.toml
-COPY ./ave/common/Cargo.toml /ave/common/Cargo.toml
-COPY ./ave/build/Cargo.toml /ave/build/Cargo.toml
-COPY ./ave/Cargo.toml /ave/Cargo.toml
-COPY ./ave/Cargo.lock /ave/Cargo.lock
-COPY ./ave/README.md /ave/README.md
-COPY ./ave/common/pins /ave/common/pins
-COPY ./ave/common/build.rs /ave/common/build.rs
-COPY ./ave/common/proto /ave/common/proto
-
-COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
-COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
-COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
-COPY ./ave-actors/databases/rocksdb_db/README.md ./ave-actors/databases/rocksdb_db/README.md
-COPY ./ave-actors/databases/sqlite_db/Cargo.toml ./ave-actors/databases/sqlite_db/Cargo.toml
-COPY ./ave-actors/databases/sqlite_db/README.md ./ave-actors/databases/sqlite_db/README.md
-COPY ./ave-actors/store/Cargo.toml ./ave-actors/store/Cargo.toml
-COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
-COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
-COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
-COPY ./ave-actors/README.md ./ave-actors/README.md
-
-COPY ./ave-contract-sdk/Cargo.toml ./ave-contract-sdk/Cargo.toml
-COPY ./ave-contract-sdk/src ./ave-contract-sdk/src
-
-COPY ./ave-reproducible-wasm/dist/cargo-ave-amd64 /usr/local/bin/cargo-ave-amd64
-COPY ./ave-reproducible-wasm/dist/cargo-ave-arm64 /usr/local/bin/cargo-ave-arm64
-COPY ./ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
-
-COPY ./ave/http/src ./ave/http/src
-COPY ./ave/http/migrations ./ave/http/migrations
-COPY ./ave/src ./ave/src
-COPY ./ave/identity/src ./ave/identity/src
-COPY ./ave/core/src ./ave/core/src
-COPY ./ave/core/migrations ./ave/core/migrations
-COPY ./ave/bridge/src ./ave/bridge/src
-COPY ./ave/network/src ./ave/network/src
-COPY ./ave/common/src ./ave/common/src
-COPY ./ave/build/src ./ave/build/src
-
-COPY ./ave-actors/actor/src ./ave-actors/actor/src
-COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
-COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
-COPY ./ave-actors/store/src ./ave-actors/store/src
-COPY ./ave-actors/src ./ave-actors/src
-
-WORKDIR /ave/http
-# Single build RUN with persistent cargo caches: the registry and the
-# workspace target dir survive across image builds, so rebuilds only
-# recompile changed crates (notably NOT the rocksdb C++ sources).
-# Caches never enter the image — only /out/ave-http, /contracts and
-# /runtime-libs are copied out — so same inputs always give
-# byte-identical outputs, cache hit or not.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/ave/target \
-    cargo build --target x86_64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
-    mkdir -p /out && cp /ave/target/x86_64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
-    # Pinned cargo + vendored deps for on-node contract builds.
-    # NOTE: the SDK template carries an absolute path (upstream issue #9);
-    # it is rewritten here to the in-context SDK copy. Do not "fix" this
-    # by symlinking; the day the template uses the published crate this
-    # sed goes away.
-    test "$(sha256sum /usr/local/bin/cargo-ave-amd64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_AMD64=' /tmp/toolchain.env | cut -d= -f2)" && \
-    mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
-    printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
-    mkdir -p /tmp/contract-template/.cargo && \
-    sed 's#path = "/home/ale/dev/ave-contract-sdk"#path = "/ave-contract-sdk"#' /ave-contract-sdk/src/runtime/contract_Cargo.toml > /tmp/contract-template/Cargo.toml && \
-    cp "/ave/common/pins/${PIN_LOCKFILE}" /tmp/contract-template/Cargo.lock && \
-    cargo vendor --manifest-path /tmp/contract-template/Cargo.toml /contracts/vendor --offline && \
-    printf '[build]\ntarget-dir = "/contracts/target"\n\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/contracts/vendor"\n' > /contracts/vendor-config.toml && \
-    cp /contracts/vendor-config.toml /tmp/contract-template/.cargo/config.toml && \
-    # Contract toolchain for the TARGET triple: native exec on
-    # matching hosts, files-only foreign install when crossing (the
-    # foreign rustc can not run here; the warmup below proves the
-    # native one and persists nothing anyway).
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      echo "native contract toolchain $RUSTC_VERSION" && \
-      rustup toolchain install "$RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo,rust-src && \
-      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION" && \
-      rustup run "$RUSTC_VERSION" cargo build --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline && \
-      mkdir -p /shims && cp -L /usr/local/cargo/bin/cargo /shims/cargo && \
-      ln /shims/cargo /shims/rustc && ln /shims/cargo /shims/rustup; \
-    else \
-      echo "cross contract toolchain $RUSTC_VERSION-$TARGET_TRIPLE" && \
-      rustup toolchain install "$RUSTC_VERSION-$TARGET_TRIPLE" --force-non-host --profile minimal --component rustc,rust-std,cargo,rust-src && \
-      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION-$TARGET_TRIPLE" && \
-      TC_DIR="/usr/local/rustup/toolchains/$RUSTC_VERSION-$TARGET_TRIPLE" && \
-      mkdir -p /shims && cp -L "$TC_DIR/bin/cargo" /shims/cargo && cp -L "$TC_DIR/bin/rustc" /shims/rustc; \
-    fi && \
-    rm -rf /contracts/target /tmp/contract-template && \
-    mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
-    chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
-    # Toolchains must stay readable for the non-root runtime user;
-    # the sandbox remounts them read-only anyway. Native keeps the
-    # single contract toolchain; cross drops the host node toolchain
-    # (wrong arch for the image) and defaults to the contract one.
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi; \
-    else \
-      rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default --force-non-host "$RUSTC_VERSION-$TARGET_TRIPLE"; \
-    fi && \
-    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/git && \
-    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
-    rm -f /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
-    chmod -R a+rX /usr/local/rustup && \
-    du -sh /usr/local/rustup && \
-    mkdir -p /runtime-libs/lib /runtime-libs/lib64 /runtime-libs/usr && \
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      TRIPLE=x86_64-linux-gnu && ARCH_LIB=x86_64-linux-gnu && \
-      GCC_PROGS="/usr/bin/cc /usr/bin/gcc /usr/bin/${TRIPLE}-gcc /usr/bin/as /usr/bin/ld /usr/bin/ar" && \
-      for prog in cc1 collect2 lto-wrapper lto1; do \
-        for driver in /usr/bin/gcc /usr/bin/${TRIPLE}-gcc /usr/bin/cc; do \
-          p=$($driver -print-prog-name=$prog 2>/dev/null | grep '^/' || true); \
-          [ -n "$p" ] && GCC_PROGS="$GCC_PROGS $p"; \
-        done; \
-      done && \
-      for bin in /usr/local/bin/cargo-ave-amd64 $GCC_PROGS; do \
-        [ -f "$bin" ] || continue; \
-        case "$bin" in *.a|*.o|*.h|*.so|*.so.*|*.spec|*.la) continue ;; esac; \
-        for lib in $(ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true); do \
-          dest="/runtime-libs${lib}"; \
-          if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$lib" "$dest"; fi; \
-        done; \
-        case "$bin" in /usr/bin/*|/bin/*|/usr/local/bin/cargo-ave-*) ;; *) \
-          dest="/runtime-libs$bin"; \
-          if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$bin" "$dest"; fi;; \
-        esac; \
-      done && \
-      mkdir -p /runtime-libs/usr/bin && \
-      for t in cc gcc ${TRIPLE}-gcc as ld ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
-      mkdir -p /runtime-libs/usr/lib/gcc && cp -r /usr/lib/gcc/${TRIPLE} /runtime-libs/usr/lib/gcc/ && \
-      rm -rf /runtime-libs/usr/lib/gcc/${TRIPLE}/*/include && \
-      if [ -d /usr/libexec/gcc ]; then cp -r /usr/libexec/gcc /runtime-libs/usr/libexec/; else mkdir -p /runtime-libs/usr/libexec && cp -r /usr/libexec/*-linux-gnu /runtime-libs/usr/libexec/ 2>/dev/null || true; fi && \
-      rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
-      for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a; do \
-        f=$(find /usr/lib/${ARCH_LIB} -maxdepth 1 -name "$crt" 2>/dev/null | head -1); \
-        if [ -n "$f" ]; then d="/runtime-libs$(dirname $f)"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
-      done; \
-    else \
-      echo "cross runtime libs: recursive readelf scan over cargo-ave and the native x86_64 gcc from /cross-cc (proc-macro crates link with the HOST cc)" && \
-      echo /usr/local/bin/cargo-ave-amd64 > /tmp/scan.list && \
-      for prog in gcc as ld ar; do \
-        src=$(ls /cross-cc/usr/bin/$prog /cross-cc/usr/bin/x86_64-linux-gnu-$prog 2>/dev/null | head -1); \
-        [ -n "$src" ] || { echo "no $prog in /cross-cc" >&2; exit 1; }; \
-        echo "$src" >> /tmp/scan.list; \
-      done && \
-      for prog in $(find /cross-cc/usr/libexec/gcc -name 'cc1' -o -name 'collect2' -o -name 'lto-wrapper' -o -name 'lto1' 2>/dev/null); do \
-        echo "$prog" >> /tmp/scan.list; \
-      done && \
-      rm -f /tmp/scan.done && touch /tmp/scan.done && \
-      while [ -s /tmp/scan.list ]; do \
-        scan_bin=$(head -n 1 /tmp/scan.list); sed -i '1d' /tmp/scan.list; \
-        grep -qxF "$scan_bin" /tmp/scan.done && continue; \
-        echo "$scan_bin" >> /tmp/scan.done; \
-        for lib in $(readelf -d "$scan_bin" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p'); do \
-          f=$(find /cross-cc/usr/lib /cross-cc/lib /usr/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /usr/lib/gcc-cross -name "$lib" 2>/dev/null | head -1); \
-          if [ -z "$f" ]; then echo "missing lib $lib for $scan_bin" >&2; exit 1; fi; \
-          d="/runtime-libs$(echo $(dirname $f) | sed 's#^/cross-cc##')"; \
-          if [ ! -e "$d/$(basename $f)" ]; then mkdir -p "$d"; cp -L "$f" "$d/"; echo "$d/$(basename $f)" >> /tmp/scan.list; fi; \
-        done; \
-      done && \
-      interp=$(readelf -l /usr/local/bin/cargo-ave-amd64 2>/dev/null | sed -n 's/.*interpreter: \([^]]*\)\].*/\1/p'); \
-      if [ -n "$interp" ]; then d="/runtime-libs$(dirname $interp)"; mkdir -p "$d"; cp -L "$interp" "$d/"; \
-      else echo "no interpreter for cargo-ave" >&2; exit 1; fi && \
-      rm -f /tmp/scan.list /tmp/scan.done && \
-      mkdir -p /runtime-libs/usr/bin && \
-      for t in gcc as ld ar; do \
-        src=$(ls /cross-cc/usr/bin/$t /cross-cc/usr/bin/x86_64-linux-gnu-$t 2>/dev/null | head -1); \
-        [ -n "$src" ] || { echo "no $t in /cross-cc" >&2; exit 1; }; \
-        cp -L "$src" /runtime-libs/usr/bin/x86_64-linux-gnu-$t; \
-      done && \
-      ln -s x86_64-linux-gnu-gcc /runtime-libs/usr/bin/cc && \
-      mkdir -p /runtime-libs/usr/lib/gcc && cp -r /cross-cc/usr/lib/gcc/x86_64-linux-gnu /runtime-libs/usr/lib/gcc/ && \
-      rm -rf /runtime-libs/usr/lib/gcc/x86_64-linux-gnu/*/include && \
-      mkdir -p /runtime-libs/usr/libexec && cp -r /cross-cc/usr/libexec/gcc /runtime-libs/usr/libexec/ && \
-      rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
-      for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a libgcc_s.so.1; do \
-        f=$(find /cross-cc/usr /usr/x86_64-linux-gnu /usr/lib/gcc-cross -name "$crt" 2>/dev/null | head -1); \
-        if [ -n "$f" ]; then d="/runtime-libs$(echo $(dirname $f) | sed 's#^/cross-cc##')"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
-      done; \
-    fi && \
-    echo "runtime-libs:" && du -sh /runtime-libs
-
-# Fixed node paths (/db, /keys, /logs): empty dirs owned by the runtime
-# user, so fresh named volumes auto-populate with the right owner and
-# no seeding or chown step is ever needed. /contracts travels the
-# same way (baked vendor set, see the COPY --chown below).
-RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
-
-# ============================================================================
-# Builder for ARM64 (aarch64 cross toolchain; native gcc on arm64
-# hosts. The CONTRACT toolchain below is for the TARGET triple —
-# native exec on matching hosts, files-only foreign install when
-# crossing).
-# ============================================================================
-FROM --platform=$BUILDPLATFORM rust-base AS builder-arm64
-ARG CARGO_PROFILE
-ARG FEATURES
-ARG PIN
-ARG PIN_LOCKFILE
-ARG RUSTC_VERSION
-ARG NODE_RUSTC_VERSION
-ENV CARGO_PROFILE=$CARGO_PROFILE
-ENV FEATURES=$FEATURES
-ENV TARGET_TRIPLE=aarch64-unknown-linux-gnu
-ENV NATIVE_MARCH=aarch64
-ENV SYS_TRIPLE=aarch64-linux-gnu
-ENV CC=aarch64-linux-gnu-gcc
-ENV CXX=aarch64-linux-gnu-g++
-ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-ENV PKG_CONFIG_ALLOW_CROSS=1
-RUN if [ "$(uname -m)" != "aarch64" ]; then \
-      dpkg --add-architecture arm64 && apt-get update && \
-      apt-get install --no-install-recommends -y \
-        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-        libc6-dev-arm64-cross libssl-dev:arm64 zlib1g:arm64 \
-        libcurl4:arm64 && \
-      apt-get clean && rm -rf /var/lib/apt/lists/*; \
-    fi && \
-    mkdir -p ~/.cargo && \
-    printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > ~/.cargo/config.toml
-# NOTE: on native arm64 hosts the aarch64 triplet binaries already ship
-# with gcc (same as x86_64 triplets on amd64); no extra packages needed.
-ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-ENV OPENSSL_DIR=/usr
-ENV OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
-ENV OPENSSL_INCLUDE_DIR=/usr/include
-ENV BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/usr/aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-ENV OPENSSL_DIR_aarch64_unknown_linux_gnu=/usr
-ENV OPENSSL_LIB_DIR_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu
-# Native arm64 gcc for the IMAGE (contract builds link proc-macro
-# crates with the HOST cc): TARGET-arch debs downloaded and unpacked
-# without maintainer scripts — never executes foreign binaries.
-# Skipped on native hosts, whose gcc is already correct. The big RUN
-# below picks the drivers, cc1/as/ld and their library closure out
-# of /cross-cc into /runtime-libs.
-RUN if [ "$(uname -m)" != "aarch64" ]; then \
-      mkdir -p /debs-arm64 && \
-      apt-get update && \
-      apt-get -o Dir::Cache::Archives=/debs-arm64 install --download-only -y --no-install-recommends \
-        gcc:arm64 binutils:arm64 libc6-dev:arm64 libstdc++6:arm64 && \
-      mkdir -p /cross-cc && \
-      for deb in /debs-arm64/*.deb; do dpkg-deb -x "$deb" /cross-cc; done && \
-      rm -rf /debs-arm64 && \
-      ls /cross-cc/usr/bin/ | head -n 8; \
-    fi
-
+FROM scratch AS sources
 COPY ./ave/http/Cargo.toml ./ave/http/Cargo.toml
 COPY ./ave/identity/Cargo.toml ./ave/identity/Cargo.toml
 COPY ./ave/core/Cargo.toml ./ave/core/Cargo.toml
@@ -394,7 +104,6 @@ COPY ./ave/README.md ./ave/README.md
 COPY ./ave/common/pins ./ave/common/pins
 COPY ./ave/common/build.rs ./ave/common/build.rs
 COPY ./ave/common/proto ./ave/common/proto
-
 COPY ./ave-actors/actor/Cargo.toml ./ave-actors/actor/Cargo.toml
 COPY ./ave-actors/actor/README.md ./ave-actors/actor/README.md
 COPY ./ave-actors/databases/rocksdb_db/Cargo.toml ./ave-actors/databases/rocksdb_db/Cargo.toml
@@ -406,14 +115,11 @@ COPY ./ave-actors/store/README.md ./ave-actors/store/README.md
 COPY ./ave-actors/Cargo.toml ./ave-actors/Cargo.toml
 COPY ./ave-actors/Cargo.lock ./ave-actors/Cargo.lock
 COPY ./ave-actors/README.md ./ave-actors/README.md
-
 COPY ./ave-contract-sdk/Cargo.toml ./ave-contract-sdk/Cargo.toml
 COPY ./ave-contract-sdk/src ./ave-contract-sdk/src
-
-COPY ./ave-reproducible-wasm/dist/cargo-ave-amd64 /usr/local/bin/cargo-ave-amd64
-COPY ./ave-reproducible-wasm/dist/cargo-ave-arm64 /usr/local/bin/cargo-ave-arm64
-COPY ./ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
-
+COPY ./ave-reproducible-wasm/dist/cargo-ave-amd64 ./ave-reproducible-wasm/dist/cargo-ave-amd64
+COPY ./ave-reproducible-wasm/dist/cargo-ave-arm64 ./ave-reproducible-wasm/dist/cargo-ave-arm64
+COPY ./ave-reproducible-wasm/config/toolchain.env ./ave-reproducible-wasm/config/toolchain.env
 COPY ./ave/http/src ./ave/http/src
 COPY ./ave/http/migrations ./ave/http/migrations
 COPY ./ave/src ./ave/src
@@ -424,104 +130,221 @@ COPY ./ave/bridge/src ./ave/bridge/src
 COPY ./ave/network/src ./ave/network/src
 COPY ./ave/common/src ./ave/common/src
 COPY ./ave/build/src ./ave/build/src
-
 COPY ./ave-actors/actor/src ./ave-actors/actor/src
 COPY ./ave-actors/databases/rocksdb_db/src ./ave-actors/databases/rocksdb_db/src
 COPY ./ave-actors/databases/sqlite_db/src ./ave-actors/databases/sqlite_db/src
 COPY ./ave-actors/store/src ./ave-actors/store/src
 COPY ./ave-actors/src ./ave-actors/src
 
+# Shared native target configuration. No target binary is executed here.
+FROM --platform=$BUILDPLATFORM rust-base AS target-config
+ARG BUILDARCH
+ARG TARGETARCH
+ARG NODE_RUSTC_VERSION
+RUN case "$TARGETARCH" in \
+      amd64) RUST_TARGET=x86_64-unknown-linux-gnu; RUST_TARGET_VAR=x86_64_unknown_linux_gnu; TARGET_KEY=X86_64_UNKNOWN_LINUX_GNU; GNU_TRIPLE=x86_64-linux-gnu; CROSS_GCC=gcc-x86-64-linux-gnu; CROSS_GXX=g++-x86-64-linux-gnu ;; \
+      arm64) RUST_TARGET=aarch64-unknown-linux-gnu; RUST_TARGET_VAR=aarch64_unknown_linux_gnu; TARGET_KEY=AARCH64_UNKNOWN_LINUX_GNU; GNU_TRIPLE=aarch64-linux-gnu; CROSS_GCC=gcc-aarch64-linux-gnu; CROSS_GXX=g++-aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      dpkg --add-architecture "$TARGETARCH" && apt-get update && \
+      apt-get install --no-install-recommends -y \
+        "$CROSS_GCC" "$CROSS_GXX" "libc6-dev-$TARGETARCH-cross" \
+        "libssl-dev:$TARGETARCH" "zlib1g:$TARGETARCH" "libcurl4:$TARGETARCH" && \
+      apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi && \
+    rustup target add "$RUST_TARGET" --toolchain "$NODE_RUSTC_VERSION" && \
+    { \
+      echo "export RUST_TARGET=$RUST_TARGET"; \
+      echo "export GNU_TRIPLE=$GNU_TRIPLE"; \
+      echo "export ARCH_LIB=$GNU_TRIPLE"; \
+      echo "export CC=$GNU_TRIPLE-gcc"; \
+      echo "export CXX=$GNU_TRIPLE-g++"; \
+      echo "export CC_$RUST_TARGET_VAR=$GNU_TRIPLE-gcc"; \
+      echo "export CXX_$RUST_TARGET_VAR=$GNU_TRIPLE-g++"; \
+      echo "export AR_$RUST_TARGET_VAR=$GNU_TRIPLE-ar"; \
+      echo "export CARGO_TARGET_${TARGET_KEY}_LINKER=$GNU_TRIPLE-gcc"; \
+      echo "export PKG_CONFIG_ALLOW_CROSS=1"; \
+      echo "export PKG_CONFIG_LIBDIR=/usr/lib/$GNU_TRIPLE/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"; \
+      echo "export OPENSSL_DIR=/usr"; \
+      echo "export OPENSSL_LIB_DIR=/usr/lib/$GNU_TRIPLE"; \
+      echo "export OPENSSL_INCLUDE_DIR=/usr/include"; \
+    } > /etc/ave-target.env && \
+    if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      echo "export BINDGEN_EXTRA_CLANG_ARGS='--sysroot=/usr/$GNU_TRIPLE -I/usr/$GNU_TRIPLE/include'" >> /etc/ave-target.env; \
+    fi
+
+# The node binary has no dependency on contract toolchain packaging.
+FROM --platform=$BUILDPLATFORM target-config AS node-builder
+ARG BUILDARCH
+ARG TARGETARCH
+ARG CARGO_PROFILE
+ARG FEATURES
+COPY --from=sources /ave /ave
+COPY --from=sources /ave-actors /ave-actors
+COPY --from=sources /ave-contract-sdk /ave-contract-sdk
 WORKDIR /ave/http
-# Single build RUN with persistent cargo caches (same scheme as the
-# amd64 builder above): incremental rebuilds, byte-identical outputs.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/ave/target \
-    cargo build --target aarch64-unknown-linux-gnu --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
-    mkdir -p /out && cp /ave/target/aarch64-unknown-linux-gnu/"$CARGO_PROFILE"/ave-http /out/ave-http && \
-    # Pinned cargo + vendored deps for on-node contract builds.
-    # NOTE: the SDK template carries an absolute path (upstream issue #9);
-    # it is rewritten here to the in-context SDK copy. Do not "fix" this
-    # by symlinking; the day the template uses the published crate this
-    # sed goes away.
-    test "$(sha256sum /usr/local/bin/cargo-ave-arm64 | cut -d' ' -f1)" = "$(grep '^CARGO_BINARY_SHA256_ARM64=' /tmp/toolchain.env | cut -d= -f2)" && \
+RUN --mount=type=cache,id=ave-node-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=ave-node-compiler-${BUILDARCH}-${TARGETARCH},target=/ave/target \
+    . /etc/ave-target.env && \
+    cargo build --locked --target "$RUST_TARGET" --profile "$CARGO_PROFILE" --no-default-features --features "$FEATURES" && \
+    mkdir -p /out && cp "/ave/target/$RUST_TARGET/$CARGO_PROFILE/ave-http" /out/ave-http && \
+    mkdir -p /volumes/db /volumes/keys /volumes/logs && chown -R 65532:65532 /volumes
+
+# Final contract sources are packaged independently of dependency resolution.
+FROM scratch AS contract-sources
+COPY --from=sources /ave-contract-sdk /runtime-sources/home/ale/dev/ave-contract-sdk
+COPY --from=sources /ave/Cargo.toml /runtime-sources/home/ale/dev/ave/Cargo.toml
+COPY --from=sources /ave/README.md /runtime-sources/home/ale/dev/ave/README.md
+COPY --from=sources /ave/src /runtime-sources/home/ale/dev/ave/src
+COPY --from=sources /ave/common/Cargo.toml /runtime-sources/home/ale/dev/ave/common/Cargo.toml
+COPY --from=sources /ave/common/build.rs /runtime-sources/home/ale/dev/ave/common/build.rs
+COPY --from=sources /ave/common/src/lib.rs /runtime-sources/home/ale/dev/ave/common/src/lib.rs
+COPY --from=sources /ave/common/src/wrapper.rs /runtime-sources/home/ale/dev/ave/common/src/wrapper.rs
+
+# Contract dependency resolution is independent of the toolchain and node.
+FROM --platform=$BUILDPLATFORM target-config AS contract-vendor
+ARG TARGETARCH
+ARG PIN_LOCKFILE
+COPY --from=sources /ave/Cargo.toml /ave/Cargo.toml
+COPY --from=sources /ave/README.md /ave/README.md
+COPY --from=sources /ave/http/Cargo.toml /ave/http/Cargo.toml
+COPY --from=sources /ave/identity/Cargo.toml /ave/identity/Cargo.toml
+COPY --from=sources /ave/core/Cargo.toml /ave/core/Cargo.toml
+COPY --from=sources /ave/bridge/Cargo.toml /ave/bridge/Cargo.toml
+COPY --from=sources /ave/network/Cargo.toml /ave/network/Cargo.toml
+COPY --from=sources /ave/build/Cargo.toml /ave/build/Cargo.toml
+COPY --from=sources /ave/common/Cargo.toml /ave/common/Cargo.toml
+COPY --from=sources /ave/common/build.rs /ave/common/build.rs
+COPY --from=sources /ave/common/src/lib.rs /ave/common/src/lib.rs
+COPY --from=sources /ave/common/src/wrapper.rs /ave/common/src/wrapper.rs
+COPY --from=sources /ave/common/pins /ave/common/pins
+COPY --from=sources /ave-contract-sdk /ave-contract-sdk
+COPY --from=sources /ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
+COPY --from=sources /ave-reproducible-wasm/dist/cargo-ave-${TARGETARCH} /usr/local/bin/cargo-ave-pinned
+RUN --mount=type=cache,id=ave-node-registry,target=/usr/local/cargo/registry \
+    case "$TARGETARCH" in \
+      amd64) HASH_KEY=CARGO_BINARY_SHA256_AMD64 ;; \
+      arm64) HASH_KEY=CARGO_BINARY_SHA256_ARM64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    test "$(sha256sum /usr/local/bin/cargo-ave-pinned | cut -d' ' -f1)" = "$(grep "^${HASH_KEY}=" /tmp/toolchain.env | cut -d= -f2)" && \
     mkdir -p /contracts/contracts /contracts/vendor /contracts/target /tmp/contract-template/src && \
-    printf '// Empty crate: the vendor step and the warmup build below only need\n// resolvable dependencies, never real contract logic.\n' > /tmp/contract-template/src/lib.rs && \
+    printf '// Empty crate used to resolve and validate the pinned dependencies.\n' > /tmp/contract-template/src/lib.rs && \
     mkdir -p /tmp/contract-template/.cargo && \
     sed 's#path = "/home/ale/dev/ave-contract-sdk"#path = "/ave-contract-sdk"#' /ave-contract-sdk/src/runtime/contract_Cargo.toml > /tmp/contract-template/Cargo.toml && \
     cp "/ave/common/pins/${PIN_LOCKFILE}" /tmp/contract-template/Cargo.lock && \
-    cargo vendor --manifest-path /tmp/contract-template/Cargo.toml /contracts/vendor --offline && \
+    cargo fetch --locked --manifest-path /tmp/contract-template/Cargo.toml && \
+    cargo vendor --locked --offline --manifest-path /tmp/contract-template/Cargo.toml /contracts/vendor && \
     printf '[build]\ntarget-dir = "/contracts/target"\n\n[net]\noffline = true\n\n[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/contracts/vendor"\n' > /contracts/vendor-config.toml && \
-    cp /contracts/vendor-config.toml /tmp/contract-template/.cargo/config.toml && \
-    # Contract toolchain for the TARGET triple: native exec on
-    # matching hosts, files-only foreign install when crossing (the
-    # foreign rustc can not run here; the warmup below proves the
-    # native one and persists nothing anyway).
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      echo "native contract toolchain $RUSTC_VERSION" && \
+    cp /contracts/vendor-config.toml /tmp/contract-template/.cargo/config.toml
+
+# The contract toolchain only changes with its pin or host/target selection.
+FROM --platform=$BUILDPLATFORM target-config AS contract-toolchain
+ARG BUILDARCH
+ARG TARGETARCH
+ARG RUSTC_VERSION
+ARG NODE_RUSTC_VERSION
+RUN . /etc/ave-target.env && \
+    if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
       rustup toolchain install "$RUSTC_VERSION" --profile minimal --component rustc,rust-std,cargo,rust-src && \
-      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION" && \
-      rustup run "$RUSTC_VERSION" cargo build --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline && \
-      mkdir -p /shims && cp -L /usr/local/cargo/bin/cargo /shims/cargo && \
-      ln /shims/cargo /shims/rustc && ln /shims/cargo /shims/rustup; \
+      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION"; \
     else \
-      echo "cross contract toolchain $RUSTC_VERSION-$TARGET_TRIPLE" && \
-      rustup toolchain install "$RUSTC_VERSION-$TARGET_TRIPLE" --force-non-host --profile minimal --component rustc,rust-std,cargo,rust-src && \
-      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION-$TARGET_TRIPLE" && \
-      TC_DIR="/usr/local/rustup/toolchains/$RUSTC_VERSION-$TARGET_TRIPLE" && \
-      mkdir -p /shims && cp -L "$TC_DIR/bin/cargo" /shims/cargo && cp -L "$TC_DIR/bin/rustc" /shims/rustc; \
+      rustup toolchain install "$RUSTC_VERSION-$RUST_TARGET" --force-non-host --profile minimal --component rustc,rust-std,cargo,rust-src && \
+      rustup target add wasm32-unknown-unknown --toolchain "$RUSTC_VERSION-$RUST_TARGET"; \
+    fi && \
+    if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
+      if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi; \
+    else \
+      rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default --force-non-host "$RUSTC_VERSION-$RUST_TARGET"; \
+    fi && \
+    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/git \
+      /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
+    rm -f /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
+    rm -f /usr/local/rustup/toolchains/*/lib/rustlib/*/lib/librustc-stable_rt.*san.a \
+      /usr/local/rustup/toolchains/*/lib/rustlib/*/lib/libtest-* \
+      /usr/local/rustup/toolchains/*/lib/rustlib/*/lib/libbench-* && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# Assemble the independent artifacts and warm up only a native toolchain.
+FROM --platform=$BUILDPLATFORM contract-toolchain AS contract-builder
+ARG BUILDARCH
+ARG TARGETARCH
+ARG RUSTC_VERSION
+COPY --from=contract-vendor /contracts /contracts
+COPY --from=contract-vendor /tmp/contract-template /tmp/contract-template
+COPY --from=contract-sources /runtime-sources /runtime-sources
+COPY --from=contract-vendor /usr/local/bin/cargo-ave-pinned /usr/local/bin/cargo-ave-pinned
+COPY --from=contract-vendor /ave /ave
+COPY --from=contract-vendor /ave-contract-sdk /ave-contract-sdk
+RUN . /etc/ave-target.env && \
+    if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
+      rustup run "$RUSTC_VERSION" cargo --config /tmp/contract-template/.cargo/config.toml build --locked --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline; \
     fi && \
     rm -rf /contracts/target /tmp/contract-template && \
     mkdir -p /contracts/target && chown -R 65532:65532 /contracts /home/ave && \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo && \
-    # Toolchains must stay readable for the non-root runtime user;
-    # the sandbox remounts them read-only anyway. Native keeps the
-    # single contract toolchain; cross drops the host node toolchain
-    # (wrong arch for the image) and defaults to the contract one.
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      if [ "$NODE_RUSTC_VERSION" != "$RUSTC_VERSION" ]; then rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default "$RUSTC_VERSION"; fi; \
-    else \
-      rustup toolchain uninstall "$NODE_RUSTC_VERSION" && rustup default --force-non-host "$RUSTC_VERSION-$TARGET_TRIPLE"; \
+    mkdir -p /toolchain-root/usr/local/bin && \
+    cp -a /usr/local/rustup /toolchain-root/usr/local/rustup && \
+    if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
+      cp -L /usr/local/cargo/bin/rustup /toolchain-root/usr/local/bin/rustup; \
     fi && \
-    rm -rf /usr/local/rustup/downloads /usr/local/rustup/tmp /usr/local/cargo/git && \
-    rm -rf /usr/local/rustup/toolchains/*/share/doc /usr/local/rustup/toolchains/*/share/man && \
-    rm -f /usr/local/rustup/toolchains/*/bin/rustdoc /usr/local/rustup/toolchains/*/bin/rust-gdb* && \
-    chmod -R a+rX /usr/local/rustup && \
-    du -sh /usr/local/rustup && \
+    ln "/toolchain-root/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/cargo" /toolchain-root/usr/local/bin/cargo && \
+    ln "/toolchain-root/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/rustc" /toolchain-root/usr/local/bin/rustc
+
+# Native GCC for the target image and its exact shared-library closure.
+FROM --platform=$BUILDPLATFORM target-config AS runtime-gcc
+ARG BUILDARCH
+ARG TARGETARCH
+COPY --from=sources /ave-reproducible-wasm/dist/cargo-ave-${TARGETARCH} /usr/local/bin/cargo-ave-pinned
+RUN . /etc/ave-target.env && \
+    if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      mkdir -p /debs-target && \
+      apt-get update && \
+      apt-get -o Dir::Cache::Archives=/debs-target install --download-only -y --no-install-recommends \
+        "gcc:$TARGETARCH" "binutils:$TARGETARCH" "libc6-dev:$TARGETARCH" "libstdc++6:$TARGETARCH" && \
+      mkdir -p /cross-cc && \
+      for deb in /debs-target/*.deb; do dpkg-deb -x "$deb" /cross-cc; done && \
+      rm -rf /debs-target; \
+    fi
+RUN . /etc/ave-target.env && \
     mkdir -p /runtime-libs/lib /runtime-libs/lib64 /runtime-libs/usr && \
-    if [ "$(uname -m)" = "$NATIVE_MARCH" ]; then \
-      TRIPLE=aarch64-linux-gnu && ARCH_LIB=aarch64-linux-gnu && \
-      GCC_PROGS="/usr/bin/${TRIPLE}-gcc /usr/bin/${TRIPLE}-as /usr/bin/${TRIPLE}-ld /usr/bin/${TRIPLE}-ar" && \
+    if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
+      GCC_PROGS="/usr/bin/cc /usr/bin/gcc /usr/bin/$GNU_TRIPLE-gcc /usr/bin/as /usr/bin/ld /usr/bin/ar /usr/bin/$GNU_TRIPLE-as /usr/bin/$GNU_TRIPLE-ld /usr/bin/$GNU_TRIPLE-ar" && \
       for prog in cc1 collect2 lto-wrapper lto1; do \
-        p=$(/usr/bin/${TRIPLE}-gcc -print-prog-name=$prog 2>/dev/null | grep '^/' || true); \
-        [ -n "$p" ] && GCC_PROGS="$GCC_PROGS $p"; \
+        for driver in /usr/bin/gcc /usr/bin/$GNU_TRIPLE-gcc /usr/bin/cc; do \
+          p=$($driver -print-prog-name=$prog 2>/dev/null | grep '^/' || true); \
+          [ -n "$p" ] && GCC_PROGS="$GCC_PROGS $p"; \
+        done; \
       done && \
-      for bin in /usr/local/bin/cargo-ave-arm64 $GCC_PROGS; do \
+      for bin in /usr/local/bin/cargo-ave-pinned $GCC_PROGS; do \
         [ -f "$bin" ] || continue; \
-        case "$bin" in *.a|*.o|*.h|*.so|*.so.*|*.spec|*.la) continue ;; esac; \
         for lib in $(ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true); do \
           dest="/runtime-libs${lib}"; \
           if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$lib" "$dest"; fi; \
         done; \
         case "$bin" in /usr/bin/*|/bin/*|/usr/local/bin/cargo-ave-*) ;; *) \
           dest="/runtime-libs$bin"; \
-          if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$bin" "$dest"; fi;; \
+          if [ ! -e "$dest" ]; then mkdir -p "$(dirname "$dest")"; cp -L "$bin" "$dest"; fi ;; \
         esac; \
       done && \
       mkdir -p /runtime-libs/usr/bin && \
-      for t in cc gcc ${TRIPLE}-gcc as ld ar; do cp -L /usr/bin/$t /runtime-libs/usr/bin/ 2>/dev/null || true; done && \
-      mkdir -p /runtime-libs/usr/lib/gcc && cp -r /usr/lib/gcc/${TRIPLE} /runtime-libs/usr/lib/gcc/ && \
-      rm -rf /runtime-libs/usr/lib/gcc/${TRIPLE}/*/include && \
+      for t in gcc as ld ar; do \
+        src=$(command -v "$GNU_TRIPLE-$t" || command -v "$t"); \
+        cp -L "$src" "/runtime-libs/usr/bin/$GNU_TRIPLE-$t"; \
+        ln "/runtime-libs/usr/bin/$GNU_TRIPLE-$t" "/runtime-libs/usr/bin/$t"; \
+      done && \
+      ln /runtime-libs/usr/bin/$GNU_TRIPLE-gcc /runtime-libs/usr/bin/cc && \
+      mkdir -p /runtime-libs/usr/lib/gcc && cp -r "/usr/lib/gcc/$GNU_TRIPLE" /runtime-libs/usr/lib/gcc/ && \
       if [ -d /usr/libexec/gcc ]; then cp -r /usr/libexec/gcc /runtime-libs/usr/libexec/; else mkdir -p /runtime-libs/usr/libexec && cp -r /usr/libexec/*-linux-gnu /runtime-libs/usr/libexec/ 2>/dev/null || true; fi && \
-      rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
       for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a; do \
-        f=$(find /usr/lib/${ARCH_LIB} -maxdepth 1 -name "$crt" 2>/dev/null | head -1); \
-        if [ -n "$f" ]; then d="/runtime-libs$(dirname $f)"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
+        f=$(find "/usr/lib/$ARCH_LIB" -maxdepth 1 -name "$crt" 2>/dev/null | head -1); \
+        if [ -n "$f" ]; then d="/runtime-libs$(dirname "$f")"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
       done; \
     else \
-      echo "cross runtime libs: recursive readelf scan over cargo-ave and the native arm64 gcc from /cross-cc (proc-macro crates link with the HOST cc)" && \
-      echo /usr/local/bin/cargo-ave-arm64 > /tmp/scan.list && \
+      echo /usr/local/bin/cargo-ave-pinned > /tmp/scan.list && \
       for prog in gcc as ld ar; do \
-        src=$(ls /cross-cc/usr/bin/$prog /cross-cc/usr/bin/aarch64-linux-gnu-$prog 2>/dev/null | head -1); \
+        src=$(ls "/cross-cc/usr/bin/$prog" "/cross-cc/usr/bin/$GNU_TRIPLE-$prog" 2>/dev/null | head -1); \
         [ -n "$src" ] || { echo "no $prog in /cross-cc" >&2; exit 1; }; \
         echo "$src" >> /tmp/scan.list; \
       done && \
@@ -534,145 +357,92 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         grep -qxF "$scan_bin" /tmp/scan.done && continue; \
         echo "$scan_bin" >> /tmp/scan.done; \
         for lib in $(readelf -d "$scan_bin" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p'); do \
-          f=$(find /cross-cc/usr/lib /cross-cc/lib /usr/$SYS_TRIPLE /lib/$SYS_TRIPLE /usr/lib/$SYS_TRIPLE /usr/lib/gcc-cross -name "$lib" 2>/dev/null | head -1); \
+          f=$(find "/cross-cc/usr/lib" "/cross-cc/lib" "/usr/$GNU_TRIPLE" "/lib/$GNU_TRIPLE" "/usr/lib/$GNU_TRIPLE" /usr/lib/gcc-cross -name "$lib" 2>/dev/null | head -1); \
           if [ -z "$f" ]; then echo "missing lib $lib for $scan_bin" >&2; exit 1; fi; \
-          d="/runtime-libs$(echo $(dirname $f) | sed 's#^/cross-cc##')"; \
-          if [ ! -e "$d/$(basename $f)" ]; then mkdir -p "$d"; cp -L "$f" "$d/"; echo "$d/$(basename $f)" >> /tmp/scan.list; fi; \
+          d="/runtime-libs$(echo "$(dirname "$f")" | sed 's#^/cross-cc##')"; \
+          if [ ! -e "$d/$(basename "$f")" ]; then mkdir -p "$d"; cp -L "$f" "$d/"; echo "$d/$(basename "$f")" >> /tmp/scan.list; fi; \
         done; \
       done && \
-      interp=$(readelf -l /usr/local/bin/cargo-ave-arm64 2>/dev/null | sed -n 's/.*interpreter: \([^]]*\)\].*/\1/p'); \
-      if [ -n "$interp" ]; then d="/runtime-libs$(dirname $interp)"; mkdir -p "$d"; cp -L "$interp" "$d/"; \
+      interp=$(readelf -l /usr/local/bin/cargo-ave-pinned 2>/dev/null | sed -n 's/.*interpreter: \([^]]*\)\].*/\1/p'); \
+      if [ -n "$interp" ]; then d="/runtime-libs$(dirname "$interp")"; mkdir -p "$d"; cp -L "$interp" "$d/"; \
       else echo "no interpreter for cargo-ave" >&2; exit 1; fi && \
       rm -f /tmp/scan.list /tmp/scan.done && \
       mkdir -p /runtime-libs/usr/bin && \
       for t in gcc as ld ar; do \
-        src=$(ls /cross-cc/usr/bin/$t /cross-cc/usr/bin/aarch64-linux-gnu-$t 2>/dev/null | head -1); \
+        src=$(ls "/cross-cc/usr/bin/$t" "/cross-cc/usr/bin/$GNU_TRIPLE-$t" 2>/dev/null | head -1); \
         [ -n "$src" ] || { echo "no $t in /cross-cc" >&2; exit 1; }; \
-        cp -L "$src" /runtime-libs/usr/bin/$t; \
-        cp -L "$src" /runtime-libs/usr/bin/aarch64-linux-gnu-$t; \
+        cp -L "$src" "/runtime-libs/usr/bin/$GNU_TRIPLE-$t"; \
+        ln "/runtime-libs/usr/bin/$GNU_TRIPLE-$t" "/runtime-libs/usr/bin/$t"; \
       done && \
-      ln -s aarch64-linux-gnu-gcc /runtime-libs/usr/bin/cc && \
-      mkdir -p /runtime-libs/usr/lib/gcc && cp -r /cross-cc/usr/lib/gcc/aarch64-linux-gnu /runtime-libs/usr/lib/gcc/ && \
-      rm -rf /runtime-libs/usr/lib/gcc/aarch64-linux-gnu/*/include && \
+      ln /runtime-libs/usr/bin/$GNU_TRIPLE-gcc /runtime-libs/usr/bin/cc && \
+      mkdir -p /runtime-libs/usr/lib/gcc && cp -r "/cross-cc/usr/lib/gcc/$GNU_TRIPLE" /runtime-libs/usr/lib/gcc/ && \
       mkdir -p /runtime-libs/usr/libexec && cp -r /cross-cc/usr/libexec/gcc /runtime-libs/usr/libexec/ && \
-      rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
       for crt in Scrt1.o crti.o crtn.o Mcrt1.o gcrt1.o libc_nonshared.a libpthread_nonshared.a libc.so libm.so libpthread.so libutil.a librt.a libdl.a libpthread.a libgcc_s.so.1; do \
-        f=$(find /cross-cc/usr /usr/$SYS_TRIPLE /usr/lib/gcc-cross -name "$crt" 2>/dev/null | head -1); \
-        if [ -n "$f" ]; then d="/runtime-libs$(echo $(dirname $f) | sed 's#^/cross-cc##')"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
+        f=$(find /cross-cc/usr "/usr/$GNU_TRIPLE" /usr/lib/gcc-cross -name "$crt" 2>/dev/null | head -1); \
+        if [ -n "$f" ]; then d="/runtime-libs$(echo "$(dirname "$f")" | sed 's#^/cross-cc##')"; mkdir -p "$d"; cp -L "$f" "$d/"; fi; \
       done; \
     fi && \
-    echo "runtime-libs:" && du -sh /runtime-libs
+    rm -rf /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/include /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/include-fixed && \
+    rm -f /runtime-libs/usr/libexec/gcc/*/*/cc1plus /runtime-libs/usr/libexec/gcc/*/*/g++-mapper-server && \
+    rm -f /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libstdc++* /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libsupc++* \
+      /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libasan* /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libubsan* \
+      /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/liblsan* /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libtsan* \
+      /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libgomp* /runtime-libs/usr/lib/gcc/$GNU_TRIPLE/*/libgcov*
 
-# Fixed node paths (/db, /keys, /logs): empty dirs owned by the runtime
-# user, so fresh named volumes auto-populate with the right owner and
-# no seeding or chown step is ever needed. /contracts travels the
-# same way (baked vendor set, see the COPY --chown below).
-RUN mkdir -p /volumes/db /volumes/keys /volumes/logs
-
-# ============================================================================
-# Runtime dependency set (glibc + ssl + zlib + certs)
-# ============================================================================
-FROM --platform=$BUILDPLATFORM sys-${BUILDARCH} AS libs-amd64
-# Any host, never any emulation: this stage always runs NATIVE
-# (own-arch base, own-arch apt/dpkg). The TARGET-arch debs are only
-# downloaded and unpacked with dpkg-deb under /out (never executed);
-# the CA bundle comes from the NATIVE maintainer script (same
-# Mozilla set). Use sys-${BUILDARCH} (not a foreign digest) so even
-# /bin/sh is native.
-RUN dpkg --add-architecture amd64 && apt-get update && \
+FROM --platform=$BUILDPLATFORM sys-${BUILDARCH} AS libs
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) ARCH_LIB=x86_64-linux-gnu ;; \
+      arm64) ARCH_LIB=aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    dpkg --add-architecture "$TARGETARCH" && apt-get update && \
     mkdir -p /debs /out && cd /debs && \
-    apt-get download libssl3t64:amd64 zlib1g:amd64 && \
+    apt-get download "libssl3t64:$TARGETARCH" "zlib1g:$TARGETARCH" && \
     for deb in *.deb; do dpkg-deb -x "$deb" /out; done && \
     cd / && rm -rf /debs && \
     apt-get install --no-install-recommends -y ca-certificates && \
     update-ca-certificates --fresh && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    test -f /out/usr/lib/x86_64-linux-gnu/libssl.so.3
+    test -f "/out/usr/lib/$ARCH_LIB/libssl.so.3"
 
-FROM --platform=$BUILDPLATFORM sys-${BUILDARCH} AS libs-arm64
-# Same as libs-amd64 above, for the arm64 runtime set.
-RUN dpkg --add-architecture arm64 && apt-get update && \
-    mkdir -p /debs /out && cd /debs && \
-    apt-get download libssl3t64:arm64 zlib1g:arm64 && \
-    for deb in *.deb; do dpkg-deb -x "$deb" /out; done && \
-    cd / && rm -rf /debs && \
-    apt-get install --no-install-recommends -y ca-certificates && \
-    update-ca-certificates --fresh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    test -f /out/usr/lib/aarch64-linux-gnu/libssl.so.3
-
-# ============================================================================
-# Final images (distroless, no shell, non-root)
-# ============================================================================
 FROM --platform=linux/amd64 gcr.io/distroless/cc-debian13@${DISTROLESS_AMD64_DIGEST} AS amd64
-ARG CARGO_PROFILE
 ARG RUSTC_VERSION
-COPY --from=libs-amd64 /out/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/
-COPY --from=libs-amd64 /out/usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
-COPY --from=libs-amd64 /out/usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
-COPY --from=libs-amd64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-amd64 /out/ave-http /usr/local/bin/ave-http
-COPY --from=builder-amd64 --chown=65532:65532 /contracts /contracts
-COPY --from=builder-amd64 --chown=65532:65532 /volumes/db /db
-COPY --from=builder-amd64 --chown=65532:65532 /volumes/keys /keys
-COPY --from=builder-amd64 --chown=65532:65532 /volumes/logs /logs
-COPY --from=builder-amd64 /usr/local/bin/cargo-ave-amd64 /usr/local/bin/cargo-ave-pinned
-COPY --from=builder-amd64 /runtime-libs/lib /lib
-COPY --from=builder-amd64 /runtime-libs/lib64 /lib64
-COPY --from=builder-amd64 /runtime-libs/usr /usr
-COPY --from=builder-amd64 /usr/local/rustup /usr/local/rustup
-# Shims for PATH resolution (`cargo`, `rustc`, plus the `rustup`
-# proxy on native builds; cross builds ship the real target-arch
-# binaries and no proxy — the node resolves the toolchain without
-# it). Without `cargo`/`rustc` every in-image build fails instantly
-# at the toolchain probe (verified failure mode).
-COPY --from=builder-amd64 /shims/* /usr/local/bin/
-COPY --from=builder-amd64 --chown=65532:65532 /home/ave /home/ave
-COPY --from=builder-amd64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
-COPY --from=builder-amd64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml
-COPY --from=builder-amd64 /ave/src /home/ale/dev/ave/src
-COPY --from=builder-amd64 /ave/common /home/ale/dev/ave/common
+COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs /out/usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/
+COPY --from=libs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=node-builder /out/ave-http /usr/local/bin/ave-http
+COPY --from=node-builder --chown=65532:65532 /volumes/ /
+COPY --from=contract-builder --chown=65532:65532 /contracts /contracts
+COPY --from=contract-builder /usr/local/bin/cargo-ave-pinned /usr/local/bin/cargo-ave-pinned
+COPY --from=contract-builder /toolchain-root/usr/local /usr/local
+COPY --from=contract-builder --chown=65532:65532 /home/ave /home/ave
+COPY --from=contract-builder /runtime-sources/home/ale/dev /home/ale/dev
+COPY --from=runtime-gcc /runtime-libs/lib /lib
+COPY --from=runtime-gcc /runtime-libs/lib64 /lib64
+COPY --from=runtime-gcc /runtime-libs/usr /usr
 ENV RUSTUP_HOME=/usr/local/rustup HOME=/home/ave
-# Toolchain `bin` first (same as arm64 below): `cargo`/`rustc`
-# resolve to the real in-place binaries, whose relative sysroot
-# lookup works with or without the proxy shims. Same rustc version
-# the proxies dispatch to, so native behavior is unchanged.
 ENV PATH="/usr/local/rustup/toolchains/${RUSTC_VERSION}-x86_64-unknown-linux-gnu/bin:/usr/local/bin:${PATH}"
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/ave-http"]
 
 FROM --platform=linux/arm64 gcr.io/distroless/cc-debian13@${DISTROLESS_ARM64_DIGEST} AS arm64
-ARG CARGO_PROFILE
 ARG RUSTC_VERSION
-COPY --from=libs-arm64 /out/usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-linux-gnu/
-COPY --from=libs-arm64 /out/usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
-COPY --from=libs-arm64 /out/usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
-COPY --from=libs-arm64 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder-arm64 /out/ave-http /usr/local/bin/ave-http
-COPY --from=builder-arm64 --chown=65532:65532 /contracts /contracts
-COPY --from=builder-arm64 --chown=65532:65532 /volumes/db /db
-COPY --from=builder-arm64 --chown=65532:65532 /volumes/keys /keys
-COPY --from=builder-arm64 --chown=65532:65532 /volumes/logs /logs
-COPY --from=builder-arm64 /usr/local/bin/cargo-ave-arm64 /usr/local/bin/cargo-ave-pinned
-COPY --from=builder-arm64 /runtime-libs/lib /lib
-COPY --from=builder-arm64 /runtime-libs/lib64 /lib64
-COPY --from=builder-arm64 /runtime-libs/usr /usr
-COPY --from=builder-arm64 /usr/local/rustup /usr/local/rustup
-# Shims for PATH resolution (`cargo`, `rustc`, plus the `rustup`
-# proxy on native builds; cross builds ship the real target-arch
-# binaries and no proxy — the node resolves the toolchain without
-# it). NOTE: the copied real binaries can not run standalone (their
-# sysroot lookup is relative to the toolchain dir), so the toolchain
-# `bin` dir below comes FIRST in PATH: `cargo`/`rustc` resolve to
-# the real in-place binaries and the sysroot is found. Without them
-# every in-image build fails instantly at the toolchain probe
-# (verified failure mode).
-COPY --from=builder-arm64 /shims/* /usr/local/bin/
-COPY --from=builder-arm64 --chown=65532:65532 /home/ave /home/ave
-COPY --from=builder-arm64 /ave-contract-sdk /home/ale/dev/ave-contract-sdk
-COPY --from=builder-arm64 /ave/Cargo.toml /home/ale/dev/ave/Cargo.toml
-COPY --from=builder-arm64 /ave/src /home/ale/dev/ave/src
-COPY --from=builder-arm64 /ave/common /home/ale/dev/ave/common
+COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libssl.so.3 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs /out/usr/lib/aarch64-linux-gnu/libz.so.1 /usr/lib/aarch64-linux-gnu/
+COPY --from=libs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=node-builder /out/ave-http /usr/local/bin/ave-http
+COPY --from=node-builder --chown=65532:65532 /volumes/ /
+COPY --from=contract-builder --chown=65532:65532 /contracts /contracts
+COPY --from=contract-builder /usr/local/bin/cargo-ave-pinned /usr/local/bin/cargo-ave-pinned
+COPY --from=contract-builder /toolchain-root/usr/local /usr/local
+COPY --from=contract-builder --chown=65532:65532 /home/ave /home/ave
+COPY --from=contract-builder /runtime-sources/home/ale/dev /home/ale/dev
+COPY --from=runtime-gcc /runtime-libs/lib /lib
+COPY --from=runtime-gcc /runtime-libs/lib64 /lib64
+COPY --from=runtime-gcc /runtime-libs/usr /usr
 ENV RUSTUP_HOME=/usr/local/rustup HOME=/home/ave
 ENV PATH="/usr/local/rustup/toolchains/${RUSTC_VERSION}-aarch64-unknown-linux-gnu/bin:/usr/local/bin:${PATH}"
 USER 65532:65532
