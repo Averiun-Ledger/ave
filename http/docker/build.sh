@@ -531,6 +531,7 @@ if variant == "rocksdb-compiler":
     })
 
 seen = set()
+links = {}
 checked = 0
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
     for member in archive:
@@ -538,6 +539,9 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
         seen.add(name)
         assert not name.startswith("usr/local/cargo/registry"), f"registry cache leaked: {name}"
         assert not name.startswith("ave/target"), f"target cache leaked: {name}"
+        if member.issym():
+            links[name] = member.linkname
+            continue
         if not member.isfile():
             continue
         source = archive.extractfile(member)
@@ -551,7 +555,25 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
         assert machine == machine_want, f"{name}: ELF machine {machine} != {machine_want}"
         checked += 1
 
-missing = sorted(required - seen)
+def resolve(path):
+    # Follow rootfs symlinks (merged-usr: lib -> usr/lib, ...).
+    # Link targets are relative to the link's directory.
+    for _ in range(10):
+        if path in seen:
+            return path
+        head, _, tail = path.partition("/")
+        if head in links:
+            target = links[head]
+            path = (target + "/" + tail).replace("//", "/")
+            if not path.startswith("/"):
+                pass
+            else:
+                path = path.lstrip("/")
+            continue
+        return None
+    return None
+
+missing = sorted(p for p in required if resolve(p) is None)
 assert not missing, f"missing required files: {missing}"
 assert checked > 0, "no ELF files found"
 print(f"rootfs ELF arch ok ({checked} files); required tool set present")
