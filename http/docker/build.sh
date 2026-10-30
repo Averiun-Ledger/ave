@@ -562,14 +562,26 @@ PYEOF
     rm -f "$tmp_script"
 }
 
+# Tag scheme: only the compiler image carries the contract pin
+# (rust/sdk) — light variants never touch a toolchain. The pin's
+# `_wasm32` suffix is dropped in tags: wasm32 is the only target,
+# so it adds no information (the PIN itself is untouched).
+image_tag() {
+    local variant="$1" arch="$2" repo mid pin_tag
+    repo="${DOCKER_USERNAME:+$DOCKER_USERNAME/}${DOCKER_REPO}"
+    pin_tag="${PIN%_wasm32}"
+    if [ "$variant" = "rocksdb-compiler" ]; then
+        mid="${VERSION}-${variant}-${pin_tag}-${arch}${EXP_SUFFIX}"
+    else
+        mid="${VERSION}-${variant}-${arch}${EXP_SUFFIX}"
+    fi
+    printf '%s:%s' "$repo" "$mid"
+}
+
 build_variant_arch() {
     local variant="$1" dockerfile="$2" features="$3" arch="$4"
     local tag
-    if [ -n "$DOCKER_USERNAME" ]; then
-        tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}-${PIN}-${arch}${EXP_SUFFIX}"
-    else
-        tag="${DOCKER_REPO}:${VERSION}-${variant}-${PIN}-${arch}${EXP_SUFFIX}"
-    fi
+    tag="$(image_tag "$variant" "$arch")"
     echo ""
     echo "### Building $tag"
     local start end secs
@@ -626,16 +638,21 @@ for i in "${!VARIANT_NAMES[@]}"; do
     esac
     for arch in $BUILD_ARCHS; do
         build_variant_arch "$variant" "$dockerfile" "$features" "$arch"
-        MANIFESTS="$MANIFESTS ${VERSION}-${variant}-${PIN}:${arch}"
+        MANIFESTS="$MANIFESTS $(image_tag "$variant" "$arch")"
     done
 done
 
 if [ "$PROD" = true ]; then
     for variant in $VARIANT_SEL; do
-        if [ -n "$DOCKER_USERNAME" ]; then
-            base_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}-${PIN}"
+        if [ "$variant" = "rocksdb-compiler" ]; then
+            pin_mid="-${PIN%_wasm32}"
         else
-            base_tag="${DOCKER_REPO}:${VERSION}-${variant}-${PIN}"
+            pin_mid=""
+        fi
+        if [ -n "$DOCKER_USERNAME" ]; then
+            base_tag="${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-${variant}${pin_mid}"
+        else
+            base_tag="${DOCKER_REPO}:${VERSION}-${variant}${pin_mid}"
         fi
         echo ""
         echo "### Multi-arch manifest $base_tag"
@@ -674,7 +691,7 @@ echo "    # can not move them: /contracts, /db/*, /keys, /logs; tests keep"
 echo "    # custom dirs via the test feature). Named volumes persist across"
 echo "    # 'docker rm'; make them writable by 65532 once."
 if [ -n "$DOCKER_USERNAME" ]; then
-    echo "    ${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN}-<arch>"
+    echo "    ${DOCKER_USERNAME}/${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN%_wasm32}-<arch>"
 else
-    echo "    ${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN}-<arch>"
+    echo "    ${DOCKER_REPO}:${VERSION}-rocksdb-compiler-${PIN%_wasm32}-<arch>"
 fi

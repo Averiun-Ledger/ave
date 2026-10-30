@@ -334,8 +334,8 @@ RUN . /etc/ave-target.env && \
     if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
       cp -L /usr/local/cargo/bin/rustup /toolchain-root/usr/local/bin/rustup; \
     fi && \
-    ln "/toolchain-root/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/cargo" /toolchain-root/usr/local/bin/cargo && \
-    ln "/toolchain-root/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/rustc" /toolchain-root/usr/local/bin/rustc
+    ln -s "/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/cargo" /toolchain-root/usr/local/bin/cargo && \
+    ln -s "/usr/local/rustup/toolchains/$RUSTC_VERSION-$RUST_TARGET/bin/rustc" /toolchain-root/usr/local/bin/rustc
 
 # Native GCC for the target image and its exact shared-library closure.
 FROM --platform=$BUILDPLATFORM target-config AS runtime-gcc
