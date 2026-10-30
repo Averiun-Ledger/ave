@@ -34,8 +34,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
 AVE_REPO="$WORKSPACE_ROOT/ave"
 
-DOCKER_USERNAME="${DOCKER_USERNAME:-}"
-DOCKER_REPO="${DOCKER_REPO:-ave-node}"
+DOCKER_USERNAME="${DOCKER_USERNAME:-averiun}"
+DOCKER_REPO="${DOCKER_REPO:-ave-http}"
 
 # Pinned moby/profiles commit for the seccomp base (review before bumping).
 MOBY_PROFILES_COMMIT="${MOBY_PROFILES_COMMIT:-6fe7deb1b9fb7c0397a4593480d7d22b9ee8caef}"
