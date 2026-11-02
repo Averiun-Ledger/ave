@@ -13,7 +13,22 @@ use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::warn;
+
+/// One `last_used` bookkeeping write, queued for the background flusher.
+pub(crate) struct LastUsedTouch {
+    key_id: String,
+    ip_address: Option<String>,
+}
+
+/// Bounded touch queue: `last_used` is best-effort, so a full queue
+/// drops with a warning instead of slowing responses.
+const TOUCH_QUEUE_CAPACITY: usize = 4096;
+/// Low load: a lone touch waits at most this long before its flush.
+const TOUCH_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// High load: flush early once this many distinct keys accumulate.
+const TOUCH_BATCH_MAX: usize = 500;
 
 pub struct RotateApiKeyParams<'a> {
     pub key_id: &'a str,
@@ -944,34 +959,114 @@ impl AuthDatabase {
     /// auth transaction and the request path: a failed touch must
     /// never deny an otherwise valid request, and the write must not
     /// serialize read-only traffic behind a write lock.
+    ///
+    /// Never blocks the caller: touches are deduplicated by key and
+    /// flushed in a single transaction by a background worker, either
+    /// every second (low load) or once the batch fills (high load).
     pub fn touch_api_key_last_used(
-        &self,
+        self: &Arc<Self>,
         key_id: &str,
         ip_address: Option<&str>,
     ) {
-        let conn = match self.lock_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
+        let sender = {
+            let mut guard = self.touch_sender.lock().unwrap_or_else(|e| {
                 warn!(
                     target: "ave::http::auth",
-                    msg_type = "touch_skipped",
-                    error = %error,
-                    "touch last_used: no connection, skipped"
+                    msg_type = "touch_poisoned",
+                    "touch sender lock poisoned, recovering"
                 );
-                return;
+                e.into_inner()
+            });
+            if guard.is_none() {
+                let (sender, mut receiver) =
+                    tokio::sync::mpsc::channel::<LastUsedTouch>(
+                        TOUCH_QUEUE_CAPACITY,
+                    );
+                let db = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut pending: HashMap<String, Option<String>> =
+                        HashMap::new();
+                    loop {
+                        match tokio::time::timeout(
+                            TOUCH_FLUSH_INTERVAL,
+                            receiver.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some(job)) => {
+                                pending.insert(job.key_id, job.ip_address);
+                                if pending.len() < TOUCH_BATCH_MAX {
+                                    continue;
+                                }
+                            }
+                            Ok(None) => return,
+                            Err(_) => {
+                                if pending.is_empty() {
+                                    continue;
+                                }
+                            }
+                        }
+                        let batch = std::mem::take(&mut pending);
+                        if let Err(error) = db
+                            .run_blocking("auth_touch_flush", move |db| {
+                                db.flush_last_used_touch(batch)
+                            })
+                            .await
+                        {
+                            warn!(
+                                target: "ave::http::auth",
+                                msg_type = "touch_failed",
+                                error = %error,
+                                "touch last_used flush failed, skipped"
+                            );
+                        }
+                    }
+                });
+                guard.replace(sender);
             }
+            guard.as_ref().expect("touch sender set above").clone()
         };
-        if let Err(error) = conn.execute(
-            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
-            params![Self::now(), ip_address, key_id],
-        ) {
+        if sender
+            .try_send(LastUsedTouch {
+                key_id: key_id.to_owned(),
+                ip_address: ip_address.map(str::to_owned),
+            })
+            .is_err()
+        {
             warn!(
                 target: "ave::http::auth",
-                msg_type = "touch_failed",
-                error = %error,
-                "touch last_used failed, skipped"
+                msg_type = "touch_dropped",
+                "touch queue full, entry dropped"
             );
         }
+    }
+
+    /// Writes one deduplicated batch in a single transaction with a
+    /// reused statement: write amplification is bounded by distinct
+    /// keys, not by requests.
+    fn flush_last_used_touch(
+        &self,
+        batch: HashMap<String, Option<String>>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
+                )
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let now = Self::now();
+            for (key_id, ip_address) in &batch {
+                stmt.execute(params![now, ip_address, key_id])
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 
     /// Delete expired API keys

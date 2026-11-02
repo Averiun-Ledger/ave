@@ -248,6 +248,15 @@ pub struct AuthDatabase {
     runtime: Arc<AuthDbRuntime>,
     metrics: Arc<DbMetrics>,
     blocking_task_semaphore: Arc<Semaphore>,
+    pub(crate) touch_sender: Arc<
+        std::sync::Mutex<
+            Option<
+                tokio::sync::mpsc::Sender<
+                    super::database_apikeys::LastUsedTouch,
+                >,
+            >,
+        >,
+    >,
     #[cfg(feature = "prometheus")]
     prometheus:
         Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
@@ -1123,6 +1132,7 @@ impl AuthDatabase {
 
         let db = Self {
             audit_sender: Arc::new(std::sync::Mutex::new(None)),
+            touch_sender: Arc::new(std::sync::Mutex::new(None)),
             runtime: Arc::new(runtime),
             metrics: Arc::new(DbMetrics::default()),
             blocking_task_semaphore: Arc::new(Semaphore::new(

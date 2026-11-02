@@ -735,6 +735,14 @@ pub fn map_runtime_error_to_compiler_error(
         RuntimeError::FuelLimitError(details) => {
             CompilerError::FuelLimitError { details }
         }
+        // Build-time validation runs without a wall-clock deadline, so
+        // this is unreachable in practice. If it ever fires, this node
+        // cannot finish the build: report unavailable compilers (retry
+        // elsewhere), never a verdict against the contract.
+        RuntimeError::DeadlineExceeded => CompilerError::CompilersUnavailable {
+            details: "contract exceeded wall-clock deadline during validation"
+                .to_owned(),
+        },
         RuntimeError::InstantiationFailed(details) => {
             CompilerError::InstantiationFailed { details }
         }

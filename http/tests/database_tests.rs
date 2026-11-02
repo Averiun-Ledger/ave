@@ -2826,3 +2826,43 @@ async fn test_quota_boundary_math_no_overflow() {
     assert_eq!(status.used_events, 1);
     assert_eq!(status.effective_limit, Some(MAX + MAX));
 }
+
+#[test(tokio::test)]
+async fn test_touch_last_used_batches_without_blocking() {
+    let (db, _dirs) = create_test_db();
+    let db = Arc::new(db);
+    let user = db
+        .create_user("touchbatch", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let (_api_key, key_info) = db
+        .create_api_key(user.id, Some("touch"), None, None, false)
+        .unwrap();
+
+    // Bursts collapse to one write per key; the last IP wins.
+    for _ in 0..50 {
+        db.touch_api_key_last_used(&key_info.id, Some("10.0.0.1"));
+    }
+    db.touch_api_key_last_used(&key_info.id, Some("10.0.0.2"));
+
+    let updated = poll_until(
+        || db.get_api_key_info(&key_info.id).unwrap(),
+        |k| k.last_used_at.is_some(),
+    )
+    .await;
+    assert_eq!(updated.last_used_ip.as_deref(), Some("10.0.0.2"));
+}
+
+async fn poll_until<T, F>(mut get: impl FnMut() -> T, mut done: F) -> T
+where
+    F: FnMut(&T) -> bool,
+{
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let value = get();
+        if done(&value) || std::time::Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}

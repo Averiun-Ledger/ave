@@ -836,14 +836,18 @@ async fn shared_vendor_dir() -> std::path::PathBuf {
         .expect("frozen lockfile for the active pin");
         std::fs::write(project.join("Cargo.lock"), frozen.content)
             .expect("write vendor lockfile");
-        let status = std::process::Command::new("cargo")
+        let output = std::process::Command::new("cargo")
             .arg("vendor")
             .arg("--manifest-path")
             .arg(project.join("Cargo.toml"))
             .arg(&probe)
-            .status()
+            .output()
             .expect("cargo vendor should run");
-        assert!(status.success(), "cargo vendor should succeed");
+        assert!(
+            output.status.success(),
+            "cargo vendor should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     probe
 }

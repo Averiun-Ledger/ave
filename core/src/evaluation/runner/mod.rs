@@ -444,26 +444,25 @@ impl Runner {
         }
         #[cfg(not(any(test, feature = "test")))]
         {
+            // The guest carries its own wall-clock deadline (epoch trap):
+            // the blocking call below always returns, so there is no
+            // abandoned worker burning CPU after a timeout anymore.
             let handle = tokio::task::spawn_blocking(move || {
-                runtime.execute(&module, &state, &init_state, &event, is_owner)
+                runtime.execute_with_deadline(
+                    &module,
+                    &state,
+                    &init_state,
+                    &event,
+                    is_owner,
+                    Self::EXECUTION_WALL_TIMEOUT,
+                )
             });
-            match tokio::time::timeout(Self::EXECUTION_WALL_TIMEOUT, handle)
-                .await
-            {
-                Ok(Ok(result)) => {
-                    result.map_err(map_runtime_error_to_runner_error)
-                }
-                Ok(Err(join_error)) => Err(RunnerError::ResourceLimit {
+            match handle.await {
+                Ok(result) => result.map_err(map_runtime_error_to_runner_error),
+                Err(join_error) => Err(RunnerError::ResourceLimit {
                     operation: "contract execution",
                     details: format!(
                         "blocking execution task failed: {join_error}"
-                    ),
-                }),
-                Err(_) => Err(RunnerError::ResourceLimit {
-                    operation: "contract execution wall-clock",
-                    details: format!(
-                        "contract did not finish within {}s",
-                        Self::EXECUTION_WALL_TIMEOUT.as_secs()
                     ),
                 }),
             }
@@ -1696,6 +1695,14 @@ fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
             details: format!(
                 "contract ran out of fuel after consuming {consumed} units"
             ),
+        },
+        // Wall-clock, not fuel: a slower machine hits this while a
+        // faster one completes, so the node steps down (unavailable)
+        // instead of voting against the contract.
+        RuntimeError::DeadlineExceeded => RunnerError::ResourceLimit {
+            operation: "contract execution wall-clock",
+            details: "contract did not finish within its wall-clock deadline"
+                .to_owned(),
         },
         RuntimeError::FuelLimitError(details) => RunnerError::ContractFailed {
             details: format!("set fuel: {}", details),
