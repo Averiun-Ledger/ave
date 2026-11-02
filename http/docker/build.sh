@@ -346,6 +346,25 @@ gate_pins() {
 }
 
 # ============================================================================
+# STEP 0a. Contract template source check: experimental builds may use
+# the local SDK checkout, but production images deliberately do NOT
+# bundle that folder — a `path` dependency would break the build there
+# by design. Fail loudly instead of shipping a broken prod image.
+# ============================================================================
+gate_contract_template() {
+    local template="$WORKSPACE_ROOT/ave-contract-sdk/src/runtime/contract_Cargo.toml"
+    [ -f "$template" ] || fail "missing contract template $template"
+    if [ -n "$PROD" ]; then
+        if grep -q '^ave-contract-sdk[^#]*path[[:space:]]*=' "$template"; then
+            fail "production build with local SDK checkout: $template still points at a local path (follow the comment inside: switch to the crates.io line and re-freeze the pin)"
+        fi
+        echo "gate: contract template uses no local path (production)"
+    else
+        echo "gate: experimental build, local SDK checkout allowed"
+    fi
+}
+
+# ============================================================================
 # STEP 0b. Seccomp profile (was seccomp-make-profile.sh): the custom
 # profile MUST exist and allow exactly the sandbox syscalls, or the
 # sandbox dies with EPERM inside the container. Regenerated from the
@@ -411,6 +430,7 @@ if [ -n "$PIN" ]; then
 else
     gate_pins
 fi
+gate_contract_template
 ensure_seccomp
 
 # 1. Defaults from the single sources of truth.
@@ -606,11 +626,14 @@ build_variant_arch() {
     tag="$(image_tag "$variant" "$arch")"
     echo ""
     echo "### Building $tag"
-    local start end secs
+    local start end secs prod_arg
     start=$(date +%s)
+    prod_arg=""
+    [ -n "$PROD" ] && prod_arg="1"
     docker build \
         --platform "linux/$arch" \
         --build-arg "PIN=$PIN" \
+        --build-arg "PROD=$prod_arg" \
         --build-arg "PIN_LOCKFILE=$PIN_LOCKFILE" \
         --build-arg "RUSTC_VERSION=$RUSTC_VERSION" \
         --build-arg "NODE_RUSTC_VERSION=$NODE_RUSTC_VERSION" \

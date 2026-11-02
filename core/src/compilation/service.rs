@@ -76,6 +76,44 @@ enum Flight {
     Follower(tokio::sync::watch::Receiver<Option<SharedBuild>>),
 }
 
+/// Restores `queued_builds` on every exit path: rejection, an
+/// accepted slot, or a future dropped while waiting for one. Without
+/// this a cancelled waiter leaks the count and eventually wedges the
+/// queue shut.
+struct QueuedGuard<'a> {
+    queued: &'a AtomicUsize,
+}
+
+impl Drop for QueuedGuard<'_> {
+    fn drop(&mut self) {
+        self.queued.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Best-effort single-flight cleanup: if the leader future is dropped
+/// before publishing (cancelled build), the entry would otherwise
+/// poison the key forever — followers would attach to a dead channel
+/// and fail every retry with "leader dropped its result". `try_lock`
+/// because `Drop` cannot await; the map lock is never held across an
+/// await, so it is free on the cancel path. A redundant second remove
+/// after the explicit one is a no-op.
+struct LeaderEntryGuard<'a> {
+    in_flight: &'a tokio::sync::Mutex<
+        HashMap<String, tokio::sync::watch::Receiver<Option<SharedBuild>>>,
+    >,
+    key: Option<String>,
+}
+
+impl Drop for LeaderEntryGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            if let Ok(mut in_flight) = self.in_flight.try_lock() {
+                in_flight.remove(&key);
+            }
+        }
+    }
+}
+
 /// Output of a single build: the wasm bytes and their digest.
 struct CompileArtifact {
     wasm: Vec<u8>,
@@ -533,8 +571,10 @@ impl CompilerServer {
             Err(_) => {
                 let queued =
                     self.inner.queued_builds.fetch_add(1, Ordering::SeqCst) + 1;
+                let _queued = QueuedGuard {
+                    queued: &self.inner.queued_builds,
+                };
                 if queued > self.inner.config.max_queued_builds {
-                    self.inner.queued_builds.fetch_sub(1, Ordering::SeqCst);
                     return Err(Status::resource_exhausted(
                         "build queue is full",
                     ));
@@ -548,7 +588,6 @@ impl CompilerServer {
                     self.inner.build_semaphore.acquire().await.map_err(|_| {
                         Status::internal("build semaphore closed")
                     });
-                self.inner.queued_builds.fetch_sub(1, Ordering::SeqCst);
                 permit?
             }
         };
@@ -796,17 +835,25 @@ impl CompilerService for CompilerServer {
         // Single-flight: the first caller for a key builds; the rest wait
         // on the same outcome. The leader always publishes a result (Ok
         // or the mapped Status) before removing the entry, so followers
-        // never wait indefinitely.
-        let flight = {
+        // never wait indefinitely; if the leader is dropped first, the
+        // guard below removes the entry best-effort instead of leaving
+        // a poisoned key behind.
+        let (flight, _leader_guard) = {
             let mut in_flight = self.inner.in_flight.lock().await;
             match in_flight.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(entry) => {
-                    Flight::Follower(entry.get().clone())
+                    (Flight::Follower(entry.get().clone()), None)
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let (sender, receiver) = tokio::sync::watch::channel(None);
                     entry.insert(receiver);
-                    Flight::Leader(sender)
+                    (
+                        Flight::Leader(sender),
+                        Some(LeaderEntryGuard {
+                            in_flight: &self.inner.in_flight,
+                            key: Some(key.clone()),
+                        }),
+                    )
                 }
             }
         };
@@ -998,4 +1045,53 @@ async fn load_or_generate_identity(
 /// installed one.
 fn ensure_rustls_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_guard_restores_count_on_drop() {
+        let counter = AtomicUsize::new(3);
+        {
+            let _guard = QueuedGuard { queued: &counter };
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn leader_guard_removes_entry_on_drop() {
+        let map = tokio::sync::Mutex::new(HashMap::new());
+        let (_sender, receiver) =
+            tokio::sync::watch::channel::<Option<SharedBuild>>(None);
+        map.lock()
+            .await
+            .insert("key".to_string(), receiver);
+        {
+            let _guard = LeaderEntryGuard {
+                in_flight: &map,
+                key: Some("key".to_string()),
+            };
+        }
+        assert!(map.lock().await.get("key").is_none());
+    }
+
+    #[tokio::test]
+    async fn leader_guard_keeps_live_entries() {
+        let map = tokio::sync::Mutex::new(HashMap::new());
+        let (_sender, receiver) =
+            tokio::sync::watch::channel::<Option<SharedBuild>>(None);
+        map.lock()
+            .await
+            .insert("key".to_string(), receiver);
+        {
+            let _guard = LeaderEntryGuard {
+                in_flight: &map,
+                key: Some("other".to_string()),
+            };
+        }
+        assert!(map.lock().await.get("key").is_some());
+    }
 }

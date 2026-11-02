@@ -237,8 +237,12 @@ RUN --mount=type=cache,id=ave-node-registry,target=/usr/local/cargo/registry \
     mkdir -p /volumes/db /volumes/keys /volumes/logs && chown -R 65532:65532 /volumes
 
 # Final contract sources are packaged independently of dependency resolution.
+# The local SDK checkout is staged under /sdk-local for experimental
+# builds only (bind-mounted where needed, so it never lands in a
+# layer); production uses the crates.io SDK and ships no local checkout
+# (enforced by build.sh --prod).
 FROM scratch AS contract-sources
-COPY --from=sources /ave-contract-sdk /runtime-sources/home/ale/dev/ave-contract-sdk
+COPY --from=sources /ave-contract-sdk /sdk-local/ave-contract-sdk
 COPY --from=sources /ave/Cargo.toml /runtime-sources/home/ale/dev/ave/Cargo.toml
 COPY --from=sources /ave/README.md /runtime-sources/home/ale/dev/ave/README.md
 COPY --from=sources /ave/src /runtime-sources/home/ale/dev/ave/src
@@ -251,6 +255,7 @@ COPY --from=sources /ave/common/src/wrapper.rs /runtime-sources/home/ale/dev/ave
 FROM --platform=$BUILDPLATFORM target-config AS contract-vendor
 ARG TARGETARCH
 ARG PIN_LOCKFILE
+ARG PROD
 COPY --from=sources /ave/Cargo.toml /ave/Cargo.toml
 COPY --from=sources /ave/README.md /ave/README.md
 COPY --from=sources /ave/http/Cargo.toml /ave/http/Cargo.toml
@@ -264,8 +269,11 @@ COPY --from=sources /ave/common/build.rs /ave/common/build.rs
 COPY --from=sources /ave/common/src/lib.rs /ave/common/src/lib.rs
 COPY --from=sources /ave/common/src/wrapper.rs /ave/common/src/wrapper.rs
 COPY --from=sources /ave/common/pins /ave/common/pins
-COPY --from=sources /ave-contract-sdk /ave-contract-sdk
 COPY --from=sources /ave-reproducible-wasm/config/toolchain.env /tmp/toolchain.env
+RUN --mount=type=cache,id=ave-node-registry,target=/usr/local/cargo/registry \
+    --mount=type=bind,from=contract-sources,src=/sdk-local/ave-contract-sdk,dst=/sdk-local \
+    if [ -z "$PROD" ]; then cp -r /sdk-local /ave-contract-sdk; fi && \
+    case "$TARGETARCH" in \
 COPY --from=sources /ave-reproducible-wasm/dist/cargo-ave-${TARGETARCH} /usr/local/bin/cargo-ave-pinned
 RUN --mount=type=cache,id=ave-node-registry,target=/usr/local/cargo/registry \
     case "$TARGETARCH" in \
@@ -319,9 +327,18 @@ ARG RUSTC_VERSION
 COPY --from=contract-vendor /contracts /contracts
 COPY --from=contract-vendor /tmp/contract-template /tmp/contract-template
 COPY --from=contract-sources /runtime-sources /runtime-sources
+ARG PROD
+# Experimental builds mirror the local SDK checkout for the contract
+# template's `path` dependency (and the warmup build); production uses
+# the crates.io SDK and ships no local checkout (enforced by build.sh
+# --prod). Bind-mounts leave no trace in the layer.
+RUN --mount=type=bind,from=contract-sources,src=/sdk-local/ave-contract-sdk,dst=/sdk-local \
+    if [ -z "$PROD" ]; then \
+      cp -r /sdk-local /runtime-sources/home/ale/dev/ave-contract-sdk && \
+      cp -r /sdk-local /ave-contract-sdk; \
+    fi
 COPY --from=contract-vendor /usr/local/bin/cargo-ave-pinned /usr/local/bin/cargo-ave-pinned
 COPY --from=contract-vendor /ave /ave
-COPY --from=contract-vendor /ave-contract-sdk /ave-contract-sdk
 RUN . /etc/ave-target.env && \
     if [ "$BUILDARCH" = "$TARGETARCH" ]; then \
       rustup run "$RUSTC_VERSION" cargo --config /tmp/contract-template/.cargo/config.toml build --locked --manifest-path /tmp/contract-template/Cargo.toml --target wasm32-unknown-unknown --release --offline; \

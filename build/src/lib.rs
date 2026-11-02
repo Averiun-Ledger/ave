@@ -531,6 +531,11 @@ pub async fn run_cargo_build(
     };
     let mut command = Command::new(&program);
     isolate_build_env(&mut command);
+    // A dropped future must not leave cargo running: the timeout path
+    // kills the whole process group explicitly, this covers plain
+    // cancellation (rustc grandchildren are bounded by the build dir
+    // lifetime and exit on their own).
+    command.kill_on_drop(true);
     if let Some(name) = rustup_toolchain {
         command.arg("run").arg(name).arg("cargo");
     }

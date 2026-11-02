@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(entry.sdk_version, "0.8.0");
         assert_eq!(
             entry.cargo_config_hash,
-            "260533a942dce0967676e91935196f4e0a62d5d243de26e8ff12656ff8530c56"
+            "fe0e35ce03729266e3423466f3135885995f5b5a1d691b9d9d6c2da55d4ee2b0"
         );
         assert_eq!(
             entry.lock_hash,
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(entry.sdk_version, "0.8.0");
         assert_eq!(
             entry.cargo_config_hash,
-            "260533a942dce0967676e91935196f4e0a62d5d243de26e8ff12656ff8530c56"
+            "fe0e35ce03729266e3423466f3135885995f5b5a1d691b9d9d6c2da55d4ee2b0"
         );
         assert_eq!(
             entry.lock_hash,
