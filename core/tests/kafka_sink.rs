@@ -125,7 +125,7 @@ async fn kafka_transport_happy_path() {
 
     let full: serde_json::Value = serde_json::from_str(&messages[0].1).unwrap();
     assert_eq!(full["public_key"], "pk");
-    assert_eq!(full["event_request_timestamp"], 1);
+    assert_eq!(full["event_request_timestamp"], "1");
 
     let light: serde_json::Value =
         serde_json::from_str(&messages[1].1).unwrap();

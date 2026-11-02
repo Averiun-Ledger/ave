@@ -169,7 +169,12 @@ pub struct AbortsQuery {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct IncidentsQuery {
     pub phase: Option<String>,
+    /// Nanosecond bounds. Query text is exact end to end, so serde
+    /// stays numeric; the TypeScript type is a string so clients are
+    /// forced to send exact digits instead of lossy JS numbers.
+    #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
     pub from_nanos: Option<u64>,
+    #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
     pub to_nanos: Option<u64>,
     pub limit: Option<u64>,
 }
@@ -306,6 +311,11 @@ pub struct PatchApproval {
     /// Collection version seen when consulting.
     pub expected_version: u64,
     /// Request `issued_at` (nanoseconds) seen when consulting.
+    ///
+    /// Decimal string on the wire (see `quoted_u64`).
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub expected_issued_at: u64,
 }
 

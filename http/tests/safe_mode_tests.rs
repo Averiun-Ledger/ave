@@ -154,7 +154,9 @@ async fn accept_approval(
             let (Some(request_id), Some(version), Some(issued_at)) = (
                 body["request_id"].as_str(),
                 body["version"].as_u64(),
-                body["request"]["issued_at"].as_u64(),
+                body["request"]["issued_at"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok()),
             ) else {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;

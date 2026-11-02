@@ -21,8 +21,18 @@ use utoipa::ToSchema;
 pub struct DataToSink {
     pub payload: DataToSinkEvent,
     pub public_key: String,
+    /// Decimal strings on the wire (see `crate::bridge::quoted_u64`).
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_request_timestamp: u64,
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_ledger_timestamp: u64,
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub sink_timestamp: u64,
 }
 

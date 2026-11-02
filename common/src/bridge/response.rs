@@ -94,9 +94,20 @@ pub struct ApprovalReq {
     pub signer: String,
     /// When the owner issued the request, in nanoseconds since the Unix
     /// epoch. Together with `deadline` it fixes the approval window.
+    ///
+    /// Decimal strings on the wire (see `quoted_u64`): nanosecond
+    /// timestamps lose precision as raw JSON integers in JavaScript.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub issued_at: u64,
     /// Approvers that have not voted by this instant (nanoseconds since
     /// the Unix epoch) are counted as absent.
+    ///
+    /// Decimal string on the wire, like `issued_at`.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub deadline: u64,
 }
 
@@ -122,8 +133,19 @@ pub enum MonitorNetworkState {
 pub struct LedgerDB {
     pub subject_id: String,
     pub sn: u64,
+    /// Decimal strings on the wire (see `quoted_u64`): nanosecond
+    /// timestamps lose precision as raw JSON integers in JavaScript.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_request_timestamp: u64,
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_ledger_timestamp: u64,
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub sink_timestamp: u64,
     pub event: RequestEventDB,
     pub event_type: EventRequestType,
@@ -702,6 +724,10 @@ pub struct PaginatorAborts {
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct WatchdogIncidentRow {
+    /// Decimal string on the wire (see `quoted_u64`).
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub timestamp_nanos: u64,
     pub phase: String,
     pub expected_secs: u64,

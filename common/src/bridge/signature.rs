@@ -9,6 +9,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, str::FromStr};
 
+use super::quoted_u64;
+
 #[cfg(feature = "openapi")]
 use utoipa::ToSchema;
 
@@ -23,7 +25,13 @@ use ts_rs::TS;
 pub struct BridgeSignature {
     /// Public key of the issuer
     pub signer: String,
-    /// Timestamp at which the signature was made
+    /// Timestamp at which the signature was made.
+    ///
+    /// Decimal string on the wire (see `quoted_u64`): raw JSON
+    /// integers lose precision in JavaScript past 2^53.
+    #[serde(with = "quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub timestamp: u64,
     /// Signature value
     pub value: String,
@@ -157,5 +165,33 @@ mod tests {
         // Missing required fields should fail deserialization.
         let json = r#"{"signer":"Eabc","timestamp":123}"#;
         assert!(serde_json::from_str::<BridgeSignature>(json).is_err());
+    }
+
+    #[test]
+    fn test_bridge_signature_timestamp_wire_format() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let content = TestContent {
+            data: "ts".to_string(),
+        };
+        let signature = Signature::new(&content, &signer).unwrap();
+        let bridge: BridgeSignature = signature.into();
+
+        // On the wire the timestamp is a decimal string (JS-safe).
+        let json = serde_json::to_string(&bridge).unwrap();
+        let expected = format!("\"timestamp\":\"{}\"", bridge.timestamp);
+        assert!(json.contains(&expected), "{json}");
+
+        // Big values survive a JS-style round trip through strings.
+        let back: BridgeSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timestamp, bridge.timestamp);
+
+        // Legacy numbers still parse when exact.
+        let legacy = json.replace(
+            &format!("\"{}\"", bridge.timestamp),
+            &bridge.timestamp.to_string(),
+        );
+        let legacy_back: BridgeSignature =
+            serde_json::from_str(&legacy).unwrap();
+        assert_eq!(legacy_back.timestamp, bridge.timestamp);
     }
 }
