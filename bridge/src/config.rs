@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::{auth::AuthConfig, http::HttpConfig};
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+#[cfg_attr(not(feature = "test"), derive(Default))]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Settings from Ave Base.
@@ -25,6 +26,10 @@ pub struct Config {
     pub http: HttpConfig,
 }
 
+/// Production builds have no custom paths, so `Default` is derived.
+/// Test builds need the fixed test directory as default: manual impl
+/// (a derived one would leave `keys_path` empty and fail validation).
+#[cfg(feature = "test")]
 impl Default for Config {
     fn default() -> Self {
         Self {

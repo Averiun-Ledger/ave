@@ -38,9 +38,10 @@ pub struct ApprovalReq {
     pub deadline: TimeStamp,
 }
 
-/// A stored approval vote with the collection coordinates that
-/// identify exactly which request the decision belongs to. Voters
-/// echo the coordinates back, so a replaced request conflicts
+/// A stored approval vote with its collection coordinates.
+///
+/// They identify exactly which request the decision belongs to.
+/// Voters echo the coordinates back, so a replaced request conflicts
 /// instead of receiving a stale vote.
 #[derive(
     Debug,

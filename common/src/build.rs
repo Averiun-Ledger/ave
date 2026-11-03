@@ -165,8 +165,9 @@ fn escape_toml(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Renders the contract cargo config from the SDK template with
-/// local paths substituted and the vendored-sources section appended
+/// Renders the contract cargo config from the SDK template.
+///
+/// Local paths substituted and the vendored-sources section appended
 /// when a vendor dir is given. THE single renderer for the node
 /// pipeline (`ave-core`) and the off-chain gate (`ave-pin`): same
 /// inputs in, byte-identical config out.
@@ -248,19 +249,20 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         }
     }
     if out.as_os_str().is_empty() {
-        out.push("/");
+        out = PathBuf::from("/");
     }
     out
 }
 
-/// Absolute vendor directory for a build: `<root>/vendor`,
-/// lexically normalized, for the cargo config above. The absolute
-/// form is what cargo records into crate paths, and the `{vendor}`
-/// remap rewrites exactly that prefix to `/vendor` — so artifacts
-/// never carry the machine-specific root or the random staging
-/// suffix. `None` when the build dir is not under `root` — then no
-/// vendor section is emitted. Callers check the dir exists first
-/// (same as before: no vendor on disk, no vendor section).
+/// Absolute vendor directory for a build.
+///
+/// `<root>/vendor`, lexically normalized, for the cargo config above.
+/// The absolute form is what cargo records into crate paths, and the
+/// `{vendor}` remap rewrites exactly that prefix to `/vendor` — so
+/// artifacts never carry the machine-specific root or the random
+/// staging suffix. `None` when the build dir is not under `root` —
+/// then no vendor section is emitted. Callers check the dir exists
+/// first (same as before: no vendor on disk, no vendor section).
 pub fn absolute_vendor_dir(build_dir: &Path, root: &Path) -> Option<PathBuf> {
     build_dir.strip_prefix(root).ok()?;
     if build_dir == root {

@@ -184,7 +184,7 @@ pub async fn system(
     let toolchains = crate::compilation::support::Toolchains::from_config(
         &config.toolchains,
     )
-    .with_cargo_bin(config.cargo_bin().clone());
+    .with_cargo_bin(config.cargo_bin());
     toolchains.verify().await.map_err(|e| {
         SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
     })?;

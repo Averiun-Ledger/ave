@@ -1234,13 +1234,15 @@ async fn local_build_cannot_read_etc_hostname() {
 /// Without the guards, a retry is rejected as queue-full or fails
 /// forever with "leader dropped its result".
 ///
-/// Deterministic by construction: A holds the only slot with a cold
-/// build while B and C queue behind it (one slot + two queue positions
-/// fits all three, so nothing is rejected). Aborting the queued builds
-/// and retrying while A still runs forces the retries through the
-/// queue path — a leaked slot cannot hide behind the free-slot fast
-/// path. The completed-counter assertions fail loudly instead of
-/// passing vacuously if the machine ever outruns the setup.
+/// Deterministic by construction, with no fixed timing windows: with
+/// one slot and two queue positions for three concurrent fresh
+/// sources, exactly one builds and two queue — three distinct sources
+/// always fit, so nothing is ever rejected. The test polls for both
+/// queued (registration takes milliseconds; even a fully cached build
+/// holds the slot orders of magnitude longer), aborts the queued two,
+/// and then checks the drain directly plus end-to-end retries. If the
+/// queue never engages, the setup — not the fix — failed, and the test
+/// fails loudly instead of passing vacuously.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn cancelled_builds_free_slot_and_entry_for_retry() {
@@ -1260,6 +1262,9 @@ async fn cancelled_builds_free_slot_and_entry_for_retry() {
         .expect("compiler server should start");
     let build_counter = server.build_counter();
     let completed = || build_counter.load(std::sync::atomic::Ordering::SeqCst);
+    // `CompilerServer` is cheap to clone (shares all state): the probe
+    // observes the serving instance from the test task.
+    let probe = server.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .expect("failed to bind ephemeral port");
     let addr = listener.local_addr().expect("listener has a local address");
@@ -1286,13 +1291,13 @@ async fn cancelled_builds_free_slot_and_entry_for_retry() {
         )
     };
 
-    // A takes the only slot (cold build: minutes). B and C queue behind
-    // it; nothing is rejected and nothing can complete yet.
+    // All three race for the slot; whoever wins builds, the other two
+    // queue (distinct sources: no single-flight followers, and three
+    // requests always fit one slot plus two queue positions).
     let build_a = tokio::spawn({
         let client = new_client();
         async move { client.compile(&source_b64(CONTRACT_A), "").await }
     });
-    tokio::time::sleep(Duration::from_secs(2)).await;
     let build_b = tokio::spawn({
         let client = new_client();
         async move { client.compile(&source_b64(CONTRACT_B), "").await }
@@ -1301,26 +1306,49 @@ async fn cancelled_builds_free_slot_and_entry_for_retry() {
         let client = new_client();
         async move { client.compile(&source_b64(CONTRACT_C), "").await }
     });
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(
-        completed(),
-        0,
-        "no build may complete during the registration window"
-    );
-    // Cancel the two queued builds. A keeps running: its slot is needed
-    // below so the retries go through the queue path.
+    // Wait for both queued instead of sleeping a fixed window: a fixed
+    // sleep is either too short (cold builds) or too long (warm cache
+    // finishes a build inside it). Two queued means one is still
+    // holding the slot — steady state, not a transient.
+    let engaged = Instant::now() + Duration::from_secs(30);
+    while probe.queued_count() != 2 {
+        assert!(
+            Instant::now() < engaged,
+            "the queue never engaged: one build plus two queued expected, \
+             without it this test cannot exercise cancellation"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Cancel the two queued builds. Both handles must report
+    // cancellation (never completed): that proves they were still
+    // queued, not silently finished.
     build_b.abort();
     build_c.abort();
-    let _ = build_b.await;
-    let _ = build_c.await;
-    // Retrying while A still holds the slot must succeed: a leaked
-    // queue slot rejects here instead of bypassing it through the
-    // free-slot fast path.
-    assert_eq!(
-        completed(),
-        0,
-        "A must still be building while the retries register"
-    );
+    for (name, handle) in [("B", build_b), ("C", build_c)] {
+        match handle.await {
+            Err(join_err) if join_err.is_cancelled() => {}
+            other => panic!(
+                "{name} must still have been queued (cancelled), got {other:?}"
+            ),
+        }
+    }
+    // The queue must drain back to zero: a leaked `QueuedGuard` leaves
+    // the counter inflated here, deterministically, with no timing
+    // involved.
+    let drained = Instant::now() + Duration::from_secs(10);
+    while probe.queued_count() != 0 {
+        assert!(
+            Instant::now() < drained,
+            "cancelled builds leaked their queue slots: \
+             queued_count never returned to zero"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Retrying the cancelled sources must succeed: a poisoned
+    // single-flight entry fails every retry with "leader dropped its
+    // result" (the map is consulted before the semaphore, so this
+    // holds whether or not A still runs), and a leaked queue slot
+    // rejects with queue-full while A holds the slot.
     let client = new_client();
     for contract in [CONTRACT_B, CONTRACT_C] {
         let outcome = client

@@ -295,10 +295,11 @@ impl Display for ApprovalStateRes {
     }
 }
 
-/// Manual approval decision bound to the exact request the operator
-/// reviewed. The three expected coordinates identify the pending
-/// collection: any accepted replacement changes at least one of
-/// them, so a stale decision conflicts instead of voting wrong.
+/// Manual approval decision bound to the exact reviewed request.
+///
+/// The three expected coordinates identify the pending collection:
+/// any accepted replacement changes at least one of them, so a stale
+/// decision conflicts instead of voting wrong.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]

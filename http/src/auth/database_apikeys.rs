@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::warn;
 
 /// One `last_used` bookkeeping write, queued for the background flusher.
-pub(crate) struct LastUsedTouch {
+pub struct LastUsedTouch {
     key_id: String,
     ip_address: Option<String>,
 }

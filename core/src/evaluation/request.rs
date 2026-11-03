@@ -79,12 +79,13 @@ impl EvaluateData {
     }
 }
 
-/// Viewpoint rules for evaluation requests: strict shared validation
-/// (governance facts take none; tracker facts need schema-covered,
-/// well-formed viewpoints). Intake keeps its own lenient check in
-/// `crate::model::common::viewpoints`; evaluation (here and the
-/// workers) requires this one — do not unify them without a protocol
-/// decision.
+/// Viewpoint rules for evaluation requests.
+///
+/// Strict shared validation (governance facts take none; tracker facts
+/// need schema-covered, well-formed viewpoints). Intake keeps its own
+/// lenient check in `crate::model::common::viewpoints`; evaluation
+/// (here and the workers) requires this one — do not unify them
+/// without a protocol decision.
 pub fn validate_fact_viewpoints(
     fact_viewpoints: &BTreeSet<String>,
     schema_id: &SchemaType,

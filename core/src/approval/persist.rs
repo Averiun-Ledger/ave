@@ -515,7 +515,7 @@ impl Handler<Self> for ApprPersist {
                         version: self.version,
                     };
                     state.map_or_else(
-                        || entry(),
+                        entry,
                         |query| {
                             if &query == req_state {
                                 entry()

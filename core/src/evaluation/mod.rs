@@ -1060,15 +1060,17 @@ pub mod tests {
             .unwrap();
 
         crate::node::Node::replay_sink_events(
-            system,
-            &subject_manager,
-            &our_key.to_string(),
-            subject_data,
-            subject_id,
-            from_sn,
-            to_sn,
-            limit,
-            crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+            crate::node::SinkReplayInput {
+                system,
+                subject_manager: &subject_manager,
+                our_key: &our_key.to_string(),
+                subject_data,
+                subject_id,
+                from_sn,
+                to_sn,
+                limit,
+                ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+            },
         )
         .await
         .unwrap()
@@ -1105,15 +1107,17 @@ pub mod tests {
             .unwrap();
 
         crate::node::Node::replay_sink_events(
-            system,
-            &subject_manager,
-            &our_key.to_string(),
-            subject_data,
-            subject_id,
-            from_sn,
-            to_sn,
-            limit,
-            crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+            crate::node::SinkReplayInput {
+                system,
+                subject_manager: &subject_manager,
+                our_key: &our_key.to_string(),
+                subject_data,
+                subject_id,
+                from_sn,
+                to_sn,
+                limit,
+                ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+            },
         )
         .await
         .unwrap_err()

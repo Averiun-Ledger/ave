@@ -84,13 +84,14 @@ async fn loader_dirs(exe: &Path) -> Vec<PathBuf> {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
-            let path = if let Some(pos) = line.find("=>") {
-                line[pos + 2..].split_whitespace().next()
-            } else {
-                line.split_whitespace()
-                    .next()
-                    .filter(|token| token.starts_with('/'))
-            };
+            let path = line.find("=>").map_or_else(
+                || {
+                    line.split_whitespace()
+                        .next()
+                        .filter(|token| token.starts_with('/'))
+                },
+                |pos| line[pos + 2..].split_whitespace().next(),
+            );
             if let Some(path) = path
                 && let Some(dir) = Path::new(path).parent()
             {
@@ -285,19 +286,17 @@ pub async fn prepare(
     // Host C linker for build scripts, resolved once so the child
     // never depends on `PATH` lookup or dangling `cc` alternatives.
     let mut host_cc = None;
-    for candidate in [std::env::var_os("CC"), std::env::var_os("TARGET_CC")] {
-        if let Some(name) = candidate {
-            let path = PathBuf::from(name);
-            if path.is_file() {
-                host_cc = Some(path);
-                break;
-            }
+    for name in [std::env::var_os("CC"), std::env::var_os("TARGET_CC")]
+        .into_iter()
+        .flatten()
+    {
+        let path = PathBuf::from(name);
+        if path.is_file() {
+            host_cc = Some(path);
+            break;
         }
     }
-    let host_cc = match host_cc {
-        Some(path) => Some(path),
-        None => resolve_in_path("cc"),
-    };
+    let host_cc = host_cc.or_else(|| resolve_in_path("cc"));
     let host_cc = match host_cc {
         Some(path) => tokio::fs::canonicalize(&path).await.ok(),
         None => None,
@@ -410,17 +409,16 @@ pub async fn prepare(
                     }
                     if let Ok(root) =
                         tokio::fs::read_to_string(&root_manifest).await
+                        && root.contains("[workspace]")
                     {
-                        if root.contains("[workspace]") {
-                            push(root_manifest.clone(), false);
-                            // A root that is also a package must
-                            // present its targets to the parser.
-                            let root_src = ancestor.join("src");
-                            if root_src.is_dir() {
-                                push(root_src, false);
-                            }
-                            break;
+                        push(root_manifest.clone(), false);
+                        // A root that is also a package must
+                        // present its targets to the parser.
+                        let root_src = ancestor.join("src");
+                        if root_src.is_dir() {
+                            push(root_src, false);
                         }
+                        break;
                     }
                 }
                 manifests.push(canonical.join("Cargo.toml"));
@@ -539,10 +537,10 @@ pub async fn prepare(
         if mirror.iter().any(|(dir, _)| resolved.starts_with(dir)) {
             continue;
         }
-        if let Ok(bytes) = std::fs::read(source) {
-            if bytes.len() <= 1 << 20 {
-                copies.push((source.clone(), bytes));
-            }
+        if let Ok(bytes) = std::fs::read(source)
+            && bytes.len() <= 1 << 20
+        {
+            copies.push((source.clone(), bytes));
         }
     }
     let mut mounts = Vec::new();
@@ -798,8 +796,9 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             entry.flags,
             entry.data.as_deref(),
         );
-        if result.is_err() && !entry.best_effort {
-            let e = result.unwrap_err();
+        if let Err(e) = &result
+            && !entry.best_effort
+        {
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
             return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));
@@ -835,8 +834,9 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
             entry.flags,
             entry.data.as_deref(),
         );
-        if result.is_err() && !entry.best_effort {
-            let e = result.unwrap_err();
+        if let Err(e) = &result
+            && !entry.best_effort
+        {
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
             return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));

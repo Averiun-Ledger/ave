@@ -456,6 +456,13 @@ impl CompilerServer {
         Arc::clone(&self.inner.builds_completed)
     }
 
+    /// Number of builds currently waiting for a slot. Exposed for
+    /// tests: after cancelling every queued request it must return to
+    /// zero (the `QueuedGuard` drains on abort).
+    pub fn queued_count(&self) -> usize {
+        self.inner.queued_builds.load(Ordering::SeqCst)
+    }
+
     /// Public key of the compiler identity, in its Display form; operators
     /// pin it in the node configuration to verify attestations.
     pub fn public_key(&self) -> String {

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 /// Authentication system configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(not(feature = "test"), derive(Default))]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     /// Enable or disable authentication
@@ -40,6 +41,10 @@ pub struct AuthConfig {
     pub session: SessionConfig,
 }
 
+/// Production builds have no custom paths, so `Default` is derived.
+/// Test builds need the fixed test directory as default: manual impl
+/// (a derived one would leave `database_path` empty).
+#[cfg(feature = "test")]
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {

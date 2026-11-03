@@ -242,6 +242,21 @@ impl BorshDeserialize for Node {
 /// any positive value returns the same events.
 pub(crate) const SINK_REPLAY_LEDGER_BATCH_SIZE: u64 = 100;
 
+/// Inputs for mailbox-free ledger replay for sink events (see
+/// [`Node::replay_sink_events`]): the resolved subject plus the
+/// range and paging the caller asked for.
+pub(crate) struct SinkReplayInput<'a> {
+    pub system: &'a SystemRef,
+    pub subject_manager: &'a ActorRef<SubjectManager>,
+    pub our_key: &'a str,
+    pub subject_data: SubjectData,
+    pub subject_id: &'a DigestIdentifier,
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub limit: u64,
+    pub ledger_batch_size: u64,
+}
+
 impl Node {
     fn hash(&self) -> Result<HashAlgorithm, ActorError> {
         self.hash.ok_or_else(|| ActorError::FunctionalCritical {
@@ -623,16 +638,19 @@ impl Node {
     /// replay did. The caller resolves [`SubjectData`] locally first
     /// (a plain map read on [`Node`]).
     pub(crate) async fn replay_sink_events(
-        system: &SystemRef,
-        subject_manager: &ActorRef<SubjectManager>,
-        our_key: &str,
-        subject_data: SubjectData,
-        subject_id: &DigestIdentifier,
-        from_sn: u64,
-        to_sn: Option<u64>,
-        limit: u64,
-        ledger_batch_size: u64,
+        input: SinkReplayInput<'_>,
     ) -> Result<SinkEventsPage, ActorError> {
+        let SinkReplayInput {
+            system,
+            subject_manager,
+            our_key,
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size,
+        } = input;
         if limit == 0 {
             return Err(ActorError::Functional {
                 description: "Replay limit must be greater than zero"

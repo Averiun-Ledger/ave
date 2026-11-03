@@ -2792,17 +2792,17 @@ impl Api {
             return Err(Error::SubjectNotFound(subject_id_str));
         };
 
-        Node::replay_sink_events(
-            &self.system,
-            &self.subject_manager,
-            &self.public_key,
+        Node::replay_sink_events(crate::node::SinkReplayInput {
+            system: &self.system,
+            subject_manager: &self.subject_manager,
+            our_key: &self.public_key,
             subject_data,
-            &subject_id,
-            query.from_sn.unwrap_or(0),
-            query.to_sn,
-            query.limit.unwrap_or(100),
-            SINK_REPLAY_LEDGER_BATCH_SIZE,
-        )
+            subject_id: &subject_id,
+            from_sn: query.from_sn.unwrap_or(0),
+            to_sn: query.to_sn,
+            limit: query.limit.unwrap_or(100),
+            ledger_batch_size: SINK_REPLAY_LEDGER_BATCH_SIZE,
+        })
         .await
         .map_err(|e| {
             warn!(

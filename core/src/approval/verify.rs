@@ -497,8 +497,9 @@ pub fn verify_approval_data(
     Ok(())
 }
 
-/// Approval evidence through the node's own checks, with the
-/// evaluated patch and roles the node itself would use: the tally
+/// Approval evidence through the node's own checks.
+///
+/// The evaluated patch and roles the node itself would use: the tally
 /// verification input plus the request gates (pre-event metadata and
 /// freshness window) checked before it.
 pub fn verify_approval_evidence(

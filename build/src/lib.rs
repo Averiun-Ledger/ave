@@ -226,10 +226,10 @@ fn toolchain_rustc_direct(toolchain: &str) -> Option<PathBuf> {
     let dir = Path::new(&home).join("toolchains");
     let mut candidates = vec![dir.join(toolchain)];
     #[cfg(target_os = "linux")]
-    if let Some(triple) = runtime_host_triple() {
-        if !toolchain.ends_with(triple) {
-            candidates.push(dir.join(format!("{toolchain}-{triple}")));
-        }
+    if let Some(triple) = runtime_host_triple()
+        && !toolchain.ends_with(triple)
+    {
+        candidates.push(dir.join(format!("{toolchain}-{triple}")));
     }
     candidates
         .into_iter()

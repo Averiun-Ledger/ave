@@ -1406,7 +1406,7 @@ where
     let mut filled = 0;
     // A missing watermark with journal history still walks from sn
     // 0: the genesis event counts as fillable, not as already done.
-    while done.map_or(true, |cut| cut < tip_sn) {
+    while done.is_none_or(|cut| cut < tip_sn) {
         let events: Vec<Ledger> = get_n_events(ctx, from, 256).await?;
         if events.is_empty() {
             break;

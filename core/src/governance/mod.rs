@@ -687,7 +687,7 @@ impl Governance {
     /// re-evaluated on every applied batch: a governance learned after
     /// boot starts empty and only gains schemas as events apply.
     /// Warn-and-continue: sink wiring must never fail governance apply.
-    async fn upsert_sink_servers(&self, ctx: &mut ActorContext<Self>) {
+    async fn upsert_sink_servers(&self, ctx: &ActorContext<Self>) {
         let matching = if let Some(config) =
             ctx.system().get_helper::<ConfigHelper>("config")
         {

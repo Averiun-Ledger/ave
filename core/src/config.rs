@@ -25,11 +25,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_LEDGER_BATCH_SIZE: usize = 1_000_000;
 const MAX_SYNC_PAGE_SIZE: usize = 10_000;
 
-/// Canonical production paths. Production builds fix every filesystem
-/// location to these constants: the config file can not move them (the
-/// fields only exist with the `test` feature, and unknown keys fail
-/// loud). Operators map volumes onto these container paths; tests keep
-/// fully custom directories.
+/// Canonical production paths.
+///
+/// Production builds fix every filesystem location to these constants:
+/// the config file can not move them (the fields only exist with the
+/// `test` feature, and unknown keys fail loud). Operators map volumes
+/// onto these container paths; tests keep fully custom directories.
 pub const CONTRACTS_DIR: &str = "/contracts";
 pub const DB_LOCAL_ROCKSDB_DIR: &str = "/db/local/rocksdb";
 pub const DB_LOCAL_SQLITE_DIR: &str = "/db/local/sqlite";
@@ -1009,9 +1010,9 @@ impl AveInternalDBFeatureConfig {
         #[cfg(not(feature = "test"))]
         {
             let _ = path;
-            return Err(serde::de::Error::custom(
+            Err(serde::de::Error::custom(
                 "database paths are fixed in production builds",
-            ));
+            ))
         }
     }
 }
@@ -1028,10 +1029,12 @@ impl fmt::Display for AveInternalDBFeatureConfig {
 }
 
 impl AveInternalDBConfig {
+    // Production directories are constants; test builds validate
+    // their custom ones. Split by cfg: the test body allocates
+    // (`to_string`) and can never be `const`, while the production
+    // body is trivially `const` (and clippy requires it to be).
+    #[cfg(feature = "test")]
     pub fn validate(&self) -> Result<(), Error> {
-        // Production directories are constants; test builds validate
-        // their custom ones.
-        #[cfg(feature = "test")]
         match &self.db {
             #[cfg(feature = "rocksdb")]
             AveInternalDBFeatureConfig::Rocksdb { path } => {
@@ -1052,6 +1055,11 @@ impl AveInternalDBConfig {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "test"))]
+    pub const fn validate(&self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -1129,9 +1137,9 @@ impl AveExternalDBFeatureConfig {
         #[cfg(not(feature = "test"))]
         {
             let _ = path;
-            return Err(serde::de::Error::custom(
+            Err(serde::de::Error::custom(
                 "database paths are fixed in production builds",
-            ));
+            ))
         }
     }
 }
@@ -1143,10 +1151,12 @@ impl fmt::Display for AveExternalDBFeatureConfig {
 }
 
 impl AveExternalDBConfig {
+    // Production directories are constants; test builds validate
+    // their custom ones. Split by cfg: the test body allocates
+    // (`to_string`) and can never be `const`, while the production
+    // body is trivially `const` (and clippy requires it to be).
+    #[cfg(feature = "test")]
     pub fn validate(&self) -> Result<(), Error> {
-        // Production directories are constants; test builds validate
-        // their custom ones.
-        #[cfg(feature = "test")]
         match &self.db {
             #[cfg(feature = "ext-sqlite")]
             AveExternalDBFeatureConfig::Sqlite { path } => {
@@ -1158,6 +1168,11 @@ impl AveExternalDBConfig {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "test"))]
+    pub const fn validate(&self) -> Result<(), Error> {
         Ok(())
     }
 }
