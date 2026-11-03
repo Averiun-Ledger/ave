@@ -934,3 +934,85 @@ async fn dirty_restart_does_not_reapply_page_boundary() {
     drop(node);
     drop(dirs);
 }
+
+/// Regression test for the second Node <-> SubjectAccess cycle
+/// (report 33, extended variant): `update_subject` waits on Node
+/// (`GetSubjectData`) while a received batch waited on SubjectAccess
+/// through Node (`SubjectAccessData` -> `GetAccessInfo`). Both `ask`s
+/// have no timeout, so the old nesting hung the central actor.
+/// The distributor now reads flags and data with two independent
+/// asks, so concurrent updates and batch reception always complete.
+/// Each iteration uses a fresh tracker, unknown to the receiver:
+/// its genesis batch always passes the next-sn gate and reaches the
+/// auth check. Bounded by timeout: a reintroduced nested wait hangs
+/// instead of failing, and the timeout turns that into a loud
+/// failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_update_and_batch_reception_complete() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let target = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_pk = PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+
+    let governance_id = setup_example_governance(
+        &target,
+        &[MemberSpec {
+            api: &alice,
+            name: "Alice",
+            gov_witness: true,
+            creator: true,
+            issuer: true,
+        }],
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(180), async {
+        for _ in 0..4 {
+            let (tracker_id, _) = create_subject(
+                &alice,
+                governance_id.clone(),
+                "Example",
+                "",
+                true,
+            )
+            .await
+            .unwrap();
+            // Receiver-side peer so the concurrent update has someone
+            // to ask (its Node wait is the deadlock-relevant part).
+            target
+                .add_sync_peer(tracker_id.clone(), vec![alice_pk.clone()])
+                .await
+                .unwrap();
+            let genesis = alice
+                .test_get_tracker_ledger(tracker_id.clone(), 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("genesis event");
+            // Update and batch reception overlap: with the nested wait
+            // this is where Node and SubjectAccess wedged each other.
+            // The update may legitimately fail to fetch (roles); what
+            // must never happen is hanging.
+            let (_update, ()) = tokio::join!(
+                async {
+                    let _ = target.update_subject(tracker_id.clone()).await;
+                },
+                async {
+                    inject_ledger_batch(&target, &alice_pk, vec![genesis], None)
+                        .await
+                }
+            );
+            node_running(&target).await.unwrap();
+        }
+    })
+    .await
+    .expect("concurrent update + batch reception hung (nested wait?)");
+}

@@ -42,7 +42,7 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, get_abort_request, node_running,
+    PORT_COUNTER, create_node, get_abort_request, node_running, wait_request,
     wait_request_state,
 };
 
@@ -6452,4 +6452,158 @@ async fn test_gov_version_skip_with_failures_in_between() {
     })
     .await
     .expect("test overran its 60s budget");
+}
+
+/// End-to-end for report item 45: a schema id with path separators
+/// must change nothing. The event itself is recorded like any failed
+/// event (sn advances), but the hostile id never lands in state, so
+/// it can never reach staging/artifact paths. The compiler refuses
+/// it before building (`resolve_compile_targets` votes `Error`, no
+/// cargo runs) and a refused compilation skips evaluation straight
+/// to validation; the join sites fail closed on top. This suite runs
+/// `always_accept` (auto-approval ignores verdicts), so what the
+/// test asserts is the state after commit — no schema added —
+/// while a valid schema still lands (rejection poisons nothing).
+/// Walks this process' test contracts roots and fails on any path
+/// carrying the hostile marker: with the fix, a refused schema never
+/// reaches staging or artifact directories.
+fn assert_no_hostile_artifacts() {
+    let prefix =
+        format!("ave-test-contracts-{}-", std::process::id());
+    let mut roots = vec![];
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                roots.push(entry.path());
+            }
+        }
+    }
+    assert!(
+        !roots.is_empty(),
+        "expected test contracts roots under the temp dir"
+    );
+    let mut stack = roots;
+    while let Some(path) = stack.pop() {
+        let name = path.to_string_lossy().into_owned();
+        assert!(
+            !name.contains("outside"),
+            "hostile artifact escaped contracts root: {name}"
+        );
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                stack.extend(entries.flatten().map(|e| e.path()));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_schema_id_fails_without_state_change() {
+    tokio::time::timeout(Duration::from_secs(300), async {
+        let (nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = &nodes[0].api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![]).await;
+
+        // Would escape `contracts_path` if ever joined into a
+        // staging/artifact name.
+        let hostile = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "x/../../outside",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id =
+            emit_fact(owner, governance_id.clone(), hostile, false)
+                .await
+                .unwrap();
+        wait_request(owner, request_id).await.unwrap();
+
+        // The event is recorded like any failed event (sn advances),
+        // but the state must not change: no schema added.
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 1, "the failed event is still recorded");
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas.is_empty(),
+            "hostile schema id must change nothing, got {:?}",
+            gov.schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // The compiler refused it before touching the filesystem: no
+        // staging or artifact directory for the hostile id may exist
+        // anywhere under this process' contracts roots (a full
+        // pre-fix run left `/tmp/outside_<hash>/` with compiled wasm
+        // behind — that is the escape this test guards).
+        assert_no_hostile_artifacts();
+
+        // Never usable: no tracker can be created under it.
+        create_subject(
+            owner,
+            governance_id.clone(),
+            "x/../../outside",
+            "",
+            false,
+        )
+        .await
+        .expect_err("tracker under a rejected schema id must fail");
+
+        // The node stays healthy: a valid schema still lands.
+        let valid = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id = emit_fact(owner, governance_id.clone(), valid, false)
+            .await
+            .unwrap();
+        wait_request(owner, request_id.clone()).await.unwrap();
+        let terminal = owner.get_request_state(request_id).await.unwrap().state;
+        assert!(
+            matches!(terminal, RequestState::Finish),
+            "valid schema must still apply, got {terminal:?}"
+        );
+        let state =
+            get_subject(owner, governance_id.clone(), None, true)
+                .await
+                .unwrap();
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
+            "valid schema must persist after hostile refusal"
+        );
+    })
+    .await
+    .expect("test overran its 300s budget");
 }

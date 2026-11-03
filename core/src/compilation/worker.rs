@@ -62,7 +62,7 @@ use ave_actors::{
 use tracing::{Span, debug, error, info, info_span, warn};
 
 use super::{
-    Compilation, CompilationMessage,
+    Compilation, CompilationMessage, join_contained,
     response::{
         CompilationError, CompilationRes, CompilationResult, CompilerResponse,
     },
@@ -817,12 +817,34 @@ impl CompileWorker {
                 "{}_temp_staging_{}_{}",
                 subject_id, schema_id, contract_hash
             );
-            let staging_path = config.contracts_path.join(&staging_name);
+            let Some(staging_path) =
+                join_contained(&config.contracts_path, &staging_name)
+            else {
+                return (
+                    index,
+                    SchemaOutcome::fatal(ActorError::Functional {
+                        description: format!(
+                            "staging path escapes contracts root: {staging_name}"
+                        ),
+                    }),
+                );
+            };
             (staging_name, staging_path)
         } else {
             let official_name = format!("{}_{}", subject_id, schema_id);
-            let official_path =
-                config.contracts_path.join("contracts").join(&official_name);
+            let Some(official_path) = join_contained(
+                &config.contracts_path.join("contracts"),
+                &official_name,
+            ) else {
+                return (
+                    index,
+                    SchemaOutcome::fatal(ActorError::Functional {
+                        description: format!(
+                            "artifact path escapes contracts root: {official_name}"
+                        ),
+                    }),
+                );
+            };
             (official_name, official_path)
         };
 

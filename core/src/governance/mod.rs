@@ -12,7 +12,7 @@ use crate::{
             ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
         },
         error::CompilerError,
-        payload_contract_sources,
+        join_contained, payload_contract_sources,
         support::{
             CompilerResponse, CompilerSupport, ContractSourceInput,
             is_local_fatal_compiler_error,
@@ -1478,11 +1478,19 @@ impl Governance {
                     )
                     .await);
                 }
-                if let Err(e) = fs::remove_dir_all(
-                    config.contracts_path.join(&staging_name),
-                )
-                .await
-                {
+                // Fail closed: never delete outside the contracts
+                // root (boot sweep collects the leaked staging dir,
+                // if any).
+                let Some(staging_path) =
+                    join_contained(&config.contracts_path, &staging_name)
+                else {
+                    warn!(
+                        contract_name = %staging_name,
+                        "Refusing to remove staging path outside contracts root"
+                    );
+                    continue;
+                };
+                if let Err(e) = fs::remove_dir_all(staging_path).await {
                     debug!(
                         error = %e,
                         staging = %staging_name,
@@ -1493,16 +1501,42 @@ impl Governance {
             }
 
             let official_name = format!("{}_{}", subject_id, schema_id);
-            let official_path =
-                config.contracts_path.join("contracts").join(&official_name);
-            let staging_path = config.contracts_path.join(&staging_name);
+            let Some(official_path) = join_contained(
+                &config.contracts_path.join("contracts"),
+                &official_name,
+            ) else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote artifact path outside contracts root"
+                );
+                continue;
+            };
+            let Some(staging_path) =
+                join_contained(&config.contracts_path, &staging_name)
+            else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote staging path outside contracts root"
+                );
+                continue;
+            };
             // Swap through a backup instead of delete + rename: a crash
             // leaves the old or the new official artifact, never an
             // empty window. The backup lives at the contracts root with
             // the governance prefix, so the boot sweep removes it.
-            let backup_path = config
-                .contracts_path
-                .join(format!("{official_name}_temp_promote"));
+            let backup_name = format!("{official_name}_temp_promote");
+            let Some(backup_path) =
+                join_contained(&config.contracts_path, &backup_name)
+            else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote backup path outside contracts root"
+                );
+                continue;
+            };
             if official_path.exists() {
                 // Stale backup from an interrupted promotion.
                 if let Err(e) = fs::remove_dir_all(&backup_path).await {
@@ -1680,9 +1714,16 @@ impl Governance {
             }
             // Best-effort: a leftover directory is swept on the next
             // boot by `sweep_contract_artifacts`.
-            if let Err(e) =
-                fs::remove_dir_all(config.contracts_path.join(&staging_name))
-                    .await
+            let Some(staging_path) =
+                join_contained(&config.contracts_path, &staging_name)
+            else {
+                warn!(
+                    contract_name = %staging_name,
+                    "Refusing to remove staging path outside contracts root"
+                );
+                continue;
+            };
+            if let Err(e) = fs::remove_dir_all(staging_path).await
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 warn!(
@@ -2047,8 +2088,17 @@ impl Governance {
         for (schema_id, schema) in schemas {
             let contract_name =
                 format!("{}_{}", self.subject_metadata.subject_id, schema_id);
-            let contract_path =
-                config.contracts_path.join("contracts").join(&contract_name);
+            let Some(contract_path) = join_contained(
+                &config.contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "RecoverArtifacts",
+                    schema_id = %schema_id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
             let mut delays = [1_u64, 2, 4].into_iter();
 
             let recovered = loop {
@@ -3555,8 +3605,17 @@ impl Governance {
             } = schema;
 
             let contract_name = format!("{}_{}", subject_id, id);
-            let contract_path =
-                contracts_path.join("contracts").join(&contract_name);
+            let Some(contract_path) = join_contained(
+                &contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "CompilerArtifacts",
+                    schema_id = %id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
 
             if is_compiler {
                 // Compiler role: the node builds the artifact itself.
@@ -3712,8 +3771,17 @@ impl Governance {
                 .await?;
 
             let contract_name = format!("{}_{}", subject_id, id);
-            let contract_path =
-                contracts_path.join("contracts").join(&contract_name);
+            let Some(contract_path) = join_contained(
+                &contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "CompilerArtifacts",
+                    schema_id = %id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
 
             if is_compiler {
                 // Compiler role: the node builds the artifact itself.

@@ -5,6 +5,7 @@
 //! owner coordinates it — the same shape as the governance evaluation.
 //!
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
@@ -235,6 +236,29 @@ pub struct CompileTarget {
 /// not provide comes from the committed state, which is identical at the
 /// same governance version — including a pin switch with no schema
 /// changes, which recompiles every committed schema (see below).
+/// Joins an externally-influenced directory name, refusing to resolve
+/// outside `base` (`..` segments survive `join` and resolve at the
+/// filesystem). Only single normal components are accepted; anything
+/// else returns `None` and the caller must refuse the operation, never
+/// sanitize silently or fall back to another path. Last-resort net for
+/// ids that predate admission checks or arrive through another path.
+pub(crate) fn join_contained(base: &Path, name: &str) -> Option<PathBuf> {
+    // Empty resolves to `base` itself (deleting it would be a
+    // disaster); backslash is a separator on Windows, and fleet
+    // builds must agree, so it is rejected on every platform.
+    if name.is_empty() || name.contains('\\') {
+        return None;
+    }
+    let mut out = base.to_path_buf();
+    for component in Path::new(name).components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 pub fn resolve_compile_targets(
     payload: &ValueWrapper,
     schemas: &BTreeMap<SchemaType, Schema>,
@@ -247,6 +271,16 @@ pub fn resolve_compile_targets(
     if let Some(schemas_event) = &event.schemas {
         if let Some(add) = &schemas_event.add {
             for schema in add {
+                // Filesystem gate: the id travels literally into
+                // staging paths, so the compiler — first to touch the
+                // filesystem — refuses it. Refuse to compile rather
+                // than sanitize silently.
+                if !schema.id.is_safe_path_segment() {
+                    return Err(CompilationError::InvalidEvent(format!(
+                        "unsafe schema id: {}",
+                        schema.id
+                    )));
+                }
                 targets.insert(
                     schema.id.clone(),
                     CompileTarget {
@@ -268,6 +302,14 @@ pub fn resolve_compile_targets(
 
                 // A change references an existing schema: its committed
                 // data completes whatever the event does not change.
+                // Same filesystem gate as adds: the id still lands in
+                // staging paths for a new contract.
+                if !schema.actual_id.is_safe_path_segment() {
+                    return Err(CompilationError::InvalidEvent(format!(
+                        "unsafe schema id: {}",
+                        schema.actual_id
+                    )));
+                }
                 let Some(current) = schemas.get(&schema.actual_id) else {
                     return Err(CompilationError::InvalidEvent(format!(
                         "Schema {} does not exist",
@@ -1219,5 +1261,54 @@ mod tests {
         )
         .unwrap();
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn hostile_schema_id_never_becomes_a_target() {
+        // `x/../../outside` would escape `contracts_path` when joined
+        // into staging/official names: refuse to compile rather than
+        // sanitize silently.
+        let err = resolve_compile_targets(
+            &ValueWrapper(serde_json::json!({
+                "schemas": {
+                    "add": [
+                        {
+                            "id": "x/../../outside",
+                            "contract": "new source",
+                            "initial_value": { "one": 1 }
+                        }
+                    ]
+                }
+            })),
+            &committed_schemas(),
+            "rust-1.95.0_sdk-0.8.0_wasm32",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::compilation::response::CompilationError::InvalidEvent(_)
+            ),
+            "hostile schema id must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn join_contained_refuses_escape() {
+        let base = std::path::Path::new("/srv/ave/contracts");
+        assert_eq!(
+            super::join_contained(base, "subj_schema_hash"),
+            Some(base.join("subj_schema_hash"))
+        );
+        // Dots are fine in ids; separators and parents are not.
+        assert!(super::join_contained(base, "subj_orders.v1_hash").is_some());
+        for hostile in
+            ["x/../../outside", "../x", "..", ".", "/abs", "a\\b", ""]
+        {
+            assert!(
+                super::join_contained(base, hostile).is_none(),
+                "{hostile:?} must not resolve inside the contracts root"
+            );
+        }
     }
 }

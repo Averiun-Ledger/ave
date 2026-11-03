@@ -2355,9 +2355,20 @@ impl RequestManager {
                 );
             }
 
-            match fs::remove_dir_all(config.contracts_path.join(&staging_name))
-                .await
-            {
+            // Fail closed: never delete outside the contracts root;
+            // a hostile name only leaks its own staging dir.
+            let Some(staging_path) = crate::compilation::join_contained(
+                &config.contracts_path,
+                &staging_name,
+            ) else {
+                warn!(
+                    request_id = %self.id,
+                    contract_name = %staging_name,
+                    "Refusing to sweep staging path outside contracts root"
+                );
+                continue;
+            };
+            match fs::remove_dir_all(staging_path).await {
                 Ok(()) => {
                     debug!(
                         request_id = %self.id,

@@ -14,6 +14,7 @@ use ave_network::ComunicateInfo;
 
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
+    auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
         model::{HashThisRole, RoleTypes},
@@ -287,23 +288,49 @@ impl DistriWorker {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) -> Result<(bool, bool, Option<SubjectData>), ActorError> {
-        let node_path = ActorPath::from("/user/node");
-        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
-
-        let response = node_actor
-            .ask(NodeMessage::SubjectAccessData(subject_id.to_owned()))
+        // Two independent reads, never nested handler waits: Node
+        // asking SubjectAccess while it waits on Node deadlocks the
+        // central actor against an in-flight Update (no timeout on
+        // either `ask`). Flags come straight from SubjectAccess, data
+        // straight from Node; the distributor awaits both itself.
+        let access_path = ActorPath::from("/user/node/auth");
+        let access_actor = ctx
+            .system()
+            .get_actor::<SubjectAccess>(&access_path)
             .await?;
-        match response {
-            NodeResponse::SubjectAccessData {
+        let access_response = access_actor
+            .ask(SubjectAccessMessage::GetAccessInfo {
+                subject_id: subject_id.clone(),
+            })
+            .await?;
+        let (is_gov_authorized, is_tracker_banned) = match access_response {
+            SubjectAccessResponse::AccessInfo {
                 is_gov_authorized,
                 is_tracker_banned,
-                subject_data,
-            } => Ok((is_gov_authorized, is_tracker_banned, subject_data)),
-            _ => Err(ActorError::UnexpectedResponse {
-                expected: "NodeResponse::SubjectAccessData".to_owned(),
-                path: node_path,
-            }),
-        }
+            } => (is_gov_authorized, is_tracker_banned),
+            _ => {
+                return Err(ActorError::UnexpectedResponse {
+                    expected: "SubjectAccessResponse::AccessInfo".to_owned(),
+                    path: access_path,
+                });
+            }
+        };
+
+        let node_path = ActorPath::from("/user/node");
+        let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
+        let node_response = node_actor
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+            .await?;
+        let subject_data = match node_response {
+            NodeResponse::SubjectData(data) => data,
+            _ => {
+                return Err(ActorError::UnexpectedResponse {
+                    expected: "NodeResponse::SubjectData".to_owned(),
+                    path: node_path,
+                });
+            }
+        };
+        Ok((is_gov_authorized, is_tracker_banned, subject_data))
     }
 
     async fn check_auth_common(

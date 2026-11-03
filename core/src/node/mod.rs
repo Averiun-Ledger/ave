@@ -13,10 +13,7 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{
-        SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage,
-        SubjectAccessResponse,
-    },
+    auth::{SubjectAccess, SubjectAccessInitParams},
     config::SinkTarget,
     db::{Storable, check_dir_writable},
     distribution::worker::DistriWorker,
@@ -843,7 +840,6 @@ pub enum NodeMessage {
     DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
-    SubjectAccessData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
@@ -891,11 +887,6 @@ pub enum NodeResponse {
     IOwnerNewOwner {
         i_owner: bool,
         i_new_owner: Option<bool>,
-    },
-    SubjectAccessData {
-        is_gov_authorized: bool,
-        is_tracker_banned: bool,
-        subject_data: Option<SubjectData>,
     },
     Ok,
 }
@@ -1595,79 +1586,6 @@ impl Handler<Self> for Node {
                 Ok(NodeResponse::IOwnerNewOwner {
                     i_owner,
                     i_new_owner,
-                })
-            }
-            NodeMessage::SubjectAccessData(subject_id) => {
-                let access = match ctx.get_child::<SubjectAccess>("auth").await
-                {
-                    Ok(access) => access,
-                    Err(e) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "SubjectAccess actor not found"
-                        );
-                        ctx.system().crash_system();
-                        return Err(e);
-                    }
-                };
-
-                let (is_gov_authorized, is_tracker_banned) = match access
-                    .ask(SubjectAccessMessage::GetAccessInfo {
-                        subject_id: subject_id.clone(),
-                    })
-                    .await
-                {
-                    Ok(SubjectAccessResponse::AccessInfo {
-                        is_gov_authorized,
-                        is_tracker_banned,
-                    }) => (is_gov_authorized, is_tracker_banned),
-                    Ok(other) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            ?other,
-                            "Unexpected response from subject_access actor for GetAccessInfo"
-                        );
-                        ctx.system().crash_system();
-                        return Err(ActorError::UnexpectedResponse {
-                            expected: "SubjectAccessResponse::AccessInfo"
-                                .to_owned(),
-                            path: ctx.path().clone() / "auth",
-                        });
-                    }
-                    Err(e) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to get access info from subject_access actor"
-                        );
-                        ctx.system().crash_system();
-                        return Err(e);
-                    }
-                };
-
-                let subj_data = self
-                    .known_subjects
-                    .get(&subject_id)
-                    .or_else(|| self.owned_subjects.get(&subject_id))
-                    .cloned();
-
-                debug!(
-                    msg_type = "SubjectAccessData",
-                    subject_id = %subject_id,
-                    is_gov_authorized = is_gov_authorized,
-                    is_tracker_banned = is_tracker_banned,
-                    subject_data = ?subj_data,
-                    "Checked subject access status"
-                );
-
-                Ok(NodeResponse::SubjectAccessData {
-                    is_gov_authorized,
-                    is_tracker_banned,
-                    subject_data: subj_data,
                 })
             }
         }
