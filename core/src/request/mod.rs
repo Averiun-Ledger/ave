@@ -1100,8 +1100,7 @@ impl RequestHandler {
             else {
                 return Ok(());
             };
-            let subject_data =
-                get_subject_data(ctx, subject_id).await?;
+            let subject_data = get_subject_data(ctx, subject_id).await?;
             let governance_id = subject_data
                 .as_ref()
                 .and_then(|data| data.get_governance_id());
@@ -1109,8 +1108,7 @@ impl RequestHandler {
                 .as_ref()
                 .is_none_or(|data| data.get_schema_id().is_gov());
             if let Some(governance_id) = &governance_id
-                && let Err(e) =
-                    wait_governance_ready(ctx, governance_id).await
+                && let Err(e) = wait_governance_ready(ctx, governance_id).await
             {
                 error!(
                     "Request handler promote timed out waiting for governance readiness"
@@ -1154,9 +1152,7 @@ impl RequestHandler {
             };
             let Some(helpers) = self.helpers.clone() else {
                 let e = " Can not obtain helpers".to_string();
-                return Err(ActorError::FunctionalCritical {
-                    description: e,
-                });
+                return Err(ActorError::FunctionalCritical { description: e });
             };
             match ctx
                 .create_child(
@@ -1224,7 +1220,8 @@ impl RequestHandler {
     async fn end_child(
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
-    ) -> Result<(), ActorError> {        let actor = ctx
+    ) -> Result<(), ActorError> {
+        let actor = ctx
             .get_child::<RequestManager>(&subject_id.to_string())
             .await?;
         actor.ask_stop().await
@@ -1577,8 +1574,7 @@ impl Actor for RequestHandler {
                 else {
                     break;
                 };
-                let subject_data =
-                    get_subject_data(ctx, &subject_id).await?;
+                let subject_data = get_subject_data(ctx, &subject_id).await?;
                 let governance_id = subject_data
                     .as_ref()
                     .and_then(|data| data.get_governance_id());

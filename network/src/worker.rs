@@ -1586,8 +1586,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 // address looks retryable, instead of crashing the
                 // bootstrap on the first attempt. Deterministic config
                 // errors (wrong id, denied, self-dial) keep failing fast.
-                let park_transient =
-                    matches!(error, DialError::Transport(_));
+                let park_transient = matches!(error, DialError::Transport(_));
                 let (add_to_retry, new_addresses) = self
                     .handle_dial_error(error, &peer_id, true)
                     .unwrap_or((false, vec![]));
@@ -1597,7 +1596,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         if new_addresses.is_empty() {
                             self.retry_boot_nodes.insert(peer_id, addresses);
                         } else {
-                            self.retry_boot_nodes.insert(peer_id, new_addresses);
+                            self.retry_boot_nodes
+                                .insert(peer_id, new_addresses);
                         }
                     } else if park_transient {
                         self.retry_boot_nodes.insert(peer_id, addresses);
@@ -3686,7 +3686,9 @@ mod tests {
         // Deterministic config errors still drop cleanly (no pointless
         // retries, no crash either: the caller moves on).
         let bad = PeerId::random();
-        worker.boot_nodes.insert(bad, vec!["/memory/1".parse().unwrap()]);
+        worker
+            .boot_nodes
+            .insert(bad, vec!["/memory/1".parse().unwrap()]);
         worker
             .handle_connection_events(SwarmEvent::OutgoingConnectionError {
                 peer_id: Some(bad),

@@ -337,7 +337,6 @@ pub fn resolve_compile_targets(
     Ok(targets)
 }
 
-
 /// A struct representing a Compilation actor.
 pub struct Compilation {
     our_key: Arc<PublicKey>,

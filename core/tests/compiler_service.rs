@@ -292,10 +292,8 @@ async fn compile_dedup_single_flight() {
     let source = source_b64(CONTRACT_A);
 
     let before = counter(server);
-    let (first, second) = tokio::join!(
-        client.compile(&source, ""),
-        client.compile(&source, ""),
-    );
+    let (first, second) =
+        tokio::join!(client.compile(&source, ""), client.compile(&source, ""),);
     let first = first.expect("first concurrent compile should succeed");
     let second = second.expect("second concurrent compile should succeed");
 
@@ -712,17 +710,19 @@ async fn compile_pinned_toolchain_matches_local_build() {
 
     let mut pooled = Vec::new();
     for toolchain in ["1.95.0", "1.98.1"] {
-        let remote = client
-            .compile(&source, toolchain)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("remote {toolchain} compile should succeed: {e}")
-            });
+        let remote =
+            client
+                .compile(&source, toolchain)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("remote {toolchain} compile should succeed: {e}")
+                });
 
-        let root =
-            tempfile::tempdir().expect("failed to create build tempdir");
-        let build_dir =
-            root.path().join("contracts").join(format!("parity-{toolchain}"));
+        let root = tempfile::tempdir().expect("failed to create build tempdir");
+        let build_dir = root
+            .path()
+            .join("contracts")
+            .join(format!("parity-{toolchain}"));
         let local = local_build_wasm_with_toolchain(
             &source,
             &build_dir,
@@ -828,8 +828,11 @@ async fn shared_vendor_dir() -> std::path::PathBuf {
             .expect("create vendor project");
         std::fs::write(project.join("src").join("lib.rs"), "")
             .expect("write vendor stub source");
-        std::fs::write(project.join("Cargo.toml"), pipeline::compilation_toml())
-            .expect("write vendor manifest");
+        std::fs::write(
+            project.join("Cargo.toml"),
+            pipeline::compilation_toml(),
+        )
+        .expect("write vendor manifest");
         let frozen = ave_common::build::pin_lockfile(
             ave_common::governance::DEFAULT_PIN,
         )
@@ -867,10 +870,9 @@ async fn local_build_wasm_vendored(
     let (rust_src, rustc_commit) =
         ave_build::query_sysroot("1.95.0").await.expect("sysroot");
     let manifest_toml = pipeline::compilation_toml();
-    let frozen = ave_common::build::pin_lockfile(
-        ave_common::governance::DEFAULT_PIN,
-    )
-    .expect("frozen lockfile for the active pin");
+    let frozen =
+        ave_common::build::pin_lockfile(ave_common::governance::DEFAULT_PIN)
+            .expect("frozen lockfile for the active pin");
     let vendor_dir = ave_common::build::absolute_vendor_dir(build_dir, root);
     assert!(vendor_dir.is_some(), "vendor dir must resolve");
     let request = ave_build::BuildRequest {
@@ -1029,8 +1031,9 @@ async fn try_local_build_wasm(
     use ave_contract_sdk::runtime::CONTRACT_CARGO_CONFIG;
     let decoded = pipeline::decode_contract_source(source_b64)
         .map_err(|e| e.to_string())?;
-    let (rust_src, rustc_commit) =
-        ave_build::query_sysroot("").await.map_err(|e| e.to_string())?;
+    let (rust_src, rustc_commit) = ave_build::query_sysroot("")
+        .await
+        .map_err(|e| e.to_string())?;
     let manifest_toml = pipeline::compilation_toml();
     let request = ave_build::BuildRequest {
         source: &decoded,
@@ -1084,9 +1087,7 @@ async fn local_build_ignores_outer_env_sentinel() {
     );
     for sentinel in [b"outer-value-a".as_slice(), b"outer-value-b".as_slice()] {
         assert!(
-            !wasm_a
-                .windows(sentinel.len())
-                .any(|w| w == sentinel),
+            !wasm_a.windows(sentinel.len()).any(|w| w == sentinel),
             "the artifact embeds outer env"
         );
     }
@@ -1187,9 +1188,8 @@ async fn local_build_cannot_read_home_secret() {
         std::path::Path::new(&home).join(".ave-sandbox-test-secret");
     std::fs::write(&secret_path, b"sandbox-secret-value")
         .expect("secret fixture must be writable");
-    let source = BASE64_STANDARD.encode(contract_with_included_file(
-        &secret_path.to_string_lossy(),
-    ));
+    let source = BASE64_STANDARD
+        .encode(contract_with_included_file(&secret_path.to_string_lossy()));
     let root = tempfile::tempdir().expect("failed to create tempdir");
     let build_dir = root.path().join("contracts").join("home-evil");
     let result =
@@ -1214,8 +1214,8 @@ async fn local_build_cannot_read_home_secret() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn local_build_cannot_read_etc_hostname() {
-    let source = BASE64_STANDARD
-        .encode(contract_with_included_file("/etc/hostname"));
+    let source =
+        BASE64_STANDARD.encode(contract_with_included_file("/etc/hostname"));
     let root = tempfile::tempdir().expect("failed to create tempdir");
     let build_dir = root.path().join("contracts").join("etc-evil");
     let result =

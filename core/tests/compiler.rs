@@ -17942,8 +17942,8 @@ async fn test_compiler_disagreement_reboot_diff() {
     // compartida del proceso en vez de reconstruir).
     let gov_state =
         get_subject(&node1.api, governance_id.clone(), Some(2), true)
-        .await
-        .unwrap();
+            .await
+            .unwrap();
     assert_eq!(gov_state.sn, 2);
     assert_eq!(scripted.compiles_received(), 2);
 

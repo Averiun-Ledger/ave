@@ -4,9 +4,7 @@
 
 use argon2::{
     Algorithm, Argon2, Params, Version,
-    password_hash::{
-        PasswordHasher, PasswordVerifier, phc::PasswordHash,
-    },
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};

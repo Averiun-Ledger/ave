@@ -567,12 +567,9 @@ impl Node {
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, _) = Self::get_tracker_ledger_batch(
-                &tracker,
-                lo_sn,
-                batch_hi_sn,
-            )
-            .await?;
+            let (mut batch, _) =
+                Self::get_tracker_ledger_batch(&tracker, lo_sn, batch_hi_sn)
+                    .await?;
             if batch.is_empty() {
                 break;
             }
@@ -686,8 +683,7 @@ impl Node {
                     "/user/node/subject_manager/{}",
                     subject_id
                 ));
-                let governance =
-                    system.get_actor::<Governance>(&path).await?;
+                let governance = system.get_actor::<Governance>(&path).await?;
                 let response =
                     governance.ask(GovernanceMessage::GetMetadata).await?;
                 let GovernanceResponse::Metadata(metadata) = response else {
@@ -734,9 +730,8 @@ impl Node {
                         governance_id
                     ));
 
-                    let sn = if let Ok(actor) = system
-                        .get_actor::<WitnessesRegister>(&actor_path)
-                        .await
+                    let sn = if let Ok(actor) =
+                        system.get_actor::<WitnessesRegister>(&actor_path).await
                     {
                         let response = actor
                             .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
@@ -768,9 +763,8 @@ impl Node {
                             "/user/node/subject_manager/{}",
                             subject_id
                         ));
-                        let tracker = system
-                            .get_actor::<Tracker>(&tracker_path)
-                            .await?;
+                        let tracker =
+                            system.get_actor::<Tracker>(&tracker_path).await?;
                         let response =
                             tracker.ask(TrackerMessage::GetMetadata).await?;
                         let TrackerResponse::Metadata(metadata) = response

@@ -26,7 +26,10 @@ mod tests {
             "https://user:token123@logs.example.com/events",
         );
         assert!(!with_userinfo.contains("token123"), "{with_userinfo}");
-        assert!(with_userinfo.contains("logs.example.com"), "{with_userinfo}");
+        assert!(
+            with_userinfo.contains("logs.example.com"),
+            "{with_userinfo}"
+        );
 
         let with_query = sanitize_url_for_log(
             "https://logs.example.com/events?token=abc123",
@@ -34,8 +37,7 @@ mod tests {
         assert!(!with_query.contains("abc123"), "{with_query}");
         assert!(with_query.ends_with("?***"), "{with_query}");
 
-        let clean =
-            sanitize_url_for_log("https://logs.example.com/events");
+        let clean = sanitize_url_for_log("https://logs.example.com/events");
         assert_eq!(clean, "https://logs.example.com/events");
     }
 }
@@ -49,7 +51,9 @@ fn sanitize_url_for_log(url: &str) -> String {
                 Some((_, after)) => {
                     // Only treat as userinfo when it precedes any / ? #.
                     let user = &rest[..rest.len() - after.len() - 1];
-                    if user.contains('/') || user.contains('?') || user.contains('#')
+                    if user.contains('/')
+                        || user.contains('?')
+                        || user.contains('#')
                     {
                         rest.to_string()
                     } else {

@@ -527,8 +527,7 @@ impl Tracker {
                 // Convergent move: the register drops the subject from
                 // every matching owner entry, so the recorded old owner
                 // does not need to be exact on replay.
-                let new_owner =
-                    event.ledger_seal_signature.signer.clone();
+                let new_owner = event.ledger_seal_signature.signer.clone();
                 let subject_register = ctx
                     .system()
                     .get_actor::<SubjectRegister>(&ActorPath::from(format!(
@@ -559,8 +558,7 @@ impl Tracker {
             EventRequest::EOL(..) => {
                 node.tell(NodeMessage::EOLSubject {
                     subject_id,
-                    i_owner: *self.our_key
-                        == self.subject_metadata.owner,
+                    i_owner: *self.our_key == self.subject_metadata.owner,
                 })
                 .await?;
                 report.writes_resent += 1;

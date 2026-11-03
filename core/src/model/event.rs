@@ -512,34 +512,31 @@ impl Protocols {
                 };
 
                 let compilation_response =
-                    compilation.as_ref().map(|compilation| {
-                        match &compilation.response {
-                            CompilationResponse::Ok {
-                                result,
-                                toolchain_version,
-                                ..
-                            } => CompResDB::Ok {
-                                contracts: result
-                                    .contracts
-                                    .iter()
-                                    .map(|(schema, hash)| {
-                                        (
-                                            schema.to_string(),
-                                            hash.to_string(),
-                                        )
-                                    })
-                                    .collect(),
-                                toolchain_version: toolchain_version.clone(),
-                            },
-                            CompilationResponse::Error {
-                                result,
-                                toolchain_version,
-                                ..
-                            } => CompResDB::Error {
-                                error: result.to_string(),
-                                toolchain_version: toolchain_version.clone(),
-                            },
-                        }
+                    compilation.as_ref().map(|compilation| match &compilation
+                        .response
+                    {
+                        CompilationResponse::Ok {
+                            result,
+                            toolchain_version,
+                            ..
+                        } => CompResDB::Ok {
+                            contracts: result
+                                .contracts
+                                .iter()
+                                .map(|(schema, hash)| {
+                                    (schema.to_string(), hash.to_string())
+                                })
+                                .collect(),
+                            toolchain_version: toolchain_version.clone(),
+                        },
+                        CompilationResponse::Error {
+                            result,
+                            toolchain_version,
+                            ..
+                        } => CompResDB::Error {
+                            error: result.to_string(),
+                            toolchain_version: toolchain_version.clone(),
+                        },
                     });
 
                 Ok((
@@ -1214,9 +1211,7 @@ mod tests {
             eval_req_hash: id(3),
             evaluators_signatures: vec![dummy_sig()],
             viewpoints: BTreeSet::from(["agua".to_owned()]),
-            response: EvaluationResponseOpaque::Error {
-                result_hash: id(4),
-            },
+            response: EvaluationResponseOpaque::Error { result_hash: id(4) },
         });
     }
 }

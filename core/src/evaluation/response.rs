@@ -206,13 +206,11 @@ impl ResponseSummary {
     }
 }
 
-use anyhow::{Result, bail};
 use crate::model::event::{EvaluationData, EvaluationResponse};
+use anyhow::{Result, bail};
 
 /// Patch decided by successful evaluation, for the approval path.
-pub fn evaluated_patch(
-    evaluation: &EvaluationData,
-) -> Result<ValueWrapper> {
+pub fn evaluated_patch(evaluation: &EvaluationData) -> Result<ValueWrapper> {
     match &evaluation.response {
         EvaluationResponse::Ok { result, .. } => Ok(result.patch.clone()),
         EvaluationResponse::Error { .. } => {

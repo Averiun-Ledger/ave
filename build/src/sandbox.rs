@@ -79,7 +79,8 @@ async fn loader_dirs(exe: &Path) -> Vec<PathBuf> {
             dirs.push(dir);
         }
     };
-    if let Ok(output) = tokio::process::Command::new("ldd").arg(exe).output().await
+    if let Ok(output) =
+        tokio::process::Command::new("ldd").arg(exe).output().await
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -133,7 +134,8 @@ fn elf_interp(exe: &Path) -> Option<PathBuf> {
         }
         // ELF32: e_phoff@28, e_phentsize@42, e_phnum@44.
         1 => {
-            let phoff = u32::from_le_bytes(bytes.get(28..32)?.try_into().ok()?) as u64;
+            let phoff =
+                u32::from_le_bytes(bytes.get(28..32)?.try_into().ok()?) as u64;
             let phentsize =
                 u16::from_le_bytes(bytes.get(42..44)?.try_into().ok()?) as u64;
             let phnum =
@@ -166,7 +168,8 @@ fn elf_interp(exe: &Path) -> Option<PathBuf> {
         if p_filesz == 0 || p_filesz > 4096 {
             continue;
         }
-        let raw = bytes.get(p_offset as usize..(p_offset + p_filesz) as usize)?;
+        let raw =
+            bytes.get(p_offset as usize..(p_offset + p_filesz) as usize)?;
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         let path = std::str::from_utf8(&raw[..end]).ok()?;
         if path.starts_with('/') {
@@ -325,9 +328,8 @@ pub async fn prepare(
         } else {
             canonical_build.join(vendor)
         };
-        let canonical = tokio::fs::canonicalize(&absolute)
-            .await
-            .unwrap_or(absolute);
+        let canonical =
+            tokio::fs::canonicalize(&absolute).await.unwrap_or(absolute);
         push(canonical, false);
     }
     // Name resolution and TLS for online (dev-only) builds: public
@@ -364,8 +366,7 @@ pub async fn prepare(
                 continue;
             }
             depth += 1;
-            let Ok(content) = tokio::fs::read_to_string(&manifest).await
-            else {
+            let Ok(content) = tokio::fs::read_to_string(&manifest).await else {
                 continue;
             };
             let manifest_dir = manifest
@@ -389,8 +390,7 @@ pub async fn prepare(
                 } else {
                     manifest_dir.join(&dep)
                 };
-                let Ok(canonical) =
-                    tokio::fs::canonicalize(&absolute).await
+                let Ok(canonical) = tokio::fs::canonicalize(&absolute).await
                 else {
                     continue;
                 };
@@ -451,7 +451,10 @@ pub async fn prepare(
     tokio::fs::create_dir_all(&canonical_cargo_home)
         .await
         .map_err(|e| {
-            io::Error::new(e.kind(), format!("sandbox staging: cargo home: {e}"))
+            io::Error::new(
+                e.kind(),
+                format!("sandbox staging: cargo home: {e}"),
+            )
         })?;
     // Skeleton for devices, scratch and process table inside.
     for dir in ["dev", "tmp", "proc"] {
@@ -503,7 +506,10 @@ pub async fn prepare(
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 io::Error::new(
                     e.kind(),
-                    format!("sandbox staging: usrlink parent {}: {e}", parent.display()),
+                    format!(
+                        "sandbox staging: usrlink parent {}: {e}",
+                        parent.display()
+                    ),
                 )
             })?;
         }
@@ -565,7 +571,10 @@ pub async fn prepare(
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     io::Error::new(
                         e.kind(),
-                        format!("sandbox staging: file parent {}: {e}", parent.display()),
+                        format!(
+                            "sandbox staging: file parent {}: {e}",
+                            parent.display()
+                        ),
                     )
                 })?;
             }
@@ -573,7 +582,10 @@ pub async fn prepare(
                 tokio::fs::write(&target, []).await.map_err(|e| {
                     io::Error::new(
                         e.kind(),
-                        format!("sandbox staging: file placeholder {}: {e}", target.display()),
+                        format!(
+                            "sandbox staging: file placeholder {}: {e}",
+                            target.display()
+                        ),
                     )
                 })?;
             }
@@ -590,9 +602,8 @@ pub async fn prepare(
                 source: cstring(&target),
                 target: cstring(&target),
                 fstype: None,
-                flags: (libc::MS_BIND
-                    | libc::MS_REMOUNT
-                    | libc::MS_RDONLY) as libc::c_ulong,
+                flags: (libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY)
+                    as libc::c_ulong,
                 data: None,
                 best_effort: false,
             });
@@ -619,7 +630,8 @@ pub async fn prepare(
                     flags: (libc::MS_BIND
                         | libc::MS_REMOUNT
                         | libc::MS_RDONLY
-                        | libc::MS_REC) as libc::c_ulong,
+                        | libc::MS_REC)
+                        as libc::c_ulong,
                     data: None,
                     best_effort: false,
                 });
@@ -682,11 +694,7 @@ fn raw_write(fd: libc::c_int, bytes: &[u8]) -> io::Result<()> {
     let mut rest = bytes;
     while !rest.is_empty() {
         let written = unsafe {
-            libc::write(
-                fd,
-                rest.as_ptr() as *const libc::c_void,
-                rest.len(),
-            )
+            libc::write(fd, rest.as_ptr() as *const libc::c_void, rest.len())
         };
         if written < 0 {
             return Err(io::Error::last_os_error());
@@ -702,7 +710,11 @@ fn raw_open(path: &CStr) -> io::Result<libc::c_int> {
 }
 
 #[cfg(target_os = "linux")]
-fn raw_open_mode(path: &CStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<libc::c_int> {
+fn raw_open_mode(
+    path: &CStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> io::Result<libc::c_int> {
     let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -760,17 +772,25 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     const OLD: &CStr = c"/old";
     const DENY: &[u8] = b"deny";
 
-    let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWUTS;
+    let mut flags =
+        libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWUTS;
     if spec.isolated_net {
         flags |= libc::CLONE_NEWNET;
     }
     if unsafe { libc::unshare(flags) } != 0 {
         let e = io::Error::last_os_error();
-        return Err(io::Error::new(e.kind(), format!("unshare namespaces: {e}")));
+        return Err(io::Error::new(
+            e.kind(),
+            format!("unshare namespaces: {e}"),
+        ));
     }
-    write_file(SETGROUPS, DENY).map_err(|e| io::Error::new(e.kind(), format!("deny setgroups: {e}")))?;
-    write_file(UID_MAP, &spec.uid_map).map_err(|e| io::Error::new(e.kind(), format!("write uid_map: {e}")))?;
-    write_file(GID_MAP, &spec.gid_map).map_err(|e| io::Error::new(e.kind(), format!("write gid_map: {e}")))?;
+    write_file(SETGROUPS, DENY).map_err(|e| {
+        io::Error::new(e.kind(), format!("deny setgroups: {e}"))
+    })?;
+    write_file(UID_MAP, &spec.uid_map)
+        .map_err(|e| io::Error::new(e.kind(), format!("write uid_map: {e}")))?;
+    write_file(GID_MAP, &spec.gid_map)
+        .map_err(|e| io::Error::new(e.kind(), format!("write gid_map: {e}")))?;
     // Private mounts: nothing below escapes to the host.
     do_mount(
         NONE,
@@ -801,7 +821,10 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         {
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
-            return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));
+            return Err(io::Error::new(
+                e.kind(),
+                format!("mount {src} -> {tgt} flags={}: {e}", entry.flags),
+            ));
         }
     }
     // Materialize copied content on top of the binds, before
@@ -839,12 +862,19 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
         {
             let src = entry.source.to_string_lossy().into_owned();
             let tgt = entry.target.to_string_lossy().into_owned();
-            return Err(io::Error::new(e.kind(), format!("mount {src} -> {tgt} flags={}: {e}", entry.flags)));
+            return Err(io::Error::new(
+                e.kind(),
+                format!("mount {src} -> {tgt} flags={}: {e}", entry.flags),
+            ));
         }
     }
     // Fixed identity: hostnames never shape artifacts or logs.
-    if unsafe { libc::sethostname(spec.hostname.as_ptr(), spec.hostname.as_bytes().len()) }
-        != 0
+    if unsafe {
+        libc::sethostname(
+            spec.hostname.as_ptr(),
+            spec.hostname.as_bytes().len(),
+        )
+    } != 0
     {
         let e = io::Error::last_os_error();
         return Err(io::Error::new(e.kind(), format!("set hostname: {e}")));
@@ -887,7 +917,10 @@ fn sandbox_child(spec: &Spec) -> io::Result<()> {
     if unsafe { libc::chdir(spec.workdir.as_ptr()) } != 0 {
         let e = io::Error::last_os_error();
         let w = spec.workdir.to_string_lossy().into_owned();
-        return Err(io::Error::new(e.kind(), format!("chdir workdir {w}: {e}")));
+        return Err(io::Error::new(
+            e.kind(),
+            format!("chdir workdir {w}: {e}"),
+        ));
     }
     Ok(())
 }

@@ -95,10 +95,8 @@ impl From<DistributorError> for ActorError {
             | DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
             | DistributorError::UpTrackerFailed { .. }
-            | DistributorError::UpdateLedgerFailed { .. } => {
-                Self::Functional {
-                    description: error.to_string(),
-                }
+            | DistributorError::UpdateLedgerFailed { .. } => Self::Functional {
+                description: error.to_string(),
             },
         }
     }

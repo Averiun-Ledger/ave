@@ -1538,7 +1538,7 @@ async fn test_every_endpoint_is_covered_by_a_role() {
 
 #[test(tokio::test)]
 async fn test_provisioning_policy_admin_may_provision_manager_but_not_superadmin()
-{
+ {
     use ave_http::auth::database::UpdateUserParams;
     let (db, _dirs) = common::create_test_db();
 
@@ -1548,9 +1548,9 @@ async fn test_provisioning_policy_admin_may_provision_manager_but_not_superadmin
     // Admin provisions a manager: a non-superadmin actor updating a
     // regular user (password reset + manager role) must succeed — that
     // is the admin's job, not an escalation.
-    let clerk =
-        db.create_user("clerk", "TestPass123!", None, None, Some(false))
-            .unwrap();
+    let clerk = db
+        .create_user("clerk", "TestPass123!", None, None, Some(false))
+        .unwrap();
     let updated = db
         .update_user_validated_transactional(UpdateUserParams {
             user_id: clerk.id,

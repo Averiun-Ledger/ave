@@ -7583,7 +7583,8 @@ async fn sink_recovers_after_worker_idle_shutdown_while_lagging() {
     // after the send is acked, so a kill in between redelivers).
     // Wait for both distinct sns, settle, dedup, then assert the
     // complete ordered sequence: fully deterministic.
-    sink.wait_for_distinct_sn_count(&subject_id_str, 2, true).await;
+    sink.wait_for_distinct_sn_count(&subject_id_str, 2, true)
+        .await;
     let raw_events = wait_for_sink_events_stable(&sink).await;
     let events: Vec<_> = deduplicate_events_by_sn(&raw_events)
         .into_iter()
@@ -11398,15 +11399,10 @@ async fn dirty_restart_review_marks_quiet_subject_lagging() {
     )
     .await
     .unwrap();
-    let (subject_id, _) = create_subject(
-        &node.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     for i in 1..=2 {
         emit_fact(
             &node.api,
@@ -11469,21 +11465,22 @@ async fn dirty_restart_review_marks_quiet_subject_lagging() {
     .await;
     dirs.append(&mut new_dirs);
     node_running(&node.api).await.unwrap();
-    node.api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    node.api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     wait_for_sink_blocked(&node.api, "example-sink").await;
     assert_sink_lagging(&node.api, "example-sink", 1).await;
 
     // Full loop: healthy again, unblock, the tail is delivered.
     sink.set_mode(ResponseMode::Accept).await;
-    node.api.unblock_sink("example-sink".to_owned()).await.unwrap();
+    node.api
+        .unblock_sink("example-sink".to_owned())
+        .await
+        .unwrap();
     wait_for_sink_unblocked(&node.api, "example-sink").await;
     sink.wait_for_count(4, true).await;
-    assert_subject_sn_sequence(
-        &sink.snapshot().await,
-        &subject_id_str,
-        0,
-        3,
-    );
+    assert_subject_sn_sequence(&sink.snapshot().await, &subject_id_str, 0, 3);
 
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
@@ -11514,15 +11511,10 @@ async fn sink_deliveries_reports_per_subject_cursors() {
     )
     .await
     .unwrap();
-    let (subject_id, _) = create_subject(
-        &node.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     for i in 1..=2 {
         emit_fact(
             &node.api,
@@ -11548,10 +11540,7 @@ async fn sink_deliveries_reports_per_subject_cursors() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(
-            sink.url(),
-            Some(governance_id.to_string()),
-        ),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);
@@ -11591,8 +11580,8 @@ async fn sink_deliveries_reports_per_subject_cursors() {
     assert!(rows.iter().all(|row| row.sink == "example-sink"));
 
     // Unknown subject: valid shape, no rows. Unknown sink: error.
-    let unknown = DigestIdentifier::new(HashAlgorithm::Blake3, vec![0u8; 32])
-        .unwrap();
+    let unknown =
+        DigestIdentifier::new(HashAlgorithm::Blake3, vec![0u8; 32]).unwrap();
     let rows = node
         .api
         .get_sink_deliveries(Some(unknown), None)
@@ -11647,10 +11636,7 @@ async fn sink_attaches_without_restart_when_schema_added_late() {
         local_db,
         ext_db,
         format!("/memory/{}", port),
-        example_sink_config(
-            sink.url(),
-            Some(governance_id.to_string()),
-        ),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
     ))
     .await;
     dirs.append(&mut new_dirs);

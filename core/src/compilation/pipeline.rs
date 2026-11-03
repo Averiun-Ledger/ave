@@ -11,17 +11,17 @@ use ave_common::{
     ValueWrapper,
     identity::{DigestIdentifier, HashAlgorithm, hash_borsh},
 };
-use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
-use thiserror::Error;
 use ave_contract_sdk::runtime::{
     CompiledModule, ContractRuntime, RuntimeError,
 };
+use base64::{Engine as Base64Engine, prelude::BASE64_STANDARD};
 #[cfg(feature = "test")]
 use borsh::to_vec;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test")]
 use serde_json::Value;
+use thiserror::Error;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
@@ -193,7 +193,9 @@ pub fn decode_contract_source(
 /// compiler: a malformed payload is a request error
 /// ([`ContractSourceError::Base64DecodeFailed`] and friends), not a build
 /// error, and must not be conflated with "the contract does not compile".
-pub fn validate_contract_source(contract: &str) -> Result<(), ContractSourceError> {
+pub fn validate_contract_source(
+    contract: &str,
+) -> Result<(), ContractSourceError> {
     decode_contract_source(contract).map(|_| ())
 }
 
@@ -311,7 +313,8 @@ async fn write_file_atomic(
 ) -> Result<(), CompilerError> {
     let target = dir.join(file_name);
     let result = attempt_atomic_write(dir, &target, file_name, bytes).await;
-    let result = if matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+    let result = if matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
         // Best-effort resurrection: a concurrent sweep removed the
         // directory after our caller created it. A leftover stage (if
         // the deleter already finished) follows the documented
@@ -538,7 +541,6 @@ pub fn build_contract_record(
         toolchain_fingerprint,
     })
 }
-
 
 pub fn metadata_matches(
     persisted: &ContractArtifactRecord,
@@ -814,11 +816,7 @@ mod tests {
         // Case 1: corrupt metadata.borsh (invalid borsh) → miss.
         let (contract, manifest, engine, toolchain) = test_fingerprints("meta");
         let cache_dir = global_cache_entry_dir(
-            "unittest",
-            &contract,
-            &manifest,
-            &engine,
-            &toolchain,
+            "unittest", &contract, &manifest, &engine, &toolchain,
         );
         fs::create_dir_all(&cache_dir)
             .await
@@ -845,11 +843,7 @@ mod tests {
         // recorded hash → miss.
         let (contract, manifest, engine, toolchain) = test_fingerprints("wasm");
         let cache_dir = global_cache_entry_dir(
-            "unittest",
-            &contract,
-            &manifest,
-            &engine,
-            &toolchain,
+            "unittest", &contract, &manifest, &engine, &toolchain,
         );
         let wasm_bytes = b"fake wasm".to_vec();
         let precompiled_bytes = b"fake cwasm".to_vec();
@@ -950,7 +944,10 @@ mod tests {
         let err = decode_contract_source(&encoded)
             .expect_err("corrupt zstd payload must fail");
         assert!(
-            matches!(err, ContractSourceError::SourceDecompressionFailed { .. }),
+            matches!(
+                err,
+                ContractSourceError::SourceDecompressionFailed { .. }
+            ),
             "corrupt zstd payload must fail with SourceDecompressionFailed, \
              got {err}"
         );
@@ -968,7 +965,10 @@ mod tests {
         let err =
             decode_contract_source(&encoded).expect_err("zip-bomb must fail");
         assert!(
-            matches!(err, ContractSourceError::SourceDecompressionFailed { .. }),
+            matches!(
+                err,
+                ContractSourceError::SourceDecompressionFailed { .. }
+            ),
             "zip-bomb must fail with SourceDecompressionFailed, got {err}"
         );
 
@@ -1007,13 +1007,16 @@ mod tests {
         write_file_atomic(&dir, "contract.wasm", bytes)
             .await
             .expect("write into a missing directory must succeed");
-        let back =
-            fs::read(dir.join("contract.wasm")).await.expect("bytes must be readable");
+        let back = fs::read(dir.join("contract.wasm"))
+            .await
+            .expect("bytes must be readable");
         assert_eq!(back, bytes, "resurrected write must hold exact bytes");
         // No temp siblings leak.
         let mut entries = fs::read_dir(&dir).await.expect("dir must list");
         let mut names = Vec::new();
-        while let Some(entry) = entries.next_entry().await.expect("entry must read") {
+        while let Some(entry) =
+            entries.next_entry().await.expect("entry must read")
+        {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         assert_eq!(
@@ -1036,8 +1039,9 @@ mod tests {
         write_file_atomic(&dir, "contract.wasm", &bytes)
             .await
             .expect("overwrite must succeed");
-        let back =
-            fs::read(dir.join("contract.wasm")).await.expect("bytes must be readable");
+        let back = fs::read(dir.join("contract.wasm"))
+            .await
+            .expect("bytes must be readable");
         assert_eq!(back, bytes, "overwrite must hold exact bytes");
     }
 }

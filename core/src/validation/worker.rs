@@ -42,6 +42,10 @@ use crate::{
 
 use crate::helpers::network::ActorMessage;
 
+use crate::compilation::compilation_set;
+use crate::evaluation::response::EvaluationResult;
+use crate::model::event::{EvaluationData, EvaluationResponse, ValidationData};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -53,12 +57,6 @@ use ave_common::{
     },
     request::EventRequest,
 };
-use crate::compilation::compilation_set;
-use crate::evaluation::response::EvaluationResult;
-use crate::model::event::{
-    EvaluationData, EvaluationResponse, ValidationData,
-};
-use anyhow::{Result, bail};
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 
@@ -1203,8 +1201,6 @@ impl ValiWorker {
         Ok(())
     }
 
-
-
     async fn check_actual_protocols(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1846,10 +1842,8 @@ impl ValiWorker {
 
                 let event_request_hash =
                     event_request_hash(&self.hash, event_request)?;
-                let viewpoints_hash = viewpoints_hash(
-                    &self.hash,
-                    event_request.content(),
-                )?;
+                let viewpoints_hash =
+                    viewpoints_hash(&self.hash, event_request.content())?;
 
                 Ok(ValidationRes::Response {
                     vali_req_hash,
@@ -2707,8 +2701,7 @@ pub fn check_evaluation(
     eval_data: RoleDataRegister,
     mut properties: ValueWrapper,
     anchor: EventAnchor<'_>,
-) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError>
-{
+) -> Result<(bool, Option<ValueWrapper>, ValueWrapper), ValidatorError> {
     let EventAnchor {
         event_request,
         metadata,
@@ -2751,11 +2744,9 @@ pub fn check_evaluation(
                     value: "evaluation gov state",
                 })?,
         },
-        (false, EventRequestType::Fact) => {
-            EvaluateData::TrackerSchemasFact {
-                state: metadata.properties.clone(),
-            }
-        }
+        (false, EventRequestType::Fact) => EvaluateData::TrackerSchemasFact {
+            state: metadata.properties.clone(),
+        },
         (false, EventRequestType::Transfer) => {
             EvaluateData::TrackerSchemasTransfer {
                 state: metadata.properties.clone(),
@@ -2786,12 +2777,10 @@ pub fn check_evaluation(
             data: "evaluation request",
         });
     }
-    let recomputed_req_hash =
-        hash_borsh(&*hash.hasher(), &signed_eval_req).map_err(
-            |e| ValidatorError::InternalError {
-                problem: e.to_string(),
-            },
-        )?;
+    let recomputed_req_hash = hash_borsh(&*hash.hasher(), &signed_eval_req)
+        .map_err(|e| ValidatorError::InternalError {
+            problem: e.to_string(),
+        })?;
     if recomputed_req_hash != evaluation.eval_req_hash {
         return Err(ValidatorError::InvalidData {
             value: "eval request hash",
@@ -2837,10 +2826,12 @@ pub fn check_evaluation(
         ),
     };
 
-    let eval_result_hash = hash_borsh(&*hash.hasher(), &eval_result)
-        .map_err(|e| ValidatorError::InternalError {
-        problem: e.to_string(),
-    })?;
+    let eval_result_hash =
+        hash_borsh(&*hash.hasher(), &eval_result).map_err(|e| {
+            ValidatorError::InternalError {
+                problem: e.to_string(),
+            }
+        })?;
 
     if eval_result_hash != result_hash {
         return Err(ValidatorError::InvalidData {
@@ -2862,11 +2853,10 @@ pub fn check_evaluation(
         // Keep the patch: it is part of the approval request that
         // `check_approval` rebuilds and verifies.
         let req_patch = evaluator_res.patch.clone();
-        let json_patch =
-            serde_json::from_value::<Patch>(evaluator_res.patch.0)
-                .map_err(|_| ValidatorError::InvalidData {
-                    value: "evaluation patch",
-                })?;
+        let json_patch = serde_json::from_value::<Patch>(evaluator_res.patch.0)
+            .map_err(|_| ValidatorError::InvalidData {
+                value: "evaluation patch",
+            })?;
 
         patch(&mut properties.0, &json_patch).map_err(|_| {
             ValidatorError::InvalidOperation {
@@ -2936,20 +2926,18 @@ pub fn check_compilation(
     // closes the chain from the event request to the compiler votes,
     // which sign a result hash embedding this request hash (and the
     // pin through it and through the voted result).
-    let pre = GovernanceData::try_from(metadata.properties.clone())
-        .map_err(|_| ValidatorError::InvalidData {
+    let pre = GovernanceData::try_from(metadata.properties.clone()).map_err(
+        |_| ValidatorError::InvalidData {
             value: "governance state",
-        })?;
+        },
+    )?;
     let signed_compile_req = Signed::from_parts(
         CompilationReq {
             event_request: event_request.clone(),
             governance_id: metadata.governance_id.clone(),
             sn: metadata.sn.saturating_add(1),
             gov_version,
-            pin: effective_pin(
-                event_request.content(),
-                &pre.toolchain,
-            ),
+            pin: effective_pin(event_request.content(), &pre.toolchain),
         },
         compilation.compile_req_signature.clone(),
     );
@@ -2958,12 +2946,10 @@ pub fn check_compilation(
             data: "compilation request",
         });
     }
-    let recomputed_req_hash =
-        hash_borsh(&*hash.hasher(), &signed_compile_req).map_err(
-            |e| ValidatorError::InternalError {
-                problem: e.to_string(),
-            },
-        )?;
+    let recomputed_req_hash = hash_borsh(&*hash.hasher(), &signed_compile_req)
+        .map_err(|e| ValidatorError::InternalError {
+            problem: e.to_string(),
+        })?;
     if recomputed_req_hash != compilation.compile_req_hash {
         return Err(ValidatorError::InvalidData {
             value: "compile request hash",
@@ -2987,10 +2973,7 @@ pub fn check_compilation(
     // The voted result is rebuilt with the same effective pin: the
     // hash check below proves the compilers signed exactly this pin,
     // making divergence attributable.
-    let pin = effective_pin(
-        event_request.content(),
-        &pre.toolchain,
-    );
+    let pin = effective_pin(event_request.content(), &pre.toolchain);
     // The voted toolchain version rides the evidence the same way:
     // the hash binds it, and the check below compares it against
     // the registry entry for the pin.
@@ -3033,11 +3016,9 @@ pub fn check_compilation(
         ),
     };
 
-    let compile_result_hash =
-        hash_borsh(&*hash.hasher(), &compile_result).map_err(|e| {
-            ValidatorError::InternalError {
-                problem: e.to_string(),
-            }
+    let compile_result_hash = hash_borsh(&*hash.hasher(), &compile_result)
+        .map_err(|e| ValidatorError::InternalError {
+            problem: e.to_string(),
         })?;
 
     if compile_result_hash != result_hash {
@@ -3063,11 +3044,10 @@ pub fn check_compilation(
             value: "compilation toolchain version",
         });
     } else {
-        let entry = toolchain_info(&pin).ok_or(
-            ValidatorError::InvalidData {
+        let entry =
+            toolchain_info(&pin).ok_or(ValidatorError::InvalidData {
                 value: "compilation toolchain pin",
-            },
-        )?;
+            })?;
         if toolchain_version != entry.rustc_version {
             return Err(ValidatorError::InvalidData {
                 value: "compilation toolchain version",
@@ -3080,8 +3060,7 @@ pub fn check_compilation(
     // without a ledger anchor and an extra one would overwrite the
     // anchor of a contract the event did not touch.
     if let CompilationResponse::Ok { result, .. } = &compilation.response {
-        let EventRequest::Fact(fact_request) = event_request.content()
-        else {
+        let EventRequest::Fact(fact_request) = event_request.content() else {
             return Err(ValidatorError::InvalidData {
                 value: "event request",
             });
@@ -3359,9 +3338,8 @@ pub fn check_validation_bundle(
     if recomputed_meta != *modified_metadata_without_propierties_hash {
         bail!("validation metadata does not match the post-state");
     }
-    let recomputed_props =
-        hash_borsh(&*hash.hasher(), post_properties)
-            .map_err(|e| anyhow::anyhow!("properties hash: {e}"))?;
+    let recomputed_props = hash_borsh(&*hash.hasher(), post_properties)
+        .map_err(|e| anyhow::anyhow!("properties hash: {e}"))?;
     if recomputed_props != *propierties_hash {
         bail!("validation properties do not match the post-state");
     }
@@ -3370,9 +3348,8 @@ pub fn check_validation_bundle(
     if recomputed_req != *stored_req_hash {
         bail!("validation event hash does not match the request");
     }
-    let recomputed_viewpoints =
-        viewpoints_hash(hash, request.content())
-            .map_err(|e| anyhow::anyhow!("viewpoints hash: {e}"))?;
+    let recomputed_viewpoints = viewpoints_hash(hash, request.content())
+        .map_err(|e| anyhow::anyhow!("viewpoints hash: {e}"))?;
     if recomputed_viewpoints != *stored_viewpoints_hash {
         bail!("validation viewpoints do not match the request");
     }
@@ -3502,6 +3479,14 @@ pub fn check_approval_req(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::event::{EvaluationData, EvaluationResponse};
+    use crate::{
+        compilation::{
+            request::CompilationReq,
+            response::{CompilationResult, CompilerResponse},
+        },
+        model::event::{CompilationData, CompilationResponse},
+    };
     use crate::{
         evaluation::response::EvaluatorResponse, governance::model::Quorum,
         model::event::ApprovalData,
@@ -3512,17 +3497,9 @@ mod tests {
         identity::{KeyPair, Signature, keys::Ed25519Signer},
         request::FactRequest,
     };
-    use crate::model::event::{EvaluationData, EvaluationResponse};
-    use crate::{
-        compilation::{
-            request::CompilationReq,
-            response::{CompilationResult, CompilerResponse},
-        },
-        model::event::{CompilationData, CompilationResponse},
-    };
-use json_patch::{Patch, patch};
+    use json_patch::{Patch, patch};
 
-use anyhow::Result;
+    use anyhow::Result;
     use std::collections::{BTreeMap, BTreeSet};
     use tokio::sync::mpsc;
 

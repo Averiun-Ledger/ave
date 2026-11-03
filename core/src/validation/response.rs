@@ -101,12 +101,10 @@ pub fn validation_result_from_parts(
     approval_data_hash: Option<DigestIdentifier>,
 ) -> Result<ValidationRes> {
     match &validation.validation_metadata {
-        ValidationMetadata::Metadata(metadata) => {
-            Ok(ValidationRes::Create {
-                vali_req_hash: validation.validation_req_hash.clone(),
-                subject_metadata: metadata.clone(),
-            })
-        }
+        ValidationMetadata::Metadata(metadata) => Ok(ValidationRes::Create {
+            vali_req_hash: validation.validation_req_hash.clone(),
+            subject_metadata: metadata.clone(),
+        }),
         ValidationMetadata::ModifiedHash {
             modified_metadata_without_propierties_hash,
             propierties_hash,
@@ -131,8 +129,7 @@ pub fn check_validation_signatures(
     validators: &RoleDataRegister,
 ) -> Result<()> {
     for signature in validation.validators_signatures.iter() {
-        let signed =
-            Signed::from_parts(rebuilt.clone(), signature.clone());
+        let signed = Signed::from_parts(rebuilt.clone(), signature.clone());
         if signed.verify().is_err() {
             bail!("validator signature invalid");
         }

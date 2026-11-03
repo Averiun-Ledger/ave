@@ -305,9 +305,8 @@ impl RateLimitConfig {
         // weakening the limit.
         let mut max_window = self.window_seconds;
         for endpoint in &self.sensitive_endpoints {
-            max_window = max_window.max(
-                endpoint.window_seconds.unwrap_or(self.window_seconds),
-            );
+            max_window = max_window
+                .max(endpoint.window_seconds.unwrap_or(self.window_seconds));
         }
         if self.cleanup_interval_seconds < max_window {
             return Err(Error::InvalidConfiguration {

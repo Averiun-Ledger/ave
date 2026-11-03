@@ -8,8 +8,8 @@
 use std::str::FromStr;
 
 use ave_common::bridge::request::{
-    AbortsQuery, ActorTreeQuery, EventsQuery, IncidentsQuery,
-    SinkEventsQuery, SinkReplayRequest, SinksQuery,
+    AbortsQuery, ActorTreeQuery, EventsQuery, IncidentsQuery, SinkEventsQuery,
+    SinkReplayRequest, SinksQuery,
 };
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;

@@ -168,14 +168,12 @@ impl CoreMetrics {
         Self {
             requests: Family::default(),
             http_requests: Family::default(),
-            http_request_duration_seconds: Family::new_with_constructor(
-                || {
-                    Histogram::new(vec![
-                        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
-                        5.0, 10.0,
-                    ])
-                },
-            ),
+            http_request_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                    10.0,
+                ])
+            }),
             node_build_info: Family::default(),
             node_safe_mode: Gauge::default(),
             request_duration_seconds: Family::new_with_constructor(|| {

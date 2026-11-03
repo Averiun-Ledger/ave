@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use ave_common::SchemaType;
 use ave_common::bridge::request::ApprovalStateRes;
-use ave_common::identity::{PublicKey, keys::{Ed25519Signer, KeyPair}};
+use ave_common::identity::{
+    PublicKey,
+    keys::{Ed25519Signer, KeyPair},
+};
 use ave_common::response::RequestState;
 use ave_core::governance::data::GovernanceData;
 use ave_core::helpers::network::test_faults::{
@@ -1382,10 +1385,10 @@ async fn test_pin_switch_blind_proponent_commits() {
             always_accept: true,
             is_service: true,
             // Owner holds only the current pin.
-        toolchains: Some(BTreeMap::from([(
-            default_pin(),
-            toolchain_name(&default_pin()),
-        )])),
+            toolchains: Some(BTreeMap::from([(
+                default_pin(),
+                toolchain_name(&default_pin()),
+            )])),
             ..Default::default()
         })
         .await;
@@ -1881,7 +1884,11 @@ async fn test_pin_restart_without_new_pin_stays_stale_but_live() {
     )
     .await
     .unwrap();
-    node_b.api.update_subject(governance_id.clone()).await.unwrap();
+    node_b
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     get_subject(&node_b.api, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
@@ -1941,7 +1948,11 @@ async fn test_pin_restart_without_new_pin_stays_stale_but_live() {
     get_subject(node1, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    node_b.api.update_subject(governance_id.clone()).await.unwrap();
+    node_b
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     get_subject(&node_b.api, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
@@ -2030,7 +2041,11 @@ async fn test_pin_restart_without_new_pin_stays_stale_but_live() {
     node_running(&node_b2.api).await.unwrap();
 
     // Ledger sync needs no toolchain: the tip is reachable.
-    node_b2.api.update_subject(governance_id.clone()).await.unwrap();
+    node_b2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     get_subject(&node_b2.api, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
@@ -2237,7 +2252,10 @@ async fn test_pin_fresh_join_with_only_new_pin_syncs_current() {
     let stale_state = get_subject(node_s, tracker_id.clone(), Some(1), true)
         .await
         .unwrap();
-    assert_eq!(stale_state.properties, json!({"one": 5, "two": 0, "three": 0}));
+    assert_eq!(
+        stale_state.properties,
+        json!({"one": 5, "two": 0, "three": 0})
+    );
 
     // Stale holds 1.95 bytes from here on: no gov witness role, no
     // more updates, no demand. Record them before the switch.

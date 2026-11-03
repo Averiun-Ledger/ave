@@ -446,10 +446,8 @@ impl CompilerService for ScriptedCompilerService {
             Some(Duration::from_secs(700)),
             None,
         );
-        let outcome = client
-            .compile(&source_b64, &toolchain)
-            .await
-            .map_err(|e| {
+        let outcome =
+            client.compile(&source_b64, &toolchain).await.map_err(|e| {
                 Status::internal(format!(
                     "scripted upstream compile failed: {e}"
                 ))

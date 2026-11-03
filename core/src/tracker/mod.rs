@@ -969,7 +969,8 @@ impl Tracker {
                         }
                         EventRequest::Transfer(..) => {}
                         EventRequest::Reject(..) => {
-                            self.reject(ctx, event.sn, event.gov_version).await?;
+                            self.reject(ctx, event.sn, event.gov_version)
+                                .await?;
                         }
                         EventRequest::Confirm(..) => {
                             self.confirm(
@@ -1095,8 +1096,8 @@ impl Actor for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
-    if let Err(e) = self.init_store("tracker", None, true, ctx).await {
-        error!(
+        if let Err(e) = self.init_store("tracker", None, true, ctx).await {
+            error!(
             msg_type = "Init",
             error = %e,
             "Failed to initialize tracker store"
@@ -1142,8 +1143,7 @@ impl Actor for Tracker {
                     ),
                 });
             }
-            let Protocols::Create { validation, .. } = &first.protocols
-            else {
+            let Protocols::Create { validation, .. } = &first.protocols else {
                 return Err(ActorError::FunctionalCritical {
                     description: format!(
                         "Cannot repair tracker {}: genesis event is not a create",
@@ -1454,7 +1454,11 @@ impl PersistentActor for Tracker {
                     if let Some(name) = &metadata.name
                         && (name.is_empty() || name.len() > 100)
                     {
-                        return Err(ActorError::Functional { description: "In create event, genesis name is invalid".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis name is invalid"
+                                    .to_owned(),
+                        });
                     }
                     if let Some(description) = &metadata.description
                         && (description.is_empty() || description.len() > 200)
@@ -1465,7 +1469,11 @@ impl PersistentActor for Tracker {
                         return Err(ActorError::Functional { description: "In create event, genesis governance_id must be set".to_owned() });
                     }
                     if !metadata.schema_id.is_valid_in_request() {
-                        return Err(ActorError::Functional { description: "In create event, genesis schema_id is invalid".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis schema_id is invalid"
+                                    .to_owned(),
+                        });
                     }
                     if metadata.creator != metadata.owner {
                         return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
@@ -1474,7 +1482,11 @@ impl PersistentActor for Tracker {
                         return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
                     }
                     if !metadata.active {
-                        return Err(ActorError::Functional { description: "In create event, genesis must be active".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis must be active"
+                                    .to_owned(),
+                        });
                     }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = metadata.properties.clone();
@@ -1711,8 +1723,11 @@ impl Storable for Tracker {}
 #[cfg(test)]
 mod tests {
     use super::{Tracker, TrackerState, TrackerVisibilityMode};
-    use crate::model::event::{Ledger, Protocols, ValidationData, ValidationMetadata};
+    use crate::model::event::{
+        Ledger, Protocols, ValidationData, ValidationMetadata,
+    };
     use crate::subject::{Metadata, SubjectMetadata};
+    use ave_actors::PersistentActor;
     use ave_common::identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
         hash_borsh,
@@ -1720,26 +1735,20 @@ mod tests {
     };
     use ave_common::request::{CreateRequest, EventRequest};
     use ave_common::{Namespace, SchemaType, ValueWrapper};
-    use ave_actors::PersistentActor;
     use std::sync::Arc;
 
     fn test_owner() -> (KeyPair, PublicKey) {
         let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
-        let owner = PublicKey::new(
-            DSAlgorithm::Ed25519,
-            keys.public_key_bytes(),
-        )
-        .unwrap();
+        let owner =
+            PublicKey::new(DSAlgorithm::Ed25519, keys.public_key_bytes())
+                .unwrap();
         (keys, owner)
     }
 
     fn test_metadata(owner: &PublicKey) -> Metadata {
         let gov_version = 7u64;
-        let governance_id = hash_borsh(
-            &*HashAlgorithm::Blake3.hasher(),
-            &gov_version,
-        )
-        .unwrap();
+        let governance_id =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &gov_version).unwrap();
         Metadata {
             name: Some("Name".to_owned()),
             description: Some("Description".to_owned()),
@@ -1758,10 +1767,7 @@ mod tests {
         }
     }
 
-    fn test_create_ledger(
-        metadata: &Metadata,
-        keys: &KeyPair,
-    ) -> Ledger {
+    fn test_create_ledger(metadata: &Metadata, keys: &KeyPair) -> Ledger {
         let request = EventRequest::Create(CreateRequest {
             name: metadata.name.clone(),
             description: metadata.description.clone(),
@@ -1781,10 +1787,9 @@ mod tests {
                     validation_req_signature: signed_signature(keys),
                     validation_req_hash: DigestIdentifier::default(),
                     validators_signatures: vec![],
-                    validation_metadata:
-                        ValidationMetadata::Metadata(Box::new(
-                            metadata.clone(),
-                        )),
+                    validation_metadata: ValidationMetadata::Metadata(
+                        Box::new(metadata.clone()),
+                    ),
                 },
             },
         }
@@ -1831,10 +1836,7 @@ mod tests {
             "genesis governance must be adopted from the journal"
         );
         assert_eq!(applied.namespace, metadata.namespace);
-        assert_eq!(
-            applied.genesis_gov_version,
-            metadata.genesis_gov_version
-        );
+        assert_eq!(applied.genesis_gov_version, metadata.genesis_gov_version);
         assert_eq!(applied.subject_metadata.owner, owner);
     }
 

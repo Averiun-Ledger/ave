@@ -1,9 +1,9 @@
 mod error;
 
 use crate::{
-    db::check_dir_writable, external_db::DBManager,
-    model::event::Ledger, model::sink::SubjectSinkEvent,
-    node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
+    db::check_dir_writable, external_db::DBManager, model::event::Ledger,
+    model::sink::SubjectSinkEvent, node::register::RegisterEvent,
+    request::tracking::RequestTrackingEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};

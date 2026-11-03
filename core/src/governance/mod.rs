@@ -718,8 +718,7 @@ impl Governance {
         if matching.is_empty() {
             return;
         }
-        let child = match ctx.get_child::<SinkManager>("sink_manager").await
-        {
+        let child = match ctx.get_child::<SinkManager>("sink_manager").await {
             Ok(child) => child,
             Err(e) => {
                 warn!(
@@ -829,8 +828,7 @@ impl Governance {
         // Missing child means nothing to tear down (already stopped
         // or never created): teardown is idempotent, so that is a
         // success, not a failure.
-        let Ok(actor) = ctx.get_child::<ApprPersist>("approver").await
-        else {
+        let Ok(actor) = ctx.get_child::<ApprPersist>("approver").await else {
             return Ok(());
         };
         if actor.tell(ApprPersistMessage::PurgeStorage).await.is_err() {
@@ -931,8 +929,8 @@ impl Governance {
         attempts_left: usize,
     ) -> Result<(), ActorError> {
         let owner = *self.our_key == self.subject_metadata.owner;
-        let i_new_owner = self.subject_metadata.new_owner
-            == Some((*self.our_key).clone());
+        let i_new_owner =
+            self.subject_metadata.new_owner == Some((*self.our_key).clone());
         let new_owner = self.subject_metadata.new_owner.is_some();
         // Owner paths always carry an approver; non-owner paths only
         // with the approver role (same dispatch as build_childs).
@@ -5314,10 +5312,8 @@ impl Actor for Governance {
         // Dirty boots only (same reason as above).
         if !self.skip_reconcile {
             let node_path = ctx.path().parent().parent();
-            let manager_path = ActorPath::from(format!(
-                "{}/node_sink_manager",
-                node_path
-            ));
+            let manager_path =
+                ActorPath::from(format!("{}/node_sink_manager", node_path));
             if let Err(e) = crate::model::common::review_sink_cursor(
                 ctx.system(),
                 manager_path,
@@ -5749,7 +5745,11 @@ impl PersistentActor for Governance {
                     if let Some(name) = &metadata.name
                         && (name.is_empty() || name.len() > 100)
                     {
-                        return Err(ActorError::Functional { description: "In create event, genesis name is invalid".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis name is invalid"
+                                    .to_owned(),
+                        });
                     }
                     if let Some(description) = &metadata.description
                         && (description.is_empty() || description.len() > 200)
@@ -5763,7 +5763,11 @@ impl PersistentActor for Governance {
                         return Err(ActorError::Functional { description: "In create event, genesis namespace must be empty".to_owned() });
                     }
                     if !metadata.schema_id.is_valid_in_request() {
-                        return Err(ActorError::Functional { description: "In create event, genesis schema_id is invalid".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis schema_id is invalid"
+                                    .to_owned(),
+                        });
                     }
                     if metadata.creator != metadata.owner {
                         return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
@@ -5772,7 +5776,11 @@ impl PersistentActor for Governance {
                         return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
                     }
                     if !metadata.active {
-                        return Err(ActorError::Functional { description: "In create event, genesis must be active".to_owned() });
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis must be active"
+                                    .to_owned(),
+                        });
                     }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = serde_json::from_value::<GovernanceData>(
@@ -5799,10 +5807,12 @@ impl PersistentActor for Governance {
                             toolchain = %inner.properties.toolchain,
                             "Genesis toolchain pin is not the default"
                         );
-                        return Err(ActorError::Functional { description: format!(
-                            "In create event, genesis toolchain pin is not the default: {}",
-                            inner.properties.toolchain
-                        )});
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "In create event, genesis toolchain pin is not the default: {}",
+                                inner.properties.toolchain
+                            ),
+                        });
                     }
                     // Whole-state backstop: genesis properties are fully
                     // node-constructed, so any deviation left is smuggled

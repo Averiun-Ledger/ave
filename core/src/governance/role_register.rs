@@ -2,10 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    governance::{
-        data::GovernanceData,
-        model::Quorum,
-    },
+    governance::{data::GovernanceData, model::Quorum},
     model::common::{CeilingMap, IntervalSet, crash_system, purge_storage},
 };
 use anyhow::Result;
@@ -315,8 +312,7 @@ impl RoleRegister {
             {
                 let mut schema_eval = vec![];
                 for (key, namespace) in evaluators {
-                    if namespace
-                        .is_ancestor_or_equal_of(&evaluation.namespace)
+                    if namespace.is_ancestor_or_equal_of(&evaluation.namespace)
                     {
                         schema_eval.push(key.clone());
                     }
@@ -412,8 +408,7 @@ impl RoleRegister {
             // PublicKey, Namespace), (IntervalSet, Option<u64>
             let mut schema_val = vec![];
             for ((key, namespace), (interval, last)) in validators {
-                if namespace.is_ancestor_or_equal_of(&search.namespace)
-                {
+                if namespace.is_ancestor_or_equal_of(&search.namespace) {
                     if let Some(last) = last
                         && last <= &version
                     {
@@ -435,8 +430,7 @@ impl RoleRegister {
             .map_or_else(Vec::new, |validators| {
                 let mut schema_val = vec![];
                 for ((key, namespace), (interval, last)) in validators {
-                    if namespace.is_ancestor_or_equal_of(&search.namespace)
-                    {
+                    if namespace.is_ancestor_or_equal_of(&search.namespace) {
                         if let Some(last) = last
                             && last <= &version
                         {
@@ -454,8 +448,7 @@ impl RoleRegister {
             let quorum = if let Some(quorum_schema) =
                 self.vali_quorum.get(&search.schema_id)
             {
-                let Some(quorum) =
-                    quorum_schema.get_prev_or_equal(version)
+                let Some(quorum) = quorum_schema.get_prev_or_equal(version)
                 else {
                     break 'data;
                 };
@@ -482,12 +475,10 @@ impl RoleRegister {
                 "Found validators successfully"
             );
 
-            return Ok(RoleRegisterResponse::Validation(
-                RoleDataRegister {
-                    workers: validators.iter().cloned().collect(),
-                    quorum,
-                },
-            ));
+            return Ok(RoleRegisterResponse::Validation(RoleDataRegister {
+                workers: validators.iter().cloned().collect(),
+                quorum,
+            }));
         }
 
         debug!(
@@ -660,7 +651,12 @@ impl Handler<Self> for RoleRegister {
                 approval,
                 compilation,
             } => {
-                return self.search_actual_roles(version, &evaluation, approval, compilation);
+                return self.search_actual_roles(
+                    version,
+                    &evaluation,
+                    approval,
+                    compilation,
+                );
             }
             RoleRegisterMessage::SearchValidators { search, version } => {
                 return self.search_validators(&search, version);
@@ -1064,16 +1060,22 @@ pub fn gov_roles_from_pre(
     let gov = GovernanceData::try_from(pre_properties.clone())
         .map_err(|e| anyhow::anyhow!("governance state: {e}"))?;
     let set = |role: ProtocolTypes| {
-        gov.get_quorum_and_signers(role, &SchemaType::Governance, Namespace::new())
-            .map(|(workers, quorum)| RoleDataRegister {
-                workers: workers.into_iter().collect::<HashSet<_>>(),
-                quorum,
-            })
-            .map_err(|e| anyhow::anyhow!("gov roles: {e}"))
+        gov.get_quorum_and_signers(
+            role,
+            &SchemaType::Governance,
+            Namespace::new(),
+        )
+        .map(|(workers, quorum)| RoleDataRegister {
+            workers: workers.into_iter().collect::<HashSet<_>>(),
+            quorum,
+        })
+        .map_err(|e| anyhow::anyhow!("gov roles: {e}"))
     };
     Ok(RolesAtVersion {
         evaluation: set(ProtocolTypes::Evaluation)?,
-        approval: need_approval.then(|| set(ProtocolTypes::Approval)).transpose()?,
+        approval: need_approval
+            .then(|| set(ProtocolTypes::Approval))
+            .transpose()?,
         compilation: need_compilation
             .then(|| set(ProtocolTypes::Compilation))
             .transpose()?,

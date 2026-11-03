@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use ave_common::identity::keys::{DSA, Ed25519Signer};
 use ave_common::identity::{
     DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed, TimeStamp,
     hash_borsh,
 };
-use ave_common::identity::keys::{DSA, Ed25519Signer};
 use ave_common::request::{EventRequest, TransferRequest};
 use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::model::event::{
@@ -25,10 +25,10 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    EXAMPLE_CONTRACT, PORT_COUNTER, CreateNodeConfig,
-    CreateNodesAndConnectionsConfig, create_and_authorize_governance,
-    create_node, create_nodes_and_connections, create_subject, emit_confirm,
-    emit_fact, emit_transfer, get_subject, node_running,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
+    PORT_COUNTER, create_and_authorize_governance, create_node,
+    create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
+    emit_transfer, get_subject, node_running,
 };
 
 /// Member of a test governance using the Example schema.
@@ -120,7 +120,9 @@ async fn setup_example_governance(
     if !adds.is_empty() {
         config["members"] = json!({ "add": adds });
     }
-    emit_fact(owner, governance_id.clone(), config, true).await.unwrap();
+    emit_fact(owner, governance_id.clone(), config, true)
+        .await
+        .unwrap();
 
     // Members need the governance locally before they can create
     // subjects or verify hints under it.
@@ -129,7 +131,11 @@ async fn setup_example_governance(
         .unwrap()
         .sn;
     for member in members {
-        member.api.update_subject(governance_id.clone()).await.unwrap();
+        member
+            .api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
         get_subject(member.api, governance_id.clone(), Some(gov_sn), true)
             .await
             .unwrap();
@@ -188,19 +194,17 @@ async fn setup_transfer_gov(
 /// may affect the node.
 #[test(tokio::test)]
 async fn remote_malformed_batches_do_not_stop_the_node() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
     let target = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
-    let sender =
-        PublicKey::from_str(nodes[2].api.public_key()).unwrap();
+    let sender = PublicKey::from_str(nodes[2].api.public_key()).unwrap();
 
     let governance_id = setup_example_governance(
         &target,
@@ -213,15 +217,10 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
         }],
     )
     .await;
-    let (real_subject, _) = create_subject(
-        &alice,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (real_subject, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     let create_event = alice
         .test_get_tracker_ledger(real_subject.clone(), 0)
         .await
@@ -229,14 +228,14 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
         .into_iter()
         .next()
         .expect("genesis event");
-    let (template_request, template_validation) =
-        match &create_event.protocols {
-            Protocols::Create {
-                event_request,
-                validation,
-            } => (event_request.clone(), validation.clone()),
-            _ => panic!("expected a create event"),
-        };
+    let (template_request, template_validation) = match &create_event.protocols
+    {
+        Protocols::Create {
+            event_request,
+            validation,
+        } => (event_request.clone(), validation.clone()),
+        _ => panic!("expected a create event"),
+    };
 
     // Malformed creation for an unknown subject: tracker schema with an
     // empty governance id.
@@ -263,19 +262,14 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
     let forged_create = Ledger {
         gov_version: create_event.gov_version,
         sn: 0,
-        prev_ledger_event_hash: create_event
-            .prev_ledger_event_hash
-            .clone(),
-        ledger_seal_signature: create_event
-            .ledger_seal_signature
-            .clone(),
+        prev_ledger_event_hash: create_event.prev_ledger_event_hash.clone(),
+        ledger_seal_signature: create_event.ledger_seal_signature.clone(),
         protocols: Protocols::Create {
             event_request: Arc::new(forged_request),
             validation: forged_validation,
         },
     };
-    inject_ledger_batch(&target, &sender, vec![forged_create], None)
-        .await;
+    inject_ledger_batch(&target, &sender, vec![forged_create], None).await;
 
     // Oversized batch: well-formed but far above any honest batch.
     let mut huge = Vec::with_capacity(10_001);
@@ -292,7 +286,10 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
     // the node still serves and mutates real state.
     node_running(&target).await.unwrap();
     assert!(target.get_subject_state(forged_id).await.is_err());
-    target.get_subject_state(governance_id.clone()).await.unwrap();
+    target
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
     create_subject(&alice, governance_id, "Example", "", true)
         .await
         .unwrap();
@@ -300,8 +297,7 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut()))
-        .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }
@@ -310,15 +306,14 @@ async fn remote_malformed_batches_do_not_stop_the_node() {
 /// open a reception window; the legitimate hint still must.
 #[test(tokio::test)]
 async fn remote_forged_transfer_hint_does_not_open_reception() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let bob = nodes[2].api.clone();
@@ -334,15 +329,10 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
     // Genuine history: Alice creates a tracker, emits a fact, and
     // transfers it to Bob. The committed transfer carries the quorum
     // block the forgery will try to reuse.
-    let (subject_id, _) = create_subject(
-        &alice,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     emit_fact(
         &alice,
         subject_id.clone(),
@@ -352,16 +342,20 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
     .await
     .unwrap();
     let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
-    emit_transfer(&alice, subject_id.clone(), bob_key, true).await.unwrap();
-    let history = alice.test_get_tracker_ledger(subject_id.clone(), 2).await.unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key, true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 3);
     let genuine = history
         .iter()
         .find(|event| event.sn == 2)
         .expect("transfer event")
         .clone();
-    let (genuine_evaluation, genuine_validation) = match &genuine.protocols
-    {
+    let (genuine_evaluation, genuine_validation) = match &genuine.protocols {
         Protocols::Transfer {
             event_request: _,
             evaluation,
@@ -414,7 +408,10 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
     // The forged hint must not register any reception window.
     for _ in 0..30 {
         assert!(
-            receiver.get_subject_state(subject_id.clone()).await.is_err(),
+            receiver
+                .get_subject_state(subject_id.clone())
+                .await
+                .is_err(),
             "forged transfer hint must not admit the subject"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -432,8 +429,12 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
     .await
     .unwrap();
     bob.update_subject(subject_id.clone()).await.unwrap();
-    get_subject(&bob, subject_id.clone(), Some(2), true).await.unwrap();
-    emit_confirm(&bob, subject_id.clone(), None, true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     emit_transfer(
         &bob,
         subject_id.clone(),
@@ -459,8 +460,7 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut()))
-        .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }
@@ -469,15 +469,14 @@ async fn remote_forged_transfer_hint_does_not_open_reception() {
 /// rejected during verification; the node stays up and keeps syncing.
 #[test(tokio::test)]
 async fn remote_future_timestamp_event_is_rejected() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let alice_keys = nodes[1].keys.clone();
@@ -528,15 +527,10 @@ async fn remote_future_timestamp_event_is_rejected() {
     )
     .await
     .unwrap();
-    let (subject_id, _) = create_subject(
-        &alice,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     emit_fact(
         &alice,
         subject_id.clone(),
@@ -548,8 +542,10 @@ async fn remote_future_timestamp_event_is_rejected() {
     emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
         .await
         .unwrap();
-    let history =
-        alice.test_get_tracker_ledger(subject_id.clone(), 2).await.unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 3);
     let transfer = history
         .iter()
@@ -571,11 +567,9 @@ async fn remote_future_timestamp_event_is_rejected() {
             .unwrap(),
     };
     let timestamp = TimeStamp::from_nanos(i64::MAX as u64 + 1);
-    let content_hash = hash_borsh(
-        &*HashAlgorithm::Blake3.hasher(),
-        &(&seal, timestamp),
-    )
-    .unwrap();
+    let content_hash =
+        hash_borsh(&*HashAlgorithm::Blake3.hasher(), &(&seal, timestamp))
+            .unwrap();
     let forged_seal = Signature {
         signer: PublicKey::new(
             alice_keys.algorithm(),
@@ -604,9 +598,7 @@ async fn remote_future_timestamp_event_is_rejected() {
             address: vec![boot_addr],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            bob_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
         ..Default::default()
     })
     .await;
@@ -671,7 +663,9 @@ async fn remote_future_timestamp_event_is_rejected() {
         Some(transfer),
     )
     .await;
-    get_subject(&bob, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
 
     for node in nodes.iter_mut() {
         node.token.cancel();
@@ -696,15 +690,14 @@ async fn remote_future_timestamp_event_is_rejected() {
 /// reconstruction reads the batch itself.
 #[test(tokio::test)]
 async fn remote_failed_transfer_does_not_open_reception() {
-    let (mut nodes, dirs) = create_nodes_and_connections(
-        CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
             ..Default::default()
-        },
-    )
-    .await;
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let boot_addr = nodes[0].listen_address.clone();
@@ -742,15 +735,10 @@ async fn remote_failed_transfer_does_not_open_reception() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &alice,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
         .await
         .unwrap();
@@ -759,8 +747,10 @@ async fn remote_failed_transfer_does_not_open_reception() {
     get_subject(&alice, subject_id.clone(), Some(1), true)
         .await
         .expect("failed transfer must still commit its ledger record");
-    let history =
-        alice.test_get_tracker_ledger(subject_id.clone(), 1).await.unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 2);
     let failed = history
         .iter()
@@ -782,23 +772,20 @@ async fn remote_failed_transfer_does_not_open_reception() {
             address: vec![boot_addr],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            rita_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
         ..Default::default()
     })
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
         .await
@@ -909,8 +896,9 @@ async fn dirty_restart_does_not_reapply_page_boundary() {
     .await
     .unwrap();
 
-    let before =
-        get_subject(&api, governance_id.clone(), None, true).await.unwrap();
+    let before = get_subject(&api, governance_id.clone(), None, true)
+        .await
+        .unwrap();
 
     // Dirty stop: no clean-shutdown handshake, so boot reconciles.
     let keys = node.keys.clone();

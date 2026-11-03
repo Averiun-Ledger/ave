@@ -19,8 +19,8 @@ use ave_bridge::ave_common::{
     bridge::request::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, BridgeSignedEventRequest,
         EventsQuery, FirstEndEvents, GovQuery, IncidentsQuery, ListQuery,
-        PatchApproval, SinkDeliveriesQuery, SinkEventsQuery,
-        SinkReplayRequest, SubjectQuery, UpdateSubjectQuery,
+        PatchApproval, SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest,
+        SubjectQuery, UpdateSubjectQuery,
     },
     response::{
         ApprovalEntry, RequestData, RequestInfoExtend, SinkReplayResponse,
@@ -29,7 +29,7 @@ use ave_bridge::ave_common::{
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::{SinksQuery},
+        bridge::request::SinksQuery,
         response::{
             ActorTreeResponse, GovsData, LedgerDB, PaginatorAborts,
             PaginatorEvents, RequestInfo, RequestsInManager,

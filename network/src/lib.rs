@@ -746,9 +746,11 @@ mod tests {
                 .is_err()
         );
         assert!(
-            MemoryLimitsConfig::Percentage { value: f64::INFINITY }
-                .validate()
-                .is_err()
+            MemoryLimitsConfig::Percentage {
+                value: f64::INFINITY
+            }
+            .validate()
+            .is_err()
         );
     }
 

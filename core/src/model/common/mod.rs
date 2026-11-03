@@ -1115,10 +1115,7 @@ mod tests {
         // Fully covered page (stale re-read): nothing fresh, the
         // caller stops paging.
         let mut done = Some(4);
-        assert_eq!(
-            split_page_fresh(&[4], &mut done),
-            vec![false]
-        );
+        assert_eq!(split_page_fresh(&[4], &mut done), vec![false]);
         assert_eq!(done, Some(4));
 
         // Duplicates inside one page collapse to a single insert.
@@ -1149,8 +1146,7 @@ mod tests {
         use ave_common::governance::Quorum;
 
         let workers = sample_keys(3);
-        let two: HashSet<PublicKey> =
-            workers.iter().take(2).cloned().collect();
+        let two: HashSet<PublicKey> = workers.iter().take(2).cloned().collect();
         assert!(check_quorum_signers(&two, &Quorum::Majority, &workers));
         assert!(check_quorum_signers(&two, &Quorum::Fixed(2), &workers));
         assert!(!check_quorum_signers(&two, &Quorum::Fixed(3), &workers));
@@ -1162,7 +1158,11 @@ mod tests {
         // Count reached but not a subset: still no quorum.
         let mut outsider = two.clone();
         outsider.insert(sample_keys(1).into_iter().next().expect("key"));
-        assert!(!check_quorum_signers(&outsider, &Quorum::Fixed(3), &workers));
+        assert!(!check_quorum_signers(
+            &outsider,
+            &Quorum::Fixed(3),
+            &workers
+        ));
     }
 
     #[test]
@@ -1305,8 +1305,7 @@ pub async fn review_sink_cursor(
     use crate::sink::manager::{
         SinkManager, SinkManagerMessage, SinkManagerResponse,
     };
-    let manager = match system.get_actor::<SinkManager>(&manager_path).await
-    {
+    let manager = match system.get_actor::<SinkManager>(&manager_path).await {
         Ok(manager) => manager,
         Err(ActorError::NotFound { .. }) => return Ok(()),
         Err(e) => return Err(e),
@@ -1369,9 +1368,7 @@ where
         // No projection configured (unit-test systems): nothing to
         // fill. Production nodes always register this helper at
         // build, so a missing helper never hides a real gap there.
-        debug!(
-            "Skipping projection gap-fill: no ext_db helper registered"
-        );
+        debug!("Skipping projection gap-fill: no ext_db helper registered");
         return Ok(0);
     };
     let watermark = ext_db
@@ -1425,19 +1422,17 @@ where
             .filter(|(_, keep)| *keep)
             .map(|(event, _)| event)
             .collect();
-        filled += ext_db
-            .fill_event_gap(fresh)
-            .await
-            .map_err(|e| ActorError::Functional {
+        filled += ext_db.fill_event_gap(fresh).await.map_err(|e| {
+            ActorError::Functional {
                 description: e.to_string(),
-            })?;
-    }
-    ext_db
-        .upsert_subject_state(state)
-        .await
-        .map_err(|e| ActorError::Functional {
-            description: e.to_string(),
+            }
         })?;
+    }
+    ext_db.upsert_subject_state(state).await.map_err(|e| {
+        ActorError::Functional {
+            description: e.to_string(),
+        }
+    })?;
     if filled > 0 {
         info!(
             msg_type = "FillProjectionGap",

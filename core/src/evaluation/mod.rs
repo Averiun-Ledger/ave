@@ -1059,19 +1059,17 @@ pub mod tests {
             .await
             .unwrap();
 
-        crate::node::Node::replay_sink_events(
-            crate::node::SinkReplayInput {
-                system,
-                subject_manager: &subject_manager,
-                our_key: &our_key.to_string(),
-                subject_data,
-                subject_id,
-                from_sn,
-                to_sn,
-                limit,
-                ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
-            },
-        )
+        crate::node::Node::replay_sink_events(crate::node::SinkReplayInput {
+            system,
+            subject_manager: &subject_manager,
+            our_key: &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        })
         .await
         .unwrap()
     }
@@ -1106,19 +1104,17 @@ pub mod tests {
             .await
             .unwrap();
 
-        crate::node::Node::replay_sink_events(
-            crate::node::SinkReplayInput {
-                system,
-                subject_manager: &subject_manager,
-                our_key: &our_key.to_string(),
-                subject_data,
-                subject_id,
-                from_sn,
-                to_sn,
-                limit,
-                ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
-            },
-        )
+        crate::node::Node::replay_sink_events(crate::node::SinkReplayInput {
+            system,
+            subject_manager: &subject_manager,
+            our_key: &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        })
         .await
         .unwrap_err()
     }
@@ -2066,8 +2062,16 @@ pub mod tests {
             _node_key,
         ) = create_tracker().await;
 
-        let replay =
-            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         assert_eq!(replay.from_sn, 0);
         assert_eq!(replay.to_sn, None);
@@ -2143,8 +2147,16 @@ pub mod tests {
         )
         .await;
 
-        let first_page =
-            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 1).await;
+        let first_page = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            1,
+        )
+        .await;
         assert_eq!(first_page.events.len(), 1);
         assert!(first_page.has_more);
         assert_eq!(first_page.next_sn, Some(1));
@@ -2165,8 +2177,16 @@ pub mod tests {
             other => panic!("Unexpected event: {other:?}"),
         }
 
-        let second_page =
-            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 1, None, 10).await;
+        let second_page = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            1,
+            None,
+            10,
+        )
+        .await;
         assert_eq!(second_page.events.len(), 1);
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
@@ -2208,8 +2228,16 @@ pub mod tests {
             _node_key,
         ) = create_gov().await;
 
-        let replay =
-            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 0, None, 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2265,8 +2293,16 @@ pub mod tests {
         )
         .await;
 
-        let replay =
-            get_sink_events(&_system, &node_actor, &_node_key, &subject_id, 1, Some(1), 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            1,
+            Some(1),
+            100,
+        )
+        .await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2315,9 +2351,16 @@ pub mod tests {
             _node_key,
         ) = create_tracker().await;
 
-        let error =
-            get_sink_events_error(&_system, &node_actor, &_node_key, &subject_id, 5, Some(4), 100)
-                .await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            5,
+            Some(4),
+            100,
+        )
+        .await;
 
         let ActorError::Functional { description } = error else {
             panic!("Expected functional error")
@@ -2339,8 +2382,16 @@ pub mod tests {
             _node_key,
         ) = create_tracker().await;
 
-        let error =
-            get_sink_events_error(&_system, &node_actor, &_node_key, &subject_id, 0, None, 0).await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            0,
+        )
+        .await;
 
         let ActorError::Functional { description } = error else {
             panic!("Expected functional error")
@@ -2367,8 +2418,16 @@ pub mod tests {
         )
         .unwrap();
 
-        let error =
-            get_sink_events_error(&_system, &node_actor, &_node_key, &missing, 0, None, 100).await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &missing,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         let ActorError::NotFound { path } = error else {
             panic!("Expected not found error")

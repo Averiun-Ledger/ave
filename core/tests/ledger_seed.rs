@@ -15,8 +15,7 @@
 //! writing a lying manifest.
 
 use std::{
-    collections::BTreeSet, path::PathBuf, str::FromStr,
-    sync::atomic::Ordering,
+    collections::BTreeSet, path::PathBuf, str::FromStr, sync::atomic::Ordering,
 };
 
 mod common;
@@ -81,9 +80,12 @@ async fn budgeted<F, T>(label: &str, future: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::time::timeout(std::time::Duration::from_secs(EMIT_BUDGET_SECS), future)
-        .await
-        .unwrap_or_else(|_| panic!("seed emit timed out: {label}"))
+    tokio::time::timeout(
+        std::time::Duration::from_secs(EMIT_BUDGET_SECS),
+        future,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("seed emit timed out: {label}"))
 }
 
 async fn emit_fact_timed(
@@ -96,7 +98,6 @@ async fn emit_fact_timed(
         emit_fact(node, subject.clone(), payload, true),
     )
     .await
-
 }
 
 async fn emit_fact_viewpoints_timed(
@@ -110,7 +111,6 @@ async fn emit_fact_viewpoints_timed(
         emit_fact_viewpoints(node, subject.clone(), payload, viewpoints, true),
     )
     .await
-
 }
 
 async fn emit_transfer_timed(
@@ -123,7 +123,6 @@ async fn emit_transfer_timed(
         emit_transfer(node, subject.clone(), new_owner, true),
     )
     .await
-
 }
 
 async fn emit_confirm_timed(
@@ -136,7 +135,6 @@ async fn emit_confirm_timed(
         emit_confirm(node, subject.clone(), new_name, true),
     )
     .await
-
 }
 
 async fn emit_reject_timed(
@@ -148,7 +146,6 @@ async fn emit_reject_timed(
         emit_reject(node, subject.clone(), true),
     )
     .await
-
 }
 
 async fn emit_eol_timed(
@@ -160,7 +157,6 @@ async fn emit_eol_timed(
         emit_eol(node, subject.clone(), true),
     )
     .await
-
 }
 
 async fn create_subject_timed(
@@ -174,7 +170,6 @@ async fn create_subject_timed(
         create_subject(node, governance.clone(), schema, namespace, true),
     )
     .await
-
 }
 
 async fn create_and_authorize_governance_timed(
@@ -194,8 +189,9 @@ async fn boot_node(
     peers: Vec<RoutingNode>,
     always_accept: bool,
 ) -> (common::NodeData, PathBuf) {
-    std::fs::create_dir_all(&db)
-        .unwrap_or_else(|e| panic!("can not create seed db {}: {e}", db.display()));
+    std::fs::create_dir_all(&db).unwrap_or_else(|e| {
+        panic!("can not create seed db {}: {e}", db.display())
+    });
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (node, _tempdirs) = create_node(CreateNodeConfig {
         node_type,
@@ -242,7 +238,12 @@ struct SnRecord {
     gov_version: u64,
 }
 
-fn record(sn: u64, protocols: &'static str, success: bool, gov: u64) -> SnRecord {
+fn record(
+    sn: u64,
+    protocols: &'static str,
+    success: bool,
+    gov: u64,
+) -> SnRecord {
     SnRecord {
         sn,
         protocols,
@@ -276,12 +277,10 @@ fn protocols_of(event: &RequestEventDB) -> (&'static str, bool) {
             matches!(evaluation_response, EvalResDB::Patch(_)),
         ),
         RequestEventDB::TrackerFactOpaque {
-            evaluation_success,
-            ..
+            evaluation_success, ..
         } => ("TrackerFactOpaque", *evaluation_success),
         RequestEventDB::GovernanceFact {
-            approval_success,
-            ..
+            approval_success, ..
         } => ("GovFact", matches!(approval_success, Some(true))),
         RequestEventDB::Transfer {
             evaluation_error, ..
@@ -304,11 +303,7 @@ fn protocols_of(event: &RequestEventDB) -> (&'static str, bool) {
 async fn seed_ledger_db() {
     let root = seed_dir();
     let config = seed_config();
-    assert!(
-        root.is_dir(),
-        "seed dir {} does not exist",
-        root.display()
-    );
+    assert!(root.is_dir(), "seed dir {} does not exist", root.display());
     if on(&config, "tracker_opaque") {
         assert!(
             on(&config, "tracker_facts"),
@@ -349,7 +344,9 @@ async fn seed_ledger_db() {
 
     // Governance: owner node0, witness node1, member + schema +
     // roles in two facts (the schema fact compiles for real).
-    let gov = create_and_authorize_governance_timed(api0, vec![api1, &node2.api]).await;
+    let gov =
+        create_and_authorize_governance_timed(api0, vec![api1, &node2.api])
+            .await;
     // Gov versions are deduced from emission order: every event
     // anchors the governance version in force BEFORE it applies,
     // and every successful gov event bumps exactly one. Failures
@@ -463,9 +460,10 @@ async fn seed_ledger_db() {
         // (CompileEval shape), not a bare failure.
         {
             use ave_common::bridge::response::{CompResDB, EvalResDB};
-            let events = get_events(api0, gov.clone(), next_sn as usize + 1, true)
-                .await
-                .unwrap();
+            let events =
+                get_events(api0, gov.clone(), next_sn as usize + 1, true)
+                    .await
+                    .unwrap();
             match &events[next_sn as usize].event {
                 ave_common::bridge::response::RequestEventDB::GovernanceFact {
                     compilation_response:
@@ -481,8 +479,9 @@ async fn seed_ledger_db() {
     // Tracker T1: facts (ok, error, viewpoint), transfer, confirm.
     // Everything below runs while gov sits at v2, so every event
     // anchors gov_version 2.
-    let (t1, ..) =
-        create_subject_timed(api0, gov.clone(), "Example", "").await.unwrap();
+    let (t1, ..) = create_subject_timed(api0, gov.clone(), "Example", "")
+        .await
+        .unwrap();
     let mut t1_records = vec![SnRecord {
         sn: 0,
         protocols: "Create",
@@ -520,7 +519,9 @@ async fn seed_ledger_db() {
     }
 
     if on(&config, "tracker_transfer_confirm") {
-        emit_transfer_timed(api0, t1.clone(), key1.clone()).await.unwrap();
+        emit_transfer_timed(api0, t1.clone(), key1.clone())
+            .await
+            .unwrap();
         let next_sn = t1_records.last().expect("facts ran").sn + 1;
         t1_records.push(SnRecord {
             sn: next_sn,
@@ -568,13 +569,12 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, topaque.clone(), json!({"ModOne": {"data": 1}}))
             .await
             .unwrap();
-        api1
-            .authorize_governance(
-                topaque.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
-            )
-            .await
-            .unwrap();
+        api1.authorize_governance(
+            topaque.clone(),
+            AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
         api1.update_subject(topaque.clone()).await.unwrap();
         // Viewpoint the witness does NOT hold: node1 stores the
         // opaque projection (a viewpoint it held would arrive full).
@@ -582,7 +582,7 @@ async fn seed_ledger_db() {
             api0,
             topaque.clone(),
             json!({"ModOne": {"data": 2}}),
-            BTreeSet::from(["basura".to_owned()])
+            BTreeSet::from(["basura".to_owned()]),
         )
         .await
         .unwrap();
@@ -607,7 +607,7 @@ async fn seed_ledger_db() {
             api0,
             topaque.clone(),
             json!({"ModOne": {"data": "xx"}}),
-            BTreeSet::from(["basura".to_owned()])
+            BTreeSet::from(["basura".to_owned()]),
         )
         .await
         .unwrap();
@@ -664,20 +664,19 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, tmixed.clone(), json!({"ModOne": {"data": 1}}))
             .await
             .unwrap();
-        api1
-            .authorize_governance(
-                tmixed.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
-            )
-            .await
-            .unwrap();
+        api1.authorize_governance(
+            tmixed.clone(),
+            AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
         api1.update_subject(tmixed.clone()).await.unwrap();
         // Held viewpoint: full on both sides.
         emit_fact_viewpoints_timed(
             api0,
             tmixed.clone(),
             json!({"ModOne": {"data": 2}}),
-            BTreeSet::from(["agua".to_owned()])
+            BTreeSet::from(["agua".to_owned()]),
         )
         .await
         .unwrap();
@@ -701,7 +700,7 @@ async fn seed_ledger_db() {
             api0,
             tmixed.clone(),
             json!({"ModOne": {"data": 3}}),
-            BTreeSet::from(["basura".to_owned()])
+            BTreeSet::from(["basura".to_owned()]),
         )
         .await
         .unwrap();
@@ -724,7 +723,7 @@ async fn seed_ledger_db() {
             api0,
             tmixed.clone(),
             json!({"ModOne": {"data": "xx"}}),
-            BTreeSet::from(["agua".to_owned()])
+            BTreeSet::from(["agua".to_owned()]),
         )
         .await
         .unwrap();
@@ -739,7 +738,7 @@ async fn seed_ledger_db() {
             api0,
             tmixed.clone(),
             json!({"ModOne": {"data": "xx"}}),
-            BTreeSet::from(["basura".to_owned()])
+            BTreeSet::from(["basura".to_owned()]),
         )
         .await
         .unwrap();
@@ -757,15 +756,20 @@ async fn seed_ledger_db() {
             success: false,
             gov_version: 2,
         });
-        for event in get_events(api0, tmixed.clone(), tmixed_records.len(), true)
-            .await
-            .unwrap()
+        for event in
+            get_events(api0, tmixed.clone(), tmixed_records.len(), true)
+                .await
+                .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &tmixed_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "tmixed sn {}", event.sn);
-            assert_eq!(record.success, success, "tmixed sn {} success", event.sn);
+            assert_eq!(
+                record.success, success,
+                "tmixed sn {} success",
+                event.sn
+            );
         }
         tmixed_entry = Some(serde_json::json!({
             "name": "tracker_mixed",
@@ -782,22 +786,22 @@ async fn seed_ledger_db() {
     // or creator role commits failed), then EOL.
     let t3_entry: Option<Value>;
     {
-        let (t3, ..) =
-            create_subject_timed(api0, gov.clone(), "Example", "")
-                .await
-                .unwrap();
+        let (t3, ..) = create_subject_timed(api0, gov.clone(), "Example", "")
+            .await
+            .unwrap();
         let mut t3_records = vec![SnRecord {
             sn: 0,
             protocols: "Create",
             success: true,
             gov_version: 2,
         }];
-        let outsider = ave_common::identity::keys::Ed25519Signer::generate()
-            .unwrap();
+        let outsider =
+            ave_common::identity::keys::Ed25519Signer::generate().unwrap();
         let outsider_key =
-            ave_common::identity::keys::KeyPair::Ed25519(outsider)
-                .public_key();
-        emit_transfer_timed(api0, t3.clone(), outsider_key).await.unwrap();
+            ave_common::identity::keys::KeyPair::Ed25519(outsider).public_key();
+        emit_transfer_timed(api0, t3.clone(), outsider_key)
+            .await
+            .unwrap();
         t3_records.push(SnRecord {
             sn: 1,
             protocols: "Transfer",
@@ -834,17 +838,18 @@ async fn seed_ledger_db() {
     // Tracker T2: transfer, reject, EOL.
     let mut t2_entry: Option<Value> = None;
     if on(&config, "tracker_transfer_reject_eol") {
-        let (t2, ..) =
-            create_subject_timed(api0, gov.clone(), "Example", "")
-                .await
-                .unwrap();
+        let (t2, ..) = create_subject_timed(api0, gov.clone(), "Example", "")
+            .await
+            .unwrap();
         let mut t2_records = vec![SnRecord {
             sn: 0,
             protocols: "Create",
             success: true,
             gov_version: 2,
         }];
-        emit_transfer_timed(api0, t2.clone(), key1.clone()).await.unwrap();
+        emit_transfer_timed(api0, t2.clone(), key1.clone())
+            .await
+            .unwrap();
         t2_records.push(SnRecord {
             sn: 1,
             protocols: "Transfer",
@@ -890,12 +895,11 @@ async fn seed_ledger_db() {
         gov_version: 2,
     });
     {
-        let fake_key =
-            ave_common::identity::keys::KeyPair::Ed25519(
-                ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
-            )
-            .public_key()
-            .to_string();
+        let fake_key = ave_common::identity::keys::KeyPair::Ed25519(
+            ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
+        )
+        .public_key()
+        .to_string();
         let json = json!({
             "members": {"add": [{"name": "RejectedMember", "key": fake_key}]},
         });
@@ -917,8 +921,9 @@ async fn seed_ledger_db() {
             success: false,
             gov_version: 3,
         });
-        let state =
-            get_subject(api0, gov.clone(), Some(next_sn), true).await.unwrap();
+        let state = get_subject(api0, gov.clone(), Some(next_sn), true)
+            .await
+            .unwrap();
         assert!(
             !state.properties.to_string().contains("RejectedMember"),
             "rejected member must not apply"
@@ -928,12 +933,13 @@ async fn seed_ledger_db() {
     // Failed transfer (outsider without membership): commits
     // failed, ownership never moves, version frozen.
     {
-        let outsider =
-            ave_common::identity::keys::KeyPair::Ed25519(
-                ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
-            )
-            .public_key();
-        emit_transfer_timed(api0, gov.clone(), outsider).await.unwrap();
+        let outsider = ave_common::identity::keys::KeyPair::Ed25519(
+            ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
+        )
+        .public_key();
+        emit_transfer_timed(api0, gov.clone(), outsider)
+            .await
+            .unwrap();
         let next_sn = gov_records.last().expect("gov ran").sn + 1;
         gov_records.push(SnRecord {
             sn: next_sn,
@@ -973,8 +979,9 @@ async fn seed_ledger_db() {
             success: false,
             gov_version: 3,
         });
-        let state =
-            get_subject(api0, gov.clone(), Some(next_sn), true).await.unwrap();
+        let state = get_subject(api0, gov.clone(), Some(next_sn), true)
+            .await
+            .unwrap();
         assert!(
             !state.properties.to_string().contains("SecondSchema"),
             "rejected schema must not apply"
@@ -986,7 +993,9 @@ async fn seed_ledger_db() {
     // syncing past its last driven event), node1 carries the
     // tail, so the manifest reads each sn where it landed
     // (see gov_db).
-    emit_transfer_timed(api0, gov.clone(), key1.clone()).await.unwrap();
+    emit_transfer_timed(api0, gov.clone(), key1.clone())
+        .await
+        .unwrap();
     let next_sn = gov_records.last().expect("gov ran").sn + 1;
     gov_records.push(SnRecord {
         sn: next_sn,
@@ -1053,7 +1062,9 @@ async fn seed_ledger_db() {
             gov_version: 0,
         });
     }
-    emit_transfer_timed(api0, gov2.clone(), key1.clone()).await.unwrap();
+    emit_transfer_timed(api0, gov2.clone(), key1.clone())
+        .await
+        .unwrap();
     gov2_records.push(SnRecord {
         sn: 2,
         protocols: "Transfer",
@@ -1096,12 +1107,11 @@ async fn seed_ledger_db() {
         gov_version: 0,
     }];
     {
-        let charlie_key =
-            ave_common::identity::keys::KeyPair::Ed25519(
-                ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
-            )
-            .public_key()
-            .to_string();
+        let charlie_key = ave_common::identity::keys::KeyPair::Ed25519(
+            ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
+        )
+        .public_key()
+        .to_string();
         let json = json!({
             "members": {"add": [
                 {"name": "AveNode2", "key": api1.public_key()},
@@ -1117,7 +1127,9 @@ async fn seed_ledger_db() {
             gov_version: 0,
         });
     }
-    emit_transfer_timed(api0, gov3.clone(), key1.clone()).await.unwrap();
+    emit_transfer_timed(api0, gov3.clone(), key1.clone())
+        .await
+        .unwrap();
     gov3_records.push(SnRecord {
         sn: 2,
         protocols: "Transfer",
@@ -1173,7 +1185,6 @@ async fn seed_ledger_db() {
         assert_eq!(record.success, success, "gov3 sn {} success", event.sn);
     }
 
-
     // Governance skip (gov5): the tracker below emits at v2,
     // then the governance advances through two oks and two
     // failures to v5 before the tracker emits again. The second
@@ -1182,7 +1193,8 @@ async fn seed_ledger_db() {
     let mut gov_skip_entry: Option<Value> = None;
     let mut skip_entry: Option<Value> = None;
     if on(&config, "gov_skip") {
-        let gov5 = create_and_authorize_governance_timed(api0, vec![api1]).await;
+        let gov5 =
+            create_and_authorize_governance_timed(api0, vec![api1]).await;
         let mut gov5_records = vec![record(0, "Create", true, 0)];
         let json = json!({
             "members": {"add": [{"name": "AveNode2", "key": api1.public_key()}]},
@@ -1197,8 +1209,9 @@ async fn seed_ledger_db() {
             },
         });
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov5.clone(), Some(1), true).await.unwrap();
+        let _ = get_subject(api0, gov5.clone(), Some(1), true)
+            .await
+            .unwrap();
         gov5_records.push(record(1, "GovFact", true, 0));
         let json = json!({
             "roles": {"schema": [{
@@ -1216,21 +1229,19 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov5.clone(), Some(2), true).await.unwrap();
+        let _ = get_subject(api0, gov5.clone(), Some(2), true)
+            .await
+            .unwrap();
         gov5_records.push(record(2, "GovFact", true, 1));
 
-        let (tsk, ..) =
-            create_subject_timed(api0, gov5.clone(), "Example", "")
-                .await
-                .unwrap();
+        let (tsk, ..) = create_subject_timed(api0, gov5.clone(), "Example", "")
+            .await
+            .unwrap();
         let mut tsk_records = vec![record(0, "Create", true, 2)];
         emit_fact_timed(api0, tsk.clone(), json!({"ModOne": {"data": 10}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tsk.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tsk.clone(), Some(1), true).await.unwrap();
         tsk_records.push(record(1, "TrackerFactFull", true, 2));
 
         // Gov advances underneath: ok, failed compile, failed eval,
@@ -1242,8 +1253,9 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov5.clone(), Some(3), true).await.unwrap();
+        let _ = get_subject(api0, gov5.clone(), Some(3), true)
+            .await
+            .unwrap();
         gov5_records.push(record(3, "GovFact", true, 2));
         let json = json!({
             "schemas": {"change": [{
@@ -1264,13 +1276,11 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
         gov5_records.push(record(5, "GovFact", false, 3));
         for name in ["Charlie", "Dave"] {
-            let member_key =
-                ave_common::identity::keys::KeyPair::Ed25519(
-                    ave_common::identity::keys::Ed25519Signer::generate()
-                        .unwrap(),
-                )
-                .public_key()
-                .to_string();
+            let member_key = ave_common::identity::keys::KeyPair::Ed25519(
+                ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
+            )
+            .public_key()
+            .to_string();
             let json = json!({
                 "members": {"add": [{"name": name, "key": member_key}]},
             });
@@ -1291,9 +1301,7 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, tsk.clone(), json!({"ModOne": {"data": 11}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tsk.clone(), Some(2), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tsk.clone(), Some(2), true).await.unwrap();
         tsk_records.push(record(2, "TrackerFactFull", true, 5));
         // Version churn on the proven compiler (this gov compiled
         // its V2 change cleanly): Second joins (new shape, default
@@ -1308,25 +1316,20 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov5.clone(), Some(8), true).await.unwrap();
+        let _ = get_subject(api0, gov5.clone(), Some(8), true)
+            .await
+            .unwrap();
         gov5_records.push(record(8, "GovFact", true, 5));
         emit_fact_timed(api0, tsk.clone(), json!({"ModOne": {"data": 12}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tsk.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tsk.clone(), Some(3), true).await.unwrap();
         tsk_records.push(record(3, "TrackerFactFull", true, 6));
         // V2 has no 50-guard on three: the same payload contract A
         // rejects commits fine under V2 (version discriminator).
-        emit_fact_timed(
-            api0,
-            tsk.clone(),
-            json!({"ModThree": {"data": 50}})
-        )
-        .await
-        .unwrap();
+        emit_fact_timed(api0, tsk.clone(), json!({"ModThree": {"data": 50}}))
+            .await
+            .unwrap();
         let state =
             get_subject(api0, tsk.clone(), Some(4), true).await.unwrap();
         assert_eq!(
@@ -1344,8 +1347,9 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov5.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov5.clone(), Some(9), true).await.unwrap();
+        let _ = get_subject(api0, gov5.clone(), Some(9), true)
+            .await
+            .unwrap();
         gov5_records.push(record(9, "GovFact", true, 6));
         // Failed fact at the tip keeps state; recovery after.
         emit_fact_timed(api0, tsk.clone(), json!({"ModOne": {"data": "xx"}}))
@@ -1362,37 +1366,27 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, tsk.clone(), json!({"ModOne": {"data": 13}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tsk.clone(), Some(6), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tsk.clone(), Some(6), true).await.unwrap();
         tsk_records.push(record(6, "TrackerFactFull", true, 7));
-        for event in
-            get_events(api0, gov5.clone(), gov5_records.len(), true)
-                .await
-                .unwrap()
+        for event in get_events(api0, gov5.clone(), gov5_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &gov5_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "gov5 sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "gov5 sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "gov5 sn {} success", event.sn);
         }
-        for event in
-            get_events(api0, tsk.clone(), tsk_records.len(), true).await.unwrap()
+        for event in get_events(api0, tsk.clone(), tsk_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &tsk_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "tsk sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "tsk sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "tsk sn {} success", event.sn);
         }
         gov_skip_entry = Some(serde_json::json!({
             "name": "gov_skip",
@@ -1421,7 +1415,8 @@ async fn seed_ledger_db() {
     let mut gov_churn_entry: Option<Value> = None;
     let mut churn_entry: Option<Value> = None;
     if on(&config, "gov_churn") {
-        let gov7 = create_and_authorize_governance_timed(api0, vec![api1]).await;
+        let gov7 =
+            create_and_authorize_governance_timed(api0, vec![api1]).await;
         let mut gov7_records = vec![record(0, "Create", true, 0)];
         let json = json!({
             "members": {"add": [{"name": "AveNode2", "key": api1.public_key()}]},
@@ -1436,8 +1431,9 @@ async fn seed_ledger_db() {
             },
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(1), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(1), true)
+            .await
+            .unwrap();
         gov7_records.push(record(1, "GovFact", true, 0));
         let json = json!({
             "roles": {"schema": [{
@@ -1455,21 +1451,19 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(2), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(2), true)
+            .await
+            .unwrap();
         gov7_records.push(record(2, "GovFact", true, 1));
 
-        let (tch, ..) =
-            create_subject_timed(api0, gov7.clone(), "Example", "")
-                .await
-                .unwrap();
+        let (tch, ..) = create_subject_timed(api0, gov7.clone(), "Example", "")
+            .await
+            .unwrap();
         let mut tch_records = vec![record(0, "Create", true, 2)];
         emit_fact_timed(api0, tch.clone(), json!({"ModOne": {"data": 20}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tch.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tch.clone(), Some(1), true).await.unwrap();
         tch_records.push(record(1, "TrackerFactFull", true, 2));
 
         // Change Example A -> V2 as third fact.
@@ -1480,15 +1474,14 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(3), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(3), true)
+            .await
+            .unwrap();
         gov7_records.push(record(3, "GovFact", true, 2));
         emit_fact_timed(api0, tch.clone(), json!({"ModOne": {"data": 21}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tch.clone(), Some(2), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tch.clone(), Some(2), true).await.unwrap();
         tch_records.push(record(2, "TrackerFactFull", true, 3));
 
         // Chain back V2 -> A.
@@ -1499,8 +1492,9 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(4), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(4), true)
+            .await
+            .unwrap();
         gov7_records.push(record(4, "GovFact", true, 3));
 
         // Second joins with a new shape.
@@ -1513,26 +1507,21 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(5), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(5), true)
+            .await
+            .unwrap();
         gov7_records.push(record(5, "GovFact", true, 4));
         emit_fact_timed(api0, tch.clone(), json!({"ModOne": {"data": 22}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tch.clone(), Some(3), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tch.clone(), Some(3), true).await.unwrap();
         tch_records.push(record(3, "TrackerFactFull", true, 5));
 
         // Contract-logic failure under A: three = 50 is rejected,
         // state does not move.
-        emit_fact_timed(
-            api0,
-            tch.clone(),
-            json!({"ModThree": {"data": 50}})
-        )
-        .await
-        .unwrap();
+        emit_fact_timed(api0, tch.clone(), json!({"ModThree": {"data": 50}}))
+            .await
+            .unwrap();
         let state =
             get_subject(api0, tch.clone(), Some(4), true).await.unwrap();
         assert_eq!(
@@ -1564,17 +1553,16 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov7.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov7.clone(), Some(6), true).await.unwrap();
+        let _ = get_subject(api0, gov7.clone(), Some(6), true)
+            .await
+            .unwrap();
         gov7_records.push(record(6, "GovFact", true, 5));
         for name in ["Charlie", "Dave"] {
-            let member_key =
-                ave_common::identity::keys::KeyPair::Ed25519(
-                    ave_common::identity::keys::Ed25519Signer::generate()
-                        .unwrap(),
-                )
-                .public_key()
-                .to_string();
+            let member_key = ave_common::identity::keys::KeyPair::Ed25519(
+                ave_common::identity::keys::Ed25519Signer::generate().unwrap(),
+            )
+            .public_key()
+            .to_string();
             let json = json!({
                 "members": {"add": [{"name": name, "key": member_key}]},
             });
@@ -1592,37 +1580,27 @@ async fn seed_ledger_db() {
         emit_fact_timed(api0, tch.clone(), json!({"ModOne": {"data": 23}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tch.clone(), Some(5), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tch.clone(), Some(5), true).await.unwrap();
         tch_records.push(record(5, "TrackerFactFull", true, 8));
-        for event in
-            get_events(api0, gov7.clone(), gov7_records.len(), true)
-                .await
-                .unwrap()
+        for event in get_events(api0, gov7.clone(), gov7_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &gov7_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "gov7 sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "gov7 sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "gov7 sn {} success", event.sn);
         }
-        for event in
-            get_events(api0, tch.clone(), tch_records.len(), true).await.unwrap()
+        for event in get_events(api0, tch.clone(), tch_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &tch_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "tch sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "tch sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "tch sn {} success", event.sn);
         }
         gov_churn_entry = Some(serde_json::json!({
             "name": "gov_churn",
@@ -1651,7 +1629,9 @@ async fn seed_ledger_db() {
     let mut postopaque_entry: Option<Value> = None;
     let mut gov6_entry: Option<Value> = None;
     if on(&config, "tracker_postopaque_tx") {
-        let gov6 = create_and_authorize_governance_timed(api0, vec![api1, &node2.api]).await;
+        let gov6 =
+            create_and_authorize_governance_timed(api0, vec![api1, &node2.api])
+                .await;
         let mut gov6_records = vec![record(0, "Create", true, 0)];
         let json = json!({
             "members": {"add": [
@@ -1669,8 +1649,9 @@ async fn seed_ledger_db() {
             },
         });
         emit_fact_timed(api0, gov6.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov6.clone(), Some(1), true).await.unwrap();
+        let _ = get_subject(api0, gov6.clone(), Some(1), true)
+            .await
+            .unwrap();
         gov6_records.push(record(1, "GovFact", true, 0));
         let json = json!({
             "roles": {"schema": [{
@@ -1700,29 +1681,26 @@ async fn seed_ledger_db() {
             }]},
         });
         emit_fact_timed(api0, gov6.clone(), json).await.unwrap();
-        let _ =
-            get_subject(api0, gov6.clone(), Some(2), true).await.unwrap();
+        let _ = get_subject(api0, gov6.clone(), Some(2), true)
+            .await
+            .unwrap();
         gov6_records.push(record(2, "GovFact", true, 1));
 
-        let (tpt, ..) =
-            create_subject_timed(api0, gov6.clone(), "Example", "")
-                .await
-                .unwrap();
+        let (tpt, ..) = create_subject_timed(api0, gov6.clone(), "Example", "")
+            .await
+            .unwrap();
         let mut tpt_records = vec![record(0, "Create", true, 2)];
         emit_fact_timed(api0, tpt.clone(), json!({"ModOne": {"data": 1}}))
             .await
             .unwrap();
-        let _ = get_subject(api0, tpt.clone(), Some(1), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tpt.clone(), Some(1), true).await.unwrap();
         tpt_records.push(record(1, "TrackerFactFull", true, 2));
-        api1
-            .authorize_governance(
-                tpt.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
-            )
-            .await
-            .unwrap();
+        api1.authorize_governance(
+            tpt.clone(),
+            AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
         api1.update_subject(tpt.clone()).await.unwrap();
         // Second follower (member + creator + witness, holding
         // basura): mirrors unheld facts opaque, held ones full.
@@ -1730,7 +1708,9 @@ async fn seed_ledger_db() {
             .api
             .authorize_governance(
                 tpt.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(api0.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -1743,7 +1723,9 @@ async fn seed_ledger_db() {
             .api
             .authorize_governance(
                 tpt.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(api0.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -1751,26 +1733,22 @@ async fn seed_ledger_db() {
             api0,
             tpt.clone(),
             json!({"ModOne": {"data": 2}}),
-            BTreeSet::from(["agua".to_owned()])
+            BTreeSet::from(["agua".to_owned()]),
         )
         .await
         .unwrap();
-        let _ = get_subject(api0, tpt.clone(), Some(2), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api0, tpt.clone(), Some(2), true).await.unwrap();
         tpt_records.push(record(2, "TrackerFactFull", true, 2));
         // Handover while locally full (must precede any opaque
         // fact: handover ops require a full ledger).
-        emit_transfer_timed(api0, tpt.clone(), key1.clone()).await.unwrap();
-        tpt_records.push(record(3, "Transfer", true, 2));
-        let _ = get_subject(api1, tpt.clone(), Some(3), true)
+        emit_transfer_timed(api0, tpt.clone(), key1.clone())
             .await
             .unwrap();
+        tpt_records.push(record(3, "Transfer", true, 2));
+        let _ = get_subject(api1, tpt.clone(), Some(3), true).await.unwrap();
         emit_confirm_timed(api1, tpt.clone(), None).await.unwrap();
         tpt_records.push(record(4, "TrackerConfirm", true, 2));
-        let _ = get_subject(api1, tpt.clone(), Some(4), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api1, tpt.clone(), Some(4), true).await.unwrap();
         // Unheld viewpoint, emitted by the new owner (has
         // creator role): full bytes stay with the emitter (like
         // the legacy opaque subject). Followers without the
@@ -1779,7 +1757,7 @@ async fn seed_ledger_db() {
             api1,
             tpt.clone(),
             json!({"ModOne": {"data": 3}}),
-            BTreeSet::from(["basura".to_owned()])
+            BTreeSet::from(["basura".to_owned()]),
         )
         .await
         .unwrap();
@@ -1826,9 +1804,7 @@ async fn seed_ledger_db() {
             .await
             .unwrap();
         tpt_records.push(record(6, "Transfer", true, 2));
-        let _ = get_subject(api1, tpt.clone(), Some(6), true)
-            .await
-            .unwrap();
+        let _ = get_subject(api1, tpt.clone(), Some(6), true).await.unwrap();
         let _ = get_subject(&node2.api, tpt.clone(), Some(6), true)
             .await
             .unwrap();
@@ -1888,16 +1864,15 @@ async fn seed_ledger_db() {
             .api
             .authorize_governance(
                 tpt.clone(),
-                AuthWitness::One(PublicKey::from_str(api0.public_key()).unwrap()),
+                AuthWitness::One(
+                    PublicKey::from_str(api0.public_key()).unwrap(),
+                ),
             )
             .await
             .unwrap();
-        budgeted(
-            "node2 refetch tpt",
-            node2.api.update_subject(tpt.clone()),
-        )
-        .await
-        .unwrap();
+        budgeted("node2 refetch tpt", node2.api.update_subject(tpt.clone()))
+            .await
+            .unwrap();
         // Catch-up after reboot needs peer discovery first: retry
         // the barrier (fresh 30s budget each round) instead of
         // failing on the first quiet window.
@@ -1917,7 +1892,9 @@ async fn seed_ledger_db() {
         let _ = get_subject(&node2.api, tpt.clone(), Some(6), true)
             .await
             .unwrap();
-        emit_confirm_timed(&node2.api, tpt.clone(), None).await.unwrap();
+        emit_confirm_timed(&node2.api, tpt.clone(), None)
+            .await
+            .unwrap();
         tpt_records.push(record(7, "TrackerConfirm", true, 2));
         let _ = get_subject(&node2.api, tpt.clone(), Some(7), true)
             .await
@@ -1927,33 +1904,25 @@ async fn seed_ledger_db() {
         let _ = get_subject(&node2.api, tpt.clone(), Some(8), true)
             .await
             .unwrap();
-        for event in
-            get_events(api0, gov6.clone(), gov6_records.len(), true)
-                .await
-                .unwrap()
+        for event in get_events(api0, gov6.clone(), gov6_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &gov6_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "gov6 sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "gov6 sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "gov6 sn {} success", event.sn);
         }
-        for event in
-            get_events(api1, tpt.clone(), tpt_records.len(), true).await.unwrap()
+        for event in get_events(api1, tpt.clone(), tpt_records.len(), true)
+            .await
+            .unwrap()
         {
             let (protocols, success) = protocols_of(&event.event);
             let record = &tpt_records[event.sn as usize];
             assert_eq!(record.sn, event.sn);
             assert_eq!(record.protocols, protocols, "tpt sn {}", event.sn);
-            assert_eq!(
-                record.success, success,
-                "tpt sn {} success",
-                event.sn
-            );
+            assert_eq!(record.success, success, "tpt sn {} success", event.sn);
         }
         postopaque_entry = Some(serde_json::json!({
             "name": "tracker_postopaque_tx",

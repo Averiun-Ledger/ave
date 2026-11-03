@@ -655,9 +655,7 @@ impl TestDbExt for AuthDatabase {
         match self.revoke_api_key_transactional(
             key_id, revoked_by, reason, None, None, false,
         ) {
-            Err(
-                ave_http::auth::database::DatabaseError::NotFound(_),
-            ) => Ok(()),
+            Err(ave_http::auth::database::DatabaseError::NotFound(_)) => Ok(()),
             other => other,
         }
     }

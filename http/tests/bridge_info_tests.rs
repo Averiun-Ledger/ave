@@ -12,16 +12,14 @@ use utoipa::OpenApi;
 
 use ave_bridge::ave_common::{
     DataToSinkEvent, SchemaType,
-    bridge::request::{
-        ActorTreeQuery, ApprovalState, SinkDeliveriesQuery,
-    },
+    bridge::request::{ActorTreeQuery, ApprovalState, SinkDeliveriesQuery},
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
         ActorTreeNodeView, ActorTreeResponse, ApprovalEntry, CompResDB,
         EvalResDB, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
         RequestData, RequestEventDB, RequestInfo, RequestInfoExtend,
-        RequestState, SinkDeliveryState, SinkEventsPage, SubjectDB,
-        SubjsData, TransferSubject, WatchdogIncidentRow,
+        RequestState, SinkDeliveryState, SinkEventsPage, SubjectDB, SubjsData,
+        TransferSubject, WatchdogIncidentRow,
     },
 };
 use reqwest::Client;
@@ -638,7 +636,8 @@ async fn test_approval_rejects_stale_identity() {
     .await;
     let _request_data: RequestData = serde_json::from_value(body).unwrap();
 
-    let approval_a = poll_pending(&client, &server, &request_data.subject_id).await;
+    let approval_a =
+        poll_pending(&client, &server, &request_data.subject_id).await;
     assert!(!approval_a.request_id.is_empty());
 
     // An unknown identity never matches: 409, nothing voted.
@@ -728,7 +727,8 @@ async fn test_approval_rejects_stale_identity() {
     assert!(status.is_success(), "governance fact failed: {body}");
     let _request_data: RequestData = serde_json::from_value(body).unwrap();
 
-    let approval_b = poll_pending(&client, &server, &request_data.subject_id).await;
+    let approval_b =
+        poll_pending(&client, &server, &request_data.subject_id).await;
     assert_ne!(
         (
             approval_b.request_id.clone(),
@@ -2141,14 +2141,19 @@ async fn test_subject_deserialization() {
     ] {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!("/subjects/{}/events?{}", governance_id, filter)),
+            &server2
+                .url(&format!("/subjects/{}/events?{}", governance_id, filter)),
             "GET",
             None,
             None,
         )
         .await;
         assert!(status.is_success(), "{filter}: {body}");
-        assert_eq!(body["events"], serde_json::Value::Array(vec![]), "{filter}");
+        assert_eq!(
+            body["events"],
+            serde_json::Value::Array(vec![]),
+            "{filter}"
+        );
     }
 
     // Full range with every filter at once -> all 7 events, typed.
@@ -2214,10 +2219,8 @@ async fn test_subject_deserialization() {
     ] {
         let (status, body) = make_request(
             &client,
-            &server2.url(&format!(
-                "/subjects/{}/aborts?{}",
-                governance_id, query
-            )),
+            &server2
+                .url(&format!("/subjects/{}/aborts?{}", governance_id, query)),
             "GET",
             None,
             None,
@@ -3014,8 +3017,10 @@ async fn test_actor_tree_snapshot_filter_and_truncation() {
         make_request(&client, &server.url("/actor-tree"), "GET", None, None)
             .await;
     assert!(status.is_success(), "GET /actor-tree failed: {body}");
-    let total =
-        body.pointer("/total").and_then(serde_json::Value::as_u64).unwrap();
+    let total = body
+        .pointer("/total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
     let nodes = body
         .pointer("/nodes")
         .and_then(serde_json::Value::as_array)
@@ -3045,7 +3050,10 @@ async fn test_actor_tree_snapshot_filter_and_truncation() {
     assert_eq!(body.pointer("/truncated"), Some(&json!(true)));
     assert_eq!(body.pointer("/total"), Some(&json!(total)));
     assert_eq!(
-        body.pointer("/nodes").and_then(Value::as_array).unwrap().len(),
+        body.pointer("/nodes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -3175,8 +3183,7 @@ fn test_actor_tree_and_deliveries_deserialization() {
     assert_eq!(query.subject.as_deref(), Some("s"));
     assert_eq!(query.limit, Some(10));
 
-    let query: SinkDeliveriesQuery =
-        serde_json::from_value(json!({})).unwrap();
+    let query: SinkDeliveriesQuery = serde_json::from_value(json!({})).unwrap();
     assert_eq!(query.subject, None);
     assert_eq!(query.sink, None);
 
@@ -3269,7 +3276,10 @@ fn test_request_event_db_all_variants_deserialize() {
                     event,
                     RequestEventDB::TrackerFactFull { .. }
                 ));
-                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Fact
+                ));
             },
         ),
         (
@@ -3285,7 +3295,10 @@ fn test_request_event_db_all_variants_deserialize() {
                     event,
                     RequestEventDB::TrackerFactOpaque { .. }
                 ));
-                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Fact
+                ));
             },
         ),
         (
@@ -3304,11 +3317,11 @@ fn test_request_event_db_all_variants_deserialize() {
                 },
             }),
             |event| {
+                assert!(matches!(event, RequestEventDB::GovernanceFact { .. }));
                 assert!(matches!(
-                    event,
-                    RequestEventDB::GovernanceFact { .. }
+                    event.get_event_type(),
+                    EventRequestType::Fact
                 ));
-                assert!(matches!(event.get_event_type(), EventRequestType::Fact));
             },
         ),
         (
@@ -3327,16 +3340,13 @@ fn test_request_event_db_all_variants_deserialize() {
                 ));
             },
         ),
-        (
-            json!({"event": "tracker_confirm"}),
-            |event| {
-                assert!(matches!(event, RequestEventDB::TrackerConfirm));
-                assert!(matches!(
-                    event.get_event_type(),
-                    EventRequestType::Confirm
-                ));
-            },
-        ),
+        (json!({"event": "tracker_confirm"}), |event| {
+            assert!(matches!(event, RequestEventDB::TrackerConfirm));
+            assert!(matches!(
+                event.get_event_type(),
+                EventRequestType::Confirm
+            ));
+        }),
         (
             json!({
                 "event": "governance_confirm",
@@ -3356,20 +3366,14 @@ fn test_request_event_db_all_variants_deserialize() {
                 ));
             },
         ),
-        (
-            json!({"event": "reject"}),
-            |event| {
-                assert!(matches!(event, RequestEventDB::Reject));
-                assert!(matches!(event.get_event_type(), EventRequestType::Reject));
-            },
-        ),
-        (
-            json!({"event": "e_o_l"}),
-            |event| {
-                assert!(matches!(event, RequestEventDB::EOL));
-                assert!(matches!(event.get_event_type(), EventRequestType::Eol));
-            },
-        ),
+        (json!({"event": "reject"}), |event| {
+            assert!(matches!(event, RequestEventDB::Reject));
+            assert!(matches!(event.get_event_type(), EventRequestType::Reject));
+        }),
+        (json!({"event": "e_o_l"}), |event| {
+            assert!(matches!(event, RequestEventDB::EOL));
+            assert!(matches!(event.get_event_type(), EventRequestType::Eol));
+        }),
     ];
     assert_eq!(cases.len(), 9);
     for (body, check) in cases {
@@ -3395,7 +3399,8 @@ fn test_request_event_db_all_variants_deserialize() {
     // Every request state round-trips (terminal or not).
     let states = vec![
         json!("InQueue"),
-        json!("Handling"),        json!({"Invalid": {
+        json!("Handling"),
+        json!({"Invalid": {
             "subject_id": "s",
             "who": "w",
             "sn": 1,

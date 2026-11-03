@@ -40,9 +40,7 @@ use crate::model::{
     },
 };
 
-use crate::{
-    governance::role_register::RoleDataRegister, validation::Check,
-};
+use crate::{governance::role_register::RoleDataRegister, validation::Check};
 
 use anyhow::{Result, bail};
 
@@ -877,11 +875,8 @@ pub fn check_witness_evaluation(
     if signers.is_empty() {
         bail!("no witness evaluator signatures");
     }
-    if !check_quorum_signers(
-        &signers,
-        &eval_roles.quorum,
-        &eval_roles.workers,
-    ) {
+    if !check_quorum_signers(&signers, &eval_roles.quorum, &eval_roles.workers)
+    {
         bail!("witness evaluator quorum not reached");
     }
     Ok(Check {
@@ -914,11 +909,8 @@ pub fn check_opaque_evaluation(
     if signers.is_empty() {
         bail!("no opaque evaluator signatures");
     }
-    if !check_quorum_signers(
-        &signers,
-        &eval_roles.quorum,
-        &eval_roles.workers,
-    ) {
+    if !check_quorum_signers(&signers, &eval_roles.quorum, &eval_roles.workers)
+    {
         bail!("opaque evaluator quorum not reached");
     }
     Ok(Check {

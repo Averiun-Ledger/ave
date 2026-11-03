@@ -756,11 +756,11 @@ async fn test_cleanup_retains_counters_within_active_window() {
         .unwrap()
         .as_secs() as i64;
     {
-        let conn = ave_actors::rusqlite::Connection::open(
-            dirs.path().join("auth.db"),
-        )
-        .expect("open auth.db");
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let conn =
+            ave_actors::rusqlite::Connection::open(dirs.path().join("auth.db"))
+                .expect("open auth.db");
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         conn.execute(
             "UPDATE rate_limits SET window_start = ?1 WHERE api_key_id = ?2",
             ave_actors::rusqlite::params![now - 7200, key_info.id],
@@ -793,8 +793,12 @@ async fn test_update_system_config_rejects_short_retention() {
     ));
 
     // A retention covering the window is accepted.
-    db.update_system_config("rate_limit_cleanup_interval_seconds", "7200", Some(1))
-        .unwrap();
+    db.update_system_config(
+        "rate_limit_cleanup_interval_seconds",
+        "7200",
+        Some(1),
+    )
+    .unwrap();
 }
 
 #[test(tokio::test)]
@@ -2700,7 +2704,13 @@ async fn concurrent_management_key_issuance_leaves_a_single_active_key() {
 async fn test_rotate_revoked_key_is_rejected() {
     let (db, _dirs) = create_test_db();
     let user = db
-        .create_user("rot_revoked_user", "TestPass123!", None, None, Some(false))
+        .create_user(
+            "rot_revoked_user",
+            "TestPass123!",
+            None,
+            None,
+            Some(false),
+        )
         .unwrap();
 
     let (_api_key, key_info) = db
@@ -2722,7 +2732,8 @@ async fn test_rotate_revoked_key_is_rejected() {
 
     rotate(&key_info.id).unwrap();
 
-    let err = rotate(&key_info.id).expect_err("rotating a revoked key must fail");
+    let err =
+        rotate(&key_info.id).expect_err("rotating a revoked key must fail");
     let message = err.to_string();
     assert!(
         message.contains("revoked"),
@@ -2808,7 +2819,8 @@ async fn test_quota_boundary_math_no_overflow() {
     let (api_key, key_info) = db
         .create_api_key(user.id, Some("quota_max_key"), None, None, false)
         .unwrap();
-    db.create_usage_plan("max_plan", "Max plan", None, MAX).unwrap();
+    db.create_usage_plan("max_plan", "Max plan", None, MAX)
+        .unwrap();
     db.assign_api_key_plan(&key_info.id, Some("max_plan"), Some(1))
         .unwrap();
     db.add_quota_extension(&key_info.id, MAX, None, Some("top-up"), Some(1))
@@ -2821,7 +2833,8 @@ async fn test_quota_boundary_math_no_overflow() {
         "boundary plan plus extension must add up exactly"
     );
 
-    db.authenticate_api_key_request(&api_key, None, "/peer-id").unwrap();
+    db.authenticate_api_key_request(&api_key, None, "/peer-id")
+        .unwrap();
     let status = db.get_api_key_quota_status(&key_info.id, None).unwrap();
     assert_eq!(status.used_events, 1);
     assert_eq!(status.effective_limit, Some(MAX + MAX));

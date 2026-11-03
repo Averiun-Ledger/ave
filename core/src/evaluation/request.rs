@@ -1,7 +1,5 @@
-use crate::{
-    evaluation::{
-        response::EvaluatorError, runner::types::EvaluateInfo,
-    },
+use crate::evaluation::{
+    response::EvaluatorError, runner::types::EvaluateInfo,
 };
 
 use ave_common::{
@@ -208,10 +206,7 @@ pub fn build_evaluate_info(
     worker_context: &EvalWorkerContext,
 ) -> Result<EvaluateInfo, EvaluatorError> {
     match (req.event_request.content(), &req.data) {
-        (
-            EventRequest::Fact(fact_request),
-            EvaluateData::GovFact { state },
-        ) => {
+        (EventRequest::Fact(fact_request), EvaluateData::GovFact { state }) => {
             EvaluationReq::validate_fact_viewpoints(
                 &fact_request.viewpoints,
                 &req.schema_id,
@@ -234,13 +229,11 @@ pub fn build_evaluate_info(
             },
             |init_state| {
                 let EvalWorkerContext::TrackerFact {
-                    schema_viewpoints,
-                    ..
+                    schema_viewpoints, ..
                 } = worker_context
                 else {
                     return Err(EvaluatorError::InternalError(
-                        "Tracker fact evaluation context is missing"
-                            .to_owned(),
+                        "Tracker fact evaluation context is missing".to_owned(),
                     ));
                 };
 
@@ -276,8 +269,7 @@ pub fn build_evaluate_info(
                 worker_context
             else {
                 return Err(EvaluatorError::InternalError(
-                    "Tracker transfer evaluation context is missing"
-                        .to_owned(),
+                    "Tracker transfer evaluation context is missing".to_owned(),
                 ));
             };
 
@@ -308,12 +300,12 @@ pub fn build_evaluate_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::governance::data::GovernanceData;
     use ave_common::identity::{
         Signed,
         keys::{Ed25519Signer, KeyPair},
     };
     use ave_common::{SchemaType, identity::DigestIdentifier};
-    use crate::governance::data::GovernanceData;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -343,8 +335,9 @@ mod tests {
             signer_is_owner: true,
         };
 
-        let error =         build_evaluate_info(&req,  &None, &EvalWorkerContext::default())
-            .unwrap_err();
+        let error =
+            build_evaluate_info(&req, &None, &EvalWorkerContext::default())
+                .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
@@ -374,18 +367,19 @@ mod tests {
             signer_is_owner: true,
         };
 
-        let error =         build_evaluate_info(&req,  
-                &Some(ValueWrapper(json!({}))),
-                &EvalWorkerContext::TrackerFact {
-                    issuers: BTreeSet::new(),
-                    issuer_any: false,
-                    schema_viewpoints: BTreeSet::from([
-                        "agua".to_owned(),
-                        "basura".to_owned(),
-                    ]),
-                },
-            )
-            .unwrap_err();
+        let error = build_evaluate_info(
+            &req,
+            &Some(ValueWrapper(json!({}))),
+            &EvalWorkerContext::TrackerFact {
+                issuers: BTreeSet::new(),
+                issuer_any: false,
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+        )
+        .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
@@ -415,18 +409,19 @@ mod tests {
             signer_is_owner: true,
         };
 
-        let error =         build_evaluate_info(&req,  
-                &Some(ValueWrapper(json!({}))),
-                &EvalWorkerContext::TrackerFact {
-                    issuers: BTreeSet::new(),
-                    issuer_any: false,
-                    schema_viewpoints: BTreeSet::from([
-                        "agua".to_owned(),
-                        "basura".to_owned(),
-                    ]),
-                },
-            )
-            .unwrap_err();
+        let error = build_evaluate_info(
+            &req,
+            &Some(ValueWrapper(json!({}))),
+            &EvalWorkerContext::TrackerFact {
+                issuers: BTreeSet::new(),
+                issuer_any: false,
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+        )
+        .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 
@@ -456,18 +451,19 @@ mod tests {
             signer_is_owner: true,
         };
 
-        let error =         build_evaluate_info(&req,  
-                &Some(ValueWrapper(json!({}))),
-                &EvalWorkerContext::TrackerFact {
-                    issuers: BTreeSet::new(),
-                    issuer_any: false,
-                    schema_viewpoints: BTreeSet::from([
-                        "agua".to_owned(),
-                        "basura".to_owned(),
-                    ]),
-                },
-            )
-            .unwrap_err();
+        let error = build_evaluate_info(
+            &req,
+            &Some(ValueWrapper(json!({}))),
+            &EvalWorkerContext::TrackerFact {
+                issuers: BTreeSet::new(),
+                issuer_any: false,
+                schema_viewpoints: BTreeSet::from([
+                    "agua".to_owned(),
+                    "basura".to_owned(),
+                ]),
+            },
+        )
+        .unwrap_err();
         assert!(matches!(error, EvaluatorError::InvalidEventRequest(_)));
     }
 }

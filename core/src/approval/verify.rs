@@ -27,11 +27,7 @@ use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
     governance::role_register::RoleDataRegister,
     subject::Metadata,
-    validation::{
-        Check,
-        response::ValidatorError,
-        worker::check_approval_req,
-    },
+    validation::{Check, response::ValidatorError, worker::check_approval_req},
 };
 
 use anyhow::{Result, bail};

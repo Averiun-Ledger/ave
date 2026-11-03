@@ -514,16 +514,13 @@ impl Handler<Self> for ApprPersist {
                         request_id: self.request_id.clone(),
                         version: self.version,
                     };
-                    state.map_or_else(
-                        entry,
-                        |query| {
-                            if &query == req_state {
-                                entry()
-                            } else {
-                                ApprPersistResponse::Ok
-                            }
-                        },
-                    )
+                    state.map_or_else(entry, |query| {
+                        if &query == req_state {
+                            entry()
+                        } else {
+                            ApprPersistResponse::Ok
+                        }
+                    })
                 } else {
                     ApprPersistResponse::Ok
                 };
@@ -586,8 +583,7 @@ impl Handler<Self> for ApprPersist {
                         "Approval request not found"
                     );
                     return Err(ActorError::Functional {
-                        description: "Can not get approval request"
-                            .to_owned(),
+                        description: "Can not get approval request".to_owned(),
                     });
                 };
 
@@ -613,10 +609,7 @@ impl Handler<Self> for ApprPersist {
                     return Ok(ApprPersistResponse::Conflict {
                         request_id: self.request_id.clone(),
                         version: self.version,
-                        issued_at: approval_req
-                            .content()
-                            .issued_at
-                            .as_nanos(),
+                        issued_at: approval_req.content().issued_at.as_nanos(),
                     });
                 }
 

@@ -650,8 +650,8 @@ impl CompilerServer {
         // frozen set, so no `--locked` here; the build is still
         // bounded — a hung cargo must not hold a semaphore slot
         // forever.
-        let source = pipeline::decode_contract_source(source_b64)
-            .map_err(|e| {
+        let source =
+            pipeline::decode_contract_source(source_b64).map_err(|e| {
                 status_for_build_error(
                     &crate::compilation::error::CompilerError::from(e),
                 )
@@ -800,8 +800,7 @@ impl CompilerService for CompilerServer {
             )));
         }
 
-        let toolchain_fingerprint =
-            self.fingerprint_for(&toolchain).await?;
+        let toolchain_fingerprint = self.fingerprint_for(&toolchain).await?;
         let hash = self.inner.hash;
         let source_hash =
             hash_borsh(&*hash.hasher(), &source_b64).map_err(|e| {
@@ -1073,9 +1072,7 @@ mod tests {
         let map = tokio::sync::Mutex::new(HashMap::new());
         let (_sender, receiver) =
             tokio::sync::watch::channel::<Option<SharedBuild>>(None);
-        map.lock()
-            .await
-            .insert("key".to_string(), receiver);
+        map.lock().await.insert("key".to_string(), receiver);
         {
             let _guard = LeaderEntryGuard {
                 in_flight: &map,
@@ -1090,9 +1087,7 @@ mod tests {
         let map = tokio::sync::Mutex::new(HashMap::new());
         let (_sender, receiver) =
             tokio::sync::watch::channel::<Option<SharedBuild>>(None);
-        map.lock()
-            .await
-            .insert("key".to_string(), receiver);
+        map.lock().await.insert("key".to_string(), receiver);
         {
             let _guard = LeaderEntryGuard {
                 in_flight: &map,

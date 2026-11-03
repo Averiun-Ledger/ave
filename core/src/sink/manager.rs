@@ -945,10 +945,7 @@ impl Handler<Self> for SinkManager {
                 let response = self.handle_replay_events(requests, ctx).await?;
                 return Ok(SinkManagerResponse::ReplayResult(response));
             }
-            SinkManagerMessage::ReviewSubject {
-                subject_id,
-                tip_sn,
-            } => {
+            SinkManagerMessage::ReviewSubject { subject_id, tip_sn } => {
                 let response =
                     self.handle_review_subject(subject_id, tip_sn, ctx).await?;
                 return Ok(SinkManagerResponse::SubjectReview(response));
@@ -1265,7 +1262,10 @@ impl SinkManager {
     /// configured sinks crossed with every subject this manager
     /// knows (delivered, seen or lagging). Pure reads, sorted for
     /// stable output.
-    fn delivery_cursors(&self, subject: Option<&str>) -> Vec<SubjectDeliveryCursor> {
+    fn delivery_cursors(
+        &self,
+        subject: Option<&str>,
+    ) -> Vec<SubjectDeliveryCursor> {
         let mut subjects: BTreeSet<String> = BTreeSet::new();
         subjects.extend(self.cursors.keys().map(|(_, id)| id.clone()));
         subjects.extend(self.last_seen.keys().cloned());
@@ -2505,16 +2505,14 @@ impl SinkManager {
         ctx: &mut ActorContext<Self>,
     ) -> Result<Vec<SubjectSinkReview>, ActorError> {
         let mut out = Vec::new();
-        let sinks: Vec<String> =
-            self.sink_servers.keys().cloned().collect();
+        let sinks: Vec<String> = self.sink_servers.keys().cloned().collect();
         for sink in sinks {
             let blocked = self.blocked_sinks.contains_key(&sink);
             let cursor = self
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
                 .copied();
-            let behind =
-                cursor.map(|cut| cut < tip_sn).unwrap_or(tip_sn > 0);
+            let behind = cursor.map(|cut| cut < tip_sn).unwrap_or(tip_sn > 0);
             let mut triggered = false;
             if behind {
                 // Mark lagging even on blocked sinks (same as the
@@ -2522,11 +2520,8 @@ impl SinkManager {
                 // the sink is available again.
                 self.try_insert_lagging(&sink, subject_id.clone());
                 if !blocked {
-                    let last = self
-                        .last_seen
-                        .get(&subject_id)
-                        .copied()
-                        .unwrap_or(0);
+                    let last =
+                        self.last_seen.get(&subject_id).copied().unwrap_or(0);
                     if tip_sn > last {
                         self.persist(
                             SinkManagerEvent::LastSeenUpdated {

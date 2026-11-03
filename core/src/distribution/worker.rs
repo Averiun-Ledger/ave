@@ -879,12 +879,7 @@ impl DistriWorker {
             } else {
                 let coverage = ranges
                     .iter()
-                    .map(|r| {
-                        format!(
-                            "{}-{}:{:?}",
-                            r.from_sn, r.to_sn, r.mode
-                        )
-                    })
+                    .map(|r| format!("{}-{}:{:?}", r.from_sn, r.to_sn, r.mode))
                     .collect::<Vec<_>>()
                     .join(",");
                 return Err(ActorError::Functional {

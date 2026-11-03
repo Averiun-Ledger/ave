@@ -17,20 +17,19 @@ use ave_network::{NodeType, RoutingNode};
 use common::{
     EXAMPLE_CONTRACT, assert_tracker_fact_opaque,
     create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_eol, emit_fact,
-    emit_fact_viewpoints, emit_reject, emit_transfer, get_events,
-    get_subject, governance_properties,
+    create_subject, emit_confirm, emit_eol, emit_fact, emit_fact_viewpoints,
+    emit_reject, emit_transfer, get_events, get_subject, governance_properties,
 };
 use futures::future::join_all;
 use serde_json::json;
 use test_log::test;
 
+use crate::common::sink_setup::example_schema_governance_fact;
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_node, emit_fact_signed, get_abort_request, node_running,
     wait_request, wait_request_state,
 };
-use crate::common::sink_setup::example_schema_governance_fact;
 
 #[test(tokio::test)]
 // distribución manual.
@@ -6902,7 +6901,8 @@ async fn dirty_restart_repairs_projection_gap() {
     {
         let conn =
             rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         for id in [&governance_id, &subject_id] {
             conn.execute(
                 "DELETE FROM events WHERE subject_id = ?1",
@@ -7020,7 +7020,8 @@ async fn dirty_restart_repairs_genesis_only_projection() {
         {
             let conn =
                 rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             for id in [&governance_id, &subject_id] {
                 conn.execute(
                     "DELETE FROM events WHERE subject_id = ?1",
@@ -7119,7 +7120,8 @@ async fn dirty_restart_refreshes_stale_subject_state() {
         {
             let conn =
                 rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             for id in [&governance_id, &subject_id] {
                 conn.execute(
                     "DELETE FROM subjects WHERE subject_id = ?1",
@@ -7584,16 +7586,15 @@ async fn tracker_sink_replay_pages_past_sync_batches() {
     // batch with has_more=false, and a follow-up page from beyond
     // that batch comes back empty although events exist.
     tokio::time::timeout(Duration::from_secs(60), async {
-        let (nodes, _dirs) = create_nodes_and_connections(
-            CreateNodesAndConnectionsConfig {
+        let (nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
                 bootstrap: vec![vec![]],
                 addressable: vec![vec![0], vec![0]],
                 always_accept: true,
                 ledger_batch_size: Some(5),
                 ..Default::default()
-            },
-        )
-        .await;
+            })
+            .await;
 
         let owner = nodes[0].api.clone();
         let creator = nodes[1].api.clone();
@@ -7675,17 +7676,23 @@ async fn tracker_sink_replay_pages_past_sync_batches() {
             }
         });
 
-        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
 
-        let (subject_id, ..) =
-            create_subject(&creator, governance_id.clone(), "Example", "", true)
-                .await
-                .unwrap();
+        let (subject_id, ..) = create_subject(
+            &creator,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
 
-        let _state =
-            get_subject(&creator, subject_id.clone(), Some(0), true)
-                .await
-                .unwrap();
+        let _state = get_subject(&creator, subject_id.clone(), Some(0), true)
+            .await
+            .unwrap();
 
         // Ten async facts plus a final sync one flush the queue:
         // sn 1..=11, twelve events counting the create.
@@ -7708,10 +7715,9 @@ async fn tracker_sink_replay_pages_past_sync_batches() {
         .await
         .unwrap();
 
-        let state =
-            get_subject(&creator, subject_id.clone(), Some(11), true)
-                .await
-                .unwrap();
+        let state = get_subject(&creator, subject_id.clone(), Some(11), true)
+            .await
+            .unwrap();
         assert_eq!(state.sn, 11);
 
         // Full history in one page even though it spans three sync

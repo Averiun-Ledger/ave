@@ -294,10 +294,12 @@ impl Handler<Self> for SubjectRegister {
                 // check nor journal a duplicate.
                 if self
                     .register
-                    .get(&(creator.clone(), schema_id.clone(), namespace.clone()))
-                    .is_some_and(|(_, subjects)| {
-                        subjects.contains(&subject_id)
-                    })
+                    .get(&(
+                        creator.clone(),
+                        schema_id.clone(),
+                        namespace.clone(),
+                    ))
+                    .is_some_and(|(_, subjects)| subjects.contains(&subject_id))
                 {
                     return Ok(SubjectRegisterResponse::Ok);
                 }
@@ -361,9 +363,7 @@ impl Handler<Self> for SubjectRegister {
                         schema_id.clone(),
                         namespace.clone(),
                     ))
-                    .is_some_and(|(_, subjects)| {
-                        subjects.contains(&subject_id)
-                    })
+                    .is_some_and(|(_, subjects)| subjects.contains(&subject_id))
                 {
                     return Ok(SubjectRegisterResponse::Ok);
                 }

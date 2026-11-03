@@ -3092,13 +3092,13 @@ impl Handler<Self> for RequestManager {
                         }
                     }
                     _ => {
-                            debug!(
-                                msg_type = "ManualAbort",
-                                request_id = %self.id,
-                                state = ?self.state,
-                                "Request in non-abortable state, ignored"
-                            );
-                        }
+                        debug!(
+                            msg_type = "ManualAbort",
+                            request_id = %self.id,
+                            state = ?self.state,
+                            "Request in non-abortable state, ignored"
+                        );
+                    }
                 }
 
                 return Ok(());

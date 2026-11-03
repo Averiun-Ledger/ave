@@ -17,8 +17,8 @@ use ave_common::{
         AbortsQuery, ActorTreeQuery, ApprovalQuery, ApprovalState,
         ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
         EventsQuery, GovQuery, IncidentsQuery, ListQuery, PatchApproval,
-        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest,
-        SubjectQuery, UpdateSubjectQuery,
+        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest, SubjectQuery,
+        UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
     request::EventRequest,
@@ -395,8 +395,7 @@ impl Bridge {
         &self,
         query: SinkDeliveriesQuery,
     ) -> Result<Vec<SinkDeliveryState>, BridgeError> {
-        let subject =
-            query.subject.map(Self::parse_subject_id).transpose()?;
+        let subject = query.subject.map(Self::parse_subject_id).transpose()?;
         if let Some(ref sink) = query.sink {
             Self::require_non_empty_str("sink", sink)?;
         }
@@ -709,10 +708,7 @@ impl Bridge {
     ) -> Result<ActorTreeResponse, BridgeError> {
         use ave_common::bridge::request::DEFAULT_TREE_LIMIT;
         ave_core::validate_actor_tree_query(&query)?;
-        let subject = query
-            .subject
-            .map(Self::parse_subject_id)
-            .transpose()?;
+        let subject = query.subject.map(Self::parse_subject_id).transpose()?;
         let limit = query.limit.unwrap_or(DEFAULT_TREE_LIMIT);
 
         Ok(self.api.get_actor_tree(subject, limit)?)

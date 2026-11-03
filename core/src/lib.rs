@@ -41,8 +41,7 @@ use auth::{
     AuthWitness, SubjectAccess, SubjectAccessMessage, SubjectAccessResponse,
 };
 use ave_actors::{
-    ActorError, ActorPath, ActorRef, ActorTreeNode, PersistentActor,
-    SystemRef,
+    ActorError, ActorPath, ActorRef, ActorTreeNode, PersistentActor, SystemRef,
 };
 use ave_common::Error as CommonError;
 use ave_common::bridge::request::{
@@ -484,7 +483,7 @@ impl Api {
             },
         )
         .map_err(|e| {
-            error!(msg_type = "System", 
+            error!(msg_type = "System",
                 msg_type = "NetInit",
                 error = %e,
                 "Can not create network"
@@ -542,7 +541,7 @@ impl Api {
                     ))
                     .await
                     .map_err(|e| {
-                        error!(msg_type = "System", 
+                        error!(msg_type = "System",
                             error = %e,
                             "Failed to get manual_distribution actor"
                         );
@@ -1190,7 +1189,8 @@ impl Api {
                 );
             }
             Err(_) => {
-                warn!(msg_type = "ApiRequest",
+                warn!(
+                    msg_type = "ApiRequest",
                     "Timed out persisting clean shutdown marker; next boot will reconcile"
                 );
             }
@@ -1749,10 +1749,7 @@ impl Api {
                 });
             }
             Err(e) => {
-                return Err(actor_communication_error(
-                    "subject_manager",
-                    e,
-                ));
+                return Err(actor_communication_error("subject_manager", e));
             }
         }
         let lifted_is_tracker = match self
@@ -1816,11 +1813,14 @@ impl Api {
             let path = manager_path(&target);
             let system = self.system.clone();
             set.spawn(async move {
-                let Ok(actor) = system.get_actor::<SinkManager>(&path).await else {
+                let Ok(actor) = system.get_actor::<SinkManager>(&path).await
+                else {
                     return Ok(None);
                 };
                 match actor.ask(SinkManagerMessage::GetDetailedStatus).await {
-                    Ok(SinkManagerResponse::DetailedStatus(status)) => Ok(Some(status)),
+                    Ok(SinkManagerResponse::DetailedStatus(status)) => {
+                        Ok(Some(status))
+                    }
                     Ok(other) => {
                         warn!(msg_type = "ApiRequest",
                             manager = ?target,
@@ -2017,8 +2017,7 @@ impl Api {
         let subject_filter = subject.map(|id| id.to_string());
         let mut out = Vec::new();
         for path in paths {
-            let Ok(manager) =
-                self.system.get_actor::<SinkManager>(&path).await
+            let Ok(manager) = self.system.get_actor::<SinkManager>(&path).await
             else {
                 continue;
             };
@@ -2778,10 +2777,7 @@ impl Api {
                 Error::from(e)
             })?;
         let NodeResponse::SubjectData(subject_data) = response else {
-            warn!(
-                msg_type = "ApiRequest",
-                "Unexpected response from node"
-            );
+            warn!(msg_type = "ApiRequest", "Unexpected response from node");
             return Err(Error::UnexpectedResponse {
                 actor: "node".to_string(),
                 expected: "SubjectData".to_string(),

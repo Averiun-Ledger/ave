@@ -41,10 +41,8 @@ pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
         ancestor
     };
 
-    let test_file = target.join(format!(
-        ".ave_write_test.{}",
-        std::process::id()
-    ));
+    let test_file =
+        target.join(format!(".ave_write_test.{}", std::process::id()));
     // Exclusive create: never truncate a pre-existing file or follow a
     // pre-existing symlink at the probe path.
     match std::fs::OpenOptions::new()
@@ -155,9 +153,9 @@ pub fn key_pair(
                 opts.write(true).create_new(true);
                 #[cfg(unix)]
                 opts.mode(0o600);
-                let mut f = opts.open(&tmp_path).map_err(|e| {
-                    BridgeError::KeyWrite(e.to_string())
-                })?;
+                let mut f = opts
+                    .open(&tmp_path)
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
                 f.write_all(enc_pk.as_bytes())
                     .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
                 f.sync_all()

@@ -2,14 +2,16 @@ use crate::model::event::{
     ApprovalData, CompilationData, EvaluationData, EvaluationResponse,
     ValidationData,
 };
-use crate::validation::response::ValidatorError;
 use crate::subject::{Metadata, RequestSubjectData};
+use crate::validation::response::ValidatorError;
 
 use anyhow::bail;
 use ave_common::{
     Namespace, SchemaType,
     bridge::request::EventRequestType,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh},
+    identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    },
     request::EventRequest,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -346,9 +348,7 @@ pub fn check_gov_fact_combination(
         && !compilation.is_ok()
     {
         if evaluation.is_some() || approval.is_some() {
-            bail!(
-                "failed compilation carries no evaluation or approval"
-            );
+            bail!("failed compilation carries no evaluation or approval");
         }
         return Ok(());
     }
@@ -360,19 +360,14 @@ pub fn check_gov_fact_combination(
             }
             Ok(())
         }
-        (Some(evaluation), Some(_)) => {
-            match &evaluation.response {
-                EvaluationResponse::Ok {
-                    result,
-                    ..
-                } => {
-                    if !result.appr_required {
-                        bail!("approval without required evaluation");
-                    }
-                    Ok(())
+        (Some(evaluation), Some(_)) => match &evaluation.response {
+            EvaluationResponse::Ok { result, .. } => {
+                if !result.appr_required {
+                    bail!("approval without required evaluation");
                 }
-                _ => bail!("approval over failed evaluation"),
+                Ok(())
             }
-        }
+            _ => bail!("approval over failed evaluation"),
+        },
     }
 }

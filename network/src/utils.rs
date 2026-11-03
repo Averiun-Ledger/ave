@@ -132,17 +132,14 @@ impl LimitsConfig {
         let max_msg = max_msg_bytes.max(1);
 
         // Ephemeral nodes consume; serving nodes are dialed.
-        let (in_share, out_share, per_peer) =
-            match node_type {
-                NodeType::Ephemeral => (20, 80, 1),
-                NodeType::Bootstrap | NodeType::Addressable => (80, 20, 2),
-            };
+        let (in_share, out_share, per_peer) = match node_type {
+            NodeType::Ephemeral => (20, 80, 1),
+            NodeType::Bootstrap | NodeType::Addressable => (80, 20, 2),
+        };
 
         // ── Connection limits (RAM) ──────────────────────────────────────────────
-        let budget_bytes = ram_mb
-            .saturating_mul(1024 * 1024)
-            .saturating_mul(10)
-            / 100;
+        let budget_bytes =
+            ram_mb.saturating_mul(1024 * 1024).saturating_mul(10) / 100;
         let bytes_per_conn: u64 = 50 * 1024; // ~50 KB per established connection
 
         // Total connections: floor 50, cap 9 000 (file-descriptor & kernel limits)
@@ -150,10 +147,8 @@ impl LimitsConfig {
             ((budget_bytes / bytes_per_conn) as u32).clamp(50, 9_000);
 
         // Split driven by node role (see above).
-        let max_incoming =
-            (max_total * in_share / 100).clamp(30, 8_000);
-        let max_outgoing =
-            (max_total * out_share / 100).clamp(20, 1_000);
+        let max_incoming = (max_total * in_share / 100).clamp(30, 8_000);
+        let max_outgoing = (max_total * out_share / 100).clamp(20, 1_000);
 
         // ── Pending connections (CPU) ────────────────────────────────────────────
         // Each pending connection performs a Noise handshake (X25519 + ChaCha20).
@@ -171,8 +166,7 @@ impl LimitsConfig {
         // Worst-case stream buffers must fit in 25 % of total RAM.
         let ram_bytes = ram_mb.saturating_mul(1024 * 1024);
         let ram_streams =
-            ((ram_bytes * 25 / 100 / max_msg as u64) as usize)
-                .clamp(64, 4_032);
+            ((ram_bytes * 25 / 100 / max_msg as u64) as usize).clamp(64, 4_032);
         let reqres_streams = cpu_streams.min(ram_streams);
 
         // Yamux per-connection stream limit: must cover the worst case where a

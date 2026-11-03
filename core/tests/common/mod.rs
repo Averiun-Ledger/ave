@@ -71,7 +71,11 @@ pub fn toolchain_name(pin: &str) -> String {
 pub fn pinned_toolchains() -> std::collections::BTreeMap<String, String> {
     let default = ave_common::governance::DEFAULT_PIN.to_owned();
     let name = toolchain_name(&default);
-    let name = if name.is_empty() { "1.95.0".to_owned() } else { name };
+    let name = if name.is_empty() {
+        "1.95.0".to_owned()
+    } else {
+        name
+    };
     std::collections::BTreeMap::from([(default, name)])
 }
 
@@ -900,9 +904,7 @@ pub async fn emit_approve(
                     break stored;
                 }
                 if started.elapsed() >= Duration::from_secs(10) {
-                    return Err(
-                        "approval not registered in time".into(),
-                    );
+                    return Err("approval not registered in time".into());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }

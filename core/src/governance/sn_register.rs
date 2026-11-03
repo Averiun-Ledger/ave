@@ -296,12 +296,11 @@ impl Handler<Self> for SnRegister {
                     // the last one, so extend the window to the
                     // requested tip instead of leaving a gap.
                     if let Some(gov_version) = last_gov_version {
-                        let covered_to =
-                            ranges.last().map(|r| r.to_sn);
-                        let extend_from = covered_to.map_or(
-                            from_sn,
-                            |covered| covered.saturating_add(1).max(from_sn),
-                        );
+                        let covered_to = ranges.last().map(|r| r.to_sn);
+                        let extend_from = covered_to
+                            .map_or(from_sn, |covered| {
+                                covered.saturating_add(1).max(from_sn)
+                            });
                         if extend_from <= to_sn
                             && covered_to.is_none_or(|c| c < to_sn)
                         {
