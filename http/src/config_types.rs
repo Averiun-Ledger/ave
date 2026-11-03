@@ -1427,6 +1427,8 @@ pub struct SinkServerHttp {
     pub healthcheck_max_failures: u32,
     /// Delay before the first healthcheck after worker startup
     pub startup_healthcheck_delay_secs: u64,
+    /// Timeout after which a tracked catch-up with no progress is requeued
+    pub catch_up_stall_timeout_secs: u64,
 }
 
 impl Default for SinkServerHttp {
@@ -1444,6 +1446,7 @@ impl Default for SinkServerHttp {
             max_recoveries_after_failure: 5,
             healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
+            catch_up_stall_timeout_secs: 600,
         }
     }
 }
@@ -1471,6 +1474,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             max_recoveries_after_failure,
             healthcheck_max_failures,
             startup_healthcheck_delay_secs,
+            catch_up_stall_timeout_secs,
         } = value;
 
         let transport = match transport {
@@ -1700,6 +1704,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
             max_recoveries_after_failure,
             healthcheck_max_failures,
             startup_healthcheck_delay_secs,
+            catch_up_stall_timeout_secs,
         }
     }
 }

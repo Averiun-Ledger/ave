@@ -1535,3 +1535,49 @@ async fn test_every_endpoint_is_covered_by_a_role() {
         );
     }
 }
+
+#[test(tokio::test)]
+async fn test_provisioning_policy_admin_may_provision_manager_but_not_superadmin()
+{
+    use ave_http::auth::database::UpdateUserParams;
+    let (db, _dirs) = common::create_test_db();
+
+    let superadmin_role = db.get_role_by_name("superadmin").unwrap();
+    let manager_role = db.get_role_by_name("manager").unwrap();
+
+    // Admin provisions a manager: a non-superadmin actor updating a
+    // regular user (password reset + manager role) must succeed — that
+    // is the admin's job, not an escalation.
+    let clerk =
+        db.create_user("clerk", "TestPass123!", None, None, Some(false))
+            .unwrap();
+    let updated = db
+        .update_user_validated_transactional(UpdateUserParams {
+            user_id: clerk.id,
+            password: Some("NewPass123!"),
+            is_active: None,
+            role_ids: Some(&[manager_role.id]),
+            actor_is_superadmin: false,
+            assigned_by: None,
+            audit: None,
+        })
+        .expect("admin must be able to provision/reset a manager account");
+    assert_eq!(updated.id, clerk.id);
+
+    // The same non-superadmin actor must not grant the superadmin role.
+    let err = db
+        .update_user_validated_transactional(UpdateUserParams {
+            user_id: clerk.id,
+            password: None,
+            is_active: None,
+            role_ids: Some(&[superadmin_role.id]),
+            actor_is_superadmin: false,
+            assigned_by: None,
+            audit: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, DatabaseError::PermissionDenied(_)),
+        "granting superadmin requires superadmin, got {err:?}"
+    );
+}

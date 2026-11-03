@@ -576,3 +576,67 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
             .any(|g| g.governance_id == governance_id.to_string())
     );
 }
+
+#[test(tokio::test)]
+async fn safe_mode_tracker_delete_retry_is_clean_and_node_keeps_working() {
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let owner = &node.api;
+
+    let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let witness_pk = witness_keypair.public_key().to_string();
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
+    let (tracker_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .unwrap();
+
+    restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
+    let owner = &node.api;
+
+    // First delete succeeds.
+    owner
+        .delete_subject(tracker_id.clone())
+        .await
+        .expect("first tracker delete failed");
+    // Retry after a completed delete: the subject is already gone, so
+    // the retry must report SubjectNotFound (clean, terminal) instead
+    // of a partial-failure Internal error or a wedged retry.
+    let err = owner.delete_subject(tracker_id.clone()).await.unwrap_err();
+    assert!(
+        matches!(err, Error::SubjectNotFound(_)),
+        "retry must be clean SubjectNotFound, got {err:?}"
+    );
+    // A restart must not resurrect anything: the retry stays clean and
+    // the node keeps operating (new tracker + fact succeed). Creating
+    // needs normal mode (safe mode only deletes).
+    restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
+    let owner = &node.api;
+    let err = owner.delete_subject(tracker_id.clone()).await.unwrap_err();
+    assert!(matches!(err, Error::SubjectNotFound(_)));
+    restart_node_with_safe_mode(&mut node, &mut dirs, false).await;
+    let owner = &node.api;
+    let (fresh_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .expect("node must keep working after delete retry");
+    let request_id = emit_fact(
+        owner,
+        fresh_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .expect("fact on fresh tracker must work");
+    wait_request(owner, request_id).await.unwrap();
+}

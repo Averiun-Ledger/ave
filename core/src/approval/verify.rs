@@ -498,29 +498,26 @@ pub fn verify_approval_data(
 }
 
 /// Approval evidence through the node's own checks, with the
-/// evaluated patch and roles the node itself would use.
-#[allow(clippy::too_many_arguments)]
+/// evaluated patch and roles the node itself would use: the tally
+/// verification input plus the request gates (pre-event metadata and
+/// freshness window) checked before it.
 pub fn verify_approval_evidence(
-    hash: &HashAlgorithm,
-    approval: &ApprovalData,
-    subject_id: &DigestIdentifier,
-    sn: u64,
-    gov_version: u64,
-    patch: &ValueWrapper,
-    signer: &PublicKey,
-    approvers: &RoleDataRegister,
-    validators: &RoleDataRegister,
-    req_subject_data_hash: &DigestIdentifier,
+    input: ApprovalVerification<'_>,
     metadata: &Metadata,
     min_window_secs: u64,
 ) -> Result<Vec<Check>> {
     use std::time::Duration;
     let rebuilt = rebuild_approval_req(
-        approval, subject_id, sn, gov_version, patch, signer,
+        input.approval,
+        input.subject_id,
+        input.sn,
+        input.gov_version,
+        input.patch,
+        input.signer,
     );
     let signed = Signed::from_parts(
         rebuilt,
-        approval.approval_req_signature.clone(),
+        input.approval.approval_req_signature.clone(),
     );
     if signed.verify().is_err() {
         bail!("approval request signature invalid");
@@ -532,9 +529,9 @@ pub fn verify_approval_evidence(
     check_approval_req(
         &signed,
         metadata,
-        gov_version,
-        patch,
-        signer,
+        input.gov_version,
+        input.patch,
+        input.signer,
         Duration::from_secs(min_window_secs),
     )
     .map_err(|e| anyhow::anyhow!("approval request gates: {e}"))?;
@@ -542,20 +539,8 @@ pub fn verify_approval_evidence(
         name: "approval-gates",
         detail: "subject/sn/version/patch/window match".to_owned(),
     });
-    verify_approval_data(ApprovalVerification {
-        hash,
-        approval,
-        approvers,
-        validators,
-        req_subject_data_hash,
-        subject_id,
-        sn,
-        gov_version,
-        patch,
-        signer,
-        now: TimeStamp::now(),
-    })
-    .map_err(|e| anyhow::anyhow!("approval evidence: {e}"))?;
+    verify_approval_data(input)
+        .map_err(|e| anyhow::anyhow!("approval evidence: {e}"))?;
     checks.push(Check {
         name: "approval",
         detail: "approval evidence verifies".to_owned(),

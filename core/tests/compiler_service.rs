@@ -1228,3 +1228,111 @@ async fn local_build_cannot_read_etc_hostname() {
          not sandbox staging"
     );
 }
+/// Cancelling queued builds must free their queue slots, and cancelling
+/// the running build must drop its single-flight entry (plus the cargo
+/// tree): retrying the same sources afterwards succeeds in every case.
+/// Without the guards, a retry is rejected as queue-full or fails
+/// forever with "leader dropped its result".
+///
+/// Deterministic by construction: A holds the only slot with a cold
+/// build while B and C queue behind it (one slot + two queue positions
+/// fits all three, so nothing is rejected). Aborting the queued builds
+/// and retrying while A still runs forces the retries through the
+/// queue path — a leaked slot cannot hide behind the free-slot fast
+/// path. The completed-counter assertions fail loudly instead of
+/// passing vacuously if the machine ever outruns the setup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn cancelled_builds_free_slot_and_entry_for_retry() {
+    let root =
+        tempfile::tempdir().expect("failed to create compiler test tempdir");
+    let config = ServiceConfig {
+        api_keys: vec![API_KEY.to_owned()],
+        max_concurrent_builds: Some(1),
+        max_queued_builds: 2,
+        artifacts_dir: root.path().join("artifacts"),
+        work_dir: root.path().join("work"),
+        key_path: root.path().join("identity.der"),
+        ..ServiceConfig::default()
+    };
+    let server = CompilerServer::new(config)
+        .await
+        .expect("compiler server should start");
+    let build_counter = server.build_counter();
+    let completed = || build_counter.load(std::sync::atomic::Ordering::SeqCst);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("failed to bind ephemeral port");
+    let addr = listener.local_addr().expect("listener has a local address");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("server runtime should build");
+        runtime.block_on(async move {
+            let _ = server.serve(listener, std::future::pending()).await;
+        });
+    });
+    // Keep the tempdir alive for the whole test.
+    let _root = root;
+    let endpoint = format!("http://{addr}");
+    let new_client = || {
+        CompilerClient::new(
+            vec![endpoint.clone()],
+            API_KEY.to_owned(),
+            None,
+            None,
+            Some(CLIENT_TIMEOUT),
+            None,
+        )
+    };
+
+    // A takes the only slot (cold build: minutes). B and C queue behind
+    // it; nothing is rejected and nothing can complete yet.
+    let build_a = tokio::spawn({
+        let client = new_client();
+        async move { client.compile(&source_b64(CONTRACT_A), "").await }
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let build_b = tokio::spawn({
+        let client = new_client();
+        async move { client.compile(&source_b64(CONTRACT_B), "").await }
+    });
+    let build_c = tokio::spawn({
+        let client = new_client();
+        async move { client.compile(&source_b64(CONTRACT_C), "").await }
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        completed(),
+        0,
+        "no build may complete during the registration window"
+    );
+    // Cancel the two queued builds. A keeps running: its slot is needed
+    // below so the retries go through the queue path.
+    build_b.abort();
+    build_c.abort();
+    let _ = build_b.await;
+    let _ = build_c.await;
+    // Retrying while A still holds the slot must succeed: a leaked
+    // queue slot rejects here instead of bypassing it through the
+    // free-slot fast path.
+    assert_eq!(
+        completed(),
+        0,
+        "A must still be building while the retries register"
+    );
+    let client = new_client();
+    for contract in [CONTRACT_B, CONTRACT_C] {
+        let outcome = client
+            .compile(&source_b64(contract), "")
+            .await
+            .expect("retry after cancel must succeed");
+        assert!(!outcome.wasm.is_empty());
+    }
+    let _ = build_a.await;
+    assert_eq!(
+        completed(),
+        3,
+        "A plus both retries must each build exactly once"
+    );
+}

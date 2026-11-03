@@ -2585,11 +2585,17 @@ impl Api {
                     )
                     .await;
 
-                    self.delete_subject_from_node(
-                        &subject_id,
-                        &mut cleanup_errors,
-                    )
-                    .await;
+                    // Unregister from the node only on a clean run: a
+                    // partial failure keeps the registration so a retry
+                    // re-enters through the normal path (every step
+                    // above tolerates already-deleted state).
+                    if cleanup_errors.is_empty() {
+                        self.delete_subject_from_node(
+                            &subject_id,
+                            &mut cleanup_errors,
+                        )
+                        .await;
+                    }
 
                     if cleanup_errors.is_empty() {
                         info!(
@@ -2634,11 +2640,17 @@ impl Api {
                     )
                     .await;
 
-                    self.delete_subject_from_node(
-                        &subject_id,
-                        &mut cleanup_errors,
-                    )
-                    .await;
+                    // Unregister from the node only on a clean run: a
+                    // partial failure keeps the registration so a retry
+                    // re-enters through the normal path (every step
+                    // above tolerates already-deleted state).
+                    if cleanup_errors.is_empty() {
+                        self.delete_subject_from_node(
+                            &subject_id,
+                            &mut cleanup_errors,
+                        )
+                        .await;
+                    }
 
                     if cleanup_errors.is_empty() {
                         info!(

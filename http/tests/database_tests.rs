@@ -2866,3 +2866,82 @@ where
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
+
+#[test(tokio::test)]
+async fn test_touch_storm_many_keys_without_blocking() {
+    let (db, _dirs) = create_test_db();
+    let db = Arc::new(db);
+    let mut key_ids = Vec::new();
+    for u in 0..8 {
+        let user = db
+            .create_user(
+                &format!("touchstorm{u}"),
+                "TestPass123!",
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap();
+        for k in 0..10 {
+            let (_api_key, key_info) = db
+                .create_api_key(
+                    user.id,
+                    Some(&format!("storm{k}")),
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap();
+            key_ids.push(key_info.id.clone());
+        }
+    }
+    assert_eq!(key_ids.len(), 80);
+
+    // Burst: 80 keys x 25 touches from concurrent tasks. try_send
+    // never blocks, so the whole burst must finish far below the
+    // 1 s flush interval even though SQLite writes are serialized.
+    let start = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for (i, key_id) in key_ids.iter().enumerate() {
+        let db = Arc::clone(&db);
+        let key_id = key_id.clone();
+        handles.push(tokio::spawn(async move {
+            for n in 0..25 {
+                let ip = format!("10.1.{i}.{}", n % 4);
+                db.touch_api_key_last_used(&key_id, Some(&ip));
+            }
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "touch burst must not block on SQLite: {:?}",
+        start.elapsed()
+    );
+
+    // Every key flushes exactly once (deduped): poll until all 80
+    // carry a timestamp, bounded so a lost batch fails loudly.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let done = key_ids
+            .iter()
+            .filter(|id| {
+                db.get_api_key_info(id)
+                    .map(|k| k.last_used_at.is_some())
+                    .unwrap_or(false)
+            })
+            .count();
+        if done == key_ids.len() || std::time::Instant::now() >= deadline {
+            assert_eq!(
+                done,
+                key_ids.len(),
+                "all storm touches must flush (only {done}/80 did)"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}

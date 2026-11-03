@@ -138,4 +138,20 @@ mod json_tests {
         assert!(serde_json::from_str::<TimeStamp>("1.5").is_err());
         assert!(serde_json::from_str::<TimeStamp>("-1").is_err());
     }
+
+    #[test]
+    fn timestamp_nanos_do_not_survive_f64() {
+        // Rationale for the string wire format: a JSON number becomes
+        // an f64 in JavaScript, and current nanos are far past 2^53.
+        let nanos = 1792022400123456789u64;
+        assert!(nanos > (1u64 << 53));
+        assert_ne!((nanos as f64) as u64, nanos);
+        // So the wire format must never be a bare number for JS
+        // readers: it serializes as a decimal string instead.
+        let ts = TimeStamp::from_nanos(nanos);
+        assert_eq!(
+            serde_json::to_string(&ts).unwrap(),
+            "\"1792022400123456789\""
+        );
+    }
 }

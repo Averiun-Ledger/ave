@@ -851,6 +851,7 @@ http:
                     max_recoveries_after_failure: 5,
                     healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
+                    catch_up_stall_timeout_secs: 600,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
@@ -888,6 +889,7 @@ http:
                     max_recoveries_after_failure: 5,
                     healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
+                    catch_up_stall_timeout_secs: 600,
                 },
             ],
         }];

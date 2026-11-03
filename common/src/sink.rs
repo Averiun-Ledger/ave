@@ -868,6 +868,7 @@ mod tests {
             max_recoveries_after_failure: 5,
             healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
+            catch_up_stall_timeout_secs: 600,
         }
     }
 
@@ -1083,6 +1084,22 @@ mod tests {
                 if component == "SinkServer.healthcheck_max_failures" => {}
             other => panic!(
                 "expected InvalidConfiguration for SinkServer.healthcheck_max_failures, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_catch_up_stall_timeout_defaults_and_rejects_zero() {
+        let server = valid_sink_server();
+        assert_eq!(server.catch_up_stall_timeout_secs, 600);
+        assert!(server.validate().is_ok());
+        let mut server = valid_sink_server();
+        server.catch_up_stall_timeout_secs = 0;
+        match server.validate() {
+            Err(Error::InvalidConfiguration { component, .. })
+                if component == "SinkServer.catch_up_stall_timeout_secs" => {}
+            other => panic!(
+                "expected InvalidConfiguration for SinkServer.catch_up_stall_timeout_secs, got {other:?}"
             ),
         }
     }
@@ -2959,6 +2976,10 @@ pub struct SinkServer {
     pub healthcheck_max_failures: u32,
     /// Delay in seconds before the first healthcheck is scheduled after startup.
     pub startup_healthcheck_delay_secs: u64,
+    /// Maximum seconds a catch-up may run without completing before the
+    /// stall watchdog requeues it. Covers dropped internal signals;
+    /// redelivery is idempotent, so a too-short value only repeats work.
+    pub catch_up_stall_timeout_secs: u64,
 }
 
 impl Default for SinkServer {
@@ -2976,6 +2997,7 @@ impl Default for SinkServer {
             max_recoveries_after_failure: 5,
             healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
+            catch_up_stall_timeout_secs: 600,
         }
     }
 }
@@ -3055,6 +3077,10 @@ impl SinkServer {
         require_positive_u64(
             "SinkServer.startup_healthcheck_delay_secs",
             self.startup_healthcheck_delay_secs,
+        )?;
+        require_positive_u64(
+            "SinkServer.catch_up_stall_timeout_secs",
+            self.catch_up_stall_timeout_secs,
         )?;
         Ok(())
     }

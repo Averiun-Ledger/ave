@@ -1,4 +1,5 @@
-#[cfg(not(any(test, feature = "test")))]
+#[cfg(any(test, feature = "test"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -52,6 +53,16 @@ type AddRemoveChangeSchema = (
 
 pub mod error;
 pub mod types;
+
+/// Test-only wall-timeout override (default 60 s, same as prod).
+/// Module-level so both `Runner` and tests share it; prod never
+/// reads it (prod path uses `EXECUTION_WALL_TIMEOUT`).
+#[cfg(any(test, feature = "test"))]
+fn test_wall_timeout_ms() -> &'static AtomicU64 {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<AtomicU64> = OnceLock::new();
+    CELL.get_or_init(|| AtomicU64::new(60_000))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Runner;
@@ -422,6 +433,20 @@ impl Runner {
     #[cfg(not(any(test, feature = "test")))]
     const EXECUTION_WALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+    #[cfg(any(test, feature = "test"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_test_wall_timeout_for_tests(timeout: Duration) {
+        test_wall_timeout_ms().store(
+            u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    fn test_wall_timeout() -> Duration {
+        Duration::from_millis(test_wall_timeout_ms().load(Ordering::SeqCst))
+    }
+
     /// Runs the blocking wasmtime call off the async worker thread:
     /// one evaluation per one-shot worker already isolates requests
     /// from each other, but without this every in-flight execution
@@ -439,7 +464,14 @@ impl Runner {
         #[cfg(any(test, feature = "test"))]
         {
             return runtime
-                .execute(&module, &state, &init_state, &event, is_owner)
+                .execute_with_deadline(
+                    &module,
+                    &state,
+                    &init_state,
+                    &event,
+                    is_owner,
+                    Self::test_wall_timeout(),
+                )
                 .map_err(map_runtime_error_to_runner_error);
         }
         #[cfg(not(any(test, feature = "test")))]
@@ -1840,5 +1872,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Slow contract (host-call loop) hits the wall-clock deadline:
+    /// the runner reports `ResourceLimit` (node steps down,
+    /// `Unavailable`), never a `ContractFailed` vote against it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_contract_deadline_is_unavailable_not_verdict() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use ave_common::ValueWrapper;
+        use ave_contract_sdk::runtime::ContractRuntime;
+
+        // Host-call loop: ms of wall time per negligible fuel, so the
+        // epoch deadline (not fuel) fires. Same shape as the SDK's own
+        // deadline test.
+        let wat = r#"(module
+            (import "env" "pointer_len" (func (param i32) (result i32)))
+            (import "env" "alloc" (func (param i32) (result i32)))
+            (import "env" "read_bytes" (func (param i32 i32 i32)))
+            (import "env" "write_bytes" (func (param i32 i32 i32)))
+            (memory (export "memory") 64)
+            (func (export "main_function") (param i32 i32 i32 i32) (result i32)
+                (local $buf i32)
+                (local.set $buf (call 1 (i32.const 1048576)))
+                (loop $again
+                    (call 3 (local.get $buf) (local.get $buf) (i32.const 1048576))
+                    (br $again))
+                i32.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).expect("test wat must parse");
+        let runtime =
+            Arc::new(ContractRuntime::new(None).expect("runtime must build"));
+        let (module, _) =
+            runtime.compile(&wasm).expect("test module must compile");
+        let module = Arc::new(module);
+        let null = ValueWrapper(serde_json::Value::Null);
+
+        super::Runner::set_test_wall_timeout_for_tests(Duration::from_millis(
+            300,
+        ));
+        let err = match super::Runner::execute_bounded(
+            Arc::clone(&runtime),
+            Arc::clone(&module),
+            null.clone(),
+            null.clone(),
+            null.clone(),
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("loop must hit the wall-clock deadline"),
+            Err(e) => e,
+        };
+        super::Runner::set_test_wall_timeout_for_tests(Duration::from_secs(60));
+        assert!(
+            matches!(err, RunnerError::ResourceLimit { .. }),
+            "deadline must be ResourceLimit (Unavailable), never a vote: {err:?}"
+        );
     }
 }

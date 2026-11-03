@@ -586,6 +586,7 @@ struct PageAnchorCache {
 
 #[derive(Default)]
 struct PageAnchorEntry {
+    subject_id: String,
     subject_generation: u64,
     last_used: u64,
     anchors: BTreeMap<u64, String>,
@@ -593,6 +594,7 @@ struct PageAnchorEntry {
 
 #[derive(Default)]
 struct CountCacheEntry {
+    subject_id: String,
     subject_generation: u64,
     last_used: u64,
     total: u64,
@@ -1050,6 +1052,7 @@ impl PageAnchorCache {
             entry.anchors.clear();
         }
 
+        entry.subject_id = subject_id.to_owned();
         entry.last_used = clock;
         entry.anchors.insert(target_page, cursor);
         while entry.anchors.len() > PAGE_ANCHOR_CACHE_MAX_ANCHORS_PER_QUERY {
@@ -1089,12 +1092,25 @@ impl PageAnchorCache {
         Some(entry.total)
     }
 
-    fn store_count(&mut self, key: String, subject_id: &str, total: u64) {
-        let subject_generation = self.current_subject_generation(subject_id);
+    fn store_count(
+        &mut self,
+        key: String,
+        subject_id: &str,
+        total: u64,
+        expected_generation: u64,
+    ) -> bool {
+        // Publish only if nothing committed since this read started:
+        // a stale total tagged as current would be served as fresh
+        // until the next write. A caller whose generation moved keeps
+        // its (transiently stale) value uncached and moves on.
+        if self.current_subject_generation(subject_id) != expected_generation {
+            return false;
+        }
         let clock = self.next_clock();
         let entry = self.count_entries.entry(key).or_default();
 
-        entry.subject_generation = subject_generation;
+        entry.subject_id = subject_id.to_owned();
+        entry.subject_generation = expected_generation;
         entry.last_used = clock;
         entry.total = total;
 
@@ -1109,6 +1125,7 @@ impl PageAnchorCache {
             };
             self.count_entries.remove(&oldest_key);
         }
+        true
     }
 
     fn bump_subject_generation(&mut self, subject_id: &str) {
@@ -1119,12 +1136,16 @@ impl PageAnchorCache {
         *generation = generation.saturating_add(1);
     }
 
-    /// Drops the generation counter of a deleted subject: query and
-    /// count entries are already invalidated by generation mismatch
-    /// and evicted lazily, but the counter itself would leak one entry
-    /// per deleted subject forever.
+    /// Drops the generation counter of a deleted subject AND every
+    /// cached entry naming it: without the drain, a read that computed
+    /// before the delete could publish with generation 0 (no counter),
+    /// colliding with the fresh subject that also starts at 0.
     fn prune_subject_generation(&mut self, subject_id: &str) {
         self.subject_generations.remove(subject_id);
+        self.query_entries
+            .retain(|_, entry| entry.subject_id != subject_id);
+        self.count_entries
+            .retain(|_, entry| entry.subject_id != subject_id);
     }
 }
 
@@ -2052,8 +2073,24 @@ impl SqliteRuntime {
         cached
     }
 
-    fn store_count_cache(&self, key: String, subject_id: &str, total: u64) {
-        self.lock_page_cache().store_count(key, subject_id, total);
+    fn store_count_cache(
+        &self,
+        key: String,
+        subject_id: &str,
+        total: u64,
+        expected_generation: u64,
+    ) -> bool {
+        self.lock_page_cache().store_count(
+            key,
+            subject_id,
+            total,
+            expected_generation,
+        )
+    }
+
+    fn subject_generation(&self, subject_id: &str) -> u64 {
+        self.lock_page_cache()
+            .current_subject_generation(subject_id)
     }
 
     fn bump_subject_generation(&self, subject_id: &str) {
@@ -2801,6 +2838,9 @@ fn count_aborts_from_conn(
     {
         return Ok(total);
     }
+    // Generation before the SQL read: the publish below lands only if
+    // nothing committed in between (see store_count).
+    let cache_generation = runtime.subject_generation(subject_id);
 
     let started = Instant::now();
     if query.request_id.is_none() && query.sn.is_none() {
@@ -2818,7 +2858,12 @@ fn count_aborts_from_conn(
         runtime
             .metrics
             .record_count_query_duration(started.elapsed());
-        runtime.store_count_cache(count_cache_key, subject_id, total);
+        runtime.store_count_cache(
+            count_cache_key,
+            subject_id,
+            total,
+            cache_generation,
+        );
         return Ok(total);
     }
 
@@ -2857,7 +2902,12 @@ fn count_aborts_from_conn(
     runtime
         .metrics
         .record_count_query_duration(started.elapsed());
-    runtime.store_count_cache(count_cache_key, subject_id, total);
+    runtime.store_count_cache(
+        count_cache_key,
+        subject_id,
+        total,
+        cache_generation,
+    );
     Ok(total)
 }
 
@@ -3182,6 +3232,9 @@ fn count_events_from_conn(
     {
         return Ok(total);
     }
+    // Generation before the SQL read: the publish below lands only if
+    // nothing committed in between (see store_count).
+    let cache_generation = runtime.subject_generation(subject_id);
 
     let started = Instant::now();
     if query.event_request_ts_from.is_none()
@@ -3206,7 +3259,12 @@ fn count_events_from_conn(
         runtime
             .metrics
             .record_count_query_duration(started.elapsed());
-        runtime.store_count_cache(count_cache_key, subject_id, total);
+        runtime.store_count_cache(
+            count_cache_key,
+            subject_id,
+            total,
+            cache_generation,
+        );
         return Ok(total);
     }
 
@@ -3251,7 +3309,12 @@ fn count_events_from_conn(
     runtime
         .metrics
         .record_count_query_duration(started.elapsed());
-    runtime.store_count_cache(count_cache_key, subject_id, total);
+    runtime.store_count_cache(
+        count_cache_key,
+        subject_id,
+        total,
+        cache_generation,
+    );
     Ok(total)
 }
 
@@ -4395,7 +4458,8 @@ mod tests {
         runtime.metrics.register_prometheus_metrics(&mut registry);
 
         assert_eq!(runtime.lookup_count_cache("key", "subject"), None);
-        runtime.store_count_cache("key".to_owned(), "subject", 42);
+        let generation = runtime.subject_generation("subject");
+        runtime.store_count_cache("key".to_owned(), "subject", 42, generation);
         assert_eq!(runtime.lookup_count_cache("key", "subject"), Some(42));
 
         let mut text = String::new();
@@ -4415,5 +4479,37 @@ mod tests {
             ),
             1.0
         );
+    }
+
+    #[test]
+    fn stale_count_publish_is_dropped_after_commit() {
+        let mut cache = PageAnchorCache::default();
+        // Read starts at generation 0 and a commit lands mid-read.
+        let generation = cache.current_subject_generation("s");
+        cache.bump_subject_generation("s");
+        // Publishing the stale total must fail: nothing may be
+        // served as fresh afterwards.
+        assert!(!cache.store_count("k".to_string(), "s", 0, generation));
+        assert!(cache.lookup_count("k", "s").is_none());
+        // A fresh read publishes normally.
+        let generation = cache.current_subject_generation("s");
+        assert!(cache.store_count("k".to_string(), "s", 100, generation));
+        assert_eq!(cache.lookup_count("k", "s"), Some(100));
+    }
+
+    #[test]
+    fn delete_purges_entries_and_generation() {
+        let mut cache = PageAnchorCache::default();
+        let generation = cache.current_subject_generation("s");
+        assert!(cache.store_count("k".to_string(), "s", 7, generation));
+        cache.store_anchor("a".to_string(), "s", 2, "cursor".to_string());
+        assert!(cache.lookup_count("k", "s").is_some());
+        // Delete: counter gone AND entries drained, so a recreated
+        // subject starting again at generation 0 finds nothing stale.
+        cache.prune_subject_generation("s");
+        assert!(cache.lookup_count("k", "s").is_none());
+        assert_eq!(cache.current_subject_generation("s"), 0);
+        assert!(cache.store_count("k".to_string(), "s", 1, 0));
+        assert_eq!(cache.lookup_count("k", "s"), Some(1));
     }
 }

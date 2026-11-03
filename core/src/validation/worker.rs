@@ -2893,31 +2893,16 @@ pub fn check_evaluation(
     Ok((appr_required, req_patch, properties))
 }
 
-/// Compilation evidence through the node's own check.
-#[allow(clippy::too_many_arguments)]
+/// Compilation evidence through the node's own check: the artifact
+/// plus the event it belongs to, anchored like [`check_compilation`].
 pub fn verify_compilation_evidence(
     hash: &HashAlgorithm,
     compilation: &CompilationData,
-    event_request: &Arc<Signed<EventRequest>>,
-    metadata: &Metadata,
-    gov_version: u64,
-    req_subject_data_hash: &DigestIdentifier,
-    signer: &PublicKey,
     comp_roles: &RoleDataRegister,
+    anchor: EventAnchor<'_>,
 ) -> Result<Vec<Check>> {
-    check_compilation(
-        hash,
-        compilation.clone(),
-        comp_roles.clone(),
-        EventAnchor {
-            event_request,
-            metadata,
-            gov_version,
-            req_subject_data_hash: req_subject_data_hash.clone(),
-            signer: signer.clone(),
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("compilation evidence: {e}"))?;
+    check_compilation(hash, compilation.clone(), comp_roles.clone(), anchor)
+        .map_err(|e| anyhow::anyhow!("compilation evidence: {e}"))?;
     Ok(vec![Check {
         name: "compilation",
         detail: "compilation evidence verifies".to_owned(),

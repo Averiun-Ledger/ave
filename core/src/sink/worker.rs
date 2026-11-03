@@ -132,6 +132,32 @@ enum HealthcheckState {
     Unhealthy { next_interval_idx: usize },
 }
 
+/// Returns catch-ups stalled past `timeout`, removing them from the
+/// in-flight maps. Pure so the watchdog decision is unit-testable
+/// without an actor context; the caller requeues the result (deduped,
+/// idempotent redelivery).
+fn stalled_catch_ups(
+    in_catch_up: &mut HashMap<String, u64>,
+    catch_up_started: &mut HashMap<String, Instant>,
+    now: Instant,
+    timeout: Duration,
+) -> Vec<(String, u64)> {
+    let mut stalled = Vec::new();
+    in_catch_up.retain(|subject_id, from_sn| {
+        let stale = catch_up_started
+            .get(subject_id)
+            .is_none_or(|started| now.duration_since(*started) >= timeout);
+        if stale {
+            stalled.push((subject_id.clone(), *from_sn));
+            catch_up_started.remove(subject_id);
+            false
+        } else {
+            true
+        }
+    });
+    stalled
+}
+
 impl std::fmt::Debug for HealthcheckState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -165,6 +191,11 @@ pub struct SinkWorker {
     /// `from_sn` (e.g. a replay that rewound the cursor) restarts the
     /// in-flight catch-up so events are re-delivered in order.
     in_catch_up: HashMap<String, u64>,
+    /// When each `in_catch_up` entry started: the stall watchdog
+    /// requeues entries without completion past the configured
+    /// timeout (a dropped internal signal must not wedge a
+    /// concurrency slot forever).
+    catch_up_started: HashMap<String, Instant>,
     /// Live events dispatched to each subject worker but not yet reported
     /// back (success or failure). A subject worker handling these events is
     /// working, not idle: the child shutdown timer and the worker's own
@@ -379,6 +410,11 @@ impl Handler<Self> for SinkWorker {
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::HealthCheck => {
+                // Stall watchdog first: a dropped internal signal leaves
+                // the catch-up marked in-flight with no completion coming.
+                if let Err(e) = self.sweep_stalled_catch_ups(ctx).await {
+                    error!(msg_type = "SweepStalledCatchUps", sink = %self.sink_name, error = %e, "Failed to sweep stalled catch-ups");
+                }
                 match self.client.health_check().await {
                     Ok(()) => {
                         self.healthcheck_failures = 0;
@@ -432,6 +468,7 @@ impl Handler<Self> for SinkWorker {
                                 .await;
                                 self.active_subject_workers.clear();
                                 self.in_catch_up.clear();
+                                self.catch_up_started.clear();
                                 self.live_in_flight.clear();
                                 match ctx.get_parent::<SinkManager>().await {
                                     Ok(parent) => {
@@ -556,7 +593,7 @@ impl Handler<Self> for SinkWorker {
                         // subject worker bumps its generation, dropping the
                         // stale delivery chain, and re-delivers from from_sn
                         // so events keep their order.
-                        self.in_catch_up.insert(subject_id.clone(), from_sn);
+                        self.track_catch_up_start(&subject_id, from_sn);
                         let child_ref = match self
                             .ensure_subject_worker(&subject_id, ctx)
                             .await
@@ -629,7 +666,7 @@ impl Handler<Self> for SinkWorker {
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
-                self.in_catch_up.insert(subject_id.clone(), from_sn);
+                self.track_catch_up_start(&subject_id, from_sn);
                 // Reset flapping counter: the sink has accepted a new catch-up
                 // attempt, so previous healthchecks that passed during the
                 // failure are no longer evidence of a broken sink. If the
@@ -791,7 +828,7 @@ impl Handler<Self> for SinkWorker {
                 Ok(SinkWorkerResponse::Ok)
             }
             SinkWorkerMessage::CatchUpCompleted { subject_id } => {
-                self.in_catch_up.remove(&subject_id);
+                self.untrack_catch_up(&subject_id);
                 self.cancel_child_shutdown(ctx, &subject_id);
                 // A blocked sink must not start new catch-ups: any pending work
                 // will be drained once the operator unblocks the sink.
@@ -925,7 +962,7 @@ impl Handler<Self> for SinkWorker {
                 count,
             } => {
                 if from_catch_up {
-                    self.in_catch_up.remove(&subject_id);
+                    self.untrack_catch_up(&subject_id);
                 } else if let Some(in_flight) =
                     self.live_in_flight.get_mut(&subject_id)
                 {
@@ -978,7 +1015,7 @@ impl Handler<Self> for SinkWorker {
                 count,
             } => {
                 if from_catch_up {
-                    self.in_catch_up.remove(&subject_id);
+                    self.untrack_catch_up(&subject_id);
                     if self.blocked.is_none()
                         && !matches!(
                             self.healthcheck_state,
@@ -1036,6 +1073,7 @@ impl Handler<Self> for SinkWorker {
                 .await;
                 self.active_subject_workers.clear();
                 self.in_catch_up.clear();
+                self.catch_up_started.clear();
                 self.live_in_flight.clear();
                 match ctx.get_parent::<SinkManager>().await {
                     Ok(parent) => {
@@ -1062,7 +1100,7 @@ impl Handler<Self> for SinkWorker {
                 from_catch_up,
             } => {
                 if from_catch_up {
-                    self.in_catch_up.remove(&subject_id);
+                    self.untrack_catch_up(&subject_id);
                 }
                 // A deleted subject can have no live work in flight.
                 self.live_in_flight.remove(&subject_id);
@@ -1199,6 +1237,56 @@ impl SinkWorker {
         Ok(child_ref)
     }
 
+    /// Tracks a catch-up start in both maps; the watchdog needs the
+    /// timestamp, the admission checks need the `from_sn`.
+    fn track_catch_up_start(&mut self, subject_id: &str, from_sn: u64) {
+        self.in_catch_up.insert(subject_id.to_owned(), from_sn);
+        self.catch_up_started
+            .insert(subject_id.to_owned(), Instant::now());
+    }
+
+    /// Forgets a catch-up in both maps (completion, failure, restart,
+    /// child teardown).
+    fn untrack_catch_up(&mut self, subject_id: &str) {
+        self.in_catch_up.remove(subject_id);
+        self.catch_up_started.remove(subject_id);
+    }
+
+    /// Requeues catch-ups running past the stall timeout: one of their
+    /// internal signals was dropped and will never arrive. Redelivery
+    /// is idempotent, so a false positive only repeats work.
+    async fn sweep_stalled_catch_ups(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let stall_timeout =
+            Duration::from_secs(self.server.catch_up_stall_timeout_secs);
+        let now = Instant::now();
+        let stalled = stalled_catch_ups(
+            &mut self.in_catch_up,
+            &mut self.catch_up_started,
+            now,
+            stall_timeout,
+        );
+        for (subject_id, from_sn) in stalled {
+            warn!(
+                msg_type = "StalledCatchUpRequeued",
+                sink = %self.sink_name,
+                subject_id = %subject_id,
+                from_sn = from_sn,
+                "Catch-up without completion past stall timeout, requeueing"
+            );
+            if !self
+                .pending_catch_ups
+                .iter()
+                .any(|(id, _)| id == &subject_id)
+            {
+                self.pending_catch_ups.push_front((subject_id, from_sn));
+            }
+        }
+        self.try_start_pending_catch_ups(ctx).await
+    }
+
     /// Start pending catch-ups while there is free concurrency capacity.
     async fn try_start_pending_catch_ups(
         &mut self,
@@ -1217,7 +1305,7 @@ impl SinkWorker {
                 self.pending_catch_ups.push_front((subject_id, from_sn));
                 break;
             }
-            self.in_catch_up.insert(subject_id.clone(), from_sn);
+            self.track_catch_up_start(&subject_id, from_sn);
             self.last_activity = Instant::now();
             self.idle_reported = false;
             match self.ensure_subject_worker(&subject_id, ctx).await {
@@ -1308,6 +1396,7 @@ impl SinkWorker {
             idle_reported: false,
             healthcheck_state: HealthcheckState::Healthy,
             in_catch_up: HashMap::new(),
+            catch_up_started: HashMap::new(),
             live_in_flight: HashMap::new(),
             blocked: None,
             recoveries_after_failure: 0,
@@ -1331,7 +1420,7 @@ impl SinkWorker {
         ctx: &ActorContext<Self>,
     ) {
         self.active_subject_workers.remove(subject_id);
-        self.in_catch_up.remove(subject_id);
+        self.untrack_catch_up(subject_id);
         match ctx.get_parent::<SinkManager>().await {
             Ok(parent) => {
                 if let Err(err) = parent
@@ -1425,5 +1514,36 @@ impl SinkWorker {
                 error!(msg_type = "ReportIdle", sink = %self.sink_name, error = %e, "Failed to report idle to parent");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_catch_up_is_requeued_once_and_fresh_one_stays() {
+        let timeout = Duration::from_secs(600);
+        let now = Instant::now();
+        let mut in_catch_up = HashMap::from([
+            ("stalled".to_owned(), 7u64),
+            ("fresh".to_owned(), 3u64),
+        ]);
+        let mut started = HashMap::from([
+            ("stalled".to_owned(), now - Duration::from_secs(601)),
+            ("fresh".to_owned(), now),
+        ]);
+        let stalled =
+            stalled_catch_ups(&mut in_catch_up, &mut started, now, timeout);
+        assert_eq!(stalled, vec![("stalled".to_owned(), 7)]);
+        assert_eq!(in_catch_up.len(), 1);
+        assert!(in_catch_up.contains_key("fresh"));
+
+        // Missing timestamp also counts as stalled (never completes).
+        in_catch_up.insert("orphan".to_owned(), 9);
+        let stalled =
+            stalled_catch_ups(&mut in_catch_up, &mut started, now, timeout);
+        assert_eq!(stalled, vec![("orphan".to_owned(), 9)]);
+        assert_eq!(in_catch_up.len(), 1);
     }
 }

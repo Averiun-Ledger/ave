@@ -312,10 +312,8 @@ impl SubjectManager {
                     None
                 }
                 Ok(NodeResponse::SubjectData(None)) => {
-                    cleanup_errors.push(format!(
-                        "subject '{}' not found in node",
-                        subject_id
-                    ));
+                    // Already unregistered from the node (e.g. a retried
+                    // deletion): nothing left to unlink, not a failure.
                     None
                 }
                 Ok(other) => {
