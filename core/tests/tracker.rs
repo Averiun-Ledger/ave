@@ -25,6 +25,7 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::sink_setup::example_schema_governance_fact;
+use crate::common::sink_setup::governance_with_viewpoints_fact;
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_node, emit_fact_signed, get_abort_request, node_running,
@@ -7777,4 +7778,247 @@ async fn tracker_sink_replay_pages_past_sync_batches() {
     })
     .await
     .expect("test overran its 60s budget");
+}
+
+/// Test 44: visibility replay must be idempotent per sn.
+///
+/// The live path records visibility per event; boot reconcile
+/// re-sends the tail. `SnRegister` and the visibility ranges live in
+/// different journals, so a crash between the two derived writes
+/// leaves the sn map behind the ranges. The replay then re-sends an
+/// older sn whose value differs from the recorded tail, and the
+/// append-only range builder must ignore the stale write instead of
+/// closing the newer range with `end < start` and appending
+/// duplicates out of order (the queries assume ordered,
+/// non-overlapping ranges with `from_sn <= to_sn`).
+///
+/// Setup: Owner + Witness, schema `Example` with viewpoints
+/// `["agua", "basura"]`, no grants anywhere (stored visibility toggles
+/// Full→None, event visibility toggles `Fact({basura})`→`Fact({agua})`).
+///
+/// Sequence:
+/// 1. Owner creates tracker `S1`; emits SN 1..4 with `["basura"]`.
+///    Witness syncs SN 0..4.
+/// 2. Owner emits SN 5 with `["agua"]`. Witness syncs SN 0..5.
+/// 3. Control: live ranges are ordered
+///    `stored [(0, 0, Full), (1, None, None)]`,
+///    `events [(0, 0, NonFact), (1, 4, Fact({basura})), (5, None, Fact({agua}))]`.
+/// 4. Shut down; the store flushes the sn snapshot. Replace it
+///    with the SN-4 state (same Borsh layout the store uses):
+///    recovery loads the sn map at SN 4 while the tracker journal
+///    and the visibility ranges still cover SN 5 — the crash
+///    window. Fail loudly if the snapshot row is missing instead
+///    of staging a vacuous restart.
+/// 5. Restart and lift the tracker: boot reconcile replays from SN 4
+///    and re-sends SN 4's values against the recorded B-from-5 tail.
+/// 6. Read back both range vectors.
+///
+/// Expected: identical to the live vectors. Without the stale-sn
+/// guard the replay closes B-from-5 with end 3 and appends A-from-4,
+/// leaving starts `[0, 5, 4, 5]` and a `(5, 3)` range.
+#[test(tokio::test)]
+async fn reconcile_visibility_replay_ignores_stale_sn() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes.remove(0);
+    let mut witness = nodes.remove(0);
+
+    let _owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+    let mut witness_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&witness.api]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        governance_with_viewpoints_fact(witness.api.public_key()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) = create_subject(
+        &owner.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SN 1..4 with ["basura"] (event visibility A), SN 5 with
+    // ["agua"] (event visibility B). Single gov version throughout.
+    // The witness is ungranted for both, so it stores everything
+    // opaque (stored visibility None after the create).
+    for data in [10, 20, 30, 40] {
+        emit_fact_viewpoints(
+            &owner.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            BTreeSet::from(["basura".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    get_subject(&witness.api, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // SN 5 with ["agua"]. Witness journals SN 0..5.
+    emit_fact_viewpoints(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 50}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // Control: live ranges are ordered and sane in both worlds.
+    let (stored_live, events_live) = witness
+        .api
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_live,
+        vec![
+            (0, Some(0), "Full".to_owned()),
+            (1, None, "None".to_owned())
+        ],
+        "live stored ranges must be sane, got {stored_live:?}"
+    );
+    assert_eq!(
+        events_live,
+        vec![
+            (0, Some(0), "NonFact".to_owned()),
+            (1, Some(4), "Fact({\"basura\"})".to_owned()),
+            (5, None, "Fact({\"agua\"})".to_owned()),
+        ],
+        "live event ranges must be sane, got {events_live:?}"
+    );
+
+    // Crash window: the sn map loses SN 5 while the journal and the
+    // visibility ranges still cover it. The store only flushes a
+    // snapshot on shutdown, so replace the flushed snapshot with the
+    // SN-4 state (same Borsh layout the store itself uses):
+    // recovery then loads `{v1:4}` with the journal intact.
+    // Fail loudly on unexpected row counts instead of staging a
+    // vacuous restart.
+    let witness_keys = witness.keys.clone();
+    let witness_local_db = witness_dirs[0].path().to_path_buf();
+    let witness_ext_db = witness_dirs[1].path().to_path_buf();
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
+    {
+        use ave_core::model::common::CeilingMap;
+        use std::collections::HashMap;
+
+        #[derive(borsh::BorshSerialize)]
+        struct SnRegMirror {
+            register: HashMap<
+                ave_common::identity::DigestIdentifier,
+                CeilingMap<u64>,
+            >,
+        }
+
+        let gov_prefix = governance_id.to_string();
+        let mut versions = CeilingMap::new();
+        versions.insert(1, 4);
+        let mut register = HashMap::new();
+        register.insert(subject_id.clone(), versions);
+        let blob =
+            borsh::to_vec(&(SnRegMirror { register }, 0u64)).unwrap();
+        let conn = rusqlite::Connection::open(
+            witness_local_db.join("database.db"),
+        )
+        .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let updated = conn
+            .execute(
+                "UPDATE sn_register_states SET value = ?1 WHERE prefix = ?2",
+                rusqlite::params![blob, gov_prefix],
+            )
+            .unwrap();
+        assert_eq!(
+            updated, 1,
+            "exactly one sn snapshot row must exist, updated {updated}"
+        );
+    }
+
+    // Restart with the SN-4 snapshot in place. Boot reconcile
+    // replays from SN 4 and re-sends SN 4's values against the
+    // recorded B-from-5 tail.
+    let witness_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut witness, mut witness_dirs2) = create_node(
+        crate::common::sink_setup::restart_config_with_peers(
+            witness_keys,
+            witness_local_db,
+            witness_ext_db,
+            format!("/memory/{}", witness_port),
+            vec![],
+            vec![],
+        ),
+    )
+    .await;
+    witness_dirs.append(&mut witness_dirs2);
+    node_running(&witness.api).await.unwrap();
+    // Force the tracker boot: projections are intact, so nothing
+    // would lift it on its own and boot reconcile would never run.
+    witness
+        .api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // The replayed ranges must match the live ones: the stale SN 4
+    // resend is ignored instead of corrupting the B-from-5 tail.
+    let (stored, events) = witness
+        .api
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        vec![
+            (0, Some(0), "Full".to_owned()),
+            (1, None, "None".to_owned())
+        ],
+        "reconcile must not corrupt stored ranges, got {stored:?}"
+    );
+    assert_eq!(
+        events,
+        vec![
+            (0, Some(0), "NonFact".to_owned()),
+            (1, Some(4), "Fact({\"basura\"})".to_owned()),
+            (5, None, "Fact({\"agua\"})".to_owned()),
+        ],
+        "reconcile must not corrupt event ranges, got {events:?}"
+    );
+
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
 }

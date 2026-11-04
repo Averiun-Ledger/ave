@@ -206,7 +206,7 @@ impl Tracker {
                     .tell(SnRegisterMessage::RegisterSn {
                         subject_id: self.subject_metadata.subject_id.clone(),
                         gov_version,
-                        sn: if sn == 0 { 0 } else { sn + 1 },
+                        sn,
                     })
                     .await?;
                 report.writes_resent += 1;
@@ -378,17 +378,18 @@ impl Tracker {
             .await?;
         report.writes_resent += 1;
         // Sn registration mirrors the live path exactly. The live
-        // path sends pre-apply sn (ledger sn, dense) at transition
-        // and post-apply sn (ledger sn + 1, genesis excluded) at the
-        // end; both are map overwrites with identical data.
-        if let Some((prev_gov, _)) = fold.prev
+        // path sends the pre-apply sn (last sn of the outgoing
+        // version) at transition and the post-apply sn (tip sn
+        // itself) at the close; both are map overwrites with
+        // identical data.
+        if let Some((prev_gov, prev_sn)) = fold.prev
             && event.gov_version != prev_gov
         {
             sn_register
                 .tell(SnRegisterMessage::RegisterSn {
                     subject_id: self.subject_metadata.subject_id.clone(),
                     gov_version: prev_gov,
-                    sn: event.sn,
+                    sn: prev_sn,
                 })
                 .await?;
             report.writes_resent += 1;

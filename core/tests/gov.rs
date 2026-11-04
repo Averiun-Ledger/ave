@@ -6569,6 +6569,49 @@ async fn hostile_schema_id_fails_without_state_change() {
         .await
         .expect_err("tracker under a rejected schema id must fail");
 
+        // Item 42: a dot is path-safe but not actor-safe. The schema
+        // id is valid for governance and passes the filesystem gate,
+        // yet no `{id}_contract_compiler` / `{id}_evaluation` /
+        // `{id}_validation` actor can ever be created for it, so the
+        // compiler refuses it the same way: recorded, no state
+        // change, no tracker, node stays healthy.
+        let dotted = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "orders.v1",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id =
+            emit_fact(owner, governance_id.clone(), dotted, false)
+                .await
+                .unwrap();
+        wait_request(owner, request_id).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 2, "the refused event is still recorded");
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas.is_empty(),
+            "dotted schema id must change nothing, got {:?}",
+            gov.schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        create_subject(owner, governance_id.clone(), "orders.v1", "", false)
+            .await
+            .expect_err("tracker under a dotted schema id must fail");
+
         // The node stays healthy: a valid schema still lands.
         let valid = json!({
             "schemas": {

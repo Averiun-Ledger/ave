@@ -368,6 +368,48 @@ pub fn make_sink_entry_with_retry_policy(
     }
 }
 
+/// Sink entry with OAuth2 authentication and an explicit retry
+/// policy (base/max delays plus token refresh margin), for tests
+/// that need small deterministic bounds instead of the defaults.
+#[allow(dead_code)]
+pub fn make_sink_entry_with_auth_and_retry_policy(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    auth: SinkAuthMethod,
+    max_retries: usize,
+    retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
+    token_refresh_margin_secs: u64,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url,
+                batch_delivery: false,
+                auth: Some(auth),
+                max_retries,
+                retry_base_delay_ms,
+                retry_max_delay_ms,
+                token_refresh_margin_secs,
+                request_timeout_ms: 10_000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            })),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
 #[allow(dead_code)]
 pub fn example_sink_config(
     url: String,

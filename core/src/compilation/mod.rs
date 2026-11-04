@@ -281,6 +281,19 @@ pub fn resolve_compile_targets(
                         schema.id
                     )));
                 }
+                // Actor-name gate: workers are created as
+                // `{id}_contract_compiler` / `{id}_evaluation` /
+                // `{id}_validation`, and actor segments only allow
+                // ASCII alphanumeric, `_` and `-`. A valid id like
+                // `orders.v1` would otherwise persist and then fail
+                // worker activation on every boot. Refuse here,
+                // before anything is committed.
+                if !schema.id.is_valid_actor_segment() {
+                    return Err(CompilationError::InvalidEvent(format!(
+                        "schema id not usable as actor name: {}",
+                        schema.id
+                    )));
+                }
                 targets.insert(
                     schema.id.clone(),
                     CompileTarget {
@@ -307,6 +320,13 @@ pub fn resolve_compile_targets(
                 if !schema.actual_id.is_safe_path_segment() {
                     return Err(CompilationError::InvalidEvent(format!(
                         "unsafe schema id: {}",
+                        schema.actual_id
+                    )));
+                }
+                // Same actor-name gate as adds.
+                if !schema.actual_id.is_valid_actor_segment() {
+                    return Err(CompilationError::InvalidEvent(format!(
+                        "schema id not usable as actor name: {}",
                         schema.actual_id
                     )));
                 }

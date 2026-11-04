@@ -346,28 +346,33 @@ pub async fn obtain_token(
 
 /// Obtain an OAuth2 token with retry/backoff, running entirely outside any
 /// cache lock so other deliveries are not blocked while the auth endpoint is
-/// down.
+/// down. The server-provided `Retry-After` hint is honored but capped at
+/// `retry_max_delay_ms`, like delivery retries: a hostile or broken IdP
+/// must not retain every consumer for the hint's duration.
 pub async fn obtain_token_with_retry(
     client: &reqwest::Client,
     auth: &SinkAuthConfig,
     password_or_secret: &str,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
 ) -> Result<TokenResponse, SinkError> {
     let mut last_err = None;
     for attempt in 0..=TOKEN_OBTAIN_MAX_RETRIES {
         if attempt > 0 {
-            // Same saturation as the delivery backoff: avoid shift overflow
-            // with a large configured base delay.
-            let exp = (attempt - 1).min(63);
-            let base_delay = retry_base_delay_ms.saturating_mul(1_u64 << exp);
-            let mut delay = add_jitter(base_delay);
-            // Honor a server-provided Retry-After hint when it exceeds the
-            // computed backoff.
-            if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err
-                && let Some(hint) = retry_after_ms
-            {
-                delay = delay.max(*hint);
-            }
+            // Same shared policy as deliveries: exponential backoff
+            // with jitter, hint honored, result capped at max_ms.
+            let hint = match &last_err {
+                Some(SinkError::Auth { retry_after_ms, .. }) => {
+                    *retry_after_ms
+                }
+                _ => None,
+            };
+            let delay = retry_delay_ms(
+                retry_base_delay_ms,
+                retry_max_delay_ms,
+                attempt as usize,
+                hint,
+            );
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
         match obtain_token(client, auth, password_or_secret).await {
@@ -399,6 +404,7 @@ pub struct OAuth2TokenCache {
     secret: String,
     margin_secs: u64,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
     /// `pub(crate)` so transport tests can seed an expired token.
     pub(crate) cached: tokio::sync::RwLock<Option<TokenResponse>>,
     /// Serializes token fetches (single-flight); never held across a cache
@@ -413,6 +419,7 @@ impl OAuth2TokenCache {
         secret: String,
         margin_secs: u64,
         retry_base_delay_ms: u64,
+        retry_max_delay_ms: u64,
     ) -> Self {
         Self {
             client,
@@ -420,6 +427,7 @@ impl OAuth2TokenCache {
             secret,
             margin_secs,
             retry_base_delay_ms,
+            retry_max_delay_ms,
             cached: tokio::sync::RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
         }
@@ -455,6 +463,7 @@ impl OAuth2TokenCache {
             &self.auth,
             &self.secret,
             self.retry_base_delay_ms,
+            self.retry_max_delay_ms,
         )
         .await?;
         let access_token = token.access_token.clone();
@@ -660,7 +669,7 @@ mod tests {
             ..SinkAuthConfig::default()
         };
 
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10)
+        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
             .await
             .expect("token should be obtained after retries");
 
@@ -717,7 +726,7 @@ mod tests {
         };
 
         let start = Instant::now();
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10)
+        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
             .await
             .expect("token should be obtained after retry");
         let elapsed = start.elapsed();
@@ -732,6 +741,66 @@ mod tests {
             request_count.load(Ordering::SeqCst),
             2,
             "should retry once before succeeding"
+        );
+    }
+
+    /// Item 46: a `Retry-After` hint longer than the configured cap
+    /// must not stall the refresh. The IdP always answers 503 with a
+    /// 60s hint and the cap is 50ms: all attempts fail fast instead
+    /// of sleeping a minute between tries.
+    #[tokio::test]
+    async fn obtain_token_with_retry_caps_retry_after_hint() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("test listener should accept");
+                request_count_server.fetch_add(1, Ordering::SeqCst);
+                let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let auth = SinkAuthConfig {
+            auth_url: format!("http://{}/token", addr),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        };
+
+        let start = Instant::now();
+        let err = obtain_token_with_retry(&client, &auth, "test-secret", 10, 50)
+            .await
+            .expect_err("token fetch must fail while the IdP 503s");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, SinkError::Auth { .. }),
+            "expected an auth error, got {err:?}"
+        );
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            3,
+            "all attempts must run (initial + 2 retries)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "refresh must be capped at retry_max_delay_ms instead of sleeping 60s per hint; took {elapsed:?}"
         );
     }
 
@@ -951,6 +1020,7 @@ mod tests {
             "test-secret".to_owned(),
             60,
             10,
+            30_000,
         ));
 
         const CALLERS: usize = 8;

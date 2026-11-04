@@ -84,6 +84,7 @@ struct KafkaOAuthContext {
     password: String,
     principal: String,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
 }
 
 /// Producer context that forwards librdkafka statistics to the core metrics.
@@ -122,6 +123,7 @@ impl rdkafka::ClientContext for KafkaStatsContext {
                 &oauth.auth,
                 &oauth.password,
                 oauth.retry_base_delay_ms,
+                oauth.retry_max_delay_ms,
             ))?;
         let lifetime_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -428,6 +430,7 @@ impl KafkaTransport {
                         password: secret,
                         principal: username.clone(),
                         retry_base_delay_ms: config.retry_base_delay_ms,
+                        retry_max_delay_ms: config.retry_max_delay_ms,
                     });
                 }
                 KafkaSaslMechanism::Gssapi => {
@@ -1103,6 +1106,7 @@ mod tests {
                 password: "secret".to_owned(),
                 principal: "client-1".to_owned(),
                 retry_base_delay_ms: 10,
+                retry_max_delay_ms: 30_000,
             }),
         };
 

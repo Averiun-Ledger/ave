@@ -656,6 +656,13 @@ impl TrackerVisibilityState {
                 return;
             }
 
+            // Stale resend (replay tail behind the recorded tip):
+            // closing here would set `end < start` and appending
+            // would break the ordered/non-overlapping invariant.
+            if sn <= last.from_sn {
+                return;
+            }
+
             if last.to_sn.is_none() {
                 last.to_sn = Some(sn.saturating_sub(1));
             }
@@ -671,6 +678,13 @@ impl TrackerVisibilityState {
     fn push_event(&mut self, sn: u64, visibility: TrackerEventVisibility) {
         if let Some(last) = self.event_ranges.last_mut() {
             if last.visibility == visibility {
+                return;
+            }
+
+            // Stale resend (replay tail behind the recorded tip):
+            // closing here would set `end < start` and appending
+            // would break the ordered/non-overlapping invariant.
+            if sn <= last.from_sn {
                 return;
             }
 

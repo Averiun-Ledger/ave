@@ -14,6 +14,7 @@ use ave_common::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         keys::{Ed25519Signer, KeyPair},
     },
+    schematype::SchemaType,
     sink::{
         DataToSinkEvent, HttpProxyConfig, HttpTlsConfig, IncomingSinkEvent,
         OAuth2GrantType, SinkAuthConfig, SinkAuthMethod, SinkCompression,
@@ -33,7 +34,7 @@ use crate::common::{
     TempEnvVar, create_and_authorize_governance, create_node,
     create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
     emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
-    get_subject, node_running,
+    get_subject, governance_properties, node_running,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -53,7 +54,8 @@ use crate::common::{
         flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
         make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
-        make_sink_entry_with_auth, make_sink_entry_with_concurrency,
+        make_sink_entry_with_auth, make_sink_entry_with_auth_and_retry_policy,
+        make_sink_entry_with_concurrency,
         make_sink_entry_with_headers, make_sink_entry_with_proxy,
         make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
@@ -11686,6 +11688,433 @@ async fn sink_attaches_without_restart_when_schema_added_late() {
     assert_no_duplicate_events(&events);
     assert_sink_not_lagging(&node.api, "example-sink").await;
     assert_sink_running(&node.api, "example-sink").await;
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// Test 43: boot reconcile must preserve gov-version windows.
+///
+/// The live path records the *previous* sn for the outgoing version
+/// at a transition and the tip sn at the close. Boot reconcile must
+/// rewrite the same boundaries; otherwise serving attributes events
+/// to the wrong governance version.
+///
+/// Setup: Owner + Witness, schema `Example` with viewpoints
+/// `["agua"]`. The creator grant starts with Witness ungranted; a
+/// gov change grants Witness `["agua"]` (new gov version).
+///
+/// Sequence:
+/// 1. Owner creates tracker `S1`; emits SN 1 with viewpoint
+///    `["agua"]` (gov v1). Witness syncs SN 0..1.
+/// 2. Gov change grants Witness `["agua"]` (gov v2). Witness syncs
+///    gov. Owner emits SN 2 with viewpoint `["agua"]` (gov v2).
+///    Witness syncs SN 2: live windows are `{v1:1, v2:2}`.
+/// 3. Shut down and wipe the witness `SnRegister` store with SQL
+///    (strictly worse than any crash window: the journal is intact,
+///    every derived write is gone) and restart. Boot reconcile
+///    full-rescans SN 0..2 and rewrites the windows.
+/// 4. Read back the stored windows for SN 0..2.
+///
+/// Expected: `[(0, 1, v1), (2, 2, v2)]` — v1 ends at SN 1, v2 covers
+/// the tip. With the off-by-one replay the transition records
+/// `event.sn` and the close records `tip + 1`, so the map is a
+/// single `[(0, 2, v1)]` range and the assert fails. After the fix it
+/// passes.
+///
+/// Note: delivery modes are deliberately NOT asserted here. Receipt
+/// masking falls back to the tip grant when the replaying windows
+/// are empty, so Full/Opaque outcomes are identical in both worlds;
+/// the windows themselves are the discriminating observable.
+#[tokio::test]
+async fn sink_reconcile_keeps_gov_version_windows() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes.remove(0);
+    let mut witness = nodes.remove(0);
+
+    let _owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+    let mut witness_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&witness.api]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        governance_with_viewpoints_fact(witness.api.public_key()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) = create_subject(
+        &owner.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SN 1 under v1. Witness journals SN 0..1.
+    emit_fact_viewpoints(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    witness.api.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&witness.api, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // New gov version: grant Witness ["agua"] on the creator entry.
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Owner",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Witness",
+                                            "viewpoints": ["agua"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    // Setup invariant (fails loudly instead of testing nothing): the
+    // grant landed, so a second gov version exists.
+    {
+        let gov_state =
+            get_subject(&owner.api, governance_id.clone(), None, true)
+                .await
+                .unwrap();
+        let gov = governance_properties(gov_state.properties.clone());
+        let granted: BTreeSet<String> = gov
+            .roles_schema
+            .get(&SchemaType::Type("Example".to_owned()))
+            .expect("Example schema roles must exist")
+            .creator
+            .iter()
+            .flat_map(|c| c.witnesses.iter())
+            .filter(|w| w.viewpoints.contains(&"agua".to_owned()))
+            .map(|w| w.name.clone())
+            .collect();
+        assert!(
+            granted.contains("Witness"),
+            "grant must land before the bug is observable, got {granted:?}"
+        );
+    }
+
+    // SN 2 under v2 (granted). Witness journals it.
+    emit_fact_viewpoints(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Control: the live path records the transition (v1 ends at
+    // SN 1) and the tip (v2 covers SN 2). Holds in both worlds: the
+    // bug is only in the boot replay.
+    let live_windows = witness
+        .api
+        .test_get_gov_version_window(
+            governance_id.clone(),
+            subject_id.clone(),
+            0,
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        live_windows,
+        vec![(0, 1, 1), (2, 2, 2)],
+        "live map must be complete before the wipe, got {live_windows:?}"
+    );
+
+    // Crash cut on the witness SnRegister store only (journal
+    // intact): delete AFTER shutdown so nothing re-persists the
+    // memory map. With no markers the boot reconcile full-rescans
+    // SN 0..2 — crossing the v1→v2 transition — and rewrites the
+    // windows from the replayed events.
+    let witness_keys = witness.keys.clone();
+    let witness_local_db = witness_dirs[0].path().to_path_buf();
+    let witness_ext_db = witness_dirs[1].path().to_path_buf();
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
+    {
+        let conn = rusqlite::Connection::open(
+            witness_local_db.join("database.db"),
+        )
+        .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let states =
+            conn.execute("DELETE FROM sn_register_states", []).unwrap();
+        let events =
+            conn.execute("DELETE FROM sn_register_events", []).unwrap();
+        assert!(
+            states > 0 || events > 0,
+            "SnRegister wipe must delete rows, else the test is vacuous"
+        );
+    }
+
+    let owner_peer_id = owner.api.peer_id().to_string();
+    let owner_address = owner.listen_address.clone();
+    let witness_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut witness, mut witness_dirs2) =
+        create_node(restart_config_with_peers(
+            witness_keys,
+            witness_local_db,
+            witness_ext_db,
+            format!("/memory/{}", witness_port),
+            vec![RoutingNode {
+                peer_id: owner_peer_id,
+                address: vec![owner_address],
+            }],
+            vec![],
+        ))
+        .await;
+    witness_dirs.append(&mut witness_dirs2);
+    node_running(&witness.api).await.unwrap();
+    // Force the tracker boot: projections are intact, so nothing
+    // would lift it on its own and boot reconcile would never run.
+    witness
+        .api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
+    witness
+        .api
+        .add_sync_peer(
+            subject_id.clone(),
+            vec![PublicKey::from_str(owner.api.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+    witness.api.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // The replayed windows must match the live ones: v1 ends at the
+    // last sn under v1 (SN 1), v2 covers the tip (SN 2). With the
+    // off-by-one replay the transition records `event.sn` and the
+    // close records `tip + 1`, collapsing the map to a single
+    // `[(0, 2, v1)]` range.
+    // The replayed windows must match the live ones: v1 ends at the
+    // last sn under v1 (SN 1), v2 covers the tip (SN 2). With the
+    // off-by-one replay the transition records `event.sn` and the
+    // close records `tip + 1`, collapsing the map to a single
+    // `[(0, 2, v1)]` range.
+    let windows = witness
+        .api
+        .test_get_gov_version_window(
+            governance_id.clone(),
+            subject_id.clone(),
+            0,
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        windows,
+        vec![(0, 1, 1), (2, 2, 2)],
+        "reconcile must rewrite live-identical windows, got {windows:?}"
+    );
+
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
+}
+
+/// Test 46: the OAuth2 token refresh honors the configured retry cap.
+///
+/// A 429/5xx IdP answer carries a `Retry-After` hint that the refresh
+/// loop must not follow unboundedly: deliveries waiting for the token
+/// would stall for the hint's duration even though the sink configures
+/// a much smaller `retry_max_delay_ms`.
+///
+/// Setup: node + governance + schema `Example` + subject `S1`. Restart
+/// with an OAuth2 sink whose IdP always answers `503` with
+/// `Retry-After: 5`, retry base 10ms / cap 300ms, and a refresh margin
+/// forcing a fetch on every delivery.
+///
+/// Expected: one refresh cycle is 3 token requests (initial + 2
+/// retries) spaced by the capped delay (~0.6s total), not by the hint
+/// (~10s). The delivery then fails fast instead of stalling, so the
+/// subject stays lagging and nothing is delivered.
+#[tokio::test]
+async fn sink_oauth2_retry_after_is_capped() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) = create_subject(
+        &node.api,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+    let subject_id_str = subject_id.to_string();
+    for data in [10, 20] {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let oauth_sink = TestSink::start().await;
+    let oauth_password_env = "AVE_SINK_PASSWORD_OAUTH_CAP_SINK";
+    let _password_guard =
+        TempEnvVar::set(oauth_password_env, "test-password");
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_auth_and_retry_policy(
+            "oauth-cap-sink",
+            oauth_sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url: oauth_sink.auth_url(),
+                username: "test-user".to_owned(),
+                ..SinkAuthConfig::default()
+            }),
+            0,
+            10,
+            300,
+            1_000_000,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Startup eager fetch succeeds: fixes the baseline so only the
+    // delivery-triggered refresh cycle below is measured.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while oauth_sink.auth_requests().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("worker should fetch a token eagerly on startup");
+    wait_for_sink_caught_up(&node.api, "oauth-cap-sink").await;
+    oauth_sink
+        .set_auth_mode(AuthResponseMode::TokenServerErrorWithRetryAfter(5))
+        .await;
+    let auth_baseline = oauth_sink.auth_requests().await.len();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 30}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // One refresh cycle is 3 token requests. With the cap it lands in
+    // ~0.6s; following the 5s hint takes ~10s.
+    let start = std::time::Instant::now();
+    let mut attempts = 0;
+    loop {
+        if oauth_sink.auth_requests().await.len() >= auth_baseline + 3 {
+            break;
+        }
+        assert!(
+            attempts < 300,
+            "refresh cycle never completed (IdP keeps failing)"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "refresh must be capped at retry_max_delay_ms, not stall for the hint; took {elapsed:?}"
+    );
+
+    // The delivery fails fast (no token) instead of stalling: the
+    // subject stays lagging and SN 3 is never delivered.
+    wait_for_sink_lagging_subjects(&node.api, "oauth-cap-sink", 1).await;
+    let events = oauth_sink.snapshot().await;
+    assert!(
+        !events.iter().any(|e| e.subject_id() == subject_id_str
+            && e.sn() == 3),
+        "SN 3 must not be delivered while the IdP keeps failing"
+    );
 
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;

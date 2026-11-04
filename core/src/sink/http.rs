@@ -461,6 +461,7 @@ impl HttpTransport {
                 password,
                 config.token_refresh_margin_secs,
                 config.retry_base_delay_ms,
+                config.retry_max_delay_ms,
             ));
         }
         let static_auth = match &config.auth {

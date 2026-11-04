@@ -3461,6 +3461,115 @@ impl Api {
         Ok(())
     }
 
+    /// Visibility ranges of a tracker as currently stored, for
+    /// crash-recovery tests: boot reconcile must leave them ordered,
+    /// non-overlapping and with `from_sn <= to_sn`. Returns
+    /// `(stored, events)` with `(from_sn, to_sn, visibility)` tuples
+    /// in stored order.
+    pub async fn test_get_tracker_visibility(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<
+        (Vec<(u64, Option<u64>, String)>, Vec<(u64, Option<u64>, String)>),
+        Error,
+    > {
+        use crate::governance::witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        };
+        let actor: ActorRef<WitnessesRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/witnesses_register"
+            )))
+            .await?;
+        let response = actor
+            .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+                subject_id,
+            })
+            .await
+            .map_err(|e| {
+                actor_communication_error("witnesses_register", e)
+            })?;
+        match response {
+            WitnessesRegisterResponse::TrackerVisibilityState { state } => {
+                Ok((
+                    state
+                        .stored_ranges
+                        .iter()
+                        .map(|range| {
+                            (
+                                range.from_sn,
+                                range.to_sn,
+                                format!("{:?}", range.visibility),
+                            )
+                        })
+                        .collect(),
+                    state
+                        .event_ranges
+                        .iter()
+                        .map(|range| {
+                            (
+                                range.from_sn,
+                                range.to_sn,
+                                format!("{:?}", range.visibility),
+                            )
+                        })
+                        .collect(),
+                ))
+            }
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "TrackerVisibilityState".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Gov-version windows of a tracker as currently stored, for
+    /// crash-recovery tests: boot reconcile must rewrite the same
+    /// boundaries the live path wrote. Returns
+    /// `(from_sn, to_sn, gov_version)` ranges in order.
+    pub async fn test_get_gov_version_window(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        from_sn: u64,
+        to_sn: u64,
+    ) -> Result<Vec<(u64, u64, u64)>, Error> {
+        use crate::governance::sn_register::{
+            SnRegister, SnRegisterMessage, SnRegisterResponse,
+        };
+        let actor: ActorRef<SnRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/sn_register"
+            )))
+            .await?;
+        let response = actor
+            .ask(SnRegisterMessage::GetGovVersionWindow {
+                subject_id,
+                from_sn,
+                to_sn,
+            })
+            .await
+            .map_err(|e| actor_communication_error("sn_register", e))?;
+        match response {
+            SnRegisterResponse::GovVersionWindow(ranges) => Ok(ranges
+                .into_iter()
+                .map(|range| {
+                    (range.from_sn, range.to_sn, range.gov_version)
+                })
+                .collect()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "sn_register".to_owned(),
+                expected: "GovVersionWindow".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Governance-schema evaluator keys in the role register, for
     /// test assertions on what UpdateLedger applied.
     pub async fn test_gov_evaluators(
