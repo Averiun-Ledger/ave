@@ -1,5 +1,8 @@
 //! SinkSubjectWorker: ephemeral child actor that handles a single subject.
 
+#[cfg(feature = "test")]
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +23,38 @@ use crate::sink::worker::{
     SinkSubjectWorkerError, SinkWorker, SinkWorkerMessage,
 };
 use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
+
+// ---------------------------------------------------------------------------
+// Test instrumentation
+// ---------------------------------------------------------------------------
+
+/// Test-only count of individual catch-up dequeue shifts per sink:
+/// every `remove(0)` moves every remaining element, so draining a
+/// batch of B events shifts B(B-1)/2 elements. Lets regression
+/// tests assert that catch-up consumes its batch sequentially
+/// instead of shifting it on every event. Keyed by sink name so
+/// tests sharing a process do not pollute each other.
+#[cfg(feature = "test")]
+static CATCH_UP_SHIFTED_ELEMENTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Test-only: reset the catch-up shift counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_reset_catch_up_shifts(sink: &str) {
+    if let Ok(mut counts) = CATCH_UP_SHIFTED_ELEMENTS.lock() {
+        counts.remove(sink);
+    }
+}
+
+/// Test-only: read the catch-up shift counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_catch_up_shifts(sink: &str) -> u64 {
+    CATCH_UP_SHIFTED_ELEMENTS
+        .lock()
+        .map(|counts| counts.get(sink).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -46,7 +81,7 @@ pub enum SinkSubjectWorkerMessage {
     },
     ProcessNextEvent {
         data: Arc<DataToSink>,
-        remaining: Vec<DataToSink>,
+        remaining: VecDeque<DataToSink>,
         generation: u64,
     },
     /// Flush the buffered live events (only used in `batch_delivery` mode).
@@ -271,9 +306,8 @@ impl Handler<Self> for SinkSubjectWorker {
                         )
                         .await;
 
-                        if !remaining.is_empty() {
-                            let mut remaining = remaining;
-                            let next_event = remaining.remove(0);
+                        let mut remaining = remaining;
+                        if let Some(next_event) = remaining.pop_front() {
                             let self_ref = ctx.reference().await?;
                             if let Err(e) = self_ref
                                 .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
@@ -645,9 +679,10 @@ impl SinkSubjectWorker {
             return Ok(());
         }
 
-        let mut events = events;
-        let event = events.remove(0);
-        let remaining = events;
+        let mut remaining: VecDeque<DataToSink> = events.into();
+        let Some(event) = remaining.pop_front() else {
+            return Ok(());
+        };
         let self_ref = ctx.reference().await?;
         let resend = Self::resend_catch_up_signal(|| {
             let self_ref = self_ref.clone();

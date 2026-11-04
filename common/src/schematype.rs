@@ -283,8 +283,7 @@ mod tests {
                 .is_valid_actor_segment()
         );
         assert!(
-            !SchemaType::Type("orders.v1".to_string())
-                .is_valid_actor_segment()
+            !SchemaType::Type("orders.v1".to_string()).is_valid_actor_segment()
         );
         assert!(
             !SchemaType::Type("x/../../outside".to_string())

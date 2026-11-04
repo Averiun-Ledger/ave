@@ -2891,50 +2891,57 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path;
-        if !contracts_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not read contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
+        // Official artifacts live under `contracts/` while staging
+        // happens at the root: both directories must be swept (the
+        // root-only scan left retired official artifacts on disk
+        // forever). Same predicate in both: temp staging always goes,
+        // anything else only when no longer allowed.
+        for contracts_dir in [
+            config.contracts_path.clone(),
+            config.contracts_path.join("contracts"),
+        ] {
+            if !contracts_dir.exists() {
+                continue;
             }
-        })?;
 
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|e| ActorError::Functional {
+            let mut entries =
+                fs::read_dir(&contracts_dir).await.map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not read contracts directory {}: {}",
+                            contracts_dir.display(),
+                            e
+                        ),
+                    }
+                })?;
+
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ActorError::Functional {
                     description: format!(
                         "Can not iterate contracts directory {}: {}",
                         contracts_dir.display(),
                         e
                     ),
-                })?
-        {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if !file_name.starts_with(&prefix) {
-                continue;
-            }
+                }
+            })? {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if !file_name.starts_with(&prefix) {
+                    continue;
+                }
 
-            let is_temp = file_name.starts_with(&format!(
-                "{}_temp_",
-                self.subject_metadata.subject_id
-            ));
-            if is_temp || !allowed.contains(&file_name) {
-                let path = entry.path();
-                if let Err(e) = fs::remove_dir_all(path).await {
-                    debug!(
-                        error = %e,
-                        file_name = %file_name,
-                        "Failed to remove swept contracts entry"
-                    );
+                let is_temp = file_name.starts_with(&format!(
+                    "{}_temp_",
+                    self.subject_metadata.subject_id
+                ));
+                if is_temp || !allowed.contains(&file_name) {
+                    let path = entry.path();
+                    if let Err(e) = fs::remove_dir_all(path).await {
+                        debug!(
+                            error = %e,
+                            file_name = %file_name,
+                            "Failed to remove swept contracts entry"
+                        );
+                    }
                 }
             }
         }
@@ -5377,8 +5384,10 @@ impl Actor for Governance {
         // Crash backstop for quiet subjects: report the ledger tip to
         // the node sink manager so undelivered past events are caught
         // up even without fresh traffic. Map reads only.
-        // Dirty boots only (same reason as above).
-        if !self.skip_reconcile {
+        // Dirty boots only (same reason as above). Ledgers without
+        // history report nothing: with no tip a missing cursor must
+        // not read as behind.
+        if !self.skip_reconcile && get_last_event(ctx).await?.is_some() {
             let node_path = ctx.path().parent().parent();
             let manager_path =
                 ActorPath::from(format!("{}/node_sink_manager", node_path));

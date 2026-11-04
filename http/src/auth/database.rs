@@ -1350,6 +1350,16 @@ impl AuthDatabase {
 // USER OPERATIONS
 // =============================================================================
 
+/// Out-of-transaction Argon2 pre-check for a password change: the
+/// observed hash, the verification outcome and (when valid) the new
+/// hash. The transaction trusts them only while the stored hash is
+/// unchanged. Mirrors the login precheck pattern.
+pub(crate) struct ChangePasswordPrecomputed {
+    seen_hash: Option<String>,
+    current_valid: bool,
+    new_hash: Option<String>,
+}
+
 impl AuthDatabase {
     fn release_deleted_username_with_conn(
         conn: &Connection,
@@ -2364,19 +2374,111 @@ impl AuthDatabase {
     /// SECURITY: This function uses constant-time comparison to prevent username enumeration
     /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
     /// to make the response time similar to a failed password change for an existing user.
+    ///
+    /// Argon2 runs outside the pooled connection (see
+    /// [`Self::change_password_precheck`]); only the short
+    /// read-modify-write below holds the connection.
     pub fn change_password_with_credentials(
         &self,
         username: &str,
         current_password: &str,
         new_password: &str,
     ) -> Result<User, DatabaseError> {
+        let precomputed = self.change_password_precheck(
+            username,
+            current_password,
+            new_password,
+        )?;
         let conn = self.lock_conn()?;
         self.change_password_with_conn(
             &conn,
             username,
             current_password,
             new_password,
+            Some(&precomputed),
         )
+    }
+
+    /// Argon2 pre-check without holding a pooled connection: fetches
+    /// the user row, releases the connection, then verifies the
+    /// current password (real or dummy hash for timing parity) and,
+    /// when it verifies, hashes the new password. Policy checks run
+    /// again inside the transaction, so a rejected new password just
+    /// wastes this hash on an error path instead of changing any
+    /// outcome. The caller must re-validate the hash inside its
+    /// transaction — a concurrent password change between here and
+    /// there aborts the change instead of applying on stale
+    /// credentials. Mirrors
+    /// [`Self::verify_credentials_precheck`].
+    pub(crate) fn change_password_precheck(
+        &self,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<ChangePasswordPrecomputed, DatabaseError> {
+        let row: Option<(String, bool, Option<i64>, bool)> = {
+            let conn = self.lock_conn()?;
+            conn.query_row(
+                "SELECT password_hash, is_active, locked_until, must_change_password
+                 FROM users WHERE username = ?1 AND is_deleted = 0",
+                params![username],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+        match row {
+            Some((hash, _, _, _)) => {
+                let valid =
+                    super::crypto::verify_password(current_password, &hash)
+                        .map_err(|e| {
+                            DatabaseError::Crypto(format!(
+                                "Password verification failed: {}",
+                                e
+                            ))
+                        })?;
+                // Hash the new password only on the valid path; the
+                // transaction re-runs the cheap policy checks, so a
+                // rejected new password just wastes this hash on an
+                // error path instead of changing any outcome.
+                let mut new_hash = None;
+                if valid {
+                    new_hash = Some(
+                        super::crypto::hash_password(new_password).map_err(
+                            |e| {
+                                DatabaseError::Crypto(format!(
+                                    "Failed to hash password: {}",
+                                    e
+                                ))
+                            },
+                        )?,
+                    );
+                }
+                Ok(ChangePasswordPrecomputed {
+                    seen_hash: Some(hash),
+                    current_valid: valid,
+                    new_hash,
+                })
+            }
+            None => {
+                let _ = super::crypto::verify_password(
+                    current_password,
+                    DUMMY_PASSWORD_HASH,
+                );
+                Ok(ChangePasswordPrecomputed {
+                    seen_hash: None,
+                    current_valid: false,
+                    new_hash: None,
+                })
+            }
+        }
     }
 
     /// Audited variant of [`Self::change_password_with_credentials`]
@@ -2400,6 +2502,14 @@ impl AuthDatabase {
             );
         }
 
+        // Argon2 (verify + new hash) runs outside any pooled
+        // connection; the Immediate transaction below only
+        // revalidates and writes. Mirrors the login flow.
+        let precomputed = self.change_password_precheck(
+            username,
+            current_password,
+            new_password,
+        )?;
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
         let result = (|| {
@@ -2412,6 +2522,7 @@ impl AuthDatabase {
                 username,
                 current_password,
                 new_password,
+                Some(&precomputed),
             ) {
                 Ok(user) => user,
                 Err(err) => {
@@ -2480,6 +2591,7 @@ impl AuthDatabase {
         username: &str,
         current_password: &str,
         new_password: &str,
+        precomputed: Option<&ChangePasswordPrecomputed>,
     ) -> Result<User, DatabaseError> {
         let user_result = conn
             .query_row(
@@ -2513,25 +2625,41 @@ impl AuthDatabase {
         // Use a real Argon2id hash to ensure identical parameters and computation cost
         let (user, password_valid) = match user_result {
             Ok(Some(u)) => {
-                // User exists - verify with real hash
-                let valid = super::crypto::verify_password(
-                    current_password,
-                    &u.password_hash,
-                )
-                .map_err(|e| {
-                    DatabaseError::Crypto(format!(
-                        "Password verification failed: {}",
-                        e
-                    ))
-                })?;
+                // With a precheck the Argon2 already ran outside any
+                // pooled connection: trust it only while the hash is
+                // unchanged, otherwise fail closed like a wrong
+                // password (a concurrent reset aborts the change).
+                let valid = match precomputed {
+                    Some(pre)
+                        if pre.seen_hash.as_deref()
+                            == Some(&u.password_hash) =>
+                    {
+                        pre.current_valid
+                    }
+                    Some(_) => false,
+                    None => super::crypto::verify_password(
+                        current_password,
+                        &u.password_hash,
+                    )
+                    .map_err(|e| {
+                        DatabaseError::Crypto(format!(
+                            "Password verification failed: {}",
+                            e
+                        ))
+                    })?,
+                };
                 (Some(u), valid)
             }
             Ok(None) | Err(_) => {
-                // User doesn't exist - verify with dummy hash to match timing
-                let _ = super::crypto::verify_password(
-                    current_password,
-                    DUMMY_PASSWORD_HASH,
-                );
+                // No precheck ran: verify with dummy hash to match
+                // timing. With precheck the timing already matched
+                // there, so skip the second burn.
+                if precomputed.is_none() {
+                    let _ = super::crypto::verify_password(
+                        current_password,
+                        DUMMY_PASSWORD_HASH,
+                    );
+                }
                 (None, false)
             }
         };
@@ -2606,9 +2734,17 @@ impl AuthDatabase {
             ));
         }
 
-        let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
-        })?;
+        // With a precheck the new hash was already computed outside
+        // any pooled connection; reuse it (it belongs to this run:
+        // same inputs, hash revalidated above).
+        let password_hash = match precomputed
+            .and_then(|pre| pre.new_hash.clone())
+        {
+            Some(hash) => hash,
+            None => hash_password(new_password).map_err(|e| {
+                DatabaseError::Crypto(format!("Failed to hash password: {}", e))
+            })?,
+        };
 
         conn.execute(
             "UPDATE users

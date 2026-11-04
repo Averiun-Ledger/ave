@@ -55,9 +55,9 @@ use crate::common::{
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
         make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
         make_sink_entry_with_auth, make_sink_entry_with_auth_and_retry_policy,
-        make_sink_entry_with_concurrency,
-        make_sink_entry_with_headers, make_sink_entry_with_proxy,
-        make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
+        make_sink_entry_with_concurrency, make_sink_entry_with_headers,
+        make_sink_entry_with_proxy, make_sink_entry_with_retry_policy,
+        make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
         sample_sinks, short_idle_sink_config, short_timeout_sink_config,
@@ -11488,6 +11488,568 @@ async fn dirty_restart_review_marks_quiet_subject_lagging() {
     join_all(node.handler.iter_mut()).await;
 }
 
+/// BR-06: boot review must treat a missing cursor as behind even when
+/// the ledger tip is SN 0. A subject with only its genesis persisted,
+/// no manager state (crash cut between ledger and manager
+/// notification), and no sink cursor must still be delivered from SN 0
+/// on the next dirty boot. Without the fix the review computes
+/// `behind = false` for tip 0 and the genesis is never delivered.
+#[traced_test]
+#[tokio::test]
+async fn sink_review_genesis_without_cursor_triggers_catch_up() {
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    // Genesis only: no facts, so the ledger tip stays at SN 0.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    // Crash cut: the ledger keeps the genesis but the governance sink
+    // manager loses every notification (no last_seen, no cursors).
+    // Wipe its whole persisted state post-shutdown so the next boot
+    // can only discover the subject via review. Fail loudly if no
+    // rows are deleted instead of staging a vacuous restart.
+    let node_keys = node.keys.clone();
+    let node_local_db = dirs[0].path().to_path_buf();
+    let node_ext_db = dirs[1].path().to_path_buf();
+    let gov_prefix = governance_id.to_string();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    {
+        let conn =
+            rusqlite::Connection::open(node_local_db.join("database.db"))
+                .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let mut wiped = 0;
+        for table in
+            ["sink_states", "sink_events", "sink_metadata", "sink_fence"]
+        {
+            wiped += conn
+                .execute(
+                    &format!("DELETE FROM {table} WHERE prefix = ?1"),
+                    rusqlite::params![gov_prefix],
+                )
+                .unwrap();
+        }
+        assert!(
+            wiped > 0,
+            "manager wipe must delete rows, else the test is vacuous"
+        );
+    }
+
+    // Dirty restart (no clean marker was ever persisted) with a
+    // healthy sink attached, then lift the quiet tracker: boot review
+    // must catch the subject up from SN 0.
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        node_keys,
+        node_local_db,
+        node_ext_db,
+        format!("/memory/{port}"),
+        example_sink_config(sink.url(), Some(governance_id.to_string())),
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+    node.api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
+    sink.wait_for_count(1, true).await;
+
+    let genesis: Vec<_> = sink
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|e| e.subject_id() == subject_id_str.as_str())
+        .collect();
+    assert_eq!(
+        genesis.len(),
+        1,
+        "genesis must be delivered exactly once, got {} events",
+        genesis.len()
+    );
+    assert_eq!(genesis[0].sn(), 0);
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// BR-04: cursor persists fan out across many sinks through the
+/// shared manager state (the `sink_manager_state_*` unit tests pin
+/// the sharing itself).
+///
+/// Setup: one node, one TestSink, 10 sink entries pointing at it, one
+/// subject with genesis + 2 facts already caught up everywhere.
+/// Every new fact fans out to 10 cursor writes against the full maps;
+/// all must be delivered exactly once.
+#[traced_test]
+#[tokio::test]
+async fn sink_cursor_updates_fan_out_to_many_sinks() {
+    const SINKS: usize = 10;
+    const NEW_FACTS: u64 = 5;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [10, 20] {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let subject_id_str = subject_id.to_string();
+
+    // Restart with MANY sink entries on a single TestSink: every fact
+    // fans out to SINKS cursor writes against the full maps.
+    let sink = TestSink::start().await;
+    let node_keys = node.keys.clone();
+    let node_local_db = dirs[0].path().to_path_buf();
+    let node_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let mut entries = Vec::with_capacity(SINKS);
+    for i in 0..SINKS {
+        entries.push(make_sink_entry(
+            &format!("cap-sink-{i}"),
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        ));
+    }
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut node_dirs2) = create_node(restart_config(
+        node_keys,
+        node_local_db,
+        node_ext_db,
+        format!("/memory/{port}"),
+        entries,
+    ))
+    .await;
+    dirs.append(&mut node_dirs2);
+    node_running(&node.api).await.unwrap();
+
+    // Baseline: catch-up of SN 0..2 on every sink.
+    let baseline = 3 * SINKS;
+    sink.wait_for_count(baseline, true).await;
+
+    // Measurement window: 5 new facts, 5 * SINKS deliveries.
+    for data in [30, 40, 50, 60, 70] {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    sink.wait_for_count(baseline + NEW_FACTS as usize * SINKS, true)
+        .await;
+
+    // Every sink really got every fact: 3 genesis-era events plus
+    // the 5 new ones, each delivered SINKS times.
+    let events: Vec<_> = sink
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|e| e.subject_id() == subject_id_str.as_str())
+        .collect();
+    assert_eq!(
+        events.len(),
+        (3 + NEW_FACTS as usize) * SINKS,
+        "every fact must reach every sink"
+    );
+    for sn in 0..3 + NEW_FACTS {
+        assert_eq!(
+            events.iter().filter(|e| e.sn() == sn).count(),
+            SINKS,
+            "SN {sn} must reach every sink"
+        );
+    }
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// BR-05: bulk lagging rebuild computes metrics once per sink, not
+/// once per inserted subject.
+///
+/// Setup: one node, K subjects with one fact each and no sink (so
+/// every subject is behind everywhere). Register the metrics
+/// registry, restart with a failing sink attached, and count lag
+/// recomputations for "lag-sink" while the boot rebuild runs. The
+/// sink never delivers (ServerError), so no catch-up ever completes
+/// and the count reflects the rebuild path only.
+///
+/// Expected: exactly the final per-sink computation (plus noise
+/// margin). Without the bulk path every insertion rescans the whole
+/// set: K+1 recomputes for K subjects.
+#[traced_test]
+#[tokio::test]
+async fn sink_rebuild_lagging_computes_metrics_once() {
+    const K: usize = 30;
+
+    // Metrics on: without the registry the recompute path is skipped
+    // and the counter would stay at zero in both worlds.
+    let mut registry = prometheus_client::registry::Registry::default();
+    ave_core::metrics::register(&mut registry);
+    ave_core::sink::manager::test_reset_lag_recomputes("lag-sink");
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    for data in 0..K {
+        let (subject_id, _) = create_subject(
+            &node.api,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+        emit_fact(
+            &node.api,
+            subject_id,
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ServerError).await;
+    let node_keys = node.keys.clone();
+    let node_local_db = dirs[0].path().to_path_buf();
+    let node_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let mut entries = Vec::with_capacity(1);
+    entries.push(make_sink_entry(
+        "lag-sink",
+        sink.url(),
+        Some(governance_id.to_string()),
+        BTreeSet::from([SinkTypes::All]),
+    ));
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut node_dirs2) = create_node(restart_config(
+        node_keys,
+        node_local_db,
+        node_ext_db,
+        format!("/memory/{port}"),
+        entries,
+    ))
+    .await;
+    dirs.append(&mut node_dirs2);
+    node_running(&node.api).await.unwrap();
+
+    // The rebuild must find every subject lagging (control: the
+    // subjects really are behind, otherwise a zero count would
+    // vacuously pass).
+    wait_for_sink_lagging_subjects(&node.api, "lag-sink", K).await;
+    let recomputes = ave_core::sink::manager::test_lag_recomputes("lag-sink");
+    assert!(
+        recomputes >= 1,
+        "boot rebuild must have run at least once, got {recomputes}"
+    );
+    assert!(
+        recomputes < 8,
+        "bulk rebuild must compute metrics once per sink, not once per subject: {recomputes} recomputes for {K} subjects"
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// BR-07: draining a catch-up batch of B events must not shift
+/// B(B-1)/2 elements.
+///
+/// Setup: one node without sinks, one subject with genesis + 200
+/// facts. Restart with a healthy sink attached and lift the quiet
+/// tracker: the 201-event backlog is caught up in `catch_up_batch_size`
+/// (100) batches through the individual `ProcessNextEvent` chain.
+///
+/// Expected: the shifted-elements count for "br07-sink" is zero
+/// (sequential consumption). Without the fix each batch extraction
+/// shifts the whole remainder: ~10k shifts here. Delivery order is
+/// asserted as the non-vacuous control (a zero count with no
+/// deliveries would prove nothing).
+#[traced_test]
+#[tokio::test]
+async fn sink_individual_catch_up_consumes_batch_sequentially() {
+    const FACTS: u64 = 200;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let subject_id_str = subject_id.to_string();
+
+    for data in 1..FACTS {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    // Last fact waits: mailbox FIFO means every prior fact is
+    // applied once this one completes.
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": FACTS}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let total = FACTS + 1; // genesis + FACTS facts
+
+    // Reset before shutdown: the counter is process-global and the
+    // restarted node runs in this same process, so a reset after
+    // restart would miss a boot catch-up launched before the lift.
+    // Phase one has no sinks attached, hence no catch-up can run
+    // before this point.
+    ave_core::sink::subject_worker::test_reset_catch_up_shifts("br07-sink");
+
+    // Dirty restart (no clean marker was ever persisted) with a
+    // healthy sink attached, then lift the quiet tracker: boot
+    // review catches the subject up from SN 0 through the individual
+    // delivery chain.
+    let node_keys = node.keys.clone();
+    let node_local_db = dirs[0].path().to_path_buf();
+    let node_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        node_keys,
+        node_local_db,
+        node_ext_db,
+        format!("/memory/{port}"),
+        vec![make_sink_entry(
+            "br07-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Measurement window: the lift catch-up only. (The counter was
+    // reset before shutdown; see above.)
+    node.api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
+    sink.wait_for_count(total as usize, true).await;
+
+    let events = sink.snapshot().await;
+    assert_subject_sn_sequence(&events, &subject_id_str, 0, total - 1);
+
+    let shifts =
+        ave_core::sink::subject_worker::test_catch_up_shifts("br07-sink");
+    assert_eq!(
+        shifts, 0,
+        "catch-up must not shift batch elements, shifted {shifts} elements for {total} events"
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// BR-09: enqueuing Q distinct subjects while the slots stay busy
+/// must not perform Q(Q-1)/2 id comparisons.
+///
+/// Setup: one node, 50 subjects with genesis only (their tips are
+/// recorded via live notifications, no sink attached). Restart with
+/// a healthy sink and `max_catch_up_concurrency: 1`: boot launches
+/// a catch-up for every lagging subject, so the first runs while
+/// the other 49 queue behind it, each admission scanning the whole
+/// queue.
+///
+/// Expected: the scan count for "br09-sink" is zero (index lookup
+/// instead of a walk). Without the fix every admission scans the
+/// queue: about Q(Q-1)/2 comparisons here (1176 observed for 50
+/// subjects). Full delivery of all 50 genesis events is asserted as
+/// the non-vacuous control (it proves every subject went through
+/// admission; a zero count with no deliveries would prove nothing).
+#[traced_test]
+#[tokio::test]
+async fn sink_pending_admission_does_not_scan_queue() {
+    const SUBJECTS: usize = 50;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..SUBJECTS {
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    }
+
+    // The counter is process-global and the restarted node runs in
+    // this same process: reset before shutdown so the boot catch-up
+    // admissions below are all counted.
+    ave_core::sink::worker::test_reset_pending_scan_comparisons("br09-sink");
+
+    // Dirty restart with a healthy sink: boot launches one catch-up
+    // per lagging subject; with concurrency 1 the first runs while
+    // the rest queue behind it.
+    let node_keys = node.keys.clone();
+    let node_local_db = dirs[0].path().to_path_buf();
+    let node_ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let sink = TestSink::start().await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        node_keys,
+        node_local_db,
+        node_ext_db,
+        format!("/memory/{port}"),
+        vec![make_sink_entry_with_concurrency(
+            "br09-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            1,
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // Control: every subject is delivered exactly once, so every
+    // subject provably went through worker admission.
+    sink.wait_for_count(SUBJECTS, true).await;
+    assert_eq!(sink.snapshot().await.len(), SUBJECTS);
+
+    let scans =
+        ave_core::sink::worker::test_pending_scan_comparisons("br09-sink");
+    assert_eq!(
+        scans, 0,
+        "catch-up admission must not scan the queue, counted {scans} comparisons for {SUBJECTS} subjects"
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
 #[traced_test]
 #[tokio::test]
 async fn sink_deliveries_reports_per_subject_cursors() {
@@ -11755,15 +12317,10 @@ async fn sink_reconcile_keeps_gov_version_windows() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     // SN 1 under v1. Witness journals SN 0..1.
     emit_fact_viewpoints(
@@ -11778,7 +12335,11 @@ async fn sink_reconcile_keeps_gov_version_windows() {
     get_subject(&witness.api, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
-    witness.api.update_subject(governance_id.clone()).await.unwrap();
+    witness
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
     get_subject(&witness.api, governance_id.clone(), None, true)
         .await
         .unwrap();
@@ -11882,11 +12443,11 @@ async fn sink_reconcile_keeps_gov_version_windows() {
     witness.token.cancel();
     join_all(witness.handler.iter_mut()).await;
     {
-        let conn = rusqlite::Connection::open(
-            witness_local_db.join("database.db"),
-        )
-        .unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let conn =
+            rusqlite::Connection::open(witness_local_db.join("database.db"))
+                .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let states =
             conn.execute("DELETE FROM sn_register_states", []).unwrap();
         let events =
@@ -11930,7 +12491,11 @@ async fn sink_reconcile_keeps_gov_version_windows() {
         )
         .await
         .unwrap();
-    witness.api.update_subject(subject_id.clone()).await.unwrap();
+    witness
+        .api
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
     get_subject(&witness.api, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
@@ -12003,15 +12568,10 @@ async fn sink_oauth2_retry_after_is_capped() {
     )
     .await
     .unwrap();
-    let (subject_id, _) = create_subject(
-        &node.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     let subject_id_str = subject_id.to_string();
     for data in [10, 20] {
         emit_fact(
@@ -12026,8 +12586,7 @@ async fn sink_oauth2_retry_after_is_capped() {
 
     let oauth_sink = TestSink::start().await;
     let oauth_password_env = "AVE_SINK_PASSWORD_OAUTH_CAP_SINK";
-    let _password_guard =
-        TempEnvVar::set(oauth_password_env, "test-password");
+    let _password_guard = TempEnvVar::set(oauth_password_env, "test-password");
 
     let keys = node.keys.clone();
     let local_db = dirs[0].path().to_path_buf();
@@ -12111,8 +12670,9 @@ async fn sink_oauth2_retry_after_is_capped() {
     wait_for_sink_lagging_subjects(&node.api, "oauth-cap-sink", 1).await;
     let events = oauth_sink.snapshot().await;
     assert!(
-        !events.iter().any(|e| e.subject_id() == subject_id_str
-            && e.sn() == 3),
+        !events
+            .iter()
+            .any(|e| e.subject_id() == subject_id_str && e.sn() == 3),
         "SN 3 must not be delivered while the IdP keeps failing"
     );
 

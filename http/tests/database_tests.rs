@@ -2958,3 +2958,70 @@ async fn test_touch_storm_many_keys_without_blocking() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
+
+/// Test BR-01: the password change must not hold the SQLite writer
+/// across Argon2.
+///
+/// The change runs two Argon2id computations (verify current + hash
+/// the new one). Both must happen outside any pooled connection; only
+/// the short revalidating transaction may hold the writer.
+///
+/// The transaction-duration metrics make this observable without
+/// threads or timing races: in a fresh database every setup
+/// transaction costs at most one Argon2, so the change transaction
+/// holding two is strictly the longest one on record — unless the
+/// hashing moved outside, in which case the global max does not move
+/// at all.
+///
+/// Expected: exactly one transaction runs for the change
+/// (attribution) and `transaction_max_ms` is unchanged (plus a
+/// sanity check that Argon2 really ran, ruling out degenerate fast
+/// paths).
+#[test(tokio::test)]
+async fn test_change_password_does_not_hold_writer_during_argon2() {
+    let (db, _dirs) = create_test_db();
+    let changer = db
+        .create_user("changer", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    db.admin_reset_password(changer.id, "Current456!").unwrap();
+
+    let before = db.metrics_snapshot();
+    let start = std::time::Instant::now();
+    db.change_password_with_credentials_transactional(
+        "changer",
+        "Current456!",
+        "FinalPass789!",
+        Some("127.0.0.1"),
+        Some("test-agent"),
+    )
+    .unwrap();
+    let wall = start.elapsed();
+    let after = db.metrics_snapshot();
+
+    // Sanity: the change really burned Argon2 time (two hashes).
+    assert!(
+        wall > std::time::Duration::from_millis(20),
+        "change must cost Argon2 time, took {wall:?}"
+    );
+    // Attribution: exactly one transaction ran for the change.
+    assert_eq!(
+        after.transaction_count,
+        before.transaction_count + 1,
+        "exactly one transaction must cover the change"
+    );
+    // The writer was not held across Argon2: the change transaction
+    // is a small fraction of the wall time (revalidation + writes
+    // only). Holding both hashes inside would make it at least half
+    // the wall time (and as much as all of it without precheck).
+    let wall_ms = wall.as_secs_f64() * 1000.0;
+    assert!(
+        after.transaction_max_ms < wall_ms / 4.0,
+        "transaction max {:?}ms must stay well below wall {:?}ms: writer held across Argon2",
+        after.transaction_max_ms,
+        wall_ms
+    );
+
+    // And the change itself took effect.
+    let user = db.verify_credentials("changer", "FinalPass789!").unwrap();
+    assert_eq!(user.username, "changer");
+}

@@ -362,9 +362,7 @@ pub async fn obtain_token_with_retry(
             // Same shared policy as deliveries: exponential backoff
             // with jitter, hint honored, result capped at max_ms.
             let hint = match &last_err {
-                Some(SinkError::Auth { retry_after_ms, .. }) => {
-                    *retry_after_ms
-                }
+                Some(SinkError::Auth { retry_after_ms, .. }) => *retry_after_ms,
                 _ => None,
             };
             let delay = retry_delay_ms(
@@ -669,9 +667,10 @@ mod tests {
             ..SinkAuthConfig::default()
         };
 
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
-            .await
-            .expect("token should be obtained after retries");
+        let token =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
+                .await
+                .expect("token should be obtained after retries");
 
         assert_eq!(token.access_token, "ok-token");
         assert_eq!(
@@ -726,9 +725,10 @@ mod tests {
         };
 
         let start = Instant::now();
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
-            .await
-            .expect("token should be obtained after retry");
+        let token =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
+                .await
+                .expect("token should be obtained after retry");
         let elapsed = start.elapsed();
 
         assert_eq!(token.access_token, "ok-token");
@@ -784,9 +784,10 @@ mod tests {
         };
 
         let start = Instant::now();
-        let err = obtain_token_with_retry(&client, &auth, "test-secret", 10, 50)
-            .await
-            .expect_err("token fetch must fail while the IdP 503s");
+        let err =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 50)
+                .await
+                .expect_err("token fetch must fail while the IdP 503s");
         let elapsed = start.elapsed();
 
         assert!(

@@ -22746,3 +22746,176 @@ async fn test_compilation_stale_gov_owner_aborts() {
         .await
         .unwrap();
 }
+
+#[test(tokio::test)]
+// BR-02: the selective sweep must also visit the official
+// `contracts/` directory, not just the staging root.
+//
+// Sequence: schema add (compiles and promotes to official),
+// schema removal and restart. The boot sweep runs with the schema
+// already absent from the allowed set, so its official directory
+// must disappear; before the fix only the root was scanned and the
+// directory survived forever.
+async fn test_gov_compile_sweep_removes_official_artifacts() {
+    let node1_local = tempfile::tempdir().unwrap();
+    let node1_ext = tempfile::tempdir().unwrap();
+    let node1_contracts = tempfile::tempdir().unwrap();
+
+    let (mut node1, _node1_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        local_db: Some(node1_local.path().to_path_buf()),
+        ext_db: Some(node1_ext.path().to_path_buf()),
+        contracts_path: Some(node1_contracts.path().to_path_buf()),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node1.api, vec![&node2.api]).await;
+
+    // AveNode2 becomes compiler and witness (same setup as the
+    // abort test: with 2 compilers the quorum requires both).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["AveNode2"],
+                    "compiler": ["AveNode2"]
+                }
+            }
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Schema add: compiles with quorum and promotes to official.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&node1.api, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+    wait_request_state_bounded(
+        &node1.api,
+        request_id,
+        400,
+        &|state| matches!(state, RequestState::Finish),
+        "Finish",
+    )
+    .await;
+
+    // Control: the promotion happened (otherwise the test proves nothing).
+    let official = node1_contracts
+        .path()
+        .join("contracts")
+        .join(format!("{}_Example", governance_id));
+    assert!(
+        official.exists(),
+        "official artifact must exist after promotion: {}",
+        official.display()
+    );
+
+    // Schema removal and restart with the same contracts_path: the
+    // boot sweep no longer sees it among the allowed ones.
+    let json = json!({
+        "schemas": {
+            "remove": ["Example"]
+        }
+    });
+    emit_fact(&node1.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let keys = node1.keys.clone();
+    let local_db = node1_local.path().to_path_buf();
+    let ext_db = node1_ext.path().to_path_buf();
+    let contracts = node1_contracts.path().to_path_buf();
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node1, _new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        peers: vec![RoutingNode {
+            peer_id: node2.api.peer_id().to_string(),
+            address: vec![node2.listen_address.clone()],
+        }],
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        contracts_path: Some(contracts),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node1.api).await.unwrap();
+
+    // The retired official directory must be gone.
+    assert!(
+        !official.exists(),
+        "sweep must remove the retired official artifact: {}",
+        official.display()
+    );
+
+    // The node stays healthy: the governance answers after restart.
+    get_subject(&node1.api, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    node1.token.cancel();
+    join_all(node1.handler.iter_mut()).await;
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+}

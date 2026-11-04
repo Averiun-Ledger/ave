@@ -7845,15 +7845,10 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
     .await
     .unwrap();
 
-    let (subject_id, _) = create_subject(
-        &owner.api,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap();
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
 
     // SN 1..4 with ["basura"] (event visibility A), SN 5 with
     // ["agua"] (event visibility B). Single gov version throughout.
@@ -7891,10 +7886,7 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
     // Control: live ranges are ordered and sane in both worlds.
     let (stored_live, events_live) = witness
         .api
-        .test_get_tracker_visibility(
-            governance_id.clone(),
-            subject_id.clone(),
-        )
+        .test_get_tracker_visibility(governance_id.clone(), subject_id.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -7944,13 +7936,12 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
         versions.insert(1, 4);
         let mut register = HashMap::new();
         register.insert(subject_id.clone(), versions);
-        let blob =
-            borsh::to_vec(&(SnRegMirror { register }, 0u64)).unwrap();
-        let conn = rusqlite::Connection::open(
-            witness_local_db.join("database.db"),
-        )
-        .unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let blob = borsh::to_vec(&(SnRegMirror { register }, 0u64)).unwrap();
+        let conn =
+            rusqlite::Connection::open(witness_local_db.join("database.db"))
+                .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let updated = conn
             .execute(
                 "UPDATE sn_register_states SET value = ?1 WHERE prefix = ?2",
@@ -7967,17 +7958,16 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
     // replays from SN 4 and re-sends SN 4's values against the
     // recorded B-from-5 tail.
     let witness_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut witness, mut witness_dirs2) = create_node(
-        crate::common::sink_setup::restart_config_with_peers(
+    let (mut witness, mut witness_dirs2) =
+        create_node(crate::common::sink_setup::restart_config_with_peers(
             witness_keys,
             witness_local_db,
             witness_ext_db,
             format!("/memory/{}", witness_port),
             vec![],
             vec![],
-        ),
-    )
-    .await;
+        ))
+        .await;
     witness_dirs.append(&mut witness_dirs2);
     node_running(&witness.api).await.unwrap();
     // Force the tracker boot: projections are intact, so nothing
@@ -7995,10 +7985,7 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
     // resend is ignored instead of corrupting the B-from-5 tail.
     let (stored, events) = witness
         .api
-        .test_get_tracker_visibility(
-            governance_id.clone(),
-            subject_id.clone(),
-        )
+        .test_get_tracker_visibility(governance_id.clone(), subject_id.clone())
         .await
         .unwrap();
     assert_eq!(

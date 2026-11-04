@@ -13,6 +13,32 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, info_span, warn};
 
+/// Test-only count of lag-metric recomputations per sink (one full
+/// scan per call). Lets regression tests assert that bulk rebuilds
+/// compute once instead of once per inserted subject. Keyed by sink
+/// name so tests sharing a process do not pollute each other.
+#[cfg(feature = "test")]
+static LAG_METRICS_RECOMPUTES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Test-only: reset the lag-metric recompute counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_reset_lag_recomputes(sink: &str) {
+    if let Ok(mut counts) = LAG_METRICS_RECOMPUTES.lock() {
+        counts.remove(sink);
+    }
+}
+
+/// Test-only: read the lag-metric recompute counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_lag_recomputes(sink: &str) -> u64 {
+    LAG_METRICS_RECOMPUTES
+        .lock()
+        .map(|counts| counts.get(sink).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
@@ -356,27 +382,31 @@ impl Event for SinkManagerEvent {}
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SinkManager {
     // === Persisted fields ===
-    cursors: BTreeMap<(String, String), u64>, // (sink_name, subject_id) -> sn_sent
-    last_seen: BTreeMap<String, u64>,         // subject_id -> sn_last
-    active_sinks: BTreeSet<String>,           // sink names active in config
+    // Maps are reference-counted: `state()`/`set_state()` share
+    // untouched maps instead of copying every entry on each event,
+    // and `apply` clones only the map it mutates (`Arc::make_mut`).
+    // Serialized forms are unchanged (`Arc` is transparent).
+    cursors: Arc<BTreeMap<(String, String), u64>>, // (sink_name, subject_id) -> sn_sent
+    last_seen: Arc<BTreeMap<String, u64>>,         // subject_id -> sn_last
+    active_sinks: Arc<BTreeSet<String>>, // sink names active in config
     version: u64,
 
     // === Transient fields (reconstructed on startup) ===
     #[serde(skip)]
-    sink_servers: BTreeMap<String, SinkServer>, // sink_name -> config (from node/gov config)
+    sink_servers: Arc<BTreeMap<String, SinkServer>>, // sink_name -> config (from node/gov config)
     #[serde(skip)]
-    lagging: BTreeMap<String, HashSet<String>>, // sink_name -> outdated subject_ids
+    lagging: Arc<BTreeMap<String, HashSet<String>>>, // sink_name -> outdated subject_ids
     #[serde(skip)]
-    store_params: Option<SinkManagerInitParams>, // saved for pre_start
+    store_params: Option<Arc<SinkManagerInitParams>>, // saved for pre_start
     #[serde(skip)]
-    blocked_sinks: BTreeMap<String, String>, // sink_name -> reason
+    blocked_sinks: Arc<BTreeMap<String, String>>, // sink_name -> reason
     /// Accepted replays whose re-delivery is still pending, mapped to the
     /// minimum `from_sn` to redeliver. Persisted (via Borsh) so a node
     /// restart cannot silently drop an accepted replay: on startup each floor
     /// triggers a catch-up from that SN. Cleared when a catch-up starting at
     /// or below the floor completes.
     #[serde(skip)]
-    replay_floors: BTreeMap<(String, String), u64>, // (sink, subject_id) -> min from_sn
+    replay_floors: Arc<BTreeMap<(String, String), u64>>, // (sink, subject_id) -> min from_sn
     /// `true` when this manager handles governance events (under Node),
     /// `false` when it handles tracker events (under Governance).
     #[serde(skip)]
@@ -392,7 +422,7 @@ pub struct SinkManager {
     /// when the timer was cancelled and re-armed) is discarded instead of
     /// killing a worker with fresh activity.
     #[serde(skip)]
-    pending_worker_shutdowns: HashMap<String, (CancellationToken, u64)>,
+    pending_worker_shutdowns: Arc<HashMap<String, (CancellationToken, u64)>>,
     /// Monotonic counter stamping every worker shutdown schedule.
     #[serde(skip)]
     next_worker_shutdown_generation: u64,
@@ -400,7 +430,7 @@ pub struct SinkManager {
     /// lagging subjects but no active worker, the manager schedules periodic
     /// healthchecks using `healthcheck_intervals_secs` to detect recovery.
     #[serde(skip)]
-    pending_healthchecks: HashMap<String, CancellationToken>,
+    pending_healthchecks: Arc<HashMap<String, CancellationToken>>,
     /// Subjects for which a catch-up has been requested but not yet completed,
     /// mapped to the `from_sn` the in-flight catch-up started from. Prevents
     /// duplicate catch-up triggers from sending the same event twice while the
@@ -408,26 +438,26 @@ pub struct SinkManager {
     /// that start (e.g. a replay) restart the in-flight catch-up so the whole
     /// range is re-delivered in order.
     #[serde(skip)]
-    catch_up_in_flight: HashMap<(String, String), u64>, // (sink, subject_id) -> in-flight from_sn
+    catch_up_in_flight: Arc<HashMap<(String, String), u64>>, // (sink, subject_id) -> in-flight from_sn
     /// Re-delivery catch-ups (e.g. replays) that were rejected by the worker
     /// while the sink was unhealthy/blocked, mapped to the minimum `from_sn`
     /// to redeliver. The normal lagging path cannot retry them because the
     /// cursor is already ahead. Drained when a catch-up completes or the sink
     /// recovers / is unblocked.
     #[serde(skip)]
-    pending_catch_ups: HashMap<(String, String), u64>, // (sink, subject_id) -> min from_sn
+    pending_catch_ups: Arc<HashMap<(String, String), u64>>, // (sink, subject_id) -> min from_sn
     /// Highest SN already forwarded to a sink/subject worker. Used for the
     /// sequential gate instead of the delivery cursor so that live batching
     /// can accumulate events while earlier events are still buffered. Not
     /// persisted: it is rebuilt from forwarded events and reset to the cursor
     /// on worker restart/recovery.
     #[serde(skip)]
-    last_notified: HashMap<(String, String), u64>, // (sink, subject_id) -> sn
+    last_notified: Arc<HashMap<(String, String), u64>>, // (sink, subject_id) -> sn
     /// Last error reported by a sink worker for this sink. Kept in memory only:
     /// it is cleared when the sink recovers, is unblocked, or has no lagging
     /// subjects left.
     #[serde(skip)]
-    last_errors: HashMap<String, String>, // sink_name -> last error message
+    last_errors: Arc<HashMap<String, String>>, // sink_name -> last error message
 }
 
 impl std::fmt::Debug for SinkManager {
@@ -496,24 +526,24 @@ impl BorshDeserialize for SinkManager {
                 }
             };
         Ok(Self {
-            cursors,
-            last_seen,
-            active_sinks,
+            cursors: Arc::new(cursors),
+            last_seen: Arc::new(last_seen),
+            active_sinks: Arc::new(active_sinks),
             version,
-            sink_servers: BTreeMap::new(),
-            lagging: BTreeMap::new(),
+            sink_servers: Arc::new(BTreeMap::new()),
+            lagging: Arc::new(BTreeMap::new()),
             store_params: None,
-            blocked_sinks,
-            replay_floors,
+            blocked_sinks: Arc::new(blocked_sinks),
+            replay_floors: Arc::new(replay_floors),
             is_governance: false, // default from BorshDeserialize, will be overridden by create_initial
             node_public_key: String::new(), // same: re-derived from init params
-            pending_worker_shutdowns: HashMap::new(),
+            pending_worker_shutdowns: Arc::new(HashMap::new()),
             next_worker_shutdown_generation: 0,
-            pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: HashMap::new(),
-            pending_catch_ups: HashMap::new(),
-            last_notified: HashMap::new(),
-            last_errors: HashMap::new(),
+            pending_healthchecks: Arc::new(HashMap::new()),
+            catch_up_in_flight: Arc::new(HashMap::new()),
+            pending_catch_ups: Arc::new(HashMap::new()),
+            last_notified: Arc::new(HashMap::new()),
+            last_errors: Arc::new(HashMap::new()),
         })
     }
 }
@@ -541,24 +571,24 @@ impl PersistentActor for SinkManager {
             sink_servers.insert(sink.server.clone(), sink.clone());
         }
         Self {
-            cursors: BTreeMap::new(),
-            last_seen: BTreeMap::new(),
-            active_sinks,
+            cursors: Arc::default(),
+            last_seen: Arc::default(),
+            active_sinks: Arc::new(active_sinks),
             version: 1,
-            sink_servers,
-            lagging: BTreeMap::new(),
-            store_params: Some(params.clone()),
-            blocked_sinks: BTreeMap::new(),
-            replay_floors: BTreeMap::new(),
+            sink_servers: Arc::new(sink_servers),
+            lagging: Arc::default(),
+            store_params: Some(Arc::new(params.clone())),
+            blocked_sinks: Arc::default(),
+            replay_floors: Arc::default(),
             is_governance: params.is_governance,
             node_public_key: params.node_public_key,
-            pending_worker_shutdowns: HashMap::new(),
+            pending_worker_shutdowns: Arc::default(),
             next_worker_shutdown_generation: 0,
-            pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: HashMap::new(),
-            pending_catch_ups: HashMap::new(),
-            last_notified: HashMap::new(),
-            last_errors: HashMap::new(),
+            pending_healthchecks: Arc::default(),
+            catch_up_in_flight: Arc::default(),
+            pending_catch_ups: Arc::default(),
+            last_notified: Arc::default(),
+            last_errors: Arc::default(),
         }
     }
 
@@ -574,49 +604,50 @@ impl PersistentActor for SinkManager {
                 subject_id,
                 sn,
             } => {
-                inner
-                    .cursors
+                Arc::make_mut(&mut inner.cursors)
                     .insert((sink.clone(), subject_id.clone()), *sn);
             }
             SinkManagerEvent::CursorRemoved { sink, subject_id } => {
-                inner.cursors.remove(&(sink.clone(), subject_id.clone()));
+                Arc::make_mut(&mut inner.cursors)
+                    .remove(&(sink.clone(), subject_id.clone()));
             }
             SinkManagerEvent::LastSeenUpdated { subject_id, sn } => {
-                inner.last_seen.insert(subject_id.clone(), *sn);
+                Arc::make_mut(&mut inner.last_seen)
+                    .insert(subject_id.clone(), *sn);
             }
             SinkManagerEvent::LastSeenRemoved { subject_id } => {
-                inner.last_seen.remove(subject_id);
+                Arc::make_mut(&mut inner.last_seen).remove(subject_id);
             }
             SinkManagerEvent::SinkRecovered { sink } => {
-                inner.active_sinks.insert(sink.clone());
+                Arc::make_mut(&mut inner.active_sinks).insert(sink.clone());
             }
             SinkManagerEvent::SinkBlocked { sink, reason } => {
-                inner.blocked_sinks.insert(sink.clone(), reason.clone());
+                Arc::make_mut(&mut inner.blocked_sinks)
+                    .insert(sink.clone(), reason.clone());
             }
             SinkManagerEvent::SinkUnblocked { sink } => {
-                inner.blocked_sinks.remove(sink);
+                Arc::make_mut(&mut inner.blocked_sinks).remove(sink);
             }
             SinkManagerEvent::SinkCursorsDeleted { sink } => {
-                inner.cursors.retain(|(s, _), _| s != sink);
-                inner.lagging.remove(sink);
-                inner.blocked_sinks.remove(sink);
-                inner.last_errors.remove(sink);
-                inner.replay_floors.retain(|(s, _), _| s != sink);
+                Arc::make_mut(&mut inner.cursors).retain(|(s, _), _| s != sink);
+                Arc::make_mut(&mut inner.lagging).remove(sink);
+                Arc::make_mut(&mut inner.blocked_sinks).remove(sink);
+                Arc::make_mut(&mut inner.last_errors).remove(sink);
+                Arc::make_mut(&mut inner.replay_floors)
+                    .retain(|(s, _), _| s != sink);
             }
             SinkManagerEvent::ReplayRegistered {
                 sink,
                 subject_id,
                 from_sn,
             } => {
-                inner
-                    .replay_floors
+                Arc::make_mut(&mut inner.replay_floors)
                     .entry((sink.clone(), subject_id.clone()))
                     .and_modify(|floor| *floor = (*floor).min(*from_sn))
                     .or_insert(*from_sn);
             }
             SinkManagerEvent::ReplayCompleted { sink, subject_id } => {
-                inner
-                    .replay_floors
+                Arc::make_mut(&mut inner.replay_floors)
                     .remove(&(sink.clone(), subject_id.clone()));
             }
         }
@@ -646,40 +677,42 @@ impl PersistentActor for SinkManager {
     }
 
     fn state(&self) -> Arc<Self::State> {
+        // Share every map: no per-event deep copy. The apply step
+        // below clones only the map it mutates (`Arc::make_mut`).
         Arc::new(Self {
-            cursors: self.cursors.clone(),
-            last_seen: self.last_seen.clone(),
-            active_sinks: self.active_sinks.clone(),
+            cursors: Arc::clone(&self.cursors),
+            last_seen: Arc::clone(&self.last_seen),
+            active_sinks: Arc::clone(&self.active_sinks),
             version: self.version,
-            sink_servers: self.sink_servers.clone(),
-            lagging: self.lagging.clone(),
+            sink_servers: Arc::clone(&self.sink_servers),
+            lagging: Arc::clone(&self.lagging),
             store_params: self.store_params.clone(),
-            blocked_sinks: self.blocked_sinks.clone(),
-            replay_floors: self.replay_floors.clone(),
+            blocked_sinks: Arc::clone(&self.blocked_sinks),
+            replay_floors: Arc::clone(&self.replay_floors),
             is_governance: self.is_governance,
             node_public_key: self.node_public_key.clone(),
-            pending_worker_shutdowns: HashMap::new(),
+            pending_worker_shutdowns: Arc::default(),
             next_worker_shutdown_generation: 0,
-            pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: self.catch_up_in_flight.clone(),
-            pending_catch_ups: self.pending_catch_ups.clone(),
-            last_notified: self.last_notified.clone(),
-            last_errors: self.last_errors.clone(),
+            pending_healthchecks: Arc::default(),
+            catch_up_in_flight: Arc::clone(&self.catch_up_in_flight),
+            pending_catch_ups: Arc::clone(&self.pending_catch_ups),
+            last_notified: Arc::clone(&self.last_notified),
+            last_errors: Arc::clone(&self.last_errors),
         })
     }
 
     fn set_state(&mut self, state: Arc<Self::State>) {
         let state = &*state;
-        self.cursors.clone_from(&state.cursors);
-        self.last_seen.clone_from(&state.last_seen);
-        self.active_sinks.clone_from(&state.active_sinks);
+        self.cursors = Arc::clone(&state.cursors);
+        self.last_seen = Arc::clone(&state.last_seen);
+        self.active_sinks = Arc::clone(&state.active_sinks);
         self.version = state.version;
-        self.blocked_sinks.clone_from(&state.blocked_sinks);
-        self.replay_floors.clone_from(&state.replay_floors);
+        self.blocked_sinks = Arc::clone(&state.blocked_sinks);
+        self.replay_floors = Arc::clone(&state.replay_floors);
         // `apply` also mutates these two (e.g. `SinkCursorsDeleted` clears
         // them); skipping them here would silently drop the mutation.
-        self.lagging.clone_from(&state.lagging);
-        self.last_errors.clone_from(&state.last_errors);
+        self.lagging = Arc::clone(&state.lagging);
+        self.last_errors = Arc::clone(&state.last_errors);
     }
 }
 
@@ -774,8 +807,8 @@ impl Actor for SinkManager {
             sink_servers.insert(sink.server.clone(), sink.clone());
         }
 
-        self.active_sinks = sink_servers.keys().cloned().collect();
-        self.sink_servers = sink_servers;
+        self.active_sinks = Arc::new(sink_servers.keys().cloned().collect());
+        self.sink_servers = Arc::new(sink_servers);
 
         // Rebuild lagging set: for every subject and every active sink,
         // check if cursor is behind last_seen.
@@ -889,7 +922,7 @@ impl Handler<Self> for SinkManager {
                         is_governance: self.is_governance,
                         governance_id,
                         sinks: self.build_sink_statuses(),
-                        servers: self.sink_servers.clone(),
+                        servers: (*self.sink_servers).clone(),
                     },
                 ));
             }
@@ -897,7 +930,8 @@ impl Handler<Self> for SinkManager {
                 // The worker is idle and will be stopped. Any catch-up it may
                 // have had in flight is no longer running, so clear the flag
                 // so recovery can retry with a fresh worker.
-                self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
+                Arc::make_mut(&mut self.catch_up_in_flight)
+                    .retain(|(s, _), _| s != &sink);
                 self.schedule_worker_shutdown(sink, ctx).await;
             }
             SinkManagerMessage::WorkerStopped { sink } => {
@@ -915,8 +949,7 @@ impl Handler<Self> for SinkManager {
                     .await?;
             }
             SinkManagerMessage::CatchUpRejected { sink, subject_id } => {
-                let rejected_from = self
-                    .catch_up_in_flight
+                let rejected_from = Arc::make_mut(&mut self.catch_up_in_flight)
                     .remove(&(sink.clone(), subject_id.clone()));
                 // If the rejected catch-up was a re-delivery starting at or
                 // below the cursor (e.g. a replay), lagging will never retry
@@ -929,7 +962,7 @@ impl Handler<Self> for SinkManager {
                         .get(&(sink.clone(), subject_id.clone()))
                         .copied();
                     if cursor_sn.is_some_and(|cursor| from_sn <= cursor) {
-                        self.pending_catch_ups
+                        Arc::make_mut(&mut self.pending_catch_ups)
                             .entry((sink.clone(), subject_id.clone()))
                             .and_modify(|pending| {
                                 *pending = (*pending).min(from_sn)
@@ -968,7 +1001,8 @@ impl Handler<Self> for SinkManager {
                 // the worker now could destroy in-flight work.
                 match self.pending_worker_shutdowns.get(&sink) {
                     Some((_, current)) if *current == generation => {
-                        self.pending_worker_shutdowns.remove(&sink);
+                        Arc::make_mut(&mut self.pending_worker_shutdowns)
+                            .remove(&sink);
                     }
                     _ => {
                         return Ok(SinkManagerResponse::Ok);
@@ -1069,7 +1103,7 @@ impl Handler<Self> for SinkManager {
                 );
                 // Any catch-up that was in flight in the dead worker is lost;
                 // clear the flag so a fresh catch-up can be scheduled.
-                self.catch_up_in_flight
+                Arc::make_mut(&mut self.catch_up_in_flight)
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.reset_last_notified_for_subject(&sink, &subject_id);
 
@@ -1118,8 +1152,9 @@ impl Handler<Self> for SinkManager {
                     reason = %reason,
                     "Sink delivery failed"
                 );
-                self.last_errors.insert(sink.clone(), reason.clone());
-                self.catch_up_in_flight
+                Arc::make_mut(&mut self.last_errors)
+                    .insert(sink.clone(), reason.clone());
+                Arc::make_mut(&mut self.catch_up_in_flight)
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
                 // If the sink has lagging subjects, schedule periodic healthchecks
@@ -1150,8 +1185,9 @@ impl Handler<Self> for SinkManager {
                     error = %error,
                     "Auth failure; event kept in lagging for retry"
                 );
-                self.last_errors.insert(sink.clone(), error.clone());
-                self.catch_up_in_flight
+                Arc::make_mut(&mut self.last_errors)
+                    .insert(sink.clone(), error.clone());
+                Arc::make_mut(&mut self.catch_up_in_flight)
                     .remove(&(sink.clone(), subject_id.clone()));
                 self.try_insert_lagging(&sink, subject_id.clone());
                 if let Some(subjects) = self.lagging.get(&sink).cloned() {
@@ -1181,7 +1217,8 @@ impl Handler<Self> for SinkManager {
                     reason = %reason,
                     "Sink blocked due to permanent error; operator intervention required"
                 );
-                self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
+                Arc::make_mut(&mut self.catch_up_in_flight)
+                    .retain(|(s, _), _| s != &sink);
                 // Cancel any periodic healthcheck: the sink is now blocked and
                 // will not recover until the operator unblocks it.
                 self.cancel_healthcheck(&sink);
@@ -1211,7 +1248,7 @@ impl Handler<Self> for SinkManager {
                 subject_id,
                 sn,
             } => {
-                self.catch_up_in_flight
+                Arc::make_mut(&mut self.catch_up_in_flight)
                     .remove(&(sink.clone(), subject_id.clone()));
                 if let Err(e) = self
                     .handle_update_progress(
@@ -1346,6 +1383,10 @@ impl SinkManager {
         let Some(metrics) = try_core_metrics() else {
             return;
         };
+        #[cfg(feature = "test")]
+        if let Ok(mut counts) = LAG_METRICS_RECOMPUTES.lock() {
+            *counts.entry(sink.to_owned()).or_default() += 1;
+        }
         let (count, total, max) = self.sink_lagging_totals(sink);
         metrics.set_sink_lagging_subjects(sink, count as i64);
         metrics.set_sink_lagging_events(sink, total as i64);
@@ -1353,17 +1394,32 @@ impl SinkManager {
     }
 
     fn try_insert_lagging(&mut self, sink: &str, subject_id: String) {
-        let set = self.lagging.entry(sink.to_string()).or_default();
-        set.insert(subject_id);
-        self.update_sink_lag_metrics(sink);
+        // Incremental path: recompute only when the set actually
+        // changed. Re-inserting an already-lagging subject (e.g. a
+        // retry while catch-up is in flight) must not rescan.
+        let set = Arc::make_mut(&mut self.lagging)
+            .entry(sink.to_owned())
+            .or_default();
+        if set.insert(subject_id) {
+            self.update_sink_lag_metrics(sink);
+        }
+    }
+
+    /// Bulk insert without metrics: `rebuild_lagging` computes once
+    /// per sink after the loop instead of rescanning per subject.
+    fn insert_lagging_no_metrics(&mut self, sink: &str, subject_id: String) {
+        Arc::make_mut(&mut self.lagging)
+            .entry(sink.to_owned())
+            .or_default()
+            .insert(subject_id);
     }
 
     fn remove_lagging_subject(&mut self, sink: &str, subject_id: &str) {
-        if let Some(set) = self.lagging.get_mut(sink) {
+        if let Some(set) = Arc::make_mut(&mut self.lagging).get_mut(sink) {
             set.remove(subject_id);
             if set.is_empty() {
-                self.lagging.remove(sink);
-                self.last_errors.remove(sink);
+                Arc::make_mut(&mut self.lagging).remove(sink);
+                Arc::make_mut(&mut self.last_errors).remove(sink);
             }
         }
         self.update_sink_lag_metrics(sink);
@@ -1379,26 +1435,26 @@ impl SinkManager {
     ) {
         let key = (sink.to_string(), subject_id.to_string());
         if let Some(cursor) = self.cursors.get(&key).copied() {
-            self.last_notified.insert(key, cursor);
+            Arc::make_mut(&mut self.last_notified).insert(key, cursor);
         } else {
-            self.last_notified.remove(&key);
+            Arc::make_mut(&mut self.last_notified).remove(&key);
         }
     }
 
     /// Reset the notification cursor for every subject of a sink to its
     /// delivery cursor. Used when a sink worker stops or is recreated.
     fn reset_last_notified_for_sink(&mut self, sink: &str) {
-        self.last_notified.retain(|(s, _), _| s != sink);
+        Arc::make_mut(&mut self.last_notified).retain(|(s, _), _| s != sink);
         for ((s, subject_id), cursor) in self.cursors.iter() {
             if s == sink {
-                self.last_notified
+                Arc::make_mut(&mut self.last_notified)
                     .insert((s.clone(), subject_id.clone()), *cursor);
             }
         }
     }
 
     fn rebuild_lagging(&mut self) {
-        self.lagging.clear();
+        Arc::make_mut(&mut self.lagging).clear();
         let active_sinks: Vec<String> =
             self.active_sinks.iter().cloned().collect();
         for sink_name in &active_sinks {
@@ -1422,7 +1478,7 @@ impl SinkManager {
                 }
             }
             for subject_id in outdated {
-                self.try_insert_lagging(sink_name, subject_id);
+                self.insert_lagging_no_metrics(sink_name, subject_id);
             }
         }
 
@@ -1432,7 +1488,7 @@ impl SinkManager {
 
         // Drop stale last-error entries for sinks that no longer have lagging
         // subjects. Errors for sinks that are still behind remain visible.
-        self.last_errors.retain(|sink, _| {
+        Arc::make_mut(&mut self.last_errors).retain(|sink, _| {
             self.lagging
                 .get(sink)
                 .map(|s| !s.is_empty())
@@ -1638,7 +1694,7 @@ impl SinkManager {
     ) {
         // Cancel any existing shutdown timer for this worker
         if let Some((token, _)) =
-            self.pending_worker_shutdowns.remove(&sink_name)
+            Arc::make_mut(&mut self.pending_worker_shutdowns).remove(&sink_name)
         {
             token.cancel();
         }
@@ -1691,14 +1747,14 @@ impl SinkManager {
         });
         // Keep the token for explicit per-sink cancellation.  The actor will
         // abort all spawned tasks automatically on stop/restart.
-        self.pending_worker_shutdowns
+        Arc::make_mut(&mut self.pending_worker_shutdowns)
             .insert(sink_name, (token, generation));
     }
 
     /// Cancel pending worker shutdown timer for the given sink.
     fn cancel_worker_shutdown(&mut self, sink_name: &str) {
         if let Some((token, _)) =
-            self.pending_worker_shutdowns.remove(sink_name)
+            Arc::make_mut(&mut self.pending_worker_shutdowns).remove(sink_name)
         {
             token.cancel();
         }
@@ -1718,17 +1774,20 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         // Drop the shutdown timer for the dead worker: cancel it if it was
         // still pending (abnormal stop), no-op if it already fired.
-        if let Some((token, _)) = self.pending_worker_shutdowns.remove(&sink) {
+        if let Some((token, _)) =
+            Arc::make_mut(&mut self.pending_worker_shutdowns).remove(&sink)
+        {
             token.cancel();
         }
         // Any catch-up running in the dead worker is no longer running.
-        self.catch_up_in_flight.retain(|(s, _), _| s != &sink);
+        Arc::make_mut(&mut self.catch_up_in_flight)
+            .retain(|(s, _), _| s != &sink);
         // Events notified to the dead worker but not yet delivered are lost;
         // reset notification cursors so the gate does not skip them.
         self.reset_last_notified_for_sink(&sink);
 
         let mut outdated = Vec::new();
-        for (subject_id, &last_sn) in &self.last_seen {
+        for (subject_id, &last_sn) in self.last_seen.iter() {
             let cursor_sn = self
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
@@ -1770,7 +1829,9 @@ impl SinkManager {
         sink_name: String,
         ctx: &ActorContext<Self>,
     ) {
-        if let Some(token) = self.pending_healthchecks.remove(&sink_name) {
+        if let Some(token) =
+            Arc::make_mut(&mut self.pending_healthchecks).remove(&sink_name)
+        {
             token.cancel();
         }
         let intervals = self
@@ -1815,12 +1876,14 @@ impl SinkManager {
                 }
             }
         });
-        self.pending_healthchecks.insert(sink_name, token);
+        Arc::make_mut(&mut self.pending_healthchecks).insert(sink_name, token);
     }
 
     /// Cancel pending healthcheck timer for the given sink.
     fn cancel_healthcheck(&mut self, sink_name: &str) {
-        if let Some(token) = self.pending_healthchecks.remove(sink_name) {
+        if let Some(token) =
+            Arc::make_mut(&mut self.pending_healthchecks).remove(sink_name)
+        {
             token.cancel();
         }
     }
@@ -1928,12 +1991,12 @@ impl SinkManager {
                         .await
                     {
                         error!(msg_type = "NotifyWorker", sink = %sink_name, error = %e, "Failed to notify worker");
-                        self.lagging
+                        Arc::make_mut(&mut self.lagging)
                             .entry(sink_name.clone())
                             .or_default()
                             .insert(subject_id.clone());
                     } else {
-                        self.last_notified.insert(
+                        Arc::make_mut(&mut self.last_notified).insert(
                             (sink_name.clone(), subject_id.clone()),
                             sn,
                         );
@@ -1941,7 +2004,7 @@ impl SinkManager {
                 }
                 Err(e) => {
                     error!(msg_type = "EnsureWorker", sink = %sink_name, error = %e, "Failed to ensure worker");
-                    self.lagging
+                    Arc::make_mut(&mut self.lagging)
                         .entry(sink_name.clone())
                         .or_default()
                         .insert(subject_id.clone());
@@ -2059,8 +2122,7 @@ impl SinkManager {
             .get(&(sink.clone(), subject_id.clone()))
             .copied();
         let last_sn = self.last_seen.get(&subject_id).copied().unwrap_or(0);
-        let finished_from = self
-            .catch_up_in_flight
+        let finished_from = Arc::make_mut(&mut self.catch_up_in_flight)
             .remove(&(sink.clone(), subject_id.clone()));
         // Reset notification cursor to the delivery cursor: from now on new live
         // events will be gated against the delivered state.
@@ -2092,15 +2154,14 @@ impl SinkManager {
 
         // A re-delivery queued after a rejection (e.g. a replay rejected by
         // the unhealthy worker) must run now so its range is delivered.
-        let pending_from_sn = self
-            .pending_catch_ups
+        let pending_from_sn = Arc::make_mut(&mut self.pending_catch_ups)
             .remove(&(sink.clone(), subject_id.clone()));
 
         if let Some(from_sn) = pending_from_sn {
             if self.blocked_sinks.contains_key(&sink) {
                 // Keep the request queued: it will be drained when a catch-up
                 // completes after the sink is unblocked.
-                self.pending_catch_ups
+                Arc::make_mut(&mut self.pending_catch_ups)
                     .insert((sink.clone(), subject_id.clone()), from_sn);
             } else {
                 info!(
@@ -2494,7 +2555,9 @@ impl SinkManager {
 
     /// Boot backstop for quiet subjects: compares the persisted
     /// delivery cursor against the subject's reported ledger tip and
-    /// triggers an ordered catch-up where behind. Refreshes the
+    /// triggers an ordered catch-up where behind (a missing cursor
+    /// for a subject unknown to the manager is behind even at SN 0:
+    /// the ledger holds a genesis the sink never got). Refreshes the
     /// freshness bound to ledger truth first (a crash may have lost
     /// the notification that set it). Skips blocked sinks; unknown
     /// subjects report clean without touching anything.
@@ -2512,7 +2575,23 @@ impl SinkManager {
                 .cursors
                 .get(&(sink.clone(), subject_id.clone()))
                 .copied();
-            let behind = cursor.map(|cut| cut < tip_sn).unwrap_or(tip_sn > 0);
+            // A missing cursor means behind, with one exception: the
+            // manager already tracks this subject at this tip (the
+            // live pipeline owns it, e.g. a batch not yet acked), so
+            // there is nothing to recover. A subject unknown to the
+            // manager lost its notification: a missing cursor is
+            // behind even at SN 0, where the ledger holds a genesis
+            // the sink never got (same rule as the boot rebuild).
+            // Callers only report tips of ledgers with history, so a
+            // missing cursor here never means "no ledger".
+            let behind = match cursor {
+                Some(cut) => cut < tip_sn,
+                None => {
+                    tip_sn
+                        > self.last_seen.get(&subject_id).copied().unwrap_or(0)
+                        || !self.last_seen.contains_key(&subject_id)
+                }
+            };
             let mut triggered = false;
             if behind {
                 // Mark lagging even on blocked sinks (same as the
@@ -2566,7 +2645,7 @@ impl SinkManager {
         // where worker dies while processing.
         self.cancel_worker_shutdown(&sink);
 
-        self.catch_up_in_flight
+        Arc::make_mut(&mut self.catch_up_in_flight)
             .insert((sink.clone(), subject_id.clone()), from_sn);
         if let Err(e) = worker_ref
             .tell(SinkWorkerMessage::CatchUp {
@@ -2575,7 +2654,8 @@ impl SinkManager {
             })
             .await
         {
-            self.catch_up_in_flight.remove(&(sink, subject_id));
+            Arc::make_mut(&mut self.catch_up_in_flight)
+                .remove(&(sink, subject_id));
             return Err(e);
         }
         Ok(())
@@ -2601,7 +2681,7 @@ impl SinkManager {
             if self.catch_up_in_flight.contains_key(&key) {
                 continue;
             }
-            self.pending_catch_ups.remove(&key);
+            Arc::make_mut(&mut self.pending_catch_ups).remove(&key);
             if let Err(e) = self
                 .send_catch_up(
                     sink.to_string(),
@@ -2618,7 +2698,7 @@ impl SinkManager {
                     error = %e,
                     "Failed to launch queued catch-up after sink recovery"
                 );
-                self.pending_catch_ups.insert(key, from_sn);
+                Arc::make_mut(&mut self.pending_catch_ups).insert(key, from_sn);
             }
         }
     }
@@ -2632,8 +2712,8 @@ impl SinkManager {
             return Ok(());
         }
         info!(msg_type = "SinkRecovered", sink = %sink, "Sink recovered, triggering catch-up");
-        self.active_sinks.insert(sink.clone());
-        self.last_errors.remove(&sink);
+        Arc::make_mut(&mut self.active_sinks).insert(sink.clone());
+        Arc::make_mut(&mut self.last_errors).remove(&sink);
 
         // Cancel periodic healthcheck — the sink is healthy again.
         self.cancel_healthcheck(&sink);
@@ -2667,7 +2747,7 @@ impl SinkManager {
     ) -> Result<(), ActorError> {
         if self.blocked_sinks.contains_key(&sink) {
             info!(msg_type = "SinkUnblocked", sink = %sink, "Sink manually unblocked by operator");
-            self.last_errors.remove(&sink);
+            Arc::make_mut(&mut self.last_errors).remove(&sink);
             // Cancel any stale healthcheck timer before unblocking. A fresh
             // worker will be created below and will run its own healthchecks if
             // needed.
@@ -2747,8 +2827,9 @@ impl SinkManager {
             if self.sink_servers.contains_key(&sink.server) {
                 continue;
             }
-            self.sink_servers.insert(sink.server.clone(), sink.clone());
-            self.active_sinks.insert(sink.server.clone());
+            Arc::make_mut(&mut self.sink_servers)
+                .insert(sink.server.clone(), sink.clone());
+            Arc::make_mut(&mut self.active_sinks).insert(sink.server.clone());
             added.push(sink.server.clone());
         }
         added
@@ -2852,10 +2933,10 @@ impl SinkManager {
             .map(|(sink, _)| sink.clone())
             .collect();
         for sink in sinks_with_subject {
-            if let Some(set) = self.lagging.get_mut(&sink) {
+            if let Some(set) = Arc::make_mut(&mut self.lagging).get_mut(&sink) {
                 set.remove(subject_id);
                 if set.is_empty() {
-                    self.lagging.remove(&sink);
+                    Arc::make_mut(&mut self.lagging).remove(&sink);
                 }
             }
         }
@@ -2891,9 +2972,9 @@ impl SinkManager {
 
         // Clear any in-flight catch-up for the deleted subject so it does not
         // block future catch-ups for other subjects.
-        self.catch_up_in_flight
+        Arc::make_mut(&mut self.catch_up_in_flight)
             .retain(|(_, sid), _| sid != subject_id);
-        self.pending_catch_ups
+        Arc::make_mut(&mut self.pending_catch_ups)
             .retain(|(_, sid), _| sid != subject_id);
 
         // Complete any pending replay for the deleted subject so a restart
@@ -2928,24 +3009,24 @@ mod tests {
         last_seen: BTreeMap<String, u64>,
     ) -> SinkManager {
         SinkManager {
-            cursors,
-            last_seen,
-            active_sinks: BTreeSet::new(),
+            cursors: Arc::new(cursors),
+            last_seen: Arc::new(last_seen),
+            active_sinks: Arc::default(),
             version: 1,
-            sink_servers: BTreeMap::new(),
-            lagging: BTreeMap::new(),
+            sink_servers: Arc::default(),
+            lagging: Arc::default(),
             store_params: None,
-            blocked_sinks: BTreeMap::new(),
-            replay_floors: BTreeMap::new(),
+            blocked_sinks: Arc::default(),
+            replay_floors: Arc::default(),
             is_governance: false,
             node_public_key: String::new(),
-            pending_worker_shutdowns: HashMap::new(),
+            pending_worker_shutdowns: Arc::default(),
             next_worker_shutdown_generation: 0,
-            pending_healthchecks: HashMap::new(),
-            catch_up_in_flight: HashMap::new(),
-            pending_catch_ups: HashMap::new(),
-            last_notified: HashMap::new(),
-            last_errors: HashMap::new(),
+            pending_healthchecks: Arc::default(),
+            catch_up_in_flight: Arc::default(),
+            pending_catch_ups: Arc::default(),
+            last_notified: Arc::default(),
+            last_errors: Arc::default(),
         }
     }
 
@@ -2993,7 +3074,7 @@ mod tests {
         last_seen.insert("c".to_owned(), 0);
 
         let mut manager = manager_with_state(cursors, last_seen);
-        manager.lagging.insert(
+        Arc::make_mut(&mut manager.lagging).insert(
             "sink".to_owned(),
             HashSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]),
         );
@@ -3002,5 +3083,73 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(total, 5); // 3 + 1 + 1
         assert_eq!(max, 3);
+    }
+
+    #[test]
+    fn sink_manager_state_maps_are_reference_counted() {
+        // Every map must be pointer-sized (Arc): `state()` shares
+        // untouched maps instead of copying every entry on each
+        // event, and `apply` clones only the map it mutates.
+        let manager = manager_with_state(BTreeMap::new(), BTreeMap::new());
+        let ptr = std::mem::size_of::<usize>();
+        assert_eq!(std::mem::size_of_val(&manager.cursors), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.last_seen), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.active_sinks), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.sink_servers), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.lagging), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.store_params), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.blocked_sinks), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.replay_floors), ptr);
+        assert_eq!(
+            std::mem::size_of_val(&manager.pending_worker_shutdowns),
+            ptr
+        );
+        assert_eq!(std::mem::size_of_val(&manager.pending_healthchecks), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.catch_up_in_flight), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.pending_catch_ups), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.last_notified), ptr);
+        assert_eq!(std::mem::size_of_val(&manager.last_errors), ptr);
+    }
+
+    #[test]
+    fn sink_manager_apply_shares_untouched_maps() {
+        let mut cursors = BTreeMap::new();
+        cursors.insert(("sink".to_owned(), "sub".to_owned()), 7);
+        let mut last_seen = BTreeMap::new();
+        last_seen.insert("sub".to_owned(), 9);
+        let manager = manager_with_state(cursors, last_seen);
+
+        let s1 = manager.state();
+        let s2 = SinkManager::apply(
+            Arc::clone(&s1),
+            &SinkManagerEvent::CursorUpdated {
+                sink: "sink".to_owned(),
+                subject_id: "sub".to_owned(),
+                sn: 8,
+            },
+        )
+        .unwrap();
+
+        // Only the touched map is reallocated; every other map is
+        // shared with the previous state.
+        assert!(!Arc::ptr_eq(&s1.cursors, &s2.cursors));
+        assert!(Arc::ptr_eq(&s1.last_seen, &s2.last_seen));
+        assert!(Arc::ptr_eq(&s1.active_sinks, &s2.active_sinks));
+        assert!(Arc::ptr_eq(&s1.sink_servers, &s2.sink_servers));
+        assert!(Arc::ptr_eq(&s1.lagging, &s2.lagging));
+        assert!(Arc::ptr_eq(&s1.blocked_sinks, &s2.blocked_sinks));
+        assert!(Arc::ptr_eq(&s1.replay_floors, &s2.replay_floors));
+        assert!(Arc::ptr_eq(&s1.catch_up_in_flight, &s2.catch_up_in_flight));
+        assert!(Arc::ptr_eq(&s1.pending_catch_ups, &s2.pending_catch_ups));
+        assert!(Arc::ptr_eq(&s1.last_notified, &s2.last_notified));
+        assert!(Arc::ptr_eq(&s1.last_errors, &s2.last_errors));
+
+        // `set_state` shares instead of copying back element-wise.
+        let mut restored = manager_with_state(BTreeMap::new(), BTreeMap::new());
+        restored.set_state(Arc::clone(&s2));
+        assert!(Arc::ptr_eq(&restored.cursors, &s2.cursors));
+        assert!(Arc::ptr_eq(&restored.last_seen, &s2.last_seen));
+        assert!(Arc::ptr_eq(&restored.lagging, &s2.lagging));
+        assert!(Arc::ptr_eq(&restored.last_errors, &s2.last_errors));
     }
 }

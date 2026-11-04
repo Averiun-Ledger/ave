@@ -1256,7 +1256,12 @@ impl Actor for Tracker {
         // Dirty boots only: on a running node the reconciled set
         // already gates repeats, and firing on every request-driven
         // reboot could race slow live acks with duplicate catch-ups.
-        if !self.skip_reconcile {
+        // Ledgers without history (unknown subject lifted manually)
+        // report nothing: with no tip a missing cursor must not read
+        // as behind.
+        if !self.skip_reconcile
+            && crate::model::common::get_last_event(ctx).await?.is_some()
+        {
             let manager_path = ActorPath::from(format!(
                 "/user/node/subject_manager/{}/sink_manager",
                 self.governance_id

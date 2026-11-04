@@ -533,10 +533,12 @@ impl CompileWorker {
 
         // The vote attests the toolchain that built it: validators
         // compare this version against the registry entry for the pin
-        // (valid ID, wrong toolchain is rejected there). Measured once
-        // per request from the SELECTED toolchain — the gate above
-        // already proved it resolves. Unmeasurable means the toolchain
-        // is broken: stand down, the build would fail the same way.
+        // (valid ID, wrong toolchain is rejected there). Measure ONLY
+        // the selected toolchain: probing ambient rustc as well would
+        // stand down a request whose explicit toolchain works fine,
+        // just because the ambient one is broken. Unmeasurable means
+        // the toolchain is broken: stand down, the build would fail
+        // the same way.
         let toolchain_name = if pin.is_empty() {
             String::new()
         } else {
@@ -546,21 +548,17 @@ impl CompileWorker {
             }
         };
         // An empty toolchain name selects the system cargo (legacy
-        // request): it is measured like any other toolchain, in
+        // request): it is measured exactly like a named toolchain, in
         // tests exactly as in production, so both vote the same
         // attestation (validators judge whatever it attests).
-        let empty_version =
-            match Self::measure_toolchain_version("", &pin).await {
-                Ok(version) => version,
-                Err(response) => return Ok(response),
-            };
-        let toolchain_version = if toolchain_name.is_empty() {
-            empty_version
-        } else {
-            match Self::measure_toolchain_version(&toolchain_name, &pin).await {
-                Ok(version) => version,
-                Err(response) => return Ok(response),
-            }
+        let toolchain_version = match Self::measure_toolchain_version(
+            &toolchain_name,
+            &pin,
+        )
+        .await
+        {
+            Ok(version) => version,
+            Err(response) => return Ok(response),
         };
 
         let result = match resolve_compile_targets(

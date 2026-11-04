@@ -3471,7 +3471,10 @@ impl Api {
         governance_id: DigestIdentifier,
         subject_id: DigestIdentifier,
     ) -> Result<
-        (Vec<(u64, Option<u64>, String)>, Vec<(u64, Option<u64>, String)>),
+        (
+            Vec<(u64, Option<u64>, String)>,
+            Vec<(u64, Option<u64>, String)>,
+        ),
         Error,
     > {
         use crate::governance::witnesses_register::{
@@ -3489,9 +3492,7 @@ impl Api {
                 subject_id,
             })
             .await
-            .map_err(|e| {
-                actor_communication_error("witnesses_register", e)
-            })?;
+            .map_err(|e| actor_communication_error("witnesses_register", e))?;
         match response {
             WitnessesRegisterResponse::TrackerVisibilityState { state } => {
                 Ok((
@@ -3558,9 +3559,7 @@ impl Api {
         match response {
             SnRegisterResponse::GovVersionWindow(ranges) => Ok(ranges
                 .into_iter()
-                .map(|range| {
-                    (range.from_sn, range.to_sn, range.gov_version)
-                })
+                .map(|range| (range.from_sn, range.to_sn, range.gov_version))
                 .collect()),
             _ => Err(Error::UnexpectedResponse {
                 actor: "sn_register".to_owned(),

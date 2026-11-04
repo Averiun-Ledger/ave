@@ -1306,10 +1306,12 @@ where
 /// against the subject's ledger tip.
 ///
 /// Catches up where behind (boot backstop for quiet subjects:
-/// without fresh traffic the gap would never be noticed). Pure map
-/// reads on the manager side; the catch-up chain lifts the subject
-/// itself only when delivery is actually needed. Unknown manager
-/// (no sinks configured) is a clean no-op.
+/// without fresh traffic the gap would never be noticed), including
+/// a missing cursor at SN 0. Pure map reads on the manager side; the
+/// catch-up chain lifts the subject itself only when delivery is
+/// actually needed. Unknown manager (no sinks configured) is a clean
+/// no-op. Only call with tips of ledgers that have history: a
+/// history-less subject must skip the review, never report tip 0.
 pub async fn review_sink_cursor(
     system: &SystemRef,
     manager_path: ActorPath,

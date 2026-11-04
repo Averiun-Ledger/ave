@@ -26,6 +26,38 @@ use crate::sink::transport::{NodeSigner, SinkTransport};
 use ave_common::DataToSink;
 
 // ---------------------------------------------------------------------------
+// Test instrumentation
+// ---------------------------------------------------------------------------
+
+/// Test-only count of pending-queue elements scanned by the linear
+/// admission/dedup searches, per sink: enqueuing Q distinct subjects
+/// while the slots stay busy scans Q(Q-1)/2 elements. Lets regression
+/// tests assert that catch-up admission does not walk the queue.
+/// Keyed by sink name so tests sharing a process do not pollute each
+/// other.
+#[cfg(feature = "test")]
+static PENDING_SCAN_COMPARISONS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Test-only: reset the pending-scan counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_reset_pending_scan_comparisons(sink: &str) {
+    if let Ok(mut counts) = PENDING_SCAN_COMPARISONS.lock() {
+        counts.remove(sink);
+    }
+}
+
+/// Test-only: read the pending-scan counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_pending_scan_comparisons(sink: &str) -> u64 {
+    PENDING_SCAN_COMPARISONS
+        .lock()
+        .map(|counts| counts.get(sink).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
 
@@ -121,6 +153,66 @@ pub enum SinkSubjectWorkerError {
         /// `true` when the subject was not found during catch-up.
         from_catch_up: bool,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Pending catch-ups
+// ---------------------------------------------------------------------------
+
+/// FIFO queue of subjects waiting for a catch-up slot once
+/// `max_catch_up_concurrency` allows it, with an index for O(1)
+/// dedup: admitting Q subjects while the slots stay busy used to
+/// scan Q(Q-1)/2 ids. Both structures are updated together: every id
+/// in `order` has an entry in `from_sn` and vice versa.
+#[derive(Debug, Default)]
+struct PendingCatchUps {
+    /// Admission order (FIFO).
+    order: VecDeque<String>,
+    /// Lowest requested `from_sn` per queued subject.
+    from_sn: HashMap<String, u64>,
+}
+
+impl PendingCatchUps {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn contains(&self, subject_id: &str) -> bool {
+        self.from_sn.contains_key(subject_id)
+    }
+
+    /// Queue a subject, or rewind its queued `from_sn` to the lower
+    /// one (a replay that rewound the cursor must rewind the queued
+    /// catch-up too, like the in-flight restart).
+    fn insert_or_rewind(&mut self, subject_id: &str, from_sn: u64) {
+        if let Some(queued_from) = self.from_sn.get_mut(subject_id) {
+            *queued_from = (*queued_from).min(from_sn);
+        } else {
+            self.from_sn.insert(subject_id.to_owned(), from_sn);
+            self.order.push_back(subject_id.to_owned());
+        }
+    }
+
+    fn push_front(&mut self, subject_id: String, from_sn: u64) {
+        self.from_sn.insert(subject_id.clone(), from_sn);
+        self.order.push_front(subject_id);
+    }
+
+    fn pop_front(&mut self) -> Option<(String, u64)> {
+        loop {
+            let subject_id = self.order.pop_front()?;
+            // Every queued id has a map entry (all three writers
+            // update both together): skip defensively instead of
+            // stranding the queue behind a desynced head.
+            if let Some(from_sn) = self.from_sn.remove(&subject_id) {
+                return Some((subject_id, from_sn));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +319,7 @@ pub struct SinkWorker {
     next_child_shutdown_generation: u64,
     /// Subjects waiting for a catch-up slot once `max_catch_up_concurrency`
     /// allows it.
-    pending_catch_ups: VecDeque<(String, u64)>,
+    pending_catch_ups: PendingCatchUps,
     /// `true` when this worker handles governance events (parent is under Node),
     /// `false` when it handles tracker events (parent is under Governance).
     is_governance: bool,
@@ -650,19 +742,8 @@ impl Handler<Self> for SinkWorker {
                     // too, like the in-flight restart above — otherwise the
                     // events below the queued from_sn are never delivered
                     // while the manager's cursor advances past them.
-                    match self
-                        .pending_catch_ups
-                        .iter_mut()
-                        .find(|(id, _)| id == &subject_id)
-                    {
-                        Some((_, queued_from)) => {
-                            *queued_from = (*queued_from).min(from_sn);
-                        }
-                        None => {
-                            self.pending_catch_ups
-                                .push_back((subject_id, from_sn));
-                        }
-                    }
+                    self.pending_catch_ups
+                        .insert_or_rewind(&subject_id, from_sn);
                     return Ok(SinkWorkerResponse::Ok);
                 }
 
@@ -1101,6 +1182,15 @@ impl Handler<Self> for SinkWorker {
             } => {
                 if from_catch_up {
                     self.untrack_catch_up(&subject_id);
+                    // A freed slot must not strand queued catch-ups:
+                    // drain like the completion path. Blocked sinks
+                    // stay drained on unblock.
+                    if self.blocked.is_none()
+                        && let Err(e) =
+                            self.try_start_pending_catch_ups(ctx).await
+                    {
+                        error!(msg_type = "DrainPendingCatchUps", sink = %self.sink_name, error = %e, "Failed to drain pending catch-ups after subject not found");
+                    }
                 }
                 // A deleted subject can have no live work in flight.
                 self.live_in_flight.remove(&subject_id);
@@ -1276,12 +1366,8 @@ impl SinkWorker {
                 from_sn = from_sn,
                 "Catch-up without completion past stall timeout, requeueing"
             );
-            if !self
-                .pending_catch_ups
-                .iter()
-                .any(|(id, _)| id == &subject_id)
-            {
-                self.pending_catch_ups.push_front((subject_id, from_sn));
+            if !self.pending_catch_ups.contains(&subject_id) {
+                self.pending_catch_ups.push_front(subject_id, from_sn);
             }
         }
         self.try_start_pending_catch_ups(ctx).await
@@ -1302,7 +1388,7 @@ impl SinkWorker {
                 continue;
             }
             if self.in_catch_up.len() >= self.server.max_catch_up_concurrency {
-                self.pending_catch_ups.push_front((subject_id, from_sn));
+                self.pending_catch_ups.push_front(subject_id, from_sn);
                 break;
             }
             self.track_catch_up_start(&subject_id, from_sn);
@@ -1405,7 +1491,7 @@ impl SinkWorker {
             active_subject_workers: HashMap::new(),
             pending_child_shutdowns: HashMap::new(),
             next_child_shutdown_generation: 0,
-            pending_catch_ups: VecDeque::new(),
+            pending_catch_ups: PendingCatchUps::default(),
             is_governance,
         })
     }

@@ -6468,8 +6468,7 @@ async fn test_gov_version_skip_with_failures_in_between() {
 /// carrying the hostile marker: with the fix, a refused schema never
 /// reaches staging or artifact directories.
 fn assert_no_hostile_artifacts() {
-    let prefix =
-        format!("ave-test-contracts-{}-", std::process::id());
+    let prefix = format!("ave-test-contracts-{}-", std::process::id());
     let mut roots = vec![];
     if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
         for entry in entries.flatten() {
@@ -6590,10 +6589,9 @@ async fn hostile_schema_id_fails_without_state_change() {
                 ]
             },
         });
-        let request_id =
-            emit_fact(owner, governance_id.clone(), dotted, false)
-                .await
-                .unwrap();
+        let request_id = emit_fact(owner, governance_id.clone(), dotted, false)
+            .await
+            .unwrap();
         wait_request(owner, request_id).await.unwrap();
         let state = get_subject(owner, governance_id.clone(), None, true)
             .await
@@ -6637,13 +6635,13 @@ async fn hostile_schema_id_fails_without_state_change() {
             matches!(terminal, RequestState::Finish),
             "valid schema must still apply, got {terminal:?}"
         );
-        let state =
-            get_subject(owner, governance_id.clone(), None, true)
-                .await
-                .unwrap();
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
         let gov = governance_properties(state.properties.clone());
         assert!(
-            gov.schemas.contains_key(&SchemaType::Type("Example".to_owned())),
+            gov.schemas
+                .contains_key(&SchemaType::Type("Example".to_owned())),
             "valid schema must persist after hostile refusal"
         );
     })
