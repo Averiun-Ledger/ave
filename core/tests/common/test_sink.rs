@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -6,7 +7,7 @@ use std::{
 
 use ave_common::IncomingSinkEvent;
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -807,8 +808,12 @@ impl TestSink {
 
     async fn auth(
         State(state): State<Arc<Mutex<TestSinkState>>>,
-        Json(req): Json<AuthRequest>,
+        Form(params): Form<HashMap<String, String>>,
     ) -> Response {
+        let req = AuthRequest {
+            username: params.get("username").cloned().unwrap_or_default(),
+            password: params.get("password").cloned().unwrap_or_default(),
+        };
         let mut guard = state.lock().await;
         guard.auth_requests.push(req);
 

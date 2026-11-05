@@ -289,25 +289,27 @@ pub async fn obtain_token(
     auth: &SinkAuthConfig,
     password_or_secret: &str,
 ) -> Result<TokenResponse, SinkError> {
-    let mut body = match auth.grant_type {
-        OAuth2GrantType::Password => serde_json::json!({
-            "grant_type": auth.grant_type.as_str(),
-            "username": auth.username,
-            "password": password_or_secret,
-        }),
-        OAuth2GrantType::ClientCredentials => serde_json::json!({
-            "grant_type": auth.grant_type.as_str(),
-            "client_id": auth.client_id,
-            "client_secret": password_or_secret,
-        }),
+    // RFC 6749 §4.3.2/§4.4.2: token requests are form-encoded, not
+    // JSON. A strict IdP rejects any other body for these grants.
+    let mut params: Vec<(&str, &str)> = match auth.grant_type {
+        OAuth2GrantType::Password => vec![
+            ("grant_type", auth.grant_type.as_str()),
+            ("username", &auth.username),
+            ("password", password_or_secret),
+        ],
+        OAuth2GrantType::ClientCredentials => vec![
+            ("grant_type", auth.grant_type.as_str()),
+            ("client_id", &auth.client_id),
+            ("client_secret", password_or_secret),
+        ],
     };
     if !auth.scope.is_empty() {
-        body["scope"] = serde_json::Value::String(auth.scope.clone());
+        params.push(("scope", &auth.scope));
     }
 
     let res = client
         .post(&auth.auth_url)
-        .json(&body)
+        .form(&params)
         .send()
         .await
         .map_err(|e| SinkError::Auth {
@@ -805,12 +807,51 @@ mod tests {
         );
     }
 
-    /// Starts a minimal HTTP OAuth2 token endpoint that captures the JSON body
-    /// of the token request and returns it through the oneshot sender.
+    /// Starts a minimal HTTP OAuth2 token endpoint that captures the
+    /// form-encoded body of the token request and returns it through
+    /// the oneshot sender.
     async fn start_oauth2_server_that_captures_body(
         access_token: &str,
     ) -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+        /// Minimal `application/x-www-form-urlencoded` decoder for the
+        /// ASCII values these tests send (plus for space, %XX escapes).
+        fn decode_form(body: &[u8]) -> serde_json::Value {
+            fn decode(component: &str) -> String {
+                let mut out = String::with_capacity(component.len());
+                let mut bytes = component.as_bytes().iter();
+                while let Some(&b) = bytes.next() {
+                    match b {
+                        b'+' => out.push(' '),
+                        b'%' => {
+                            let hex = |c: u8| {
+                                (c as char).to_digit(16).unwrap_or(0) as u8
+                            };
+                            let hi =
+                                bytes.next().copied().unwrap_or(b'0');
+                            let lo =
+                                bytes.next().copied().unwrap_or(b'0');
+                            out.push((hex(hi) << 4 | hex(lo)) as char);
+                        }
+                        _ => out.push(b as char),
+                    }
+                }
+                out
+            }
+            let mut map = serde_json::Map::new();
+            let text =
+                std::str::from_utf8(body).expect("form body is utf8");
+            for pair in text.split('&') {
+                let (key, value) =
+                    pair.split_once('=').unwrap_or((pair, ""));
+                map.insert(
+                    decode(key),
+                    serde_json::Value::String(decode(value)),
+                );
+            }
+            serde_json::Value::Object(map)
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -874,8 +915,11 @@ mod tests {
                         .expect("should read request body");
                 }
 
-                serde_json::from_slice(&body_bytes)
-                    .expect("request body should be valid JSON")
+                assert!(
+                    headers.contains("application/x-www-form-urlencoded"),
+                    "token request must be form-encoded, got: {headers}"
+                );
+                decode_form(&body_bytes)
             };
             let _ = tx.send(body);
 

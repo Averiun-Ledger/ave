@@ -262,6 +262,17 @@ pub struct AuthDatabase {
         Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
     runtime_config: Arc<RuntimeAuthConfig>,
     pub(crate) config: Arc<AuthConfig>,
+    /// Serializes whole system-config updates (validate, persist,
+    /// publish) across the audited and plain variants: without it a
+    /// newer commit can be published before an older one resumes and
+    /// the process keeps applying the stale value after a newer one
+    /// was confirmed.
+    pub(crate) system_config_write: Arc<std::sync::Mutex<()>>,
+    /// Test-only barrier slot fired between commit and publish so a
+    /// test can force the stale-publish interleave deterministically.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) commit_publish_hook:
+        Arc<std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>>>,
 }
 
 impl AuthDatabase {
@@ -1033,6 +1044,21 @@ impl AuthDatabase {
         Ok(())
     }
 
+    /// Test-only one-shot barrier between commit and publish: lets a
+    /// test force the stale-publish interleave deterministically.
+    /// Costless in production (compiled out without the test feature).
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn wait_commit_publish_hook(&self) {
+        let barrier = self
+            .commit_publish_hook
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
     /// Get a locked database connection with error handling
     pub(super) fn lock_conn(&self) -> Result<PooledConnection, DatabaseError> {
         let started = Instant::now();
@@ -1142,6 +1168,9 @@ impl AuthDatabase {
             prometheus: Arc::new(std::sync::OnceLock::new()),
             runtime_config: Arc::new(RuntimeAuthConfig::from_config(&config)),
             config: Arc::new(config),
+            system_config_write: Arc::new(std::sync::Mutex::new(())),
+            #[cfg(any(test, feature = "test"))]
+            commit_publish_hook: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // Run migrations

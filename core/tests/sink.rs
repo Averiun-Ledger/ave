@@ -10841,7 +10841,13 @@ async fn start_client_credentials_auth_server() -> (
     String,
     std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
 ) {
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use axum::{
+        Form, Json, Router,
+        extract::State,
+        http::StatusCode,
+        routing::post,
+    };
+    use std::collections::HashMap;
 
     let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
@@ -10854,8 +10860,16 @@ async fn start_client_credentials_auth_server() -> (
                         tokio::sync::Mutex<Option<serde_json::Value>>,
                     >,
                 >,
-                 Json(body): Json<serde_json::Value>| async move {
-                    *state.lock().await = Some(body);
+                 Form(params): Form<HashMap<String, String>>| async move {
+                    let mut map = serde_json::Map::new();
+                    for (key, value) in &params {
+                        map.insert(
+                            key.clone(),
+                            serde_json::Value::String(value.clone()),
+                        );
+                    }
+                    *state.lock().await =
+                        Some(serde_json::Value::Object(map));
                     let token = serde_json::json!({
                         "access_token": "cc-test-token",
                         "token_type": "Bearer",

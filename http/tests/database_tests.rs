@@ -3025,3 +3025,110 @@ async fn test_change_password_does_not_hold_writer_during_argon2() {
     let user = db.verify_credentials("changer", "FinalPass789!").unwrap();
     assert_eq!(user.username, "changer");
 }
+
+/// Concurrent system config updates must neither wedge nor lose the
+/// publish order (BR22-12): the write lock serializes the whole
+/// validate-persist-publish flow of both the plain and the audited
+/// variant. Hammer both paths from several threads, then prove through
+/// rate-limit behavior that the last confirmed value is applied.
+#[test(tokio::test)]
+async fn test_concurrent_system_config_updates_stay_consistent() {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = tmp_dir.path().to_path_buf();
+        let db =
+            AuthDatabase::new(config, "AdminPass123!", None).unwrap();
+        let user = db
+            .create_user("racecfg", "TestPass123!", None, None, Some(false))
+            .unwrap();
+        let (_, key_info) = db
+            .create_api_key(user.id, Some("racecfg"), None, None, false)
+            .unwrap();
+
+        db.update_system_config("rate_limit_window_seconds", "60", Some(1))
+            .unwrap();
+        db.update_system_config("rate_limit_max_requests", "1", Some(1))
+            .unwrap();
+
+        let db = std::sync::Arc::new(db);
+        let mut handles = Vec::new();
+        for t in 0..8u32 {
+            let db = db.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..200u32 {
+                    let value =
+                        if (i + t) % 2 == 0 { "true" } else { "false" };
+                    if (i + t) % 3 == 0 {
+                        db.update_system_config(
+                            "rate_limit_enable",
+                            value,
+                            None,
+                        )
+                        .unwrap();
+                    } else {
+                        db.update_system_config_transactional(
+                            "rate_limit_enable",
+                            value,
+                            None,
+                            Some(
+                                ave_http::auth::database_audit::AuditLogParams {
+                                    user_id: None,
+                                    api_key_id: None,
+                                    action_type: "test",
+                                    endpoint: None,
+                                    http_method: None,
+                                    ip_address: None,
+                                    user_agent: None,
+                                    request_id: None,
+                                    details: None,
+                                    success: true,
+                                    error_message: None,
+                                },
+                            ),
+                        )
+                        .unwrap();
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker finished");
+        }
+
+        // Publish path intact: a confirmed disable is applied.
+        db.update_system_config("rate_limit_enable", "false", Some(1))
+            .unwrap();
+        assert!(
+            db.check_rate_limit(
+                Some(&key_info.id),
+                Some("127.0.0.1"),
+                Some("/race-cfg")
+            )
+            .unwrap()
+        );
+        // And a confirmed enable is applied too (first request passes,
+        // the second hits the quota of 1).
+        db.update_system_config("rate_limit_enable", "true", Some(1))
+            .unwrap();
+        assert!(
+            db.check_rate_limit(
+                Some(&key_info.id),
+                Some("127.0.0.1"),
+                Some("/race-cfg")
+            )
+            .unwrap()
+        );
+        assert!(
+            db.check_rate_limit(
+                Some(&key_info.id),
+                Some("127.0.0.1"),
+                Some("/race-cfg")
+            )
+            .is_err()
+        );
+    })
+    .await
+    .expect("concurrent config updates hung");
+}

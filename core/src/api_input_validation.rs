@@ -49,16 +49,29 @@ pub fn resolve_page(
 /// so direct (non-HTTP) callers can never force an unbounded
 /// read either.
 pub fn page_sorted<T, K: Ord>(
-    mut items: Vec<T>,
+    items: Vec<T>,
     limit: u64,
     offset: u64,
     key: impl Fn(&T) -> K,
 ) -> Vec<T> {
-    items.sort_by_key(key);
+    // Decorate once: the key is computed per item, not per comparison.
+    let mut keyed: Vec<(K, T)> = items
+        .into_iter()
+        .map(|item| {
+            let sort_key = key(&item);
+            (sort_key, item)
+        })
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
     let limit =
         usize::try_from(limit.min(MAX_QUERY_LIMIT)).unwrap_or(usize::MAX);
     let offset = usize::try_from(offset).unwrap_or(usize::MAX);
-    items.into_iter().skip(offset).take(limit).collect()
+    keyed
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, item)| item)
+        .collect()
 }
 
 /// Rejects `0` with a message that names the field.

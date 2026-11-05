@@ -30,7 +30,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot};
 use tokio::task::{self, JoinHandle};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -52,6 +52,10 @@ const WRITE_BATCH_RETRY_ATTEMPTS: usize = 3;
 const WRITE_BATCH_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(5);
 const READER_STATEMENT_CACHE_CAPACITY: usize = 32;
 const WRITER_STATEMENT_CACHE_CAPACITY: usize = 128;
+/// Bound for waiting on reader capacity before entering the blocking
+/// pool (mirrors the auth database queue timeout): saturation fails
+/// loud instead of holding a blocking thread on the pool condvar.
+const READER_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const PAGE_ANCHOR_CACHE_MAX_QUERIES: usize = 256;
 const PAGE_ANCHOR_CACHE_MAX_ANCHORS_PER_QUERY: usize = 64;
 const PAGE_ANCHOR_WALK_THRESHOLD: u64 = 8;
@@ -1478,7 +1482,27 @@ impl SqliteReadStore {
     {
         let runtime = Arc::clone(&self.runtime);
 
+        // Capacity before threads: waiting for a reader here never
+        // holds a blocking thread, and saturation fails loud instead
+        // of parking on the pool condvar forever.
+        let permit = timeout(
+            READER_QUEUE_TIMEOUT,
+            runtime.reader_permits.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            DatabaseError::Query(format!(
+                "reader pool saturated; no capacity for {operation_name}"
+            ))
+        })?
+        .map_err(|_| {
+            DatabaseError::Query(
+                "projection reader backpressure semaphore closed".to_string(),
+            )
+        })?;
+
         task::spawn_blocking(move || {
+            let _permit = permit;
             let started = Instant::now();
             let conn = runtime.acquire_reader()?;
             let result = operation(&conn);
@@ -1976,6 +2000,10 @@ const fn retry_backoff(attempt: usize) -> Duration {
 struct SqliteRuntime {
     writer: Mutex<Connection>,
     readers: Arc<ConnectionPool>,
+    /// One permit per reader connection, taken before entering the
+    /// blocking pool: waiting for capacity never holds a blocking
+    /// thread, and saturation fails loud instead of parking forever.
+    reader_permits: Arc<Semaphore>,
     metrics: Arc<SqliteMetrics>,
     page_cache: Mutex<PageAnchorCache>,
 }
@@ -1987,17 +2015,21 @@ impl SqliteRuntime {
         tuning: &SqliteTuning,
     ) -> Result<Self, DatabaseError> {
         let metrics = Arc::new(SqliteMetrics::default());
-        let writer = open_writer_connection(path, sync_mode, tuning)?;
         let reader_count = Self::recommended_reader_pool_size();
+        // One cache budget per base, split across writer + readers.
+        let conn_tuning = tuning.for_connections(1 + reader_count);
+        let writer =
+            open_writer_connection(path, sync_mode, &conn_tuning)?;
         let mut readers = Vec::with_capacity(reader_count);
 
         for _ in 0..reader_count {
-            readers.push(open_reader_connection(path, tuning)?);
+            readers.push(open_reader_connection(path, &conn_tuning)?);
         }
 
         Ok(Self {
             writer: Mutex::new(writer),
             readers: Arc::new(ConnectionPool::new(readers)),
+            reader_permits: Arc::new(Semaphore::new(reader_count)),
             metrics,
             page_cache: Mutex::new(PageAnchorCache::default()),
         })
@@ -2320,6 +2352,21 @@ struct SqliteTuning {
     journal_size_limit_bytes: i64,
     cache_size_kb: i64,
     mmap_size_bytes: i64,
+}
+
+impl SqliteTuning {
+    /// Share of the tuning for one connection when `connections`
+    /// serve the same base: every connection applies only its slice
+    /// of the total cache budget, so the aggregate stays within the
+    /// budget computed for the base instead of multiplying it.
+    fn for_connections(&self, connections: usize) -> Self {
+        let connections = connections.max(1) as i64;
+        let total_kb = self.cache_size_kb.saturating_abs();
+        Self {
+            cache_size_kb: -(total_kb / connections),
+            ..*self
+        }
+    }
 }
 
 fn get_aborts_from_conn(
@@ -4511,5 +4558,82 @@ mod tests {
         assert_eq!(cache.current_subject_generation("s"), 0);
         assert!(cache.store_count("k".to_string(), "s", 1, 0));
         assert_eq!(cache.lookup_count("k", "s"), Some(1));
+    }
+
+    fn pragma_cache_kb(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("cache_size pragma")
+    }
+
+    #[tokio::test]
+    async fn reader_saturation_fails_loud_instead_of_holding_threads() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("database.db");
+            let tuning = tuning_for_ram(8192);
+            let runtime = Arc::new(
+                SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime"),
+            );
+            let reader_count =
+                SqliteRuntime::recommended_reader_pool_size();
+            // Occupy every permit and every connection: a further read
+            // must fail with saturation after the queue budget instead
+            // of parking a blocking thread on the pool forever.
+            let mut permits = Vec::with_capacity(reader_count);
+            for _ in 0..reader_count {
+                permits.push(
+                    runtime
+                        .reader_permits
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("permit"),
+                );
+            }
+            let mut conns = Vec::with_capacity(reader_count);
+            for _ in 0..reader_count {
+                conns.push(runtime.readers.acquire().expect("reader"));
+            }
+            let reader = SqliteReadStore::new(Arc::clone(&runtime));
+            let err = reader
+                .get_subject_state("missing")
+                .await
+                .expect_err("saturated read must fail");
+            assert!(
+                err.to_string().contains("saturated"),
+                "unexpected error: {err}"
+            );
+        })
+        .await
+        .expect("reader saturation test hung");
+    }
+
+    #[test]
+    fn pool_connections_share_one_cache_budget() {
+        // 8 GiB host: 2 % is 163 MiB total for the base. Every
+        // connection (writer + readers) must apply only its slice so
+        // the aggregate stays within budget instead of multiplying it.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let tuning = tuning_for_ram(8192);
+        let total_kb = tuning.cache_size_kb.saturating_abs();
+        assert_eq!(total_kb, 163 * 1024);
+        let runtime =
+            SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime");
+
+        let readers = runtime
+            .readers
+            .connections
+            .lock()
+            .expect("reader pool");
+        let per_conn = total_kb / (1 + readers.len() as i64);
+        assert_eq!(
+            pragma_cache_kb(&runtime.writer.lock().expect("writer")),
+            -per_conn
+        );
+        for conn in readers.iter() {
+            assert_eq!(pragma_cache_kb(conn), -per_conn);
+        }
+        assert!(per_conn * (1 + readers.len() as i64) <= total_kb);
     }
 }

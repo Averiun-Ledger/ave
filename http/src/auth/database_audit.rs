@@ -1143,6 +1143,11 @@ impl AuthDatabase {
         value: &str,
         updated_by: Option<i64>,
     ) -> Result<SystemConfig, DatabaseError> {
+        let _write = self.system_config_write.lock().map_err(|e| {
+            DatabaseError::Query(format!(
+                "system config write lock poisoned: {e}"
+            ))
+        })?;
         let key_id = SystemConfigKey::parse(key)?;
         let typed_value = key_id.parse_persisted_value(value)?;
         key_id.validate_value(&typed_value)?;
@@ -1154,6 +1159,9 @@ impl AuthDatabase {
             "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
             params![persisted_value, updated_by, key],
         ).map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        #[cfg(any(test, feature = "test"))]
+        self.wait_commit_publish_hook();
 
         self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
@@ -1179,6 +1187,11 @@ impl AuthDatabase {
         let persisted_value = key_id.serialize_value(&typed_value)?;
         self.check_rate_limit_retention(&key_id, &typed_value)?;
 
+        let _write = self.system_config_write.lock().map_err(|e| {
+            DatabaseError::Query(format!(
+                "system config write lock poisoned: {e}"
+            ))
+        })?;
         let mut conn = self.lock_conn()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1197,6 +1210,9 @@ impl AuthDatabase {
 
         tx.commit()
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        #[cfg(any(test, feature = "test"))]
+        self.wait_commit_publish_hook();
 
         self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
@@ -1288,5 +1304,131 @@ impl AuthDatabase {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_bridge::auth::AuthConfig;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    const KEY: &str = "rate_limit_enable";
+
+    fn test_db() -> (AuthDatabase, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = dir.path().to_path_buf();
+        let db =
+            AuthDatabase::new(config, "AdminPass123!", None).expect("db");
+        (db, dir)
+    }
+
+    fn db_flag(db: &AuthDatabase) -> bool {
+        db.list_system_config()
+            .expect("list config")
+            .into_iter()
+            .find(|entry| entry.key == KEY)
+            .and_then(|entry| match entry.value {
+                SystemConfigValue::Boolean(enabled) => Some(enabled),
+                _ => None,
+            })
+            .expect("rate_limit_enable present")
+    }
+
+    fn poll_db_flag(db: &AuthDatabase, expected: bool) {
+        let started = Instant::now();
+        while db_flag(db) != expected {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "timed out waiting for persisted {KEY} == {expected}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn audit_params() -> AuditLogParams<'static> {
+        AuditLogParams {
+            user_id: None,
+            api_key_id: None,
+            action_type: "test",
+            endpoint: None,
+            http_method: None,
+            ip_address: None,
+            user_agent: None,
+            request_id: None,
+            details: None,
+            success: true,
+            error_message: None,
+        }
+    }
+
+    /// Forced stale-publish interleave, once per update path: A commits
+    /// and waits on the hook, B commits (and publishes unless the
+    /// write lock holds it), then A resumes and publishes the older
+    /// value. Serialized updates converge on the last commit; without
+    /// the lock the process keeps applying the stale value after the
+    /// newer one was confirmed.
+    fn stale_publish_round(
+        update: impl Fn(&AuthDatabase, bool) + Send + Sync + Copy,
+    ) {
+        let (db, _dir) = test_db();
+        let barrier = Arc::new(Barrier::new(2));
+        db.commit_publish_hook
+            .lock()
+            .expect("hook slot")
+            .replace(barrier.clone());
+
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let db_ref = &db;
+            scope.spawn(move || {
+                update(db_ref, false);
+            });
+            // A committed (both with and without the write lock: the
+            // lock only moves its publish after the release below).
+            poll_db_flag(db_ref, false);
+            scope.spawn(move || {
+                let _ = done_tx.send(update(db_ref, true));
+            });
+            // Without the lock B is done here; with the lock B waits
+            // on it, so the timeout only fires when the fix holds and
+            // the release below still unblocks A first.
+            let _ = done_rx.recv_timeout(Duration::from_secs(5));
+            barrier.wait();
+        });
+
+        assert!(
+            db.rate_limit_enabled(),
+            "memory must apply the last confirmed value"
+        );
+        assert!(db_flag(&db), "persisted value must be the last one");
+    }
+
+    #[test]
+    fn concurrent_plain_updates_keep_memory_and_db_in_agreement() {
+        stale_publish_round(|db, enabled| {
+            db.update_system_config(
+                KEY,
+                if enabled { "true" } else { "false" },
+                None,
+            )
+            .expect("plain update");
+        });
+    }
+
+    #[test]
+    fn concurrent_audited_updates_keep_memory_and_db_in_agreement() {
+        stale_publish_round(|db, enabled| {
+            db.update_system_config_typed_transactional(
+                KEY,
+                &SystemConfigValue::Boolean(enabled),
+                None,
+                Some(audit_params()),
+            )
+            .expect("audited update");
+        });
     }
 }

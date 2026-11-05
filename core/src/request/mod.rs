@@ -405,37 +405,52 @@ impl RequestHandler {
             }
         };
 
-        let mut responses = vec![];
-        for governance in vec.iter() {
+        // One ask per governance, all in flight at once: the serial
+        // loop held the central handler for the whole fan-out.
+        // Failures keep the sequential semantics (first error in
+        // governance order aborts); a missing approver is skipped
+        // and a conflicted one carries no vote to report.
+        let queries = vec.iter().map(|governance| {
             let approver_path = ActorPath::from(format!(
                 "/user/node/subject_manager/{}/approver",
                 governance
             ));
-            if let Ok(approver_actor) =
-                ctx.system().get_actor::<ApprPersist>(&approver_path).await
-            {
+            let state = state.clone();
+            async move {
+                let Some(approver_actor) = ctx
+                    .system()
+                    .get_actor::<ApprPersist>(&approver_path)
+                    .await
+                    .ok()
+                else {
+                    return Ok::<Option<StoredApproval>, ActorError>(None);
+                };
                 let response = approver_actor
-                    .ask(ApprPersistMessage::GetApproval {
-                        state: state.clone(),
-                    })
+                    .ask(ApprPersistMessage::GetApproval { state })
                     .await?;
-
-                match response {
-                    ApprPersistResponse::Ok => {}
+                let approval = match response {
+                    ApprPersistResponse::Ok => None,
                     ApprPersistResponse::Approval {
                         request,
                         state,
                         request_id,
                         version,
-                    } => responses.push(StoredApproval {
+                    } => Some(StoredApproval {
                         request,
                         state,
                         request_id,
                         version,
                     }),
-                    ApprPersistResponse::Conflict { .. } => {}
+                    ApprPersistResponse::Conflict { .. } => None,
                 };
-            };
+                Ok(approval)
+            }
+        });
+        let mut responses = Vec::with_capacity(vec.len());
+        for answer in futures::future::join_all(queries).await {
+            if let Some(approval) = answer? {
+                responses.push(approval);
+            }
         }
 
         Ok(responses)

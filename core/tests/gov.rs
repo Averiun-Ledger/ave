@@ -6648,3 +6648,110 @@ async fn hostile_schema_id_fails_without_state_change() {
     .await
     .expect("test overran its 300s budget");
 }
+
+/// Approvals listing covers every governance with stable paging
+/// (BR22-01): the per-governance fan-out runs in parallel instead of
+/// holding the central handler for the whole sweep, but the collected
+/// set is identical and pages follow the same order. Bounded by
+/// timeout: the listing must answer even with a slow approver.
+#[test(tokio::test)]
+async fn approvals_listing_covers_all_governances_paged() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let (mut nodes, dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = nodes[0].api.clone();
+        let alice = nodes[1].api.clone();
+
+        for _ in 0..2 {
+            let governance_id =
+                create_and_authorize_governance(&owner, vec![&alice]).await;
+            let config = json!({
+                "members": {"add": [{
+                    "name": "Alice",
+                    "key": alice.public_key(),
+                }]},
+                "schemas": {"add": [{
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                }]},
+                "roles": {
+                    "governance": {
+                        "add": {"witness": ["Alice"]},
+                    },
+                    "schema": [{
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {"name": "Owner", "namespace": []}
+                            ],
+                            "validator": [
+                                {"name": "Owner", "namespace": []}
+                            ],
+                            "creator": [{
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                            }],
+                            "issuer": [{
+                                "name": "Alice",
+                                "namespace": [],
+                            }],
+                        },
+                    }],
+                },
+            });
+            emit_fact(&owner, governance_id.clone(), config, true)
+                .await
+                .unwrap();
+            let gov_sn =
+                get_subject(&owner, governance_id.clone(), None, true)
+                    .await
+                    .unwrap()
+                    .sn;
+            alice.update_subject(governance_id.clone()).await.unwrap();
+            get_subject(&alice, governance_id.clone(), Some(gov_sn), true)
+                .await
+                .unwrap();
+            create_subject(&alice, governance_id, "Example", "", true)
+                .await
+                .unwrap();
+        }
+
+        // One stored approval per governance, same set on repeat
+        // calls, pages split it without loss or reorder.
+        let full =
+            owner.get_approvals(None, 10, 0).await.unwrap();
+        assert_eq!(full.len(), 2);
+        let again =
+            owner.get_approvals(None, 10, 0).await.unwrap();
+        assert_eq!(
+            full.iter().map(|item| item.request_id.clone()).collect::<Vec<_>>(),
+            again.iter().map(|item| item.request_id.clone()).collect::<Vec<_>>(),
+        );
+        let first =
+            owner.get_approvals(None, 1, 0).await.unwrap();
+        let second =
+            owner.get_approvals(None, 1, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].request_id, full[0].request_id);
+        assert_eq!(second[0].request_id, full[1].request_id);
+
+        for node in nodes.iter_mut() {
+            node.token.cancel();
+        }
+        join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut()))
+            .await;
+        drop(nodes);
+        drop(dirs);
+    })
+    .await
+    .expect("approvals listing hung");
+}
