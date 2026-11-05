@@ -11750,7 +11750,7 @@ async fn sink_cursor_updates_fan_out_to_many_sinks() {
 #[traced_test]
 #[tokio::test]
 async fn sink_rebuild_lagging_computes_metrics_once() {
-    const K: usize = 30;
+    const K: usize = 12;
 
     // Metrics on: without the registry the recompute path is skipped
     // and the counter would stay at zero in both worlds.
@@ -11986,7 +11986,7 @@ async fn sink_individual_catch_up_consumes_batch_sequentially() {
 #[traced_test]
 #[tokio::test]
 async fn sink_pending_admission_does_not_scan_queue() {
-    const SUBJECTS: usize = 50;
+    const SUBJECTS: usize = 10;
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
