@@ -2412,6 +2412,91 @@ impl Handler<Self> for ValiWorker {
                     return Ok(());
                 }
 
+                // A superseded collection can never be stored: a newer
+                // request won the approver slot (or its sequence
+                // already committed). Retrying it is doomed, so the
+                // collection is dropped and the request reboots with
+                // fresh coordinates; the intent is preserved, no vote
+                // is cast on any collection.
+                if let ApprovalRes::Superseded = approval_res.content() {
+                    let Some(approval_req_hash) = self
+                        .approvals
+                        .iter()
+                        .find(|(_, collection)| {
+                            collection.request_id == request_id
+                                && collection.version == version
+                        })
+                        .map(|(hash, _)| hash.clone())
+                    else {
+                        debug!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Superseded for an unknown or closed collection"
+                        );
+                        return Ok(());
+                    };
+
+                    let Some(collection) =
+                        self.approvals.get(&approval_req_hash)
+                    else {
+                        return Ok(());
+                    };
+
+                    if sender != approval_res.signature().signer
+                        || !collection.approvers.workers.contains(&sender)
+                    {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Superseded from an unexpected approver"
+                        );
+                        return Ok(());
+                    }
+
+                    if approval_res.verify().is_err() {
+                        warn!(
+                            msg_type = "ApprovalResponse",
+                            sender = %sender,
+                            "Superseded with invalid signature"
+                        );
+                        return Ok(());
+                    }
+
+                    match ctx.get_parent::<Approval>().await {
+                        Ok(parent) => {
+                            if let Err(e) = parent
+                                .tell(ApprovalMessage::Reboot {
+                                    sender: (*self.our_key).clone(),
+                                })
+                                .await
+                            {
+                                debug!(
+                                    msg_type = "ApprovalResponse",
+                                    error = %e,
+                                    "Approval gone, dropping superseded reboot"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            debug!(
+                                msg_type = "ApprovalResponse",
+                                error = %e,
+                                "No parent, dropping superseded reboot"
+                            );
+                        }
+                    }
+
+                    self.approvals.remove(&approval_req_hash);
+                    if self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.request_id == request_id)
+                    {
+                        self.pending = None;
+                    }
+                    return Ok(());
+                }
+
                 let ApprovalRes::Response {
                     approval_req_hash,
                     agrees,

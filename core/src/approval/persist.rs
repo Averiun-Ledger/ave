@@ -814,7 +814,10 @@ impl Handler<Self> for ApprPersist {
                     // a live approval request always targets the next
                     // event of the subject; an older sequence is a
                     // replay of a committed or superseded request and
-                    // must not overwrite the persisted state.
+                    // must not overwrite the persisted state. The asker
+                    // is told it was superseded so its collection
+                    // reboots with fresh coordinates instead of
+                    // retrying a sequence that can never be stored.
                     if approval_req.content().sn <= metadata.sn {
                         warn!(
                             msg_type = "NetworkRequest",
@@ -822,13 +825,33 @@ impl Handler<Self> for ApprPersist {
                             subject_sn = metadata.sn,
                             "Approval request for an already committed sequence"
                         );
+                        if let Err(e) = self
+                            .send_signed_response(
+                                ctx,
+                                ApprovalRes::Superseded,
+                                &asker,
+                                &info.request_id,
+                                info.version,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Failed to send superseded response"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        }
                         return Ok(ApprPersistResponse::Ok);
                     }
 
                     // Freshness guard: a delayed request older than the
                     // persisted one (earlier issued_at, then older
                     // version, then request id as the tie-breaker) must
-                    // never overwrite the newer state.
+                    // never overwrite the newer state. The loser is told
+                    // it was superseded so its collection reboots with
+                    // fresh coordinates instead of retrying a request
+                    // that can never be stored.
                     if !self.request_id.is_empty() {
                         let incoming = (
                             approval_req.content().issued_at.as_nanos(),
@@ -851,6 +874,23 @@ impl Handler<Self> for ApprPersist {
                                 incoming_version = info.version,
                                 "Stale approval request ignored"
                             );
+                            if let Err(e) = self
+                                .send_signed_response(
+                                    ctx,
+                                    ApprovalRes::Superseded,
+                                    &asker,
+                                    &info.request_id,
+                                    info.version,
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to send superseded response"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
                             return Ok(ApprPersistResponse::Ok);
                         }
                     }

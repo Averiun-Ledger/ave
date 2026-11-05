@@ -838,101 +838,105 @@ async fn remote_failed_transfer_does_not_open_reception() {
 /// cursor; the duplicate apply used to fail the boot.
 #[test(tokio::test)]
 async fn dirty_restart_does_not_reapply_page_boundary() {
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut node, dirs) = create_node(CreateNodeConfig {
-        node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{port}"),
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
-    node_running(&node.api).await.unwrap();
-    let api = node.api.clone();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        let api = node.api.clone();
 
-    let governance_id = create_and_authorize_governance(&api, vec![]).await;
-    // 256 facts on top of genesis (257 events): recovery necessarily
-    // reads a second page, whose first event overlaps the first page
-    // under the old cursor. The boundary event removes a member, so a
-    // duplicate replay fails the patch and the boot: member adds alone
-    // would re-apply silently and prove nothing.
-    let temp_key = PublicKey::new(
-        ave_common::identity::keys::DSAlgorithm::Ed25519,
-        Ed25519Signer::generate().unwrap().public_key_bytes(),
-    )
-    .unwrap()
-    .to_string();
-    emit_fact(
-        &api,
-        governance_id.clone(),
-        json!({"members": {"add": [{ "name": "Temp", "key": temp_key }]}}),
-        false,
-    )
-    .await
-    .unwrap();
-    for i in 0..254 {
+        let governance_id = create_and_authorize_governance(&api, vec![]).await;
+        // 256 facts on top of genesis (257 events): recovery necessarily
+        // reads a second page, whose first event overlaps the first page
+        // under the old cursor. The boundary event removes a member, so a
+        // duplicate replay fails the patch and the boot: member adds alone
+        // would re-apply silently and prove nothing.
+        let temp_key = PublicKey::new(
+            ave_common::identity::keys::DSAlgorithm::Ed25519,
+            Ed25519Signer::generate().unwrap().public_key_bytes(),
+        )
+        .unwrap()
+        .to_string();
         emit_fact(
             &api,
             governance_id.clone(),
-            json!({"members": {"add": [{
-                "name": format!("Bulk{i:03}"),
-                "key": PublicKey::new(
-                    ave_common::identity::keys::DSAlgorithm::Ed25519,
-                    Ed25519Signer::generate().unwrap().public_key_bytes(),
-                )
-                .unwrap()
-                .to_string(),
-            }]}}),
+            json!({"members": {"add": [{ "name": "Temp", "key": temp_key }]}}),
             false,
         )
         .await
         .unwrap();
-    }
-    emit_fact(
-        &api,
-        governance_id.clone(),
-        json!({"members": {"remove": ["Temp"]}}),
-        true,
-    )
-    .await
-    .unwrap();
-
-    let before = get_subject(&api, governance_id.clone(), None, true)
+        for i in 0..254 {
+            emit_fact(
+                &api,
+                governance_id.clone(),
+                json!({"members": {"add": [{
+                    "name": format!("Bulk{i:03}"),
+                    "key": PublicKey::new(
+                        ave_common::identity::keys::DSAlgorithm::Ed25519,
+                        Ed25519Signer::generate().unwrap().public_key_bytes(),
+                    )
+                    .unwrap()
+                    .to_string(),
+                }]}}),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        emit_fact(
+            &api,
+            governance_id.clone(),
+            json!({"members": {"remove": ["Temp"]}}),
+            true,
+        )
         .await
         .unwrap();
 
-    // Dirty stop: no clean-shutdown handshake, so boot reconciles.
-    let keys = node.keys.clone();
-    let local_db = dirs[0].path().to_path_buf();
-    let ext_db = dirs[1].path().to_path_buf();
-    node.token.cancel();
-    join_all(node.handler.iter_mut()).await;
-    drop(node);
+        let before = get_subject(&api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
 
-    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut node, _) = create_node(CreateNodeConfig {
-        node_type: NodeType::Bootstrap,
-        listen_address: format!("/memory/{port}"),
-        always_accept: true,
-        keys: Some(keys),
-        local_db: Some(local_db),
-        ext_db: Some(ext_db),
-        ..Default::default()
+        // Dirty stop: no clean-shutdown handshake, so boot reconciles.
+        let keys = node.keys.clone();
+        let local_db = dirs[0].path().to_path_buf();
+        let ext_db = dirs[1].path().to_path_buf();
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, _) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+
+        // A duplicated boundary event would raise sn/version or fail the
+        // boot: state must be exactly what the journal holds.
+        let after = get_subject(&node.api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(after.sn, before.sn);
+        assert_eq!(after.properties, before.properties);
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+        drop(dirs);
     })
-    .await;
-    node_running(&node.api).await.unwrap();
-
-    // A duplicated boundary event would raise sn/version or fail the
-    // boot: state must be exactly what the journal holds.
-    let after = get_subject(&node.api, governance_id.clone(), None, true)
-        .await
-        .unwrap();
-    assert_eq!(after.sn, before.sn);
-    assert_eq!(after.properties, before.properties);
-
-    node.token.cancel();
-    join_all(node.handler.iter_mut()).await;
-    drop(node);
-    drop(dirs);
+    .await
+    .expect("dirty restart with page-boundary replay hung");
 }
 
 /// Regression test for the second Node <-> SubjectAccess cycle

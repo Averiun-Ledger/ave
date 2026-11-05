@@ -36,6 +36,12 @@ pub enum ApprovalRes {
         approval_req_hash: DigestIdentifier,
         who: PublicKey,
     },
+    /// Signed by the approver that holds the slot: the asking collection
+    /// was superseded by a newer stored request (or targets an already
+    /// committed sequence), so it can never be stored. Flow control
+    /// only, never evidence: the requester reboots the collection with
+    /// fresh coordinates instead of retrying the doomed one.
+    Superseded,
     /// Signed by the approver: it was pinged for a vote on this request
     /// but never received the full approval request, so it asks the
     /// validator for it. Flow control only, never evidence.
