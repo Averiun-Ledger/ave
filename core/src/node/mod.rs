@@ -1762,6 +1762,8 @@ async fn populate_sink_registry(
     use std::collections::HashSet;
 
     let mut seen = HashSet::new();
+    let mut seen_normalized: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut config_names = HashSet::new();
     for entry in sinks {
         let crate::config::SinkTarget::Schema {
@@ -1781,6 +1783,26 @@ async fn populate_sink_registry(
                 );
                 return Err(ActorError::Functional { description: msg });
             }
+            // Credential variables are derived from the normalized
+            // name: distinct raw names colliding here would silently
+            // share `AVE_SINK_*` secrets across sinks.
+            let normalized =
+                crate::sink::delivery::normalized_sink_name(&server.server);
+            if let Some(first) = seen_normalized.get(&normalized) {
+                let msg = format!(
+                    "sink names '{first}' and '{}' share one credential name",
+                    server.server
+                );
+                error!(
+                    msg_type = "SinkRegistry",
+                    first = %first,
+                    second = %server.server,
+                    normalized = %normalized,
+                    "sink credential names collide"
+                );
+                return Err(ActorError::Functional { description: msg });
+            }
+            seen_normalized.insert(normalized, server.server.clone());
             config_names.insert(server.server.clone());
             registry
                 .tell(SinkRegistryMessage::RegisterSink {

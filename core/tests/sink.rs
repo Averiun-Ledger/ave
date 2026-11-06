@@ -34,7 +34,7 @@ use crate::common::{
     TempEnvVar, create_and_authorize_governance, create_node,
     create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
     emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
-    get_subject, governance_properties, node_running,
+    get_subject, governance_properties, node_running, try_create_node,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -12692,4 +12692,48 @@ async fn sink_oauth2_retry_after_is_capped() {
 
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
+}
+
+/// Colliding credential names are rejected at boot (BR22-10):
+/// `br10-a` and `br10_a` normalize to the same env-var suffix, so
+/// admitting both would silently share `AVE_SINK_*` secrets across
+/// sinks. Bounded: the boot validation fails fast instead of hanging.
+#[tokio::test]
+async fn sink_credential_name_collision_rejected_at_boot() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        // No sink ever dials: the registry check runs before any
+        // worker starts, so the endpoint never needs to exist.
+        let mut servers = std::collections::BTreeSet::new();
+        servers.insert(SinkTypes::All);
+        let entries = ["br10-a", "br10_a"]
+            .into_iter()
+            .map(|name| {
+                make_sink_entry(
+                    name,
+                    "http://127.0.0.1:9/".to_owned(),
+                    None,
+                    servers.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let result = try_create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            always_accept: true,
+            sinks: entries,
+            ..Default::default()
+        })
+        .await;
+        let err = match result {
+            Ok(_) => panic!("colliding sink names must be rejected"),
+            Err(error) => format!("{error:?}"),
+        };
+        assert!(
+            err.contains("br10-a") && err.contains("br10_a"),
+            "rejection must name both colliding sinks, got: {err}"
+        );
+    })
+    .await
+    .expect("colliding sink names must fail boot fast");
 }

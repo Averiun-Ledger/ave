@@ -398,15 +398,20 @@ pub fn batch_group_schema_id(first: &IncomingSinkEvent) -> String {
     }
 }
 
+/// Normalized sink name as used inside every credential variable:
+/// non-ASCII-alphanumeric characters become `_`, then uppercase.
+/// Two different server names with the same normalized form read the
+/// same `AVE_SINK_*` variables, so the registry rejects them.
+pub(crate) fn normalized_sink_name(sink_name: &str) -> String {
+    sink_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
 fn sink_secret_env_var(prefix: &str, sink_name: &str) -> String {
-    format!(
-        "{prefix}{}",
-        sink_name
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect::<String>()
-            .to_ascii_uppercase()
-    )
+    format!("{prefix}{}", normalized_sink_name(sink_name))
 }
 
 #[cfg(test)]

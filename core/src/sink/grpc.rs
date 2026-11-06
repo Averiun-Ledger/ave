@@ -1,7 +1,7 @@
 //! gRPC transport for sink delivery (tonic, protobuf over HTTP/2).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -267,7 +267,8 @@ impl GrpcTransport {
 
     /// Drop the cached OAuth2 token and the delivery stream (its metadata
     /// carries the stale token), so the next attempt re-authenticates from
-    /// scratch.
+    /// scratch. The clear is intentional: no stream built on the old
+    /// token may survive, even if a newer one already replaced it.
     async fn reset_auth(&self) {
         if let Some(GrpcAuth::OAuth2(cache)) = &self.auth {
             cache.invalidate().await;
@@ -410,29 +411,57 @@ impl GrpcTransport {
             .lock()
             .await
             .insert(request_id.to_owned(), ack_tx);
-        let send_result = handle
-            .tx
-            .send(pb::DeliverRequest {
+        let send_result = tokio::time::timeout(
+            self.request_timeout(),
+            handle.tx.send(pb::DeliverRequest {
                 request_id: request_id.to_owned(),
                 meta: meta.clone(),
                 body: Some(body.clone()),
-            })
-            .await;
-        if send_result.is_err() {
-            // The reader task is gone: forget the pending ack and force a
-            // lazy reopen on the next attempt.
-            handle.pending.lock().await.remove(request_id);
-            *self.stream.lock().await = None;
-            drop(permit);
-            self.observe_in_flight();
-            return Err(StreamFailure::Delivery(SinkError::Delivery {
-                message: format!(
-                    "sink '{}': delivery stream closed",
-                    self.sink_name
-                ),
-                retryable: true,
-                retry_after_ms: None,
-            }));
+            }),
+        )
+        .await;
+        match send_result {
+            Err(_) => {
+                // The consumer is stalled with a full queue: fail
+                // loud instead of holding the in-flight slot for an
+                // unbounded send. The pending ack is dropped like on
+                // a closed stream and the attempt may retry.
+                handle.pending.lock().await.remove(request_id);
+                drop(permit);
+                self.observe_in_flight();
+                return Err(StreamFailure::Delivery(SinkError::Delivery {
+                    message: format!(
+                        "sink '{}': send queue full, timed out after {} ms",
+                        self.sink_name, self.config.request_timeout_ms
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                }));
+            }
+            Ok(Err(_)) => {
+                // The reader task is gone: forget the pending ack. Only
+                // clear the slot when it still holds this generation: a
+                // stale handle must not wipe a newer stream that already
+                // replaced it.
+                handle.pending.lock().await.remove(request_id);
+                let mut slot = self.stream.lock().await;
+                if slot.as_ref().is_some_and(|current| {
+                    Arc::ptr_eq(&current.pending, &handle.pending)
+                }) {
+                    *slot = None;
+                }
+                drop(permit);
+                self.observe_in_flight();
+                return Err(StreamFailure::Delivery(SinkError::Delivery {
+                    message: format!(
+                        "sink '{}': delivery stream closed",
+                        self.sink_name
+                    ),
+                    retryable: true,
+                    retry_after_ms: None,
+                }));
+            }
+            Ok(Ok(())) => {}
         }
 
         let result = timed_sink_request(&self.sink_name, || async {
@@ -546,7 +575,7 @@ impl GrpcTransport {
             stream_reader(
                 response.into_inner(),
                 pending,
-                Arc::clone(&self.stream),
+                Arc::downgrade(&self.stream),
                 self.sink_name.clone(),
             ),
             tracing::info_span!(
@@ -661,7 +690,7 @@ impl SinkTransport for GrpcTransport {
     }
 
     async fn health_check(&self) -> Result<(), SinkError> {
-        match self.health_service_check().await {
+        let result = match self.health_service_check().await {
             Ok(false) => Ok(()),
             Ok(true) => {
                 // Minimal servers may not implement grpc.health.v1: fall
@@ -669,15 +698,35 @@ impl SinkTransport for GrpcTransport {
                 // auth and signature paths.
                 self.test_rpc().await
             }
-            Err(e) => Err(e),
+            Err(error) => Err(error),
+        };
+        // Unlike deliveries (whose retry loop invalidates the cached
+        // token and retries once), a health check has no retry path:
+        // drop a rejected token inline so the next check re-fetches
+        // instead of replaying it until the TTL lapses. Matches the
+        // HTTP healthcheck; a no-op without OAuth2 auth.
+        if matches!(result, Err(SinkError::Auth { .. })) {
+            self.reset_auth().await;
         }
+        result
     }
 
     async fn test(&self) -> Result<(), SinkError> {
         // A missing health service must not fail the test delivery: only
         // real health errors (unreachable, NOT_SERVING) abort it.
-        self.health_service_check().await?;
-        self.test_rpc().await
+        if let Err(error) = self.health_service_check().await {
+            // Same stale-token handling as `health_check`: invalidate
+            // inline so the next use re-authenticates.
+            if matches!(error, SinkError::Auth { .. }) {
+                self.reset_auth().await;
+            }
+            return Err(error);
+        }
+        let result = self.test_rpc().await;
+        if matches!(result, Err(SinkError::Auth { .. })) {
+            self.reset_auth().await;
+        }
+        result
     }
 
     async fn warm_up(&self) -> Result<(), SinkError> {
@@ -721,10 +770,15 @@ impl SinkTransport for GrpcTransport {
 /// every pending delivery is failed as retryable (its cursor never
 /// advanced, so catch-up re-delivers in order) and the transport slot is
 /// cleared so the next delivery reopens the stream lazily.
+///
+/// The slot is held weakly on purpose: once the transport is gone the
+/// slot (and with it the request sender) must drop so the server sees
+/// EOF and closes, instead of the reader keeping the old transport
+/// half-alive forever.
 async fn stream_reader(
     mut streaming: tonic::codec::Streaming<pb::DeliverAck>,
     pending: PendingAcks,
-    slot: Arc<Mutex<Option<StreamHandle>>>,
+    slot: Weak<Mutex<Option<StreamHandle>>>,
     sink_name: String,
 ) {
     loop {
@@ -750,9 +804,19 @@ async fn stream_reader(
     }
 
     // Dropping the oneshot senders makes every waiter see the stream as
-    // broken (retryable); clearing the slot forces a lazy reopen.
+    // broken (retryable). The slot is cleared only when it still holds
+    // this generation: an old reader must not wipe a newer stream that
+    // already replaced it. A gone transport upgrades to nothing and is
+    // left alone: its slot (and sender) already dropped with it.
     pending.lock().await.clear();
-    *slot.lock().await = None;
+    if let Some(slot) = slot.upgrade() {
+        let mut guard = slot.lock().await;
+        if guard.as_ref().is_some_and(|current| {
+            Arc::ptr_eq(&current.pending, &pending)
+        }) {
+            *guard = None;
+        }
+    }
 }
 
 /// Map a per-message stream ack to a delivery result, using the same status

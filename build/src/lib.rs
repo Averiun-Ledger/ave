@@ -11,6 +11,11 @@
 //! inputs): same inputs in, byte-identical config and procedure
 //! out, on any machine with the pinned toolchain.
 
+/// Linux-only process isolation (user/mount/UTS namespaces). Gated
+/// as a whole so other targets never compile its Unix-only
+/// dependencies: outside Linux the build runs unsandboxed with only
+/// the environment scrub, selected by the caller.
+#[cfg(target_os = "linux")]
 pub mod sandbox;
 
 use std::path::{Path, PathBuf};
@@ -417,6 +422,29 @@ pub async fn toolchain_fingerprint(
 /// Materializes a contract build project: source, manifest, frozen
 /// lockfile (when given) and rendered cargo config. Reads nothing
 /// outside the given paths.
+/// Absolute cargo home for a build: create it first so the
+/// canonicalization below can not fall back to a relative path.
+/// Every consumer (cargo config, `CARGO_HOME`, sandbox mount) must
+/// use this single value: a relative path would resolve against a
+/// different working directory in the node and in the build child.
+async fn canonical_cargo_home(path: &Path) -> Result<PathBuf, BuildError> {
+    if let Ok(canonical) = tokio::fs::canonicalize(path).await {
+        return Ok(canonical);
+    }
+    tokio::fs::create_dir_all(path).await.map_err(|e| {
+        BuildError::DirectoryCreationFailed {
+            path: path.to_string_lossy().to_string(),
+            details: e.to_string(),
+        }
+    })?;
+    tokio::fs::canonicalize(path).await.map_err(|e| {
+        BuildError::DirectoryCreationFailed {
+            path: path.to_string_lossy().to_string(),
+            details: format!("created but still not resolvable: {e}"),
+        }
+    })
+}
+
 pub async fn prepare_project(
     contract_path: &Path,
     request: &BuildRequest<'_>,
@@ -470,11 +498,12 @@ pub async fn prepare_project(
         })?;
     }
 
+    let cargo_home = canonical_cargo_home(&request.cargo_home).await?;
     let cargo_config = rules::render_contract_cargo_config(
         request.config_template,
         &request.target_dir,
         request.vendor_dir.as_deref(),
-        &request.cargo_home,
+        &cargo_home,
         &request.rust_src,
         &request.rustc_commit,
     );
@@ -551,12 +580,16 @@ pub async fn run_cargo_build(
     } else {
         None
     };
+    // Absolute cargo home shared by the config above, the env here
+    // and the sandbox mount below: never a relative path that would
+    // resolve against the child working directory instead of ours.
+    let cargo_home = canonical_cargo_home(&request.cargo_home).await?;
     command
         .arg("build")
         .arg("--target")
         .arg(rules::WASM_TARGET)
         .arg("--release")
-        .env("CARGO_HOME", &request.cargo_home)
+        .env("CARGO_HOME", &cargo_home)
         // Single source of truth (`ave_common::build`): no wall-clock
         // input may shape artifacts.
         .env("SOURCE_DATE_EPOCH", rules::SOURCE_DATE_EPOCH)
@@ -598,7 +631,7 @@ pub async fn run_cargo_build(
             Path::new(&program),
             rustc_path.as_deref(),
             &sysroot,
-            &request.cargo_home,
+            &cargo_home,
             request.vendor_dir.as_deref(),
             contract_path,
             request.offline,
@@ -779,5 +812,66 @@ async fn kill_build_tree(child: &mut tokio::process::Child) {
     }
     if let Err(error) = child.kill().await {
         let _ = error;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_dir(name: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "ave-build-test-{}-{}-{}",
+            std::process::id(),
+            name,
+            id
+        ))
+    }
+
+    #[tokio::test]
+    async fn canonical_cargo_home_keeps_existing_absolute_dirs() {
+        let dir = unique_dir("abs");
+        tokio::fs::create_dir_all(&dir).await.expect("setup dir");
+        let out = canonical_cargo_home(&dir).await.expect("canonicalize");
+        assert!(out.is_absolute());
+        assert_eq!(
+            out,
+            tokio::fs::canonicalize(&dir).await.expect("expected")
+        );
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn canonical_cargo_home_creates_missing_relative_dirs() {
+        // First use with a relative path: the directory must be
+        // created and the returned path absolute, so mount sources,
+        // CARGO_HOME and the cargo config all resolve identically.
+        let rel = PathBuf::from(format!(
+            "ave-build-test-rel-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        let full = std::env::current_dir()
+            .expect("cwd")
+            .join(&rel)
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                std::env::current_dir().expect("cwd").join(&rel)
+            });
+        let _ = tokio::fs::remove_dir_all(&full).await;
+        let out =
+            canonical_cargo_home(Path::new(&rel)).await.expect("canonicalize");
+        assert!(out.is_absolute(), "must be absolute, got {out:?}");
+        assert!(out.is_dir(), "must exist after first use");
+        assert_eq!(
+            tokio::fs::canonicalize(&out).await.expect("recanonicalize"),
+            out,
+            "result must already be canonical"
+        );
+        tokio::fs::remove_dir_all(&out).await.ok();
     }
 }

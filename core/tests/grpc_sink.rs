@@ -1094,6 +1094,94 @@ async fn grpc_transport_stream_backpressure_on_stalled_consumer() {
     assert_eq!(sink.accepted_deliveries().len(), 3);
 }
 
+/// Dropping the transport must close its server stream (BR22-09): the
+/// reader must not keep the slot (and the request sender) alive, or
+/// the server never sees EOF and a replacement stream stacks on top
+/// of the ghost. Bounded by timeout: a retained sender would hang
+/// instead of failing.
+#[test(tokio::test)]
+async fn grpc_transport_drop_closes_server_stream() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let sink = GrpcTestSink::start().await;
+        let transport =
+            build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+                .await;
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .expect("first delivery opens the stream");
+        sink.wait_for_active_streams(1).await;
+
+        drop(transport);
+        // The server must observe EOF and close: no ghost stream stays
+        // open behind the replacement.
+        sink.wait_for_no_active_streams().await;
+
+        let transport =
+            build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+                .await;
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .expect("a fresh transport must deliver");
+        sink.wait_for_accepted(2).await;
+        sink.wait_for_active_streams(1).await;
+    })
+    .await
+    .expect("dropping the transport must close its stream");
+}
+
+/// A revoked token must not wedge healthchecks on the cached copy
+/// (BR22-11): when the Test RPC rejects the bearer with UNAUTHENTICATED,
+/// the transport drops the cached token, so the next healthcheck
+/// re-fetches instead of replaying the revoked one. Bounded by
+/// timeout: a retained token would hang the recovery, not fail it.
+#[test(tokio::test)]
+async fn grpc_transport_healthcheck_unauthenticated_refreshes_token() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let idp = TestSink::start().await;
+        let sink = GrpcTestSink::start_without_health_service().await;
+        let _guard = TempEnvVar::set(
+            "AVE_SINK_PASSWORD_GRPC_TEST_UNAUTH",
+            "oauth-secret",
+        );
+        let config = GrpcSinkConfig {
+            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url: idp.auth_url(),
+                username: "test-user".to_owned(),
+                ..SinkAuthConfig::default()
+            })),
+            ..grpc_config(&sink.endpoint())
+        };
+        let transport =
+            build_transport_named("grpc-test-unauth", &sink.endpoint(), config)
+                .await;
+
+        // First healthcheck fetches and caches the token.
+        transport.health_check().await.expect("test rpc works");
+        assert_eq!(idp.auth_requests().await.len(), 1);
+
+        // The server revokes the token: every Test RPC now fails.
+        sink.set_test_unauthenticated(true);
+        assert!(transport.health_check().await.is_err());
+
+        // The rejected token must not be reused: the next healthcheck
+        // re-fetches instead of replaying the revoked one.
+        assert!(transport.health_check().await.is_err());
+        assert_eq!(
+            idp.auth_requests().await.len(),
+            2,
+            "an UNAUTHENTICATED healthcheck must force a token refresh"
+        );
+
+        // Recovery works: once the server accepts again, healthchecks pass.
+        sink.set_test_unauthenticated(false);
+        transport.health_check().await.expect("test rpc works again");
+    })
+    .await
+    .expect("revoked-token healthchecks must terminate");
+}
+
 /// Unary fallback: a server without `DeliverStream` (v1-unary contract) is
 /// delivered through the unary RPC, and the transport remembers it.
 #[test(tokio::test)]
