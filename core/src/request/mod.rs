@@ -564,6 +564,12 @@ impl RequestHandler {
                 }
             }
             EventRequest::Fact(fact_request) => {
+                if let Err(reason) = fact_request.payload.validate() {
+                    return Err(RequestHandlerError::InvalidFactPayload(
+                        reason,
+                    ));
+                }
+
                 if is_gov && !fact_request.viewpoints.is_empty() {
                     return Err(
                         RequestHandlerError::GovFactViewpointsNotAllowed,
@@ -1795,11 +1801,18 @@ impl Handler<Self> for RequestHandler {
                 Ok(RequestHandlerResponse::Approvals(res))
             }
             RequestHandlerMessage::NewRequest { request } => {
-                // No gate here by design: intake accepts everything
-                // and routes internally. Target subjects serialize in
-                // their own mailbox (closed while reconciling) and
-                // stale reads resolve through deterministic protocol
-                // errors and retries, like any network race.
+                // Cheap payload gate before expensive signature check.
+                if let EventRequest::Fact(fact) = request.content()
+                    && let Err(reason) = fact.payload.validate()
+                {
+                    let err = RequestHandlerError::InvalidFactPayload(reason);
+                    warn!(
+                        msg_type = "NewRequest",
+                        error = %err,
+                        "Fact payload exceeds limits"
+                    );
+                    return Err(ActorError::from(err));
+                }
                 if let Err(e) = request.verify() {
                     let err = RequestHandlerError::SignatureVerification(
                         e.to_string(),

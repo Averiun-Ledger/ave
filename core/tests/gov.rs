@@ -6710,11 +6710,10 @@ async fn approvals_listing_covers_all_governances_paged() {
             emit_fact(&owner, governance_id.clone(), config, true)
                 .await
                 .unwrap();
-            let gov_sn =
-                get_subject(&owner, governance_id.clone(), None, true)
-                    .await
-                    .unwrap()
-                    .sn;
+            let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
             alice.update_subject(governance_id.clone()).await.unwrap();
             get_subject(&alice, governance_id.clone(), Some(gov_sn), true)
                 .await
@@ -6726,19 +6725,20 @@ async fn approvals_listing_covers_all_governances_paged() {
 
         // One stored approval per governance, same set on repeat
         // calls, pages split it without loss or reorder.
-        let full =
-            owner.get_approvals(None, 10, 0).await.unwrap();
+        let full = owner.get_approvals(None, 10, 0).await.unwrap();
         assert_eq!(full.len(), 2);
-        let again =
-            owner.get_approvals(None, 10, 0).await.unwrap();
+        let again = owner.get_approvals(None, 10, 0).await.unwrap();
         assert_eq!(
-            full.iter().map(|item| item.request_id.clone()).collect::<Vec<_>>(),
-            again.iter().map(|item| item.request_id.clone()).collect::<Vec<_>>(),
+            full.iter()
+                .map(|item| item.request_id.clone())
+                .collect::<Vec<_>>(),
+            again
+                .iter()
+                .map(|item| item.request_id.clone())
+                .collect::<Vec<_>>(),
         );
-        let first =
-            owner.get_approvals(None, 1, 0).await.unwrap();
-        let second =
-            owner.get_approvals(None, 1, 1).await.unwrap();
+        let first = owner.get_approvals(None, 1, 0).await.unwrap();
+        let second = owner.get_approvals(None, 1, 1).await.unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1);
         assert_eq!(first[0].request_id, full[0].request_id);

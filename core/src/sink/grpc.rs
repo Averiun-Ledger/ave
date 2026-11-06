@@ -1,8 +1,8 @@
 //! gRPC transport for sink delivery (tonic, protobuf over HTTP/2).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -766,10 +766,11 @@ impl SinkTransport for GrpcTransport {
 }
 
 /// Read the acks of a delivery stream, resolving each pending delivery by
-/// `request_id`. When the stream ends (server close or terminal status)
-/// every pending delivery is failed as retryable (its cursor never
-/// advanced, so catch-up re-delivers in order) and the transport slot is
-/// cleared so the next delivery reopens the stream lazily.
+/// `request_id`. When the server closes with a terminal status every
+/// pending delivery resolves with that status classification (auth,
+/// rejection or backoff hint); only a bare EOF falls back to retryable.
+/// The transport slot is cleared so the next delivery reopens the stream
+/// lazily.
 ///
 /// The slot is held weakly on purpose: once the transport is gone the
 /// slot (and with it the request sender) must drop so the server sees
@@ -781,6 +782,7 @@ async fn stream_reader(
     slot: Weak<Mutex<Option<StreamHandle>>>,
     sink_name: String,
 ) {
+    let mut terminal: Option<Status> = None;
     loop {
         match streaming.next().await {
             Some(Ok(ack)) => {
@@ -797,23 +799,35 @@ async fn stream_reader(
                     error = %status,
                     "gRPC delivery stream closed by the server"
                 );
+                terminal = Some(status);
                 break;
             }
             None => break,
         }
     }
 
-    // Dropping the oneshot senders makes every waiter see the stream as
-    // broken (retryable). The slot is cleared only when it still holds
-    // this generation: an old reader must not wipe a newer stream that
-    // already replaced it. A gone transport upgrades to nothing and is
-    // left alone: its slot (and sender) already dropped with it.
-    pending.lock().await.clear();
+    // Resolve every waiter with the terminal status classification so
+    // auth, rejection and backoff hints survive the stream death. Only
+    // a bare EOF without status stays generic retryable. The slot is
+    // cleared only when it still holds this generation: an old reader
+    // must not wipe a newer stream that already replaced it. A gone
+    // transport upgrades to nothing and is left alone: its slot (and
+    // sender) already dropped with it.
+    let waiters = std::mem::take(&mut *pending.lock().await);
+    if let Some(status) = terminal.as_ref() {
+        let classified = map_status(status);
+        for (_, sender) in waiters {
+            let _ = sender.send(Err(classified.clone()));
+        }
+    }
+    // Bare EOF: dropping the taken senders makes every waiter see the
+    // stream as broken (retryable).
     if let Some(slot) = slot.upgrade() {
         let mut guard = slot.lock().await;
-        if guard.as_ref().is_some_and(|current| {
-            Arc::ptr_eq(&current.pending, &pending)
-        }) {
+        if guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.pending, &pending))
+        {
             *guard = None;
         }
     }

@@ -12,8 +12,9 @@ use ave_common::identity::DigestIdentifier;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Largest zstd payload an artifact response may carry. The remaining 64 KiB
-/// is reserved for the MessagePack-serialized response envelope.
+/// Largest serialized artifact an artifact response may carry. The
+/// remaining 64 KiB is reserved for the MessagePack-serialized response
+/// envelope.
 pub const MAX_ARTIFACT_WIRE_BYTES: usize = 960 * 1024;
 /// Bounds decompression and the subsequent Wasmtime preparation work.
 pub const MAX_ARTIFACT_UNCOMPRESSED_BYTES: usize = 4 * 1024 * 1024;
@@ -57,10 +58,73 @@ pub enum ArtifactTransferError {
 /// engine-specific and is regenerated locally after verifying the hash.
 /// The toolchain fingerprint is cache-hygiene metadata of the build that
 /// produced the wasm (the security anchor is the wasm hash itself).
+///
+/// The payload travels as MessagePack binary, never as an integer array:
+/// the transport budget below bounds the serialized bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactData {
+    #[serde(with = "compressed_wasm_bytes")]
     pub compressed_wasm: Vec<u8>,
     pub toolchain_fingerprint: Option<DigestIdentifier>,
+}
+
+/// MessagePack binary encoding for the artifact payload, with
+/// backward compatibility: emits binary, reads binary or legacy
+/// integer arrays.
+mod compressed_wasm_bytes {
+    use serde::{
+        Deserializer, Serializer,
+        de::{SeqAccess, Visitor},
+    };
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(
+        bytes: &Vec<u8>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(bytes)
+    }
+
+    struct BytesOrSeq;
+
+    impl<'de> Visitor<'de> for BytesOrSeq {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("byte string or sequence of bytes")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(
+            self,
+            value: &[u8],
+        ) -> Result<Vec<u8>, E> {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E: serde::de::Error>(
+            self,
+            value: Vec<u8>,
+        ) -> Result<Vec<u8>, E> {
+            Ok(value)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<u8>, A::Error> {
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        deserializer.deserialize_byte_buf(BytesOrSeq)
+    }
 }
 
 impl ArtifactData {
@@ -87,10 +151,25 @@ impl ArtifactData {
             });
         }
 
-        Ok(Self {
+        let artifact = Self {
             compressed_wasm,
             toolchain_fingerprint,
-        })
+        };
+        // The budget bounds the serialized bytes on the wire, not the
+        // compressed input: integer-array encodings expand large bytes.
+        let wire_len = rmp_serde::to_vec(&artifact)
+            .map(|bytes| bytes.len())
+            .map_err(|error| ArtifactTransferError::Compression {
+                details: error.to_string(),
+            })?;
+        if wire_len > MAX_ARTIFACT_WIRE_BYTES {
+            return Err(ArtifactTransferError::TooLarge {
+                size: wire_len,
+                max: MAX_ARTIFACT_WIRE_BYTES,
+            });
+        }
+
+        Ok(artifact)
     }
 
     pub fn decompress(&self) -> Result<Vec<u8>, ArtifactTransferError> {
@@ -215,5 +294,38 @@ mod tests {
             oversized.decompress(),
             Err(ArtifactTransferError::Decompression { .. })
         ));
+    }
+
+    #[test]
+    fn artifact_wire_encoding_stays_binary_within_budget() {
+        let artifact = ArtifactData {
+            compressed_wasm: vec![0xAB_u8; 800 * 1024],
+            toolchain_fingerprint: None,
+        };
+        let wire =
+            rmp_serde::to_vec(&artifact).expect("artifact must serialize");
+        assert!(
+            wire.len() <= MAX_ARTIFACT_WIRE_BYTES,
+            "800 KiB of high bytes must fit as binary, got {}",
+            wire.len()
+        );
+    }
+
+    #[test]
+    fn artifact_reads_legacy_array_encoding() {
+        #[derive(serde::Serialize)]
+        struct LegacyArtifact {
+            compressed_wasm: Vec<u8>,
+            toolchain_fingerprint: Option<DigestIdentifier>,
+        }
+
+        let legacy = LegacyArtifact {
+            compressed_wasm: vec![1_u8, 2, 3, 200],
+            toolchain_fingerprint: None,
+        };
+        let bytes = rmp_serde::to_vec(&legacy).expect("legacy must serialize");
+        let artifact: ArtifactData = rmp_serde::from_slice(&bytes)
+            .expect("new code must read legacy arrays");
+        assert_eq!(artifact.compressed_wasm, vec![1_u8, 2, 3, 200]);
     }
 }

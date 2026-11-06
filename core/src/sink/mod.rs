@@ -828,10 +828,8 @@ mod tests {
                             let hex = |c: u8| {
                                 (c as char).to_digit(16).unwrap_or(0) as u8
                             };
-                            let hi =
-                                bytes.next().copied().unwrap_or(b'0');
-                            let lo =
-                                bytes.next().copied().unwrap_or(b'0');
+                            let hi = bytes.next().copied().unwrap_or(b'0');
+                            let lo = bytes.next().copied().unwrap_or(b'0');
                             out.push((hex(hi) << 4 | hex(lo)) as char);
                         }
                         _ => out.push(b as char),
@@ -840,11 +838,9 @@ mod tests {
                 out
             }
             let mut map = serde_json::Map::new();
-            let text =
-                std::str::from_utf8(body).expect("form body is utf8");
+            let text = std::str::from_utf8(body).expect("form body is utf8");
             for pair in text.split('&') {
-                let (key, value) =
-                    pair.split_once('=').unwrap_or((pair, ""));
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
                 map.insert(
                     decode(key),
                     serde_json::Value::String(decode(value)),

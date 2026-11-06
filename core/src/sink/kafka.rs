@@ -110,9 +110,9 @@ fn oauth_lifetime_ms(now_ms: i64, expires_in: i64) -> Result<i64, String> {
     let ttl_ms = expires_in.checked_mul(1_000).ok_or_else(|| {
         format!("lifetime overflows milliseconds ({expires_in}s)")
     })?;
-    now_ms.checked_add(ttl_ms).ok_or_else(|| {
-        "lifetime overflows the epoch-millis range".to_owned()
-    })
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| "lifetime overflows the epoch-millis range".to_owned())
 }
 
 impl rdkafka::ClientContext for KafkaStatsContext {

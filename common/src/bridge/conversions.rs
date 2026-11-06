@@ -155,9 +155,14 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
             viewpoints.insert(viewpoint);
         }
 
+        let payload = ValueWrapper(request.payload);
+        payload
+            .validate()
+            .map_err(ConversionError::InvalidPayload)?;
+
         Ok(Self {
             subject_id,
-            payload: ValueWrapper(request.payload),
+            payload,
             viewpoints,
         })
     }
@@ -358,6 +363,28 @@ mod tests {
         assert!(matches!(
             fact.unwrap_err(),
             ConversionError::InvalidViewpoints(_)
+        ));
+    }
+
+    #[test]
+    fn test_fact_request_rejects_oversized_collection() {
+        let oversized = serde_json::Value::Array(vec![
+            serde_json::Value::Null;
+            crate::MAX_COLLECTION_SIZE
+                as usize
+                + 1
+        ]);
+        let bridge_fact = BridgeFactRequest {
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
+            payload: oversized,
+            viewpoints: vec![],
+        };
+
+        let fact: Result<FactRequest, _> = bridge_fact.try_into();
+        assert!(matches!(
+            fact.unwrap_err(),
+            ConversionError::InvalidPayload(_)
         ));
     }
 

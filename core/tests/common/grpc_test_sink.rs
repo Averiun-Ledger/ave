@@ -113,8 +113,8 @@ struct GrpcSinkState {
     /// Artificial delay before acking each stream message.
     stream_ack_delay_ms: u64,
     /// One-shot: the next read of an open stream tears it down with
-    /// UNAVAILABLE (simulates a connection cut mid-stream).
-    stream_cut: bool,
+    /// the configured status (simulates a connection cut mid-stream).
+    stream_cut: Option<Code>,
     /// While set, open streams stop reading (simulates a stalled consumer).
     stream_paused: bool,
     /// While set, the `Test` RPC answers UNAUTHENTICATED (simulates a
@@ -338,7 +338,13 @@ impl GrpcTestSink {
     /// Tear down the currently open delivery stream(s) with UNAVAILABLE,
     /// like a connection cut; new streams work again afterwards.
     pub fn cut_streams(&self) {
-        self.state.lock().expect("state lock").stream_cut = true;
+        self.cut_streams_with(Code::Unavailable);
+    }
+
+    /// Tear down the currently open delivery stream(s) with the given
+    /// terminal status; new streams work again afterwards.
+    pub fn cut_streams_with(&self, code: Code) {
+        self.state.lock().expect("state lock").stream_cut = Some(code);
         self.control_notify.notify_waiters();
     }
 
@@ -583,15 +589,12 @@ impl EventSink for TestEventSink {
                 // this task is parked waiting for messages.
                 let (cut, paused) = {
                     let mut state = state.lock().expect("state lock");
-                    let cut = state.stream_cut;
-                    if cut {
-                        state.stream_cut = false;
-                    }
-                    (cut, state.stream_paused)
+                    (state.stream_cut.take(), state.stream_paused)
                 };
-                if cut {
+                if let Some(code) = cut {
                     let _ = tx
-                        .send(Err(Status::unavailable(
+                        .send(Err(Status::new(
+                            code,
                             "test server cut the stream",
                         )))
                         .await;

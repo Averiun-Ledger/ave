@@ -2018,8 +2018,7 @@ impl SqliteRuntime {
         let reader_count = Self::recommended_reader_pool_size();
         // One cache budget per base, split across writer + readers.
         let conn_tuning = tuning.for_connections(1 + reader_count);
-        let writer =
-            open_writer_connection(path, sync_mode, &conn_tuning)?;
+        let writer = open_writer_connection(path, sync_mode, &conn_tuning)?;
         let mut readers = Vec::with_capacity(reader_count);
 
         for _ in 0..reader_count {
@@ -4574,8 +4573,7 @@ mod tests {
             let runtime = Arc::new(
                 SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime"),
             );
-            let reader_count =
-                SqliteRuntime::recommended_reader_pool_size();
+            let reader_count = SqliteRuntime::recommended_reader_pool_size();
             // Occupy every permit and every connection: a further read
             // must fail with saturation after the queue budget instead
             // of parking a blocking thread on the pool forever.
@@ -4621,11 +4619,7 @@ mod tests {
         let runtime =
             SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime");
 
-        let readers = runtime
-            .readers
-            .connections
-            .lock()
-            .expect("reader pool");
+        let readers = runtime.readers.connections.lock().expect("reader pool");
         let per_conn = total_kb / (1 + readers.len() as i64);
         assert_eq!(
             pragma_cache_kb(&runtime.writer.lock().expect("writer")),

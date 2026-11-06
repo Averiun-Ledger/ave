@@ -405,7 +405,7 @@ async fn request_peer_list(
     }
 }
 
-async fn request_peer_lists(
+pub async fn request_peer_lists_by_service(
     client: reqwest::Client,
     services: Vec<String>,
     request_timeout: Duration,
@@ -413,44 +413,35 @@ async fn request_peer_lists(
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
     list_kind: &'static str,
-) -> (Vec<String>, u16) {
+) -> Vec<(String, Option<Vec<String>>)> {
     if services.is_empty()
         || graceful_token.is_cancelled()
         || crash_token.is_cancelled()
     {
-        return (vec![], 0);
+        return vec![];
     }
 
-    let responses = stream::iter(services.into_iter().map(|service| {
+    stream::iter(services.into_iter().map(|service| {
         let client = client.clone();
         let graceful_token = graceful_token.clone();
         let crash_token = crash_token.clone();
 
         async move {
-            request_peer_list(
+            let result = request_peer_list(
                 client.clone(),
-                service,
+                service.clone(),
                 request_timeout,
                 graceful_token,
                 crash_token,
                 list_kind,
             )
-            .await
+            .await;
+            (service, result)
         }
     }))
     .buffer_unordered(max_concurrent_requests.max(1))
-    .collect::<Vec<Option<Vec<String>>>>()
-    .await;
-
-    let mut peers = Vec::new();
-    let mut successful = 0u16;
-
-    for item in responses.into_iter().flatten() {
-        peers.extend(item);
-        successful = successful.saturating_add(1);
-    }
-
-    (peers, successful)
+    .collect::<Vec<(String, Option<Vec<String>>)>>()
+    .await
 }
 
 pub async fn request_update_lists(
@@ -461,33 +452,55 @@ pub async fn request_update_lists(
     max_concurrent_requests: usize,
     graceful_token: CancellationToken,
     crash_token: CancellationToken,
-) -> ((Vec<String>, Vec<String>), (u16, u16)) {
+) -> (
+    (
+        Vec<(String, Option<Vec<String>>)>,
+        Vec<(String, Option<Vec<String>>)>,
+    ),
+    (u16, u16),
+) {
     let (
-        (vec_allow_peers, successful_allow),
-        (vec_block_peers, successful_block),
-    ) = tokio::join!(
-        request_peer_lists(
-            client.clone(),
-            service_allow,
-            request_timeout,
-            max_concurrent_requests,
-            graceful_token.clone(),
-            crash_token.clone(),
-            "allow"
-        ),
-        request_peer_lists(
-            client,
-            service_block,
-            request_timeout,
-            max_concurrent_requests,
-            graceful_token.clone(),
-            crash_token.clone(),
-            "block"
+        (detailed_allow, detailed_block),
+        (successful_allow, successful_block),
+    ) = {
+        let (detailed_allow, detailed_block) = tokio::join!(
+            request_peer_lists_by_service(
+                client.clone(),
+                service_allow,
+                request_timeout,
+                max_concurrent_requests,
+                graceful_token.clone(),
+                crash_token.clone(),
+                "allow"
+            ),
+            request_peer_lists_by_service(
+                client,
+                service_block,
+                request_timeout,
+                max_concurrent_requests,
+                graceful_token.clone(),
+                crash_token.clone(),
+                "block"
+            )
+        );
+        let successful_allow = detailed_allow
+            .iter()
+            .filter(|(_, result)| result.is_some())
+            .count()
+            .min(u16::MAX as usize) as u16;
+        let successful_block = detailed_block
+            .iter()
+            .filter(|(_, result)| result.is_some())
+            .count()
+            .min(u16::MAX as usize) as u16;
+        (
+            (detailed_allow, detailed_block),
+            (successful_allow, successful_block),
         )
-    );
+    };
 
     (
-        (vec_allow_peers, vec_block_peers),
+        (detailed_allow, detailed_block),
         (successful_allow, successful_block),
     )
 }

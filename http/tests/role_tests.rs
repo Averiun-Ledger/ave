@@ -394,6 +394,30 @@ async fn test_deleted_roles_removed_from_users() {
     assert!(!roles_after.contains(&"temp_role".to_string()));
 }
 
+#[test(tokio::test)]
+async fn test_deleted_role_name_is_reusable_without_resurrection() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("temp_role", None).unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    db.delete_role(role.id).unwrap();
+
+    // Active duplicate still conflicts.
+    let _other = db.create_role("other_role", None).unwrap();
+    let dup = db.create_role("other_role", None);
+    assert!(matches!(dup.unwrap_err(), DatabaseError::Duplicate(_)));
+
+    // The deleted name is reusable as a brand-new empty role.
+    let revived = db.create_role("temp_role", None).unwrap();
+    assert_ne!(revived.id, role.id);
+    let roles = db.get_user_roles(user.id).unwrap();
+    assert!(!roles.contains(&"temp_role".to_string()));
+}
+
 // =============================================================================
 // ENDPOINT ACCESS TESTS BY ROLE
 // =============================================================================

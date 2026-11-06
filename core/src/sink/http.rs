@@ -186,7 +186,9 @@ async fn build_pinned_tls_config(
 
     let versions: &[&'static rustls::SupportedProtocolVersion] =
         match &tls.min_tls_version {
-            Some(HttpTlsVersion::Tls12) => &[&rustls::version::TLS12],
+            Some(HttpTlsVersion::Tls12) => {
+                &[&rustls::version::TLS12, &rustls::version::TLS13]
+            }
             Some(HttpTlsVersion::Tls13) => &[&rustls::version::TLS13],
             None => &[&rustls::version::TLS12, &rustls::version::TLS13],
         };

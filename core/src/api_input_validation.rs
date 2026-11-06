@@ -356,6 +356,9 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
                     "subject_id must not be empty".to_owned(),
                 ));
             }
+            if let Err(reason) = fact.payload.validate() {
+                return Err(Error::InvalidEventRequest(reason));
+            }
         }
         EventRequest::Transfer(transfer) => {
             if transfer.subject_id.is_empty() {

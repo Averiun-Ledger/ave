@@ -27,6 +27,9 @@ pub enum ConversionError {
     #[error("invalid viewpoints: {0}")]
     InvalidViewpoints(String),
 
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
+
     #[error("missing governance identifier")]
     MissingGovernanceId,
 

@@ -34,7 +34,7 @@ use crate::common::{
     TempEnvVar, create_and_authorize_governance, create_node,
     create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
     emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
-    get_subject, governance_properties, node_running, try_create_node,
+    get_subject, governance_properties, node_running,
     sink_setup::{
         assert_data_to_sink_is_create, assert_data_to_sink_is_fact_full,
         assert_event_is_confirm, assert_event_is_create, assert_event_is_eol,
@@ -66,6 +66,7 @@ use crate::common::{
         wait_for_sink_unblocked,
     },
     test_sink::{AuthResponseMode, ResponseMode, TestProxy, TestSink},
+    try_create_node,
 };
 use ave_network::RoutingNode;
 
@@ -10842,10 +10843,7 @@ async fn start_client_credentials_auth_server() -> (
     std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
 ) {
     use axum::{
-        Form, Json, Router,
-        extract::State,
-        http::StatusCode,
-        routing::post,
+        Form, Json, Router, extract::State, http::StatusCode, routing::post,
     };
     use std::collections::HashMap;
 
@@ -10868,8 +10866,7 @@ async fn start_client_credentials_auth_server() -> (
                             serde_json::Value::String(value.clone()),
                         );
                     }
-                    *state.lock().await =
-                        Some(serde_json::Value::Object(map));
+                    *state.lock().await = Some(serde_json::Value::Object(map));
                     let token = serde_json::json!({
                         "access_token": "cc-test-token",
                         "token_type": "Bearer",

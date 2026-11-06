@@ -58,11 +58,7 @@ impl AuthDbRuntime {
         let conn_tuning = tuning.for_connections(pool_size + 1);
         let mut connections = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            connections.push(open_connection(
-                path,
-                sync_mode,
-                &conn_tuning,
-            )?);
+            connections.push(open_connection(path, sync_mode, &conn_tuning)?);
         }
         let maintenance_connection =
             open_connection(path, sync_mode, &conn_tuning)?;
@@ -221,9 +217,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn pragma_cache_kb(
-        conn: &ave_actors::rusqlite::Connection,
-    ) -> i64 {
+    fn pragma_cache_kb(conn: &ave_actors::rusqlite::Connection) -> i64 {
         conn.query_row("PRAGMA cache_size", [], |row| row.get(0))
             .expect("cache_size pragma")
     }
@@ -240,20 +234,17 @@ mod tests {
         let total_kb = tuning.cache_size_kb.saturating_abs();
         assert_eq!(total_kb, 163 * 1024);
         let pool_size = 4;
-        let runtime =
-            AuthDbRuntime::new(&path, "NORMAL", &tuning, pool_size)
-                .expect("runtime");
+        let runtime = AuthDbRuntime::new(&path, "NORMAL", &tuning, pool_size)
+            .expect("runtime");
 
         let per_conn = total_kb / (pool_size as i64 + 1);
-        let primary =
-            runtime.primary.connections.lock().expect("primary pool");
+        let primary = runtime.primary.connections.lock().expect("primary pool");
         assert_eq!(primary.len(), pool_size);
         for conn in primary.iter() {
             assert_eq!(pragma_cache_kb(conn), -per_conn);
         }
         drop(primary);
-        let maintenance =
-            runtime.maintenance.connections.lock().expect("pool");
+        let maintenance = runtime.maintenance.connections.lock().expect("pool");
         assert_eq!(maintenance.len(), 1);
         assert_eq!(pragma_cache_kb(&maintenance[0]), -per_conn);
         assert!(per_conn * (pool_size as i64 + 1) <= total_kb);

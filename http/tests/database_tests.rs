@@ -3038,8 +3038,7 @@ async fn test_concurrent_system_config_updates_stay_consistent() {
         let mut config = AuthConfig::default();
         config.enable = true;
         config.database_path = tmp_dir.path().to_path_buf();
-        let db =
-            AuthDatabase::new(config, "AdminPass123!", None).unwrap();
+        let db = AuthDatabase::new(config, "AdminPass123!", None).unwrap();
         let user = db
             .create_user("racecfg", "TestPass123!", None, None, Some(false))
             .unwrap();
@@ -3058,8 +3057,7 @@ async fn test_concurrent_system_config_updates_stay_consistent() {
             let db = db.clone();
             handles.push(std::thread::spawn(move || {
                 for i in 0..200u32 {
-                    let value =
-                        if (i + t) % 2 == 0 { "true" } else { "false" };
+                    let value = if (i + t) % 2 == 0 { "true" } else { "false" };
                     if (i + t) % 3 == 0 {
                         db.update_system_config(
                             "rate_limit_enable",

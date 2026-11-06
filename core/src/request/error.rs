@@ -21,6 +21,9 @@ pub enum RequestHandlerError {
     #[error("the payload cannot be deserialized as a governance event")]
     GovFactInvalidEvent,
 
+    #[error("fact payload exceeds collection limits: {0}")]
+    InvalidFactPayload(String),
+
     #[error("governance fact events cannot define viewpoints")]
     GovFactViewpointsNotAllowed,
 

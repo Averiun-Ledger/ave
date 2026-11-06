@@ -838,10 +838,7 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.expect("setup dir");
         let out = canonical_cargo_home(&dir).await.expect("canonicalize");
         assert!(out.is_absolute());
-        assert_eq!(
-            out,
-            tokio::fs::canonicalize(&dir).await.expect("expected")
-        );
+        assert_eq!(out, tokio::fs::canonicalize(&dir).await.expect("expected"));
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
@@ -863,8 +860,9 @@ mod tests {
                 std::env::current_dir().expect("cwd").join(&rel)
             });
         let _ = tokio::fs::remove_dir_all(&full).await;
-        let out =
-            canonical_cargo_home(Path::new(&rel)).await.expect("canonicalize");
+        let out = canonical_cargo_home(Path::new(&rel))
+            .await
+            .expect("canonicalize");
         assert!(out.is_absolute(), "must be absolute, got {out:?}");
         assert!(out.is_dir(), "must exist after first use");
         assert_eq!(

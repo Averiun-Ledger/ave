@@ -1321,8 +1321,7 @@ mod tests {
         let mut config = AuthConfig::default();
         config.enable = true;
         config.database_path = dir.path().to_path_buf();
-        let db =
-            AuthDatabase::new(config, "AdminPass123!", None).expect("db");
+        let db = AuthDatabase::new(config, "AdminPass123!", None).expect("db");
         (db, dir)
     }
 

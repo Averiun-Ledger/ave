@@ -338,3 +338,50 @@ async fn tracker_request_resumes_distribution_after_commit() {
     assert_eq!(last.sn, 1);
     assert_tracker_fact_full(&last.event, payload, &[]);
 }
+
+#[test(tokio::test)]
+// Oversized collections are rejected before signing or persisting,
+// so the queue never holds an unreadable entry and a reboot stays
+// clean.
+async fn fact_payload_beyond_reader_limit_is_rejected_before_persist() {
+    let (bootstrap, owner, dirs, _governance_id, subject_id) = setup().await;
+
+    let oversized = serde_json::Value::Array(vec![
+        serde_json::Value::Null;
+        ave_common::MAX_COLLECTION_SIZE
+            as usize
+            + 1
+    ]);
+    let bad = ave_common::request::EventRequest::Fact(
+        ave_common::request::FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ave_common::ValueWrapper(oversized),
+            viewpoints: Default::default(),
+        },
+    );
+    let err = owner
+        .api
+        .own_request(bad)
+        .await
+        .expect_err("oversized fact must be rejected");
+    assert!(
+        err.to_string().contains("exceeds maximum")
+            || err.to_string().contains("too large"),
+        "unexpected rejection: {err:?}"
+    );
+
+    let payload = json!({"ModOne": {"data": 7}});
+    let request_id =
+        emit_fact(&owner.api, subject_id.clone(), payload.clone(), true)
+            .await
+            .unwrap();
+    wait_request(&owner.api, request_id).await.unwrap();
+
+    let owner = reboot_owner(&bootstrap, owner, &dirs).await;
+    let payload = json!({"ModOne": {"data": 8}});
+    let request_id =
+        emit_fact(&owner.api, subject_id.clone(), payload.clone(), true)
+            .await
+            .unwrap();
+    wait_request(&owner.api, request_id).await.unwrap();
+}

@@ -179,7 +179,19 @@ impl AuthDatabase {
              VALUES (?1, ?2)",
             params![name, description],
         )
-        .map_err(|e| DatabaseError::Insert(e.to_string()))?;
+        .map_err(|e| {
+            // Concurrent creates can both pass the check above: the
+            // partial unique index is the arbiter, report it as a
+            // conflict instead of an internal error.
+            if e.to_string().contains("UNIQUE constraint failed") {
+                DatabaseError::Duplicate(format!(
+                    "Role '{}' already exists",
+                    name
+                ))
+            } else {
+                DatabaseError::Insert(e.to_string())
+            }
+        })?;
 
         let role_id = conn.last_insert_rowid();
         Self::get_role_by_id_internal(conn, role_id)
@@ -315,9 +327,18 @@ impl AuthDatabase {
             ));
         }
 
+        // Free the name for reuse: the global UNIQUE index also covers
+        // deleted rows, so the tombstone is renamed with its id. Lookups
+        // only see active rows and old assignments stay on the deleted
+        // id, hence nothing is ever resurrected by a reuse.
+        let tombstone = format!(
+            "{}__deleted_{}",
+            role.name.clone().unwrap_or_default(),
+            role_id
+        );
         conn.execute(
-            "UPDATE roles SET is_deleted = 1 WHERE id = ?1",
-            params![role_id],
+            "UPDATE roles SET is_deleted = 1, name = ?2 WHERE id = ?1",
+            params![role_id, tombstone],
         )
         .map_err(|e| DatabaseError::Update(e.to_string()))?;
 

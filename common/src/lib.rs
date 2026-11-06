@@ -85,5 +85,6 @@ pub use sink::*;
 
 #[cfg(feature = "value-wrapper")]
 pub use wrapper::{
-    ContractData, ContractInitCheckData, ContractResultData, ValueWrapper,
+    ContractData, ContractInitCheckData, ContractResultData,
+    MAX_COLLECTION_SIZE, MAX_RECURSION_DEPTH, ValueWrapper,
 };

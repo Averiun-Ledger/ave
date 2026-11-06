@@ -7,7 +7,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     pin::Pin,
     str::FromStr,
@@ -295,6 +295,20 @@ impl Config {
     }
 }
 
+/// Merges fresh service results into per-source memory: successes
+/// replace that source, failures retain the previous value.
+fn merge_last_good(
+    memory: &mut HashMap<String, Vec<String>>,
+    detailed: Vec<(String, Option<Vec<String>>)>,
+) -> Vec<String> {
+    for (service, result) in detailed {
+        if let Some(peers) = result {
+            memory.insert(service, peers);
+        }
+    }
+    memory.values().flat_map(|peers| peers.clone()).collect()
+}
+
 pub fn build_control_lists_updaters(
     config: &Config,
     graceful_token: CancellationToken,
@@ -336,6 +350,8 @@ pub fn build_control_lists_updaters(
 
             let mut last_allow_success: Option<Instant> = None;
             let mut last_block_success: Option<Instant> = None;
+            let mut last_allow: HashMap<String, Vec<String>> = HashMap::new();
+            let mut last_block: HashMap<String, Vec<String>> = HashMap::new();
             let mut ticker = interval(update_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Keep previous semantics: first update happens after `interval`.
@@ -345,7 +361,7 @@ pub fn build_control_lists_updaters(
                     _ = ticker.tick() => {
                         let started_at = Instant::now();
                         let (
-                    (vec_allow_peers, vec_block_peers),
+                    (detailed_allow, detailed_block),
                     (successful_allow, successful_block),
                 ) = request_update_lists(
                     client.clone(),
@@ -365,8 +381,12 @@ pub fn build_control_lists_updaters(
 
                         let now = Instant::now();
 
+                // Keep last good value per source: a failed source
+                // retains its previous entries instead of clearing them.
                 // If at least 1 update of the list was possible
                 if successful_allow != 0 {
+                    let vec_allow_peers =
+                        merge_last_good(&mut last_allow, detailed_allow);
                     last_allow_success = Some(now);
                     if let Err(e) = sender.send(Event::AllowListUpdated(vec_allow_peers)).await {
                         debug!(
@@ -386,6 +406,8 @@ pub fn build_control_lists_updaters(
 
                 // If at least 1 update of the list was possible
                 if successful_block != 0 {
+                    let vec_block_peers =
+                        merge_last_good(&mut last_block, detailed_block);
                     last_block_success = Some(now);
                     if let Err(e) = sender.send(Event::BlockListUpdated(vec_block_peers)).await {
                         debug!(
@@ -445,6 +467,10 @@ pub fn build_control_lists_updaters(
 pub struct Behaviour {
     allow_peers: HashSet<PeerId>,
     block_peers: HashSet<PeerId>,
+    local_allow: HashSet<PeerId>,
+    local_block: HashSet<PeerId>,
+    remote_allow: HashSet<PeerId>,
+    remote_block: HashSet<PeerId>,
     close_connections: VecDeque<PeerId>,
     enable: bool,
     receiver: Option<Receiver<Event>>,
@@ -465,19 +491,23 @@ impl Behaviour {
                 full_allow_list.push(node.peer_id.clone());
             }
 
+            let local_allow: HashSet<PeerId> = HashSet::from_iter(
+                full_allow_list
+                    .iter()
+                    .filter_map(|e| PeerId::from_str(e).ok()),
+            );
+            let local_block: HashSet<PeerId> = HashSet::from_iter(
+                config
+                    .block_list
+                    .iter()
+                    .filter_map(|e| PeerId::from_str(e).ok()),
+            );
             let behaviour = Self {
                 enable: true,
-                allow_peers: HashSet::from_iter(
-                    full_allow_list
-                        .iter()
-                        .filter_map(|e| PeerId::from_str(e).ok()),
-                ),
-                block_peers: HashSet::from_iter(
-                    config
-                        .block_list
-                        .iter()
-                        .filter_map(|e| PeerId::from_str(e).ok()),
-                ),
+                allow_peers: local_allow.clone(),
+                block_peers: local_block.clone(),
+                local_allow,
+                local_block,
                 receiver,
                 metrics,
                 ..Default::default()
@@ -514,18 +544,21 @@ impl Behaviour {
 
     /// Method that update allow list
     fn update_allow_peers(&mut self, new_list: &[String]) {
-        // New hashset of allow list.
-        let new_list: HashSet<PeerId> = HashSet::from_iter(
+        // Remote peers are merged with local entries, never replacing them.
+        let remote: HashSet<PeerId> = HashSet::from_iter(
             new_list
                 .to_vec()
                 .iter()
                 .filter_map(|e| PeerId::from_str(e).ok()),
         );
 
+        let effective: HashSet<PeerId> =
+            self.local_allow.union(&remote).cloned().collect();
         let close_peers: Vec<PeerId> =
-            self.allow_peers.difference(&new_list).cloned().collect();
+            self.allow_peers.difference(&effective).cloned().collect();
         self.close_connections.extend(close_peers);
-        self.allow_peers.clone_from(&new_list);
+        self.remote_allow = remote;
+        self.allow_peers = effective;
         if let Some(metrics) = self.metrics.as_deref() {
             metrics.set_control_list_allow_peers(self.allow_peers.len() as i64);
         }
@@ -533,16 +566,21 @@ impl Behaviour {
 
     /// Method that update block list
     fn update_block_peers(&mut self, new_list: &[String]) {
-        // New hashset of block list.
-        let new_list: HashSet<PeerId> = HashSet::from_iter(
+        // Remote blocks are merged with local entries, never replacing them.
+        let remote: HashSet<PeerId> = HashSet::from_iter(
             new_list
                 .to_vec()
                 .iter()
                 .filter_map(|e| PeerId::from_str(e).ok()),
         );
 
-        self.close_connections.extend(new_list.clone());
-        self.block_peers.clone_from(&new_list);
+        let effective: HashSet<PeerId> =
+            self.local_block.union(&remote).cloned().collect();
+        let new_blocked: Vec<PeerId> =
+            effective.difference(&self.block_peers).cloned().collect();
+        self.close_connections.extend(new_blocked);
+        self.remote_block = remote;
+        self.block_peers = effective;
         if let Some(metrics) = self.metrics.as_deref() {
             metrics.set_control_list_block_peers(self.block_peers.len() as i64);
         }
@@ -812,6 +850,45 @@ mod tests {
                             tokio::time::sleep(delay).await;
                             let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]";
                             let _ = socket.write_all(response).await;
+                            let _ = socket.shutdown().await;
+                        });
+                    }
+                }
+            }
+        });
+
+        (format!("http://{addr}/list"), stop)
+    }
+
+    async fn spawn_json_list_service(
+        peers: Vec<String>,
+        delay: Duration,
+    ) -> (String, CancellationToken) {
+        let body = serde_json::to_string(&peers).expect("encode peer list");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind list service");
+        let addr = listener.local_addr().expect("local addr");
+        let stop = CancellationToken::new();
+        let stop_task = stop.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop_task.cancelled() => break,
+                    incoming = listener.accept() => {
+                        let Ok((mut socket, _)) = incoming else {
+                            break;
+                        };
+                        let body = body.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
                             let _ = socket.shutdown().await;
                         });
                     }
@@ -1212,35 +1289,123 @@ mod tests {
     }
 
     #[test]
+    fn merge_last_good_retains_failed_source() {
+        let mut memory = HashMap::new();
+        let first = vec![
+            ("b1".to_owned(), Some(vec!["p".to_owned()])),
+            ("b2".to_owned(), Some(vec![])),
+        ];
+        let merged = merge_last_good(&mut memory, first);
+        assert!(merged.contains(&"p".to_owned()));
+
+        let second =
+            vec![("b1".to_owned(), None), ("b2".to_owned(), Some(vec![]))];
+        let merged = merge_last_good(&mut memory, second);
+        assert!(merged.contains(&"p".to_owned()));
+    }
+
+    #[test]
     fn behaviour_update_allow_peers() {
         let mut registry = Registry::default();
         let metrics = crate::metrics::register(&mut registry);
+        let local = PeerId::random();
         let mut behaviour = Behaviour::new(
             Config::default()
                 .with_enable(true)
-                .with_allow_list(vec![PeerId::random().to_string()]),
+                .with_allow_list(vec![local.to_string()]),
             &[],
             None,
             Some(metrics),
         );
-        let new_list = vec![PeerId::random().to_string()];
-        behaviour.update_allow_peers(&new_list);
-        assert_eq!(behaviour.allow_peers.len(), 1);
+        let remote = PeerId::random();
+        behaviour.update_allow_peers(&[remote.to_string()]);
+        assert!(behaviour.check_allow(&local).is_ok());
+        assert!(behaviour.check_allow(&remote).is_ok());
+        behaviour.update_allow_peers(&[]);
+        assert!(behaviour.check_allow(&local).is_ok());
     }
 
     #[test]
     fn behaviour_update_block_peers() {
         let mut registry = Registry::default();
         let metrics = crate::metrics::register(&mut registry);
+        let local = PeerId::random();
         let mut behaviour = Behaviour::new(
-            Config::default().with_enable(true),
+            Config::default()
+                .with_enable(true)
+                .with_block_list(vec![local.to_string()]),
             &[],
             None,
             Some(metrics),
         );
-        let new_list = vec![PeerId::random().to_string()];
-        behaviour.update_block_peers(&new_list);
-        assert_eq!(behaviour.block_peers.len(), 1);
+        let remote = PeerId::random();
+        behaviour.update_block_peers(&[remote.to_string()]);
+        assert!(behaviour.check_block(&local).is_err());
+        assert!(behaviour.check_block(&remote).is_err());
+        behaviour.update_block_peers(&[]);
+        assert!(behaviour.check_block(&local).is_err());
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn remote_block_update_keeps_local_block() {
+        let other = PeerId::random();
+        let (url, server_stop) = spawn_json_list_service(
+            vec![other.to_string()],
+            Duration::from_millis(1),
+        )
+        .await;
+
+        let mut listener_behaviour = Behaviour::default();
+        listener_behaviour.set_enable(true);
+        let mut listener = Swarm::new_ephemeral_tokio(|_| listener_behaviour);
+        listener.listen().with_memory_addr_external().await;
+        let listener_peer = *listener.local_peer_id();
+
+        let cancel = CancellationToken::new();
+        let config = Config::default()
+            .with_enable(true)
+            .with_allow_list(vec![listener_peer.to_string()])
+            .with_block_list(vec![listener_peer.to_string()])
+            .with_service_block_list(vec![url])
+            .with_interval_request(Duration::from_millis(20))
+            .with_request_timeout(Duration::from_secs(5))
+            .with_max_concurrent_requests(1);
+        let receiver = build_control_lists_updaters(
+            &config,
+            cancel.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .expect("control-list updater receiver");
+        let mut dialer = Swarm::new_ephemeral_tokio(|_| {
+            Behaviour::new(config, &[], Some(receiver), None)
+        });
+
+        // Pump the swarm until the remote update flows through the real
+        // updater channel into the behaviour.
+        timeout(Duration::from_secs(5), async {
+            while !dialer.behaviour().block_peers.contains(&other) {
+                tokio::select! {
+                    _ = dialer.select_next_some() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("remote block update applied");
+
+        // The local block survived the remote refresh: still denied as
+        // blocked instead of allowed through.
+        let DialError::Denied { cause } =
+            dial(&mut dialer, &listener).unwrap_err()
+        else {
+            panic!("locally blocked peer must stay denied after update")
+        };
+        assert!(cause.downcast::<Blocked>().is_ok());
+
+        cancel.cancel();
+        server_stop.cancel();
     }
 
     #[test]

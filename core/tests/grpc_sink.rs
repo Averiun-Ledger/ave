@@ -692,6 +692,44 @@ async fn grpc_transport_warm_up_opens_stream_eagerly() {
     );
 }
 
+/// A terminal stream status classifies every pending delivery instead of
+/// failing them all as retryable: a permanent rejection surfaces at once
+/// with no reconnect.
+#[test(tokio::test)]
+async fn grpc_stream_terminal_status_is_classified() {
+    let sink = GrpcTestSink::start().await;
+    let transport = Arc::new(
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await,
+    );
+
+    transport.warm_up().await.unwrap();
+    sink.wait_for_active_streams(1).await;
+
+    // Stalled consumer: the delivery stays pending with no ack possible.
+    sink.pause_streams();
+    let pending = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move {
+            transport
+                .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    sink.cut_streams_with(Code::InvalidArgument);
+
+    let result = pending.await.unwrap();
+    assert!(
+        matches!(result, Err(SinkError::Rejected { .. })),
+        "terminal InvalidArgument must reject at once, got {result:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "a permanent rejection must not reopen the stream"
+    );
+}
+
 /// Best-effort batch delivery (Pause/Stop teardown): a single attempt, no
 /// retries — the cursor guarantees re-delivery via catch-up.
 #[test(tokio::test)]
@@ -1176,7 +1214,10 @@ async fn grpc_transport_healthcheck_unauthenticated_refreshes_token() {
 
         // Recovery works: once the server accepts again, healthchecks pass.
         sink.set_test_unauthenticated(false);
-        transport.health_check().await.expect("test rpc works again");
+        transport
+            .health_check()
+            .await
+            .expect("test rpc works again");
     })
     .await
     .expect("revoked-token healthchecks must terminate");
