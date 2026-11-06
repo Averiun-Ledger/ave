@@ -2477,19 +2477,18 @@ impl AuthDatabase {
                 // transaction re-runs the cheap policy checks, so a
                 // rejected new password just wastes this hash on an
                 // error path instead of changing any outcome.
-                let mut new_hash = None;
-                if valid {
-                    new_hash = Some(
-                        super::crypto::hash_password(new_password).map_err(
-                            |e| {
-                                DatabaseError::Crypto(format!(
-                                    "Failed to hash password: {}",
-                                    e
-                                ))
-                            },
-                        )?,
-                    );
-                }
+                let new_hash = if valid {
+                    Some(super::crypto::hash_password(new_password).map_err(
+                        |e| {
+                            DatabaseError::Crypto(format!(
+                                "Failed to hash password: {}",
+                                e
+                            ))
+                        },
+                    )?)
+                } else {
+                    None
+                };
                 Ok(ChangePasswordPrecomputed {
                     seen_hash: Some(hash),
                     current_valid: valid,

@@ -2418,7 +2418,7 @@ impl Handler<Self> for ValiWorker {
                 // collection is dropped and the request reboots with
                 // fresh coordinates; the intent is preserved, no vote
                 // is cast on any collection.
-                if let ApprovalRes::Superseded = approval_res.content() {
+                if matches!(approval_res.content(), ApprovalRes::Superseded) {
                     let Some(approval_req_hash) = self
                         .approvals
                         .iter()

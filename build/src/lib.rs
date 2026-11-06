@@ -1,5 +1,6 @@
-//! Deterministic contract compilation shared by the node
-//! (`ave-core`) and the off-chain pin tooling.
+//! Deterministic contract compilation.
+//!
+//! Shared by the node (`ave-core`) and the off-chain pin tooling.
 //!
 //! Single source of truth for: materializing a contract build
 //! project (manifest, source, frozen lockfile, cargo config),
@@ -11,8 +12,9 @@
 //! inputs): same inputs in, byte-identical config and procedure
 //! out, on any machine with the pinned toolchain.
 
-/// Linux-only process isolation (user/mount/UTS namespaces). Gated
-/// as a whole so other targets never compile its Unix-only
+/// Linux-only process isolation (user/mount/UTS namespaces).
+///
+/// Gated as a whole so other targets never compile its Unix-only
 /// dependencies: outside Linux the build runs unsandboxed with only
 /// the environment scrub, selected by the caller.
 #[cfg(target_os = "linux")]
@@ -82,8 +84,9 @@ pub enum BuildError {
 
 /// Which cargo binary runs the build.
 ///
-/// `System` is the ambient cargo (pre-pins behavior); `Rustup` runs isolated via `rustup run`
-/// (concurrent builds with different toolchains can not interfere);
+/// `System` is the ambient cargo (pre-pins behavior); `Rustup` runs
+/// isolated via `rustup run` (concurrent builds with different
+/// toolchains can not interfere);
 /// `Pinned` runs an explicit binary (the reproducible toolchain)
 /// with `RUSTC` resolved to the selected toolchain.
 pub enum CargoProgram<'a> {

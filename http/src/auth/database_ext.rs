@@ -331,11 +331,8 @@ impl AuthDatabase {
         // deleted rows, so the tombstone is renamed with its id. Lookups
         // only see active rows and old assignments stay on the deleted
         // id, hence nothing is ever resurrected by a reuse.
-        let tombstone = format!(
-            "{}__deleted_{}",
-            role.name.clone().unwrap_or_default(),
-            role_id
-        );
+        let tombstone =
+            format!("{}__deleted_{}", role.name.unwrap_or_default(), role_id);
         conn.execute(
             "UPDATE roles SET is_deleted = 1, name = ?2 WHERE id = ?1",
             params![role_id, tombstone],

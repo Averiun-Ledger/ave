@@ -346,11 +346,13 @@ pub async fn obtain_token(
     Ok(token)
 }
 
-/// Obtain an OAuth2 token with retry/backoff, running entirely outside any
-/// cache lock so other deliveries are not blocked while the auth endpoint is
-/// down. The server-provided `Retry-After` hint is honored but capped at
-/// `retry_max_delay_ms`, like delivery retries: a hostile or broken IdP
-/// must not retain every consumer for the hint's duration.
+/// Obtain an OAuth2 token with retry/backoff.
+///
+/// Runs entirely outside any cache lock so other deliveries are not
+/// blocked while the auth endpoint is down. The server-provided
+/// `Retry-After` hint is honored but capped at `retry_max_delay_ms`,
+/// like delivery retries: a hostile or broken IdP must not retain
+/// every consumer for the hint's duration.
 pub async fn obtain_token_with_retry(
     client: &reqwest::Client,
     auth: &SinkAuthConfig,

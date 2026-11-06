@@ -79,7 +79,7 @@ mod compressed_wasm_bytes {
     use std::fmt;
 
     pub fn serialize<S: Serializer>(
-        bytes: &Vec<u8>,
+        bytes: &[u8],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(bytes)

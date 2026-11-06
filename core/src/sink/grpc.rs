@@ -450,6 +450,7 @@ impl GrpcTransport {
                 }) {
                     *slot = None;
                 }
+                drop(slot);
                 drop(permit);
                 self.observe_in_flight();
                 return Err(StreamFailure::Delivery(SinkError::Delivery {
