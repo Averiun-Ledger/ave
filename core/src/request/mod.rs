@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
 use ave_common::bridge::request::{
     ApprovalState, ApprovalStateRes, EventRequestType,
@@ -22,20 +22,22 @@ use manager::{RequestManager, RequestManagerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::{Span, error, info_span};
+use tracing::{Span, error, info_span, warn};
 use types::ReqManInitMessage;
 
 use crate::approval::persist::{
     ApprPersist, ApprPersistMessage, ApprPersistResponse,
 };
-use crate::approval::request::ApprovalReq;
+use crate::approval::request::StoredApproval;
 use crate::db::Storable;
 use crate::governance::events::GovernanceEvent;
 use crate::governance::model::{HashThisRole, RoleTypes};
 use crate::helpers::db::ExternalDB;
 use crate::helpers::network::service::NetworkSender;
 use crate::metrics::try_core_metrics;
-use crate::model::common::node::{get_subject_data, i_owner_new_owner};
+use crate::model::common::node::{
+    get_subject_data, i_owner_new_owner, wait_governance_ready,
+};
 use crate::model::common::subject::{
     get_schema_viewpoints, get_tracker_visibility_state, get_version, has_role,
 };
@@ -60,6 +62,23 @@ pub struct RequestData {
     pub subject_id: DigestIdentifier,
 }
 
+/// Maximum queued requests per subject: bounds the memory and disk a
+/// single authorized signer can force the handler to persist, while
+/// staying well above legitimate bursts (bursts of hundreds of events
+/// are a normal workload).
+const MAX_QUEUED_REQUESTS_PER_SUBJECT: usize = 1024;
+
+/// Create attempts per request before failing loud. Retries go by
+/// message (never sleeping in this funnel actor): each failed
+/// attempt re-checks the maps, so arrivals colliding on a stopping
+/// child serialize into owner + queued instead of erroring.
+const MAX_CHILD_CREATE_ATTEMPTS: usize = 10;
+
+/// Delay between create retries. Teardown is milliseconds; anything
+/// longer means the stop itself is stuck — the attempts run out and
+/// the last one fails loud instead.
+const CHILD_CREATE_RETRY_DELAY_MS: u64 = 500;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestHandler {
     #[serde(skip)]
@@ -67,10 +86,22 @@ pub struct RequestHandler {
     #[serde(skip)]
     our_key: Arc<PublicKey>,
     handling: HashMap<DigestIdentifier, DigestIdentifier>,
-    in_queue: HashMap<
-        DigestIdentifier,
-        VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
-    >,
+    in_queue: HashMap<DigestIdentifier, VecDeque<QueuedRequest>>,
+}
+
+/// One queued request: shared payload plus its id.
+type QueuedRequest = (Arc<Signed<EventRequest>>, DigestIdentifier);
+
+/// Owned handoff for one queue/create attempt: the funnel
+/// signature stays narrow no matter how many attempt-scoped values
+/// travel together.
+struct QueueRequest {
+    request: Arc<Signed<EventRequest>>,
+    request_id: DigestIdentifier,
+    subject_id: DigestIdentifier,
+    is_gov: bool,
+    governance_id: Option<DigestIdentifier>,
+    attempts_left: usize,
 }
 
 impl BorshSerialize for RequestHandler {
@@ -94,10 +125,10 @@ impl BorshDeserialize for RequestHandler {
             HashMap::<DigestIdentifier, DigestIdentifier>::deserialize_reader(
                 reader,
             )?;
-        let in_queue = HashMap::<
-            DigestIdentifier,
-            VecDeque<(Signed<EventRequest>, DigestIdentifier)>,
-        >::deserialize_reader(reader)?;
+        let in_queue =
+            HashMap::<DigestIdentifier, VecDeque<QueuedRequest>>::deserialize_reader(
+                reader,
+            )?;
 
         let our_key = Arc::new(PublicKey::default());
 
@@ -112,7 +143,7 @@ impl BorshDeserialize for RequestHandler {
 
 impl RequestHandler {
     async fn check_signer_authorization(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         our_key: PublicKey,
         signer: PublicKey,
         governance_id: &DigestIdentifier,
@@ -253,7 +284,10 @@ impl RequestHandler {
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: ApprovalStateRes,
-    ) -> Result<(), RequestHandlerError> {
+        expected_request_id: String,
+        expected_version: u64,
+        expected_issued_at: u64,
+    ) -> Result<StoredApproval, RequestHandlerError> {
         if state == ApprovalStateRes::Obsolete {
             return Err(RequestHandlerError::ObsoleteApproval);
         }
@@ -270,19 +304,52 @@ impl RequestHandler {
                 RequestHandlerError::ApprovalNotFound(subject_id.to_string())
             })?;
 
-        approver_actor
-            .tell(ApprPersistMessage::ChangeResponse {
+        // `ask`, not `tell`: the caller must learn whether the vote
+        // landed or the request was superseded, instead of assuming
+        // success after queueing the message.
+        match approver_actor
+            .ask(ApprPersistMessage::ChangeResponse {
                 response: state.clone(),
+                expected_request_id: expected_request_id.clone(),
+                expected_version,
+                expected_issued_at,
             })
             .await
-            .map_err(|_| RequestHandlerError::ApprovalChangeFailed)
+            .map_err(|_| RequestHandlerError::ApprovalChangeFailed)?
+        {
+            ApprPersistResponse::Approval {
+                request,
+                state,
+                request_id,
+                version,
+            } => Ok(StoredApproval {
+                request,
+                state,
+                request_id,
+                version,
+            }),
+            ApprPersistResponse::Conflict {
+                request_id,
+                version,
+                ..
+            } => Err(RequestHandlerError::ApprovalConflict {
+                subject: subject_id.to_string(),
+                expected_request_id,
+                expected_version,
+                stored_request_id: request_id,
+                stored_version: version,
+            }),
+            ApprPersistResponse::Ok => {
+                Err(RequestHandlerError::ApprovalChangeFailed)
+            }
+        }
     }
 
     async fn get_approval(
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         state: Option<ApprovalState>,
-    ) -> Result<Option<(ApprovalReq, ApprovalState)>, RequestHandlerError> {
+    ) -> Result<Option<StoredApproval>, RequestHandlerError> {
         let approver_path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/approver",
             subject_id
@@ -302,8 +369,19 @@ impl RequestHandler {
 
         let res = match response {
             ApprPersistResponse::Ok => None,
-            ApprPersistResponse::Approval { request, state } => {
-                Some((request, state))
+            ApprPersistResponse::Approval {
+                request,
+                state,
+                request_id,
+                version,
+            } => Some(StoredApproval {
+                request,
+                state,
+                request_id,
+                version,
+            }),
+            ApprPersistResponse::Conflict { .. } => {
+                return Err(RequestHandlerError::ApprovalGetFailed);
             }
         };
 
@@ -313,7 +391,7 @@ impl RequestHandler {
     async fn get_all_approvals(
         ctx: &ActorContext<Self>,
         state: Option<ApprovalState>,
-    ) -> Result<Vec<(ApprovalReq, ApprovalState)>, ActorError> {
+    ) -> Result<Vec<StoredApproval>, ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node_actor = ctx.system().get_actor::<Node>(&node_path).await?;
         let response = node_actor.ask(NodeMessage::GetGovernances).await?;
@@ -327,35 +405,59 @@ impl RequestHandler {
             }
         };
 
-        let mut responses = vec![];
-        for governance in vec.iter() {
+        // One ask per governance, all in flight at once: the serial
+        // loop held the central handler for the whole fan-out.
+        // Failures keep the sequential semantics (first error in
+        // governance order aborts); a missing approver is skipped
+        // and a conflicted one carries no vote to report.
+        let queries = vec.iter().map(|governance| {
             let approver_path = ActorPath::from(format!(
                 "/user/node/subject_manager/{}/approver",
                 governance
             ));
-            if let Ok(approver_actor) =
-                ctx.system().get_actor::<ApprPersist>(&approver_path).await
-            {
-                let response = approver_actor
-                    .ask(ApprPersistMessage::GetApproval {
-                        state: state.clone(),
-                    })
-                    .await?;
-
-                match response {
-                    ApprPersistResponse::Ok => {}
-                    ApprPersistResponse::Approval { request, state } => {
-                        responses.push((request, state))
-                    }
+            let state = state.clone();
+            async move {
+                let Some(approver_actor) = ctx
+                    .system()
+                    .get_actor::<ApprPersist>(&approver_path)
+                    .await
+                    .ok()
+                else {
+                    return Ok::<Option<StoredApproval>, ActorError>(None);
                 };
-            };
+                let response = approver_actor
+                    .ask(ApprPersistMessage::GetApproval { state })
+                    .await?;
+                let approval = match response {
+                    ApprPersistResponse::Ok => None,
+                    ApprPersistResponse::Approval {
+                        request,
+                        state,
+                        request_id,
+                        version,
+                    } => Some(StoredApproval {
+                        request,
+                        state,
+                        request_id,
+                        version,
+                    }),
+                    ApprPersistResponse::Conflict { .. } => None,
+                };
+                Ok(approval)
+            }
+        });
+        let mut responses = Vec::with_capacity(vec.len());
+        for answer in futures::future::join_all(queries).await {
+            if let Some(approval) = answer? {
+                responses.push(approval);
+            }
         }
 
         Ok(responses)
     }
 
     async fn check_owner_new_owner(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<(), RequestHandlerError> {
         match request {
@@ -462,6 +564,12 @@ impl RequestHandler {
                 }
             }
             EventRequest::Fact(fact_request) => {
+                if let Err(reason) = fact_request.payload.validate() {
+                    return Err(RequestHandlerError::InvalidFactPayload(
+                        reason,
+                    ));
+                }
+
                 if is_gov && !fact_request.viewpoints.is_empty() {
                     return Err(
                         RequestHandlerError::GovFactViewpointsNotAllowed,
@@ -484,7 +592,7 @@ impl RequestHandler {
     }
 
     async fn check_fact_viewpoints(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
         subject_data: &SubjectData,
     ) -> Result<(), RequestHandlerError> {
@@ -532,7 +640,7 @@ impl RequestHandler {
     }
 
     async fn check_tracker_ledger_full(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
         subject_data: &SubjectData,
     ) -> Result<(), RequestHandlerError> {
@@ -559,7 +667,7 @@ impl RequestHandler {
     }
 
     async fn build_subject_data(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &EventRequest,
     ) -> Result<SubjectData, RequestHandlerError> {
         let subject_data = match request {
@@ -597,7 +705,7 @@ impl RequestHandler {
     }
 
     async fn check_creation(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_data: SubjectData,
         event_request: &EventRequestType,
         signer: PublicKey,
@@ -671,65 +779,43 @@ impl RequestHandler {
     async fn handle_queue_request(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        request: Signed<EventRequest>,
-        request_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        is_gov: bool,
-        governance_id: Option<DigestIdentifier>,
+        queue_request: QueueRequest,
     ) -> Result<(), ActorError> {
+        let QueueRequest {
+            request,
+            request_id,
+            subject_id,
+            is_gov,
+            governance_id,
+            attempts_left,
+        } = queue_request;
         let Some(helpers) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
 
             return Err(ActorError::FunctionalCritical { description: e });
         };
 
-        let in_handling = self.handling.contains_key(subject_id);
-        let in_queue = self.in_queue.contains_key(subject_id);
+        // The maps say free while a stopping child may still hold its
+        // actor name (teardown lags the FinishHandling bookkeeping by
+        // milliseconds). Arrivals in that window are admitted to the
+        // durable queue first and only then scheduled for promotion:
+        // the timer below is memory-only, so acceptance must never
+        // depend on it firing.
+        let in_handling = self.handling.contains_key(&subject_id);
+        let in_queue = self.in_queue.contains_key(&subject_id);
 
-        if !in_handling && !in_queue {
-            let command = Self::build_req_manager_init_msg(
-                &EventRequestType::from(request.content()),
-                is_gov,
-            );
-            let init_data = InitRequestManager {
-                our_key: self.our_key.clone(),
-                subject_id: subject_id.clone(),
-                governance_id,
-                helpers,
-            };
-
-            let actor = ctx
-                .create_child(
-                    &subject_id.to_string(),
-                    RequestManager::initial(init_data),
-                )
-                .await?;
-            actor
-                .tell(RequestManagerMessage::FirstRun {
-                    command,
-                    request,
-                    request_id: request_id.clone(),
-                })
-                .await?;
-
-            self.on_event(
-                RequestHandlerEvent::EventToHandling {
-                    subject_id: subject_id.clone(),
-                    request_id: request_id.clone(),
-                },
-                ctx,
-            )
-            .await;
-
-            send_to_tracking(
-                ctx,
-                RequestTrackingMessage::UpdateState {
-                    request_id: request_id.clone(),
-                    state: RequestState::Handling,
-                },
-            )
-            .await?;
-        } else {
+        if in_handling || in_queue {
+            // Bounded queue: an authorized signer must not enqueue
+            // without limit (the payload is persisted per entry).
+            if self.in_queue.get(&subject_id).is_some_and(|queue| {
+                queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
+            }) {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "Request queue for subject {subject_id} is full"
+                    ),
+                });
+            }
             self.on_event(
                 RequestHandlerEvent::EventToQueue {
                     subject_id: subject_id.clone(),
@@ -748,9 +834,141 @@ impl RequestHandler {
                 },
             )
             .await?;
+
+            // Idle-but-queued: no active request owns a future PopQueue,
+            // so schedule a promotion signal or this arrival stalls
+            // exactly like the admitted leftovers the boot scan
+            // rescues. Active subjects need none: their EndHandling
+            // already queued the PopQueue that drives the queue.
+            if !in_handling {
+                ctx.schedule_once(
+                    std::time::Duration::from_millis(
+                        CHILD_CREATE_RETRY_DELAY_MS,
+                    ),
+                    RequestHandlerMessage::PromoteQueue {
+                        subject_id: subject_id.clone(),
+                        attempts_left: MAX_CHILD_CREATE_ATTEMPTS,
+                    },
+                )?;
+            }
+
+            return Ok(());
         }
 
-        Ok(())
+        let command = Self::build_req_manager_init_msg(
+            &EventRequestType::from(request.content()),
+            is_gov,
+        );
+        let init_data = InitRequestManager {
+            our_key: self.our_key.clone(),
+            subject_id: subject_id.clone(),
+            governance_id: governance_id.clone(),
+            helpers: helpers.clone(),
+            durable: is_gov,
+        };
+
+        match ctx
+            .create_child(
+                &subject_id.to_string(),
+                RequestManager::initial(init_data),
+            )
+            .await
+        {
+            Ok(actor) => {
+                // `ask`, not `tell`: the handler records handling
+                // only after the manager acknowledged intake (its
+                // SafeState checkpoint is durable), so a crash in
+                // between never leaves a started-but-unrecorded
+                // request behind.
+                actor
+                    .ask(RequestManagerMessage::FirstRun {
+                        command,
+                        request,
+                        request_id: request_id.clone(),
+                    })
+                    .await?;
+
+                self.on_event(
+                    RequestHandlerEvent::EventToHandling {
+                        subject_id: subject_id.clone(),
+                        request_id: request_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: request_id.clone(),
+                        state: RequestState::Handling,
+                    },
+                )
+                .await?;
+
+                Ok(())
+            }
+            Err(ActorError::Exists { .. }) => {
+                if let Some(metrics) = try_core_metrics() {
+                    metrics.observe_request_handler_child_collision();
+                }
+                if attempts_left == 0 {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Request child for subject {subject_id} \
+                             still exists after retries"
+                        ),
+                    });
+                }
+                // Durable admission before acceptance: the stopping
+                // child may never finish teardown before a crash, and
+                // the timer below is memory-only. Persist the payload
+                // first so this `Ok` (already answered to the client
+                // as accepted) is always backed by the journal; the
+                // scheduled signal only promotes what is durable.
+                // Retries go by message, never by sleeping here: this
+                // actor funnels every subject.
+                if self.in_queue.get(&subject_id).is_some_and(|queue| {
+                    queue.len() >= MAX_QUEUED_REQUESTS_PER_SUBJECT
+                }) {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Request queue for subject {subject_id} is full"
+                        ),
+                    });
+                }
+                self.on_event(
+                    RequestHandlerEvent::EventToQueue {
+                        subject_id: subject_id.clone(),
+                        event: request,
+                        request_id: request_id.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                send_to_tracking(
+                    ctx,
+                    RequestTrackingMessage::UpdateState {
+                        request_id: request_id.clone(),
+                        state: RequestState::InQueue,
+                    },
+                )
+                .await?;
+
+                ctx.schedule_once(
+                    std::time::Duration::from_millis(
+                        CHILD_CREATE_RETRY_DELAY_MS,
+                    ),
+                    RequestHandlerMessage::PromoteQueue {
+                        subject_id: subject_id.clone(),
+                        attempts_left: attempts_left - 1,
+                    },
+                )?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     const fn build_req_manager_init_msg(
@@ -774,7 +992,7 @@ impl RequestHandler {
     }
 
     async fn check_in_queue(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         request: &Signed<EventRequest>,
         our_key: PublicKey,
     ) -> Result<bool, RequestHandlerError> {
@@ -782,10 +1000,11 @@ impl RequestHandler {
             return Err(RequestHandlerError::CreationNotQueued);
         }
 
-        Self::check_owner_new_owner(ctx, request.content()).await?;
-
-        let subject_data =
-            Self::build_subject_data(ctx, request.content()).await?;
+        // Owner check and subject data are independent: ask together.
+        let ((), subject_data) = tokio::try_join!(
+            Self::check_owner_new_owner(ctx, request.content()),
+            Self::build_subject_data(ctx, request.content())
+        )?;
         let event_request_type = EventRequestType::from(request.content());
         let signer = request.signature().signer.clone();
         let governance_id = subject_data
@@ -799,21 +1018,29 @@ impl RequestHandler {
             ));
         }
 
-        Self::check_tracker_ledger_full(ctx, request.content(), &subject_data)
-            .await?;
-
-        Self::check_signer_authorization(
-            ctx,
-            our_key,
-            signer.clone(),
-            &governance_id,
-            &event_request_type,
-            subject_data.clone(),
-        )
-        .await?;
-
-        Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
-            .await?;
+        // The remaining checks only read shared state: ask together.
+        // `check_creation` is a no-op outside Create/Confirm, so it
+        // runs after — cheap and out of the hot Fact path.
+        tokio::try_join!(
+            Self::check_tracker_ledger_full(
+                ctx,
+                request.content(),
+                &subject_data
+            ),
+            async {
+                Self::check_signer_authorization(
+                    ctx,
+                    our_key,
+                    signer.clone(),
+                    &governance_id,
+                    &event_request_type,
+                    subject_data.clone(),
+                )
+                .await
+                .map_err(RequestHandlerError::from)
+            },
+            Self::check_fact_viewpoints(ctx, request.content(), &subject_data)
+        )?;
 
         Self::check_creation(ctx, subject_data, &event_request_type, signer)
             .await?;
@@ -824,7 +1051,7 @@ impl RequestHandler {
     async fn in_queue_to_handling(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
         request_id: &DigestIdentifier,
         is_gov: bool,
     ) -> Result<(), ActorError> {
@@ -838,8 +1065,10 @@ impl RequestHandler {
             .get_child::<RequestManager>(&subject_id.to_string())
             .await?;
 
+        // `ask`, not `tell`: same intake acknowledgement as the
+        // direct path before moving queue to handling.
         actor
-            .tell(RequestManagerMessage::FirstRun {
+            .ask(RequestManagerMessage::FirstRun {
                 command,
                 request,
                 request_id: request_id.clone(),
@@ -863,6 +1092,150 @@ impl RequestHandler {
             },
         )
         .await
+    }
+
+    // Drives an admitted-but-idle queue: the front is already
+    // durable, so this is only a signal. Mirrors one live PopQueue
+    // per front without the volatile hop (invalid fronts pop inline,
+    // and a missing child is recreated instead of assumed). Every
+    // step re-checks the maps, so concurrent winners are respected:
+    // an active handling owns its PopQueue chain and this returns.
+    // A cut anywhere replays from durable state on the next signal
+    // or boot.
+    async fn promote_admitted_queue(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        attempts_left: usize,
+    ) -> Result<(), ActorError> {
+        // Someone else is active now: their PopQueue owns the queue.
+        if self.handling.contains_key(subject_id) {
+            return Ok(());
+        }
+        let mut attempts_left = attempts_left;
+        while !self.handling.contains_key(subject_id) {
+            let Some((event, request_id)) = self
+                .in_queue
+                .get(subject_id)
+                .and_then(|queue| queue.front().cloned())
+            else {
+                return Ok(());
+            };
+            let subject_data = get_subject_data(ctx, subject_id).await?;
+            let governance_id = subject_data
+                .as_ref()
+                .and_then(|data| data.get_governance_id());
+            let durable = subject_data
+                .as_ref()
+                .is_none_or(|data| data.get_schema_id().is_gov());
+            if let Some(governance_id) = &governance_id
+                && let Err(e) = wait_governance_ready(ctx, governance_id).await
+            {
+                error!(
+                    "Request handler promote timed out waiting for governance readiness"
+                );
+                return Err(e);
+            }
+            let is_gov = match Self::check_in_queue(
+                ctx,
+                &event,
+                (*self.our_key).clone(),
+            )
+            .await
+            {
+                Ok(is_gov) => is_gov,
+                Err(e) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_request_invalid();
+                    }
+                    self.on_event(
+                        RequestHandlerEvent::Invalid {
+                            subject_id: subject_id.clone(),
+                        },
+                        ctx,
+                    )
+                    .await;
+                    send_to_tracking(
+                        ctx,
+                        RequestTrackingMessage::UpdateState {
+                            request_id: request_id.clone(),
+                            state: RequestState::Invalid {
+                                error: e.to_string(),
+                                sn: None,
+                                subject_id: subject_id.to_string(),
+                                who: self.our_key.to_string(),
+                            },
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            let Some(helpers) = self.helpers.clone() else {
+                let e = " Can not obtain helpers".to_string();
+                return Err(ActorError::FunctionalCritical { description: e });
+            };
+            match ctx
+                .create_child(
+                    &subject_id.to_string(),
+                    RequestManager::initial(InitRequestManager {
+                        our_key: self.our_key.clone(),
+                        subject_id: subject_id.clone(),
+                        governance_id,
+                        helpers,
+                        durable,
+                    }),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(ActorError::Exists { .. }) => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_request_handler_child_collision();
+                    }
+                    // Name still held by teardown: roll the signal
+                    // while attempts last. The admission stays durable
+                    // either way; exhaustion below keeps it pending
+                    // loudly instead of failing an already-accepted
+                    // request invisibly.
+                    if attempts_left == 0 {
+                        error!(
+                            msg_type = "PromoteQueue",
+                            subject_id = %subject_id,
+                            request_id = %request_id,
+                            "Admitted request still blocked by stopping child after retries; keeping it queued"
+                        );
+                        return Ok(());
+                    }
+                    attempts_left -= 1;
+                    ctx.schedule_once(
+                        std::time::Duration::from_millis(
+                            CHILD_CREATE_RETRY_DELAY_MS,
+                        ),
+                        RequestHandlerMessage::PromoteQueue {
+                            subject_id: subject_id.clone(),
+                            attempts_left,
+                        },
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+            if let Err(e) = self
+                .in_queue_to_handling(ctx, event, &request_id, is_gov)
+                .await
+            {
+                error!(
+                    msg_type = "PromoteQueue",
+                    subject_id = %subject_id,
+                    request_id = %request_id,
+                    error = %e,
+                    "Failed to activate admitted queue"
+                );
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     async fn end_child(
@@ -907,6 +1280,8 @@ impl RequestHandler {
             subject_id: subject_id.clone(),
             governance_id,
             helpers: (hash, network),
+            // Stopped right after the purge: durability is irrelevant.
+            durable: true,
         };
 
         let actor = match ctx
@@ -918,8 +1293,23 @@ impl RequestHandler {
         {
             Ok(actor) => actor,
             Err(ActorError::Exists { .. }) => {
-                ctx.get_child::<RequestManager>(&subject_id.to_string())
-                    .await?
+                let actor = ctx
+                    .get_child::<RequestManager>(&subject_id.to_string())
+                    .await?;
+                // A live manager may hold an in-flight request: abort
+                // it first so tracking records the outcome instead of
+                // freezing on the last state.
+                if let Err(e) =
+                    actor.tell(RequestManagerMessage::ManualAbort).await
+                {
+                    warn!(
+                        msg_type = "Purge",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to abort in-flight request before purge"
+                    );
+                }
+                actor
             }
             Err(err) => return Err(err),
         };
@@ -934,7 +1324,7 @@ impl RequestHandler {
 #[derive(Debug, Clone)]
 pub enum RequestHandlerMessage {
     NewRequest {
-        request: Signed<EventRequest>,
+        request: Arc<Signed<EventRequest>>,
     },
     RequestInManager,
     RequestInManagerSubjectId {
@@ -943,6 +1333,9 @@ pub enum RequestHandlerMessage {
     ChangeApprovalState {
         subject_id: DigestIdentifier,
         state: ApprovalStateRes,
+        expected_request_id: String,
+        expected_version: u64,
+        expected_issued_at: u64,
     },
     GetApproval {
         subject_id: DigestIdentifier,
@@ -953,6 +1346,14 @@ pub enum RequestHandlerMessage {
     },
     PopQueue {
         subject_id: DigestIdentifier,
+    },
+    /// Drive an already-admitted queue after a child-name collision
+    /// or an idle arrival. Carries no payload: the work is durable
+    /// in `in_queue`, this is only a signal. Payload-carrying
+    /// retries accepted before persisting, so they are gone.
+    PromoteQueue {
+        subject_id: DigestIdentifier,
+        attempts_left: usize,
     },
     EndHandling {
         subject_id: DigestIdentifier,
@@ -973,8 +1374,8 @@ pub enum RequestHandlerResponse {
     RequestInManagerSubjectId(RequestsInManagerSubject),
     Ok(RequestData),
     Response(String),
-    Approval(Option<(ApprovalReq, ApprovalState)>),
-    Approvals(Vec<(ApprovalReq, ApprovalState)>),
+    Approval(Option<StoredApproval>),
+    Approvals(Vec<StoredApproval>),
     None,
 }
 
@@ -986,7 +1387,7 @@ impl Response for RequestHandlerResponse {}
 pub enum RequestHandlerEvent {
     EventToQueue {
         subject_id: DigestIdentifier,
-        event: Signed<EventRequest>,
+        event: Arc<Signed<EventRequest>>,
         request_id: DigestIdentifier,
     },
     Invalid {
@@ -1028,6 +1429,7 @@ impl Actor for RequestHandler {
     ) -> Result<(), ActorError> {
         if let Err(e) = self.init_store("request", None, false, ctx).await {
             error!(
+                msg_type = "PreStart",
                 error = %e,
                 "Failed to initialize store during pre_start"
             );
@@ -1037,6 +1439,7 @@ impl Actor for RequestHandler {
         let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
         else {
             error!(
+                msg_type = "PreStart",
                 helper = "config",
                 "Config helper not found during pre_start"
             );
@@ -1050,7 +1453,11 @@ impl Actor for RequestHandler {
             let Some(ext_db): Option<Arc<ExternalDB>> =
                 ctx.system().get_helper("ext_db")
             else {
-                error!("External database helper not found");
+                error!(
+                    msg_type = "PreStart",
+                    helper = "ext_db",
+                    "External database helper not found"
+                );
                 return Err(ActorError::Helper {
                     name: "ext_db".to_string(),
                     reason: "Not found".to_string(),
@@ -1067,6 +1474,7 @@ impl Actor for RequestHandler {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(
+                        msg_type = "PreStart",
                         error = %e,
                         "Failed to create tracking child during pre_start"
                     );
@@ -1074,13 +1482,14 @@ impl Actor for RequestHandler {
                 }
             };
 
-            let mut sink = tracking.register_sink("internal", None)?;
+            let sink = tracking.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_request_tracking());
         }
 
         let Some((hash, network)) = self.helpers.clone() else {
             let e = " Can not obtain helpers".to_string();
             error!(
+                msg_type = "PreStart",
                 error = %e,
                 "Failed to obtain helpers during pre_start"
             );
@@ -1092,15 +1501,40 @@ impl Actor for RequestHandler {
             return Ok(());
         }
 
+        // Deferred resume: each rehydrated in-flight request
+        // re-drives once its own governance reconciled, never
+        // mid-reconcile. Governance ids resolve from node state like
+        // the live path; unknown targets proceed ungated. Queued
+        // requests without handling (lost PopQueue between
+        // FinishHandling and EventToHandling) resume the same way:
+        // the first queued element is activated here instead of
+        // waiting for a volatile message that never arrives.
         for (subject_id, request_id) in self.handling.clone() {
-            let governance_id = get_subject_data(ctx, &subject_id)
-                .await?
+            let subject_data = get_subject_data(ctx, &subject_id).await?;
+            let governance_id = subject_data
+                .as_ref()
                 .and_then(|data| data.get_governance_id());
+            // Same durability rule as the live path: governance
+            // requests resume fully persistent, tracker requests
+            // resume from their two checkpoints. Unknown targets
+            // proceed ungated and durable, like today.
+            let durable = subject_data
+                .as_ref()
+                .is_none_or(|data| data.get_schema_id().is_gov());
+            if let Some(governance_id) = &governance_id
+                && let Err(e) = wait_governance_ready(ctx, governance_id).await
+            {
+                error!(
+                    "Request handler pre_start timed out waiting for governance readiness"
+                );
+                return Err(e);
+            }
             let request_manager_init = InitRequestManager {
                 our_key: self.our_key.clone(),
                 subject_id: subject_id.clone(),
                 governance_id,
                 helpers: (hash, network.clone()),
+                durable,
             };
 
             let request_manager_actor = match ctx
@@ -1113,6 +1547,7 @@ impl Actor for RequestHandler {
                 Ok(actor) => actor,
                 Err(e) => {
                     error!(
+                        msg_type = "PreStart",
                         subject_id = %subject_id,
                         error = %e,
                         "Failed to create request manager child during pre_start"
@@ -1128,12 +1563,131 @@ impl Actor for RequestHandler {
                 .await
             {
                 error!(
+                    msg_type = "PreStart",
                     subject_id = %subject_id,
                     request_id = %request_id,
                     error = %e,
                     "Failed to send Run message to request manager during pre_start"
                 );
                 return Err(e);
+            }
+        }
+
+        // Orphan queues: handling is gone but in_queue is not empty
+        // (EndHandling persisted, PopQueue never ran). Without this,
+        // the queue sits forever: boot only rebuilds managers for
+        // handling, and new arrivals queue behind the dead front.
+        // Each activation below is the same durable transition as the
+        // live PopQueue (intake ask, then EventToHandling), so a cut
+        // in the middle simply replays on the next boot.
+        let orphan_subjects: Vec<DigestIdentifier> = self
+            .in_queue
+            .keys()
+            .filter(|subject_id| !self.handling.contains_key(*subject_id))
+            .cloned()
+            .collect();
+        for subject_id in orphan_subjects {
+            while !self.handling.contains_key(&subject_id) {
+                let Some((event, request_id)) = self
+                    .in_queue
+                    .get(&subject_id)
+                    .and_then(|queue| queue.front().cloned())
+                else {
+                    break;
+                };
+                let subject_data = get_subject_data(ctx, &subject_id).await?;
+                let governance_id = subject_data
+                    .as_ref()
+                    .and_then(|data| data.get_governance_id());
+                let durable = subject_data
+                    .as_ref()
+                    .is_none_or(|data| data.get_schema_id().is_gov());
+                if let Some(governance_id) = &governance_id
+                    && let Err(e) =
+                        wait_governance_ready(ctx, governance_id).await
+                {
+                    error!(
+                        "Request handler pre_start timed out waiting for governance readiness"
+                    );
+                    return Err(e);
+                }
+                let is_gov = match Self::check_in_queue(
+                    ctx,
+                    &event,
+                    (*self.our_key).clone(),
+                )
+                .await
+                {
+                    Ok(is_gov) => is_gov,
+                    Err(e) => {
+                        // Same invalid-front handling as live PopQueue,
+                        // minus the volatile message: pre_start already
+                        // drives the queue, so pop here and retry the
+                        // next front inline.
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_request_invalid();
+                        }
+                        self.on_event(
+                            RequestHandlerEvent::Invalid {
+                                subject_id: subject_id.clone(),
+                            },
+                            ctx,
+                        )
+                        .await;
+                        send_to_tracking(
+                            ctx,
+                            RequestTrackingMessage::UpdateState {
+                                request_id: request_id.clone(),
+                                state: RequestState::Invalid {
+                                    error: e.to_string(),
+                                    sn: None,
+                                    subject_id: subject_id.to_string(),
+                                    who: self.our_key.to_string(),
+                                },
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let request_manager_init = InitRequestManager {
+                    our_key: self.our_key.clone(),
+                    subject_id: subject_id.clone(),
+                    governance_id,
+                    helpers: (hash, network.clone()),
+                    durable,
+                };
+                match ctx
+                    .create_child(
+                        &subject_id.to_string(),
+                        RequestManager::initial(request_manager_init),
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!(
+                            msg_type = "PreStart",
+                            subject_id = %subject_id,
+                            error = %e,
+                            "Failed to create request manager child for orphan queue during pre_start"
+                        );
+                        return Err(e);
+                    }
+                }
+                if let Err(e) = self
+                    .in_queue_to_handling(ctx, event, &request_id, is_gov)
+                    .await
+                {
+                    error!(
+                        msg_type = "PreStart",
+                        subject_id = %subject_id,
+                        request_id = %request_id,
+                        error = %e,
+                        "Failed to activate orphan queue during pre_start"
+                    );
+                    return Err(e);
+                }
             }
         }
 
@@ -1200,20 +1754,30 @@ impl Handler<Self> for RequestHandler {
             RequestHandlerMessage::ChangeApprovalState {
                 subject_id,
                 state,
+                expected_request_id,
+                expected_version,
+                expected_issued_at,
             } => {
-                Self::change_approval(ctx, &subject_id, state.clone())
-                    .await
-                    .map_err(|e| {
-                        error!(
-                            error = %e,
-                            "ChangeApprovalState failed"
-                        );
-                        ActorError::from(e)
-                    })?;
+                let voted = Self::change_approval(
+                    ctx,
+                    &subject_id,
+                    state.clone(),
+                    expected_request_id,
+                    expected_version,
+                    expected_issued_at,
+                )
+                .await
+                .map_err(|e| {
+                    error!(
+                        error = %e,
+                        "ChangeApprovalState failed"
+                    );
+                    ActorError::from(e)
+                })?;
 
                 Ok(RequestHandlerResponse::Response(format!(
-                    "The approval request for subject {} has changed to {}",
-                    subject_id, state
+                    "The approval request {} (version {}) for subject {} has changed to {}",
+                    voted.request_id, voted.version, subject_id, state
                 )))
             }
             RequestHandlerMessage::GetApproval { subject_id, state } => {
@@ -1237,11 +1801,27 @@ impl Handler<Self> for RequestHandler {
                 Ok(RequestHandlerResponse::Approvals(res))
             }
             RequestHandlerMessage::NewRequest { request } => {
+                // Cheap payload gate before expensive signature check.
+                if let EventRequest::Fact(fact) = request.content()
+                    && let Err(reason) = fact.payload.validate()
+                {
+                    let err = RequestHandlerError::InvalidFactPayload(reason);
+                    warn!(
+                        msg_type = "NewRequest",
+                        error = %err,
+                        "Fact payload exceeds limits"
+                    );
+                    return Err(ActorError::from(err));
+                }
                 if let Err(e) = request.verify() {
                     let err = RequestHandlerError::SignatureVerification(
                         e.to_string(),
                     );
-                    error!(error = %err, "Request signature verification failed");
+                    warn!(
+                        msg_type = "NewRequest",
+                        error = %err,
+                        "Request signature verification failed"
+                    );
                     return Err(ActorError::from(err));
                 };
 
@@ -1255,32 +1835,36 @@ impl Handler<Self> for RequestHandler {
                     return Err(crash_system(ctx, ActorError::from(err)).await);
                 };
 
-                if let Err(e) =
-                    Self::check_owner_new_owner(ctx, request.content()).await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Owner or new owner check failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
-                let subject_data = match Self::build_subject_data(
-                    ctx,
-                    request.content(),
-                )
-                .await
-                {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(
-                            msg_type = "NewRequest",
-                            error = %e,
-                            "Failed to build subject data"
-                        );
-                        return Err(ActorError::from(e));
-                    }
+                // Round 1: the two intake reads only need the
+                // request itself — ask together.
+                let subject_data = match tokio::try_join!(
+                    async {
+                        Self::check_owner_new_owner(ctx, request.content())
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    msg_type = "NewRequest",
+                                    error = %e,
+                                    "Owner or new owner check failed"
+                                );
+                                ActorError::from(e)
+                            })
+                    },
+                    async {
+                        Self::build_subject_data(ctx, request.content())
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    msg_type = "NewRequest",
+                                    error = %e,
+                                    "Failed to build subject data"
+                                );
+                                ActorError::from(e)
+                            })
+                    },
+                ) {
+                    Ok(((), subject_data)) => subject_data,
+                    Err(e) => return Err(e),
                 };
                 let event_request_type =
                     EventRequestType::from(request.content());
@@ -1293,7 +1877,7 @@ impl Handler<Self> for RequestHandler {
 
                 if !subject_data.get_active() {
                     let subject_id = request.content().get_subject_id();
-                    error!(
+                    warn!(
                         msg_type = "NewRequest",
                         subject_id = %subject_id,
                         "Subject is not active"
@@ -1305,25 +1889,10 @@ impl Handler<Self> for RequestHandler {
                     ));
                 }
 
-                if let Err(e) = Self::check_tracker_ledger_full(
-                    ctx,
-                    request.content(),
-                    &subject_data,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Tracker full ledger check failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
                 if let Err(e) =
                     Self::check_event_request(request.content(), is_gov)
                 {
-                    error!(
+                    warn!(
                         msg_type = "NewRequest",
                         error = %e,
                         "Event request validation failed"
@@ -1331,55 +1900,80 @@ impl Handler<Self> for RequestHandler {
                     return Err(ActorError::from(e));
                 }
 
-                if let Err(e) = Self::check_fact_viewpoints(
-                    ctx,
-                    request.content(),
-                    &subject_data,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Fact viewpoints validation failed"
-                    );
-                    return Err(ActorError::from(e));
-                }
-
-                if let Err(e) = Self::check_signer_authorization(
-                    ctx,
-                    (*self.our_key).clone(),
-                    signer.clone(),
-                    &governance_subject_id,
-                    &event_request_type,
-                    subject_data.clone(),
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        governance_id = %governance_subject_id,
-                        error = %e,
-                        "Signature check failed"
-                    );
-                    return Err(e);
-                }
-
-                if let Err(e) = Self::check_creation(
-                    ctx,
-                    subject_data,
-                    &event_request_type,
-                    signer,
-                )
-                .await
-                {
-                    error!(
-                        msg_type = "NewRequest",
-                        error = %e,
-                        "Creation check failed"
-                    );
-                    return Err(e);
-                }
+                // Round 2: the remaining checks only read shared
+                // state — ask together. Each logs its own failure
+                // like the sequential code did.
+                tokio::try_join!(
+                    async {
+                        Self::check_tracker_ledger_full(
+                            ctx,
+                            request.content(),
+                            &subject_data,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Tracker full ledger check failed"
+                            );
+                            ActorError::from(e)
+                        })
+                    },
+                    async {
+                        Self::check_fact_viewpoints(
+                            ctx,
+                            request.content(),
+                            &subject_data,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Fact viewpoints validation failed"
+                            );
+                            ActorError::from(e)
+                        })
+                    },
+                    async {
+                        Self::check_signer_authorization(
+                            ctx,
+                            (*self.our_key).clone(),
+                            signer.clone(),
+                            &governance_subject_id,
+                            &event_request_type,
+                            subject_data.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                governance_id = %governance_subject_id,
+                                error = %e,
+                                "Signature check failed"
+                            );
+                            e
+                        })
+                    },
+                    async {
+                        Self::check_creation(
+                            ctx,
+                            subject_data.clone(),
+                            &event_request_type,
+                            signer.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "NewRequest",
+                                error = %e,
+                                "Creation check failed"
+                            );
+                            e
+                        })
+                    },
+                )?;
 
                 let (request_id, subject_id) =
                     match Self::build_request_id_subject_id(hash, &request) {
@@ -1397,11 +1991,14 @@ impl Handler<Self> for RequestHandler {
                 if let Err(e) = self
                     .handle_queue_request(
                         ctx,
-                        request,
-                        &request_id,
-                        &subject_id,
-                        is_gov,
-                        governance_id,
+                        QueueRequest {
+                            request,
+                            request_id: request_id.clone(),
+                            subject_id: subject_id.clone(),
+                            is_gov,
+                            governance_id,
+                            attempts_left: MAX_CHILD_CREATE_ATTEMPTS,
+                        },
                     )
                     .await
                 {
@@ -1420,14 +2017,31 @@ impl Handler<Self> for RequestHandler {
                     subject_id,
                 }))
             }
+            RequestHandlerMessage::PromoteQueue {
+                subject_id,
+                attempts_left,
+            } => {
+                if let Err(e) = self
+                    .promote_admitted_queue(ctx, &subject_id, attempts_left)
+                    .await
+                {
+                    error!(
+                        msg_type = "PromoteQueue",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to promote admitted queue"
+                    );
+                    return Err(e);
+                }
+
+                Ok(RequestHandlerResponse::None)
+            }
             RequestHandlerMessage::PopQueue { subject_id } => {
                 let (event, request_id) = if let Some(events) =
                     self.in_queue.get(&subject_id)
                 {
-                    if let Some((event, request_id)) =
-                        events.clone().pop_front()
-                    {
-                        (event, request_id)
+                    if let Some((event, request_id)) = events.front() {
+                        (event.clone(), request_id.clone())
                     } else {
                         if let Err(e) = Self::end_child(ctx, &subject_id).await
                         {
@@ -1550,9 +2164,23 @@ impl Storable for RequestHandler {}
 
 #[async_trait]
 impl PersistentActor for RequestHandler {
-    type Persistence = LightPersistence;
     type InitParams = (Arc<PublicKey>, (HashAlgorithm, Arc<NetworkSender>));
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
+
+    /// Wide snapshot cadence: each snapshot rewrites the whole queue
+    /// maps (up to 1024 full payloads per subject), so snapshotting
+    /// every 100 events would re-write gigabytes per cycle. Recovery
+    /// replays at most this many events, bounded and fast.
+    fn snapshot_every() -> Option<u64> {
+        Some(500)
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

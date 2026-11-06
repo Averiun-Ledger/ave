@@ -1,6 +1,6 @@
 [package]
 name = "ave-core"
-version = "0.12.0"
+version = "0.13.0"
 edition.workspace = true
 authors.workspace = true
 description = "Averiun Ledger core runtime and node API"
@@ -12,8 +12,10 @@ keywords.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1.0"
 async-trait = { workspace = true }
 borsh = { workspace = true }
+ave-build = { path = "../build", version = "0.10.0" }
 ave-common = { workspace = true, features = ["sink-grpc"] }
 ave-contract-sdk = { path = "../../ave-contract-sdk", version = "0.8.0", default-features = false, features = ["runtime"] }
 json-patch = "4.2.0"
@@ -41,18 +43,30 @@ futures = { workspace = true }
 rdkafka = { workspace = true }
 httpdate = "1"
 flate2 = "1"
-zstd = "0.13"
+zstd = "0.14"
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-types = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
+subtle = { workspace = true, optional = true }
+config = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency: enables the `test` feature (embedded compiler,
+# short timeouts) whenever test targets are built, so plain
+# `cargo test` gets the test optimization without `--features test`.
+ave-core = { path = ".", features = ["test"] }
+ave-build = { path = "../build" }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-stream = "0.1"
 ave-network = { workspace = true, features = ["test"] }
+serial_test = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
@@ -61,11 +75,29 @@ axum-server = { workspace = true }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 aws-lc-rs = { version = "1", features = ["ring-io"] }
+zstd = "0.14"
+rusqlite = "0.40"
+wat = "1"
 
 [features]
-default = ["sqlite", "ext-sqlite", "prometheus"]
+default = ["sqlite", "ext-sqlite", "prometheus", "toolchain"]
 rocksdb = ["ave-actors/rocksdb"]
 sqlite = ["ave-actors/sqlite"]
 ext-sqlite = ["ave-actors/export-sqlite"]
 prometheus = ["ave-actors/prometheus"]
-test = []
+# In-process contract toolchain (cargo + rustc): a node built without
+# it can not take the compiler role (light node image).
+toolchain = []
+# gRPC compiler service, TEST BUILDS ONLY: the embedded compiler with
+# the shared content-addressed artifact store. Production nodes compile
+# in-process (`toolchain`); there is no compiler pool in production.
+compiler-service = [
+    "ave-common/compiler-grpc",
+    "dep:subtle",
+    "dep:config",
+    "dep:tracing-subscriber",
+    "tokio-stream/net",
+    "tokio/signal",
+    "tokio/rt-multi-thread",
+]
+test = ["compiler-service"]

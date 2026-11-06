@@ -93,6 +93,17 @@ pub enum SubjectError {
     #[error("in creation event, sequence number must be 0")]
     InvalidCreationSequenceNumber,
 
+    #[error(
+        "genesis toolchain pin is not the default: expected {expected}, got {actual}"
+    )]
+    InvalidGenesisToolchain { expected: String, actual: String },
+
+    #[error("genesis field is invalid: {field}")]
+    InvalidGenesisField { field: String },
+
+    #[error("genesis properties do not match node-constructed defaults")]
+    InvalidGenesisState,
+
     #[error("previous ledger event hash must be empty in creation event")]
     NonEmptyPreviousHashInCreation,
 

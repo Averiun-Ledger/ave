@@ -9,7 +9,7 @@ use crate::model::common::{
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     ActualSearch, CreatorWitnessGrant, GovVersionLimit, HiSnLimit,
@@ -237,7 +237,6 @@ impl WitnessesRegister {
             Option<u64>,
             Option<u64>,
             Option<u64>,
-            bool,
             Vec<TrackerDeliveryRange>,
         ),
         ActorError,
@@ -300,7 +299,7 @@ impl WitnessesRegister {
         );
 
         let Some(access_limit) = access_limit else {
-            return Ok((None, None, None, true, Vec::new()));
+            return Ok((None, None, None, Vec::new()));
         };
 
         let mut sorted_old_owners: Vec<(PublicKey, u64)> = data
@@ -354,7 +353,7 @@ impl WitnessesRegister {
 
         let from_sn = params.actual_sn.map_or(0, |sn| sn.saturating_add(1));
         if from_sn > access_limit {
-            return Ok((None, transfer_sn, None, true, Vec::new()));
+            return Ok((None, transfer_sn, None, Vec::new()));
         }
 
         let namespace = Namespace::from(params.namespace);
@@ -384,24 +383,16 @@ impl WitnessesRegister {
                 gv_idx += 1;
             }
 
+            // Stale SnRegister (e.g. constant gov_version only
+            // records sn 0): fall back to the tip version so a
+            // missing map entry degrades to a possibly wider grant
+            // instead of a delivery gap that wedges sync.
             let gov_version = if gv_idx < gov_versions.len()
                 && gov_versions[gv_idx].0.contains(range_from)
             {
-                Some(gov_versions[gv_idx].1)
+                gov_versions[gv_idx].1
             } else {
-                (range_from == 0).then_some(data.gov_version)
-            };
-
-            let Some(gov_version) = gov_version else {
-                warn!(
-                    msg_type = "BuildTrackerWindow",
-                    subject_id = %subject_id,
-                    node = %node,
-                    range_from = range_from,
-                    range_to = range_to,
-                    "gov_version missing for range"
-                );
-                continue;
+                data.gov_version
             };
 
             let mode = self.event_delivery_mode(
@@ -451,7 +442,7 @@ impl WitnessesRegister {
             "Tracker window built"
         );
 
-        Ok((Some(access_limit), transfer_sn, clear_sn, true, ranges))
+        Ok((Some(access_limit), transfer_sn, clear_sn, ranges))
     }
 
     pub(crate) async fn build_tracker_window(
@@ -465,13 +456,12 @@ impl WitnessesRegister {
             Option<u64>,
             Option<u64>,
             Option<u64>,
-            bool,
             Vec<TrackerDeliveryRange>,
         ),
         ActorError,
     > {
         let Some(data) = self.subjects.get(subject_id) else {
-            return Ok((None, None, None, true, Vec::new()));
+            return Ok((None, None, None, Vec::new()));
         };
 
         self.build_tracker_window_from_data(

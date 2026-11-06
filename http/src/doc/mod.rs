@@ -51,8 +51,8 @@ use ave_bridge::ave_common::{
             ApprovalState, ApprovalStateRes, BridgeConfirmRequest,
             BridgeCreateRequest, BridgeEOLRequest, BridgeEventRequest,
             BridgeFactRequest, BridgeRejectRequest, BridgeSignedEventRequest,
-            BridgeTransferRequest, EventRequestType, SinkReplayItem,
-            SinkReplayRequest,
+            BridgeTransferRequest, EventRequestType, PatchApproval,
+            SinkReplayItem, SinkReplayRequest,
         },
         signature::BridgeSignature,
     },
@@ -163,6 +163,7 @@ impl Modify for FeatureGatedPathsAddon {
 
         // ── Distribution ────────────────────────────────────────
         server::post_manual_distribution,
+        server::post_sync_lift,
 
         // ── Register ────────────────────────────────────────────
         server::get_all_govs,
@@ -171,6 +172,8 @@ impl Modify for FeatureGatedPathsAddon {
         // ── Ledger ──────────────────────────────────────────────
         server::get_events,
         server::get_aborts,
+        server::get_watchdog_incidents,
+        server::get_actor_tree,
         server::get_event_sn,
         server::get_first_or_end_events,
         server::get_subject_state,
@@ -236,6 +239,7 @@ impl Modify for FeatureGatedPathsAddon {
         server::get_sinks,
         server::get_sink,
         server::get_sinks_status,
+        server::get_sink_deliveries,
         server::unblock_sink,
         server::test_sink,
         server::reset_sink_cursors,
@@ -312,6 +316,7 @@ impl Modify for FeatureGatedPathsAddon {
             BridgeConfirmRequest,
             BridgeRejectRequest,
             BridgeSignature,
+            PatchApproval,
             ApprovalStateRes,
             ApprovalState,
 
@@ -420,6 +425,7 @@ impl Modify for FeatureGatedPathsAddon {
         (name = "System", description = "System resources, actions, and configuration (admin only)."),
         (name = "Audit Logs", description = "Query and analyze audit log entries (admin only)."),
         (name = "Sink", description = "Manage and inspect external sinks (HTTP, Kafka, gRPC)."),
+        (name = "Monitoring", description = "Node monitoring: watchdog incidents outside the ledger."),
     )
 )]
 pub struct ApiDoc;

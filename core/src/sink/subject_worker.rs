@@ -1,5 +1,8 @@
 //! SinkSubjectWorker: ephemeral child actor that handles a single subject.
 
+#[cfg(feature = "test")]
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +23,38 @@ use crate::sink::worker::{
     SinkSubjectWorkerError, SinkWorker, SinkWorkerMessage,
 };
 use ave_common::{DataToSink, IncomingSinkEvent, LightEvent, SinkTypes};
+
+// ---------------------------------------------------------------------------
+// Test instrumentation
+// ---------------------------------------------------------------------------
+
+/// Test-only count of individual catch-up dequeue shifts per sink:
+/// every `remove(0)` moves every remaining element, so draining a
+/// batch of B events shifts B(B-1)/2 elements. Lets regression
+/// tests assert that catch-up consumes its batch sequentially
+/// instead of shifting it on every event. Keyed by sink name so
+/// tests sharing a process do not pollute each other.
+#[cfg(feature = "test")]
+static CATCH_UP_SHIFTED_ELEMENTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Test-only: reset the catch-up shift counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_reset_catch_up_shifts(sink: &str) {
+    if let Ok(mut counts) = CATCH_UP_SHIFTED_ELEMENTS.lock() {
+        counts.remove(sink);
+    }
+}
+
+/// Test-only: read the catch-up shift counter for one sink.
+#[cfg(feature = "test")]
+pub fn test_catch_up_shifts(sink: &str) -> u64 {
+    CATCH_UP_SHIFTED_ELEMENTS
+        .lock()
+        .map(|counts| counts.get(sink).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -46,7 +81,7 @@ pub enum SinkSubjectWorkerMessage {
     },
     ProcessNextEvent {
         data: Arc<DataToSink>,
-        remaining: Vec<DataToSink>,
+        remaining: VecDeque<DataToSink>,
         generation: u64,
     },
     /// Flush the buffered live events (only used in `batch_delivery` mode).
@@ -148,6 +183,20 @@ impl Actor for SinkSubjectWorker {
         self.release_subject(ctx).await;
         Ok(())
     }
+
+    /// Generous shutdown deadlines for slow machines: external sends
+    /// retry with backoff, so the default would abort them mid-batch.
+    fn stop_timeout() -> Option<Duration> {
+        Some(crate::sink::SINK_SHUTDOWN_GRACE)
+    }
+
+    fn mailbox_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
+
+    fn event_drain_timeout() -> Duration {
+        crate::sink::SINK_SHUTDOWN_GRACE
+    }
 }
 
 #[async_trait]
@@ -205,8 +254,6 @@ impl Handler<Self> for SinkSubjectWorker {
                             .await
                     }
                 }
-
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::CatchUpBatch {
                 from_sn,
@@ -216,7 +263,6 @@ impl Handler<Self> for SinkSubjectWorker {
                 let generation = self.catch_up_generation;
                 self.run_catch_up_batch(from_sn, batch_size, generation, ctx)
                     .await?;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::ContinueCatchUp {
                 from_sn,
@@ -228,7 +274,6 @@ impl Handler<Self> for SinkSubjectWorker {
                 }
                 self.run_catch_up_batch(from_sn, batch_size, generation, ctx)
                     .await?;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::ProcessNextEvent {
                 data,
@@ -261,9 +306,8 @@ impl Handler<Self> for SinkSubjectWorker {
                         )
                         .await;
 
-                        if !remaining.is_empty() {
-                            let mut remaining = remaining;
-                            let next_event = remaining.remove(0);
+                        let mut remaining = remaining;
+                        if let Some(next_event) = remaining.pop_front() {
                             let self_ref = ctx.reference().await?;
                             if let Err(e) = self_ref
                                 .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
@@ -280,7 +324,7 @@ impl Handler<Self> for SinkSubjectWorker {
                             if let Err(e) = self_ref
                                 .tell(
                                     SinkSubjectWorkerMessage::ContinueCatchUp {
-                                        from_sn: sn + 1,
+                                        from_sn: sn.saturating_add(1),
                                         batch_size: self
                                             .server
                                             .catch_up_batch_size,
@@ -300,12 +344,9 @@ impl Handler<Self> for SinkSubjectWorker {
                             .await;
                     }
                 }
-
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::FlushBatch => {
                 self.flush_pending(ctx, false).await;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Pause => {
                 // Flush best-effort so buffered events are not held in memory
@@ -313,11 +354,9 @@ impl Handler<Self> for SinkSubjectWorker {
                 // already know is unhealthy.
                 self.flush_pending(ctx, true).await;
                 self.paused = true;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Resume => {
                 self.paused = false;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
             SinkSubjectWorkerMessage::Stop => {
                 // Best-effort flush: a single attempt during teardown. The
@@ -325,9 +364,10 @@ impl Handler<Self> for SinkSubjectWorker {
                 // comes back; retries here would delay actor shutdown.
                 self.flush_pending(ctx, true).await;
                 ctx.stop(None).await;
-                Ok(SinkSubjectWorkerResponse::Ok)
             }
         }
+
+        Ok(SinkSubjectWorkerResponse::Ok)
     }
 }
 
@@ -418,6 +458,59 @@ impl SinkSubjectWorker {
         }
     }
 
+    /// Bounded resend of an internal catch-up signal: the `Fail`
+    /// mailbox drops instead of blocking (cyclic delivery chain), so a
+    /// single loss must neither wedge the catch-up nor spin forever.
+    async fn resend_catch_up_signal<F, Fut>(
+        mut send: F,
+    ) -> Result<(), ActorError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), ActorError>>,
+    {
+        let mut result = send().await;
+        for _ in 0..2 {
+            if result.is_ok() {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            result = send().await;
+        }
+        result
+    }
+
+    /// Reports a lost catch-up signal as a failed catch-up: the parent
+    /// frees the `in_catch_up` marker and the manager re-drives through
+    /// lagging. Redelivery is idempotent, so this is always safe.
+    async fn report_catch_up_stalled(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        subject_id: String,
+        sn: u64,
+        reason: &str,
+    ) {
+        self.release_subject(ctx).await;
+        match ctx.get_parent::<SinkWorker>().await {
+            Ok(parent) => {
+                if let Err(e) = parent
+                    .emit_error(SinkSubjectWorkerError::DeliveryFailed {
+                        subject_id,
+                        sn,
+                        reason: reason.to_owned(),
+                        from_catch_up: true,
+                        count: 0,
+                    })
+                    .await
+                {
+                    error!(msg_type = "ReportCatchUpStalled", sink = %self.sink_name, error = %e, "Failed to report stalled catch-up");
+                }
+            }
+            Err(e) => {
+                error!(msg_type = "GetParent", sink = %self.sink_name, error = %e, "Failed to get parent worker");
+            }
+        }
+    }
+
     /// Queries the subject for the next catch-up batch starting at `from_sn`
     /// and delivers it (whole batch in `batch_delivery` mode, event by event
     /// otherwise), chaining the continuation with the given `generation`.
@@ -495,13 +588,27 @@ impl SinkSubjectWorker {
             self.release_subject(ctx).await;
             match ctx.get_parent::<SinkWorker>().await {
                 Ok(parent) => {
-                    if let Err(e) = parent
-                        .tell(SinkWorkerMessage::CatchUpCompleted {
+                    let report = Self::resend_catch_up_signal(|| {
+                        let parent = parent.clone();
+                        let subject_id = subject_id.clone();
+                        async move {
+                            parent
+                                .tell(SinkWorkerMessage::CatchUpCompleted {
+                                    subject_id,
+                                })
+                                .await
+                        }
+                    })
+                    .await;
+                    if let Err(e) = report {
+                        error!(msg_type = "ReportCatchUpCompleted", sink = %self.sink_name, error = %e, "Failed to report catch-up completed after retries");
+                        self.report_catch_up_stalled(
+                            ctx,
                             subject_id,
-                        })
-                        .await
-                    {
-                        error!(msg_type = "ReportCatchUpCompleted", sink = %self.sink_name, error = %e, "Failed to report catch-up completed");
+                            from_sn,
+                            "catch-up completion report lost",
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -534,15 +641,32 @@ impl SinkSubjectWorker {
                     )
                     .await;
                     let self_ref = ctx.reference().await?;
-                    if let Err(e) = self_ref
-                        .tell(SinkSubjectWorkerMessage::ContinueCatchUp {
-                            from_sn: last_sn + 1,
-                            batch_size: self.server.catch_up_batch_size,
-                            generation,
-                        })
-                        .await
-                    {
-                        error!(msg_type = "ContinueCatchUp", sink = %self.sink_name, error = %e, "Failed to send ContinueCatchUp to self");
+                    let next_from_sn = last_sn.saturating_add(1);
+                    let batch_size = self.server.catch_up_batch_size;
+                    let resend = Self::resend_catch_up_signal(|| {
+                        let self_ref = self_ref.clone();
+                        async move {
+                            self_ref
+                                .tell(
+                                    SinkSubjectWorkerMessage::ContinueCatchUp {
+                                        from_sn: next_from_sn,
+                                        batch_size,
+                                        generation,
+                                    },
+                                )
+                                .await
+                        }
+                    })
+                    .await;
+                    if let Err(e) = resend {
+                        error!(msg_type = "ContinueCatchUp", sink = %self.sink_name, error = %e, "Failed to send ContinueCatchUp to self after retries");
+                        self.report_catch_up_stalled(
+                            ctx,
+                            subject_id.clone(),
+                            next_from_sn,
+                            "catch-up continuation signal lost",
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -555,19 +679,35 @@ impl SinkSubjectWorker {
             return Ok(());
         }
 
-        let mut events = events;
-        let event = events.remove(0);
-        let remaining = events;
+        let mut remaining: VecDeque<DataToSink> = events.into();
+        let Some(event) = remaining.pop_front() else {
+            return Ok(());
+        };
         let self_ref = ctx.reference().await?;
-        if let Err(e) = self_ref
-            .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
-                data: Arc::new(event),
-                remaining,
-                generation,
-            })
-            .await
-        {
-            error!(msg_type = "ProcessNextEvent", sink = %self.sink_name, error = %e, "Failed to send ProcessNextEvent to self");
+        let resend = Self::resend_catch_up_signal(|| {
+            let self_ref = self_ref.clone();
+            let event = event.clone();
+            let remaining = remaining.clone();
+            async move {
+                self_ref
+                    .tell(SinkSubjectWorkerMessage::ProcessNextEvent {
+                        data: Arc::new(event),
+                        remaining,
+                        generation,
+                    })
+                    .await
+            }
+        })
+        .await;
+        if let Err(e) = resend {
+            error!(msg_type = "ProcessNextEvent", sink = %self.sink_name, error = %e, "Failed to send ProcessNextEvent to self after retries");
+            self.report_catch_up_stalled(
+                ctx,
+                subject_id.clone(),
+                from_sn,
+                "catch-up next-event signal lost",
+            )
+            .await;
         }
         Ok(())
     }
@@ -769,7 +909,11 @@ impl SinkSubjectWorker {
                     }
                 }
             } else {
-                error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Governance not found for catch-up query");
+                warn!(
+                    msg_type = "CatchUpQuery",
+                    subject_id = %subject_id,
+                    "Governance not found for catch-up query"
+                );
                 SubjectQuery::NotFound
             }
         } else {
@@ -792,7 +936,11 @@ impl SinkSubjectWorker {
             ) {
                 Ok(d) => d,
                 Err(_) => {
-                    error!(msg_type = "CatchUpQuery", subject_id = %subject_id, "Invalid subject_id format");
+                    warn!(
+                        msg_type = "CatchUpQuery",
+                        subject_id = %subject_id,
+                        "Invalid subject_id format"
+                    );
                     return SubjectQuery::NotFound;
                 }
             };

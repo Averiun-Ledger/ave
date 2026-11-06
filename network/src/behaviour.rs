@@ -128,7 +128,7 @@ impl Behaviour {
             )),
             MemoryLimitsConfig::Mb { value } => Toggle::from(Some(
                 memory_connection_limits::Behaviour::with_max_bytes(
-                    value * 1024 * 1024,
+                    value.saturating_mul(1024).saturating_mul(1024),
                 ),
             )),
         };
@@ -696,7 +696,12 @@ mod tests {
 
         let crate::ResolvedSpec { ram_mb, cpu_cores } =
             crate::resolve_spec(None);
-        let limits = LimitsConfig::build(ram_mb, cpu_cores);
+        let limits = LimitsConfig::build(
+            ram_mb,
+            cpu_cores,
+            1024 * 1024,
+            &NodeType::Bootstrap,
+        );
 
         let behaviour = Behaviour::new(
             &local_key.public(),

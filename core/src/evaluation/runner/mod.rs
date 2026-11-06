@@ -1,3 +1,6 @@
+#[cfg(any(test, feature = "test"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -13,7 +16,8 @@ use ave_common::{
     schematype::ReservedWords,
 };
 use ave_contract_sdk::runtime::{
-    CompiledModule, ContractRuntime, RuntimeError,
+    CompiledModule, ContractRuntime, ExecutionResult, ExecutionStats,
+    RuntimeError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -49,6 +53,16 @@ type AddRemoveChangeSchema = (
 
 pub mod error;
 pub mod types;
+
+/// Test-only wall-timeout override (default 60 s, same as prod).
+/// Module-level so both `Runner` and tests share it; prod never
+/// reads it (prod path uses `EXECUTION_WALL_TIMEOUT`).
+#[cfg(any(test, feature = "test"))]
+fn test_wall_timeout_ms() -> &'static AtomicU64 {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<AtomicU64> = OnceLock::new();
+    CELL.get_or_init(|| AtomicU64::new(60_000))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Runner;
@@ -100,7 +114,7 @@ impl Runner {
         ctx: &ActorContext<Self>,
         data: &EvaluateInfo,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         match data {
             EvaluateInfo::GovFact { payload, state } => {
                 Self::execute_fact_gov(state.clone(), payload).await
@@ -146,6 +160,21 @@ impl Runner {
         }
     }
 
+    /// Offline entry points for the off-chain tool: pure logic over
+    /// caller-supplied data, no actor context needed.
+    pub fn execute_transfer_not_gov_offline(
+        members: &BTreeSet<PublicKey>,
+        creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
+        new_owner: &PublicKey,
+        old_owner: &PublicKey,
+        namespace: Namespace,
+        schema_id: &SchemaType,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_transfer_not_gov(
+            members, creators, new_owner, old_owner, namespace, schema_id,
+        )
+    }
+
     fn execute_transfer_not_gov(
         members: &BTreeSet<PublicKey>,
         creators: &BTreeMap<PublicKey, BTreeSet<Namespace>>,
@@ -153,7 +182,7 @@ impl Runner {
         old_owner: &PublicKey,
         namespace: Namespace,
         schema_id: &SchemaType,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
@@ -182,9 +211,13 @@ impl Runner {
         }
 
         if !creators.get(new_owner).is_some_and(|namespaces| {
-            namespaces.iter().any(|creator_namespace| {
-                creator_namespace.is_ancestor_or_equal_of(&namespace)
-            })
+            // Exact match only: Creator grants cover exactly their
+            // namespace (hierarchy is for serving roles). This mirrors
+            // SubjectRegister enforcement, so a transfer that passes
+            // evaluation can not die later in the register check.
+            namespaces
+                .iter()
+                .any(|creator_namespace| creator_namespace == &namespace)
         }) {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_not_gov",
@@ -199,19 +232,24 @@ impl Runner {
             });
         }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: ValueWrapper(json!([])),
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: ValueWrapper(json!([])),
+        })
+    }
+
+    /// Offline entry point for the off-chain tool (see above).
+    pub fn execute_transfer_gov_offline(
+        governance: &GovernanceData,
+        new_owner: &PublicKey,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_transfer_gov(governance, new_owner)
     }
 
     fn execute_transfer_gov(
         governance: &GovernanceData,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_transfer_gov",
@@ -251,20 +289,26 @@ impl Runner {
             });
         }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: ValueWrapper(json!([])),
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: ValueWrapper(json!([])),
+        })
+    }
+
+    /// Offline entry point for the off-chain tool (see above).
+    pub fn execute_confirm_gov_offline(
+        governance: GovernanceData,
+        old_owner_name: Option<String>,
+        new_owner: &PublicKey,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_confirm_gov(governance, old_owner_name, new_owner)
     }
 
     fn execute_confirm_gov(
         mut governance: GovernanceData,
         old_owner_name: Option<String>,
         new_owner: &PublicKey,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         if new_owner.is_empty() {
             return Err(RunnerError::InvalidEvent {
                 location: "execute_confirm_gov",
@@ -374,13 +418,128 @@ impl Runner {
 
         let mod_governance = governance.to_value_wrapper();
 
-        Ok((
-            RunnerResult {
-                final_state: mod_governance,
-                approval_required: false,
-            },
-            vec![],
-        ))
+        Ok(RunnerResult {
+            final_state: mod_governance,
+            approval_required: false,
+        })
+    }
+
+    /// Wall-clock ceiling for one contract execution: fuel bounds
+    /// instructions, not wall time (bulk-memory ops cost ~1 fuel per
+    /// call), so a pathological contract could pin its thread
+    /// indefinitely. On expiry the node casts no verdict
+    /// (`ResourceLimit` → `Unavailable`, replaced from the pool) —
+    /// a slower machine must not call the request invalid.
+    #[cfg(not(any(test, feature = "test")))]
+    const EXECUTION_WALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+    #[cfg(any(test, feature = "test"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_test_wall_timeout_for_tests(timeout: Duration) {
+        test_wall_timeout_ms().store(
+            u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    fn test_wall_timeout() -> Duration {
+        Duration::from_millis(test_wall_timeout_ms().load(Ordering::SeqCst))
+    }
+
+    /// Runs the blocking wasmtime call off the async worker thread:
+    /// one evaluation per one-shot worker already isolates requests
+    /// from each other, but without this every in-flight execution
+    /// still occupies a Tokio pool thread. Under `test` (or the
+    /// `test` feature) it runs inline: those runtimes are
+    /// single-threaded and `spawn_blocking` would panic there.
+    async fn execute_bounded(
+        runtime: Arc<ContractRuntime>,
+        module: Arc<CompiledModule>,
+        state: ValueWrapper,
+        init_state: ValueWrapper,
+        event: ValueWrapper,
+        is_owner: bool,
+    ) -> Result<(ExecutionResult, ExecutionStats), RunnerError> {
+        #[cfg(any(test, feature = "test"))]
+        {
+            return runtime
+                .execute_with_deadline(
+                    &module,
+                    &state,
+                    &init_state,
+                    &event,
+                    is_owner,
+                    Self::test_wall_timeout(),
+                )
+                .map_err(map_runtime_error_to_runner_error);
+        }
+        #[cfg(not(any(test, feature = "test")))]
+        {
+            // The guest carries its own wall-clock deadline (epoch trap):
+            // the blocking call below always returns, so there is no
+            // abandoned worker burning CPU after a timeout anymore.
+            let handle = tokio::task::spawn_blocking(move || {
+                runtime.execute_with_deadline(
+                    &module,
+                    &state,
+                    &init_state,
+                    &event,
+                    is_owner,
+                    Self::EXECUTION_WALL_TIMEOUT,
+                )
+            });
+            match handle.await {
+                Ok(result) => result.map_err(map_runtime_error_to_runner_error),
+                Err(join_error) => Err(RunnerError::ResourceLimit {
+                    operation: "contract execution",
+                    details: format!(
+                        "blocking execution task failed: {join_error}"
+                    ),
+                }),
+            }
+        }
+    }
+
+    /// Offline fact execution: same core as the actor path, but the
+    /// caller supplies runtime and module (the off-chain tool
+    /// rebuilds both itself). No actor context needed.
+    pub async fn execute_fact_offline(
+        contract_runtime: Arc<ContractRuntime>,
+        module: Arc<CompiledModule>,
+        state: ValueWrapper,
+        init_state: ValueWrapper,
+        payload: ValueWrapper,
+        is_owner: bool,
+    ) -> Result<RunnerResult, RunnerError> {
+        let (result, _stats) = Self::execute_bounded(
+            contract_runtime,
+            module,
+            state,
+            init_state,
+            payload,
+            is_owner,
+        )
+        .await?;
+        Self::map_fact_result(result)
+    }
+
+    fn map_fact_result(
+        result: ExecutionResult,
+    ) -> Result<RunnerResult, RunnerError> {
+        if !result.success {
+            return Err(RunnerError::ContractFailed {
+                details: format!(
+                    "Contract execution in running was not successful: {}",
+                    result.error
+                ),
+            });
+        }
+
+        Ok(RunnerResult {
+            approval_required: false,
+            final_state: result.final_state,
+        })
     }
 
     async fn execute_fact_not_gov(
@@ -390,7 +549,7 @@ impl Runner {
         payload: &ValueWrapper,
         contract_name: &str,
         is_owner: bool,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         let Some(contract_runtime) = ctx
             .system()
             .get_helper::<Arc<ContractRuntime>>("contract_runtime")
@@ -417,32 +576,33 @@ impl Runner {
             module
         };
 
-        let (result, _stats) = contract_runtime
-            .execute(&module, state, init_state, payload, is_owner)
-            .map_err(map_runtime_error_to_runner_error)?;
+        let (result, _stats) = Self::execute_bounded(
+            contract_runtime,
+            module,
+            state.clone(),
+            init_state.clone(),
+            payload.clone(),
+            is_owner,
+        )
+        .await?;
 
-        if !result.success {
-            return Err(RunnerError::ContractFailed {
-                details: format!(
-                    "Contract execution in running was not successful: {}",
-                    result.error
-                ),
-            });
-        }
+        Self::map_fact_result(result)
+    }
 
-        Ok((
-            RunnerResult {
-                approval_required: false,
-                final_state: result.final_state,
-            },
-            vec![],
-        ))
+    /// Offline governance-fact execution: pure logic over the
+    /// pre-event governance state, no actor context needed. Used by
+    /// the off-chain tool to reproduce the voted outcome.
+    pub async fn execute_fact_gov_offline(
+        governance: GovernanceData,
+        event: ValueWrapper,
+    ) -> Result<RunnerResult, RunnerError> {
+        Self::execute_fact_gov(governance, &event).await
     }
 
     async fn execute_fact_gov(
         mut governance: GovernanceData,
         event: &ValueWrapper,
-    ) -> Result<(RunnerResult, Vec<SchemaType>), RunnerError> {
+    ) -> Result<RunnerResult, RunnerError> {
         let event: GovernanceEvent = serde_json::from_value(event.0.clone())
             .map_err(|e| RunnerError::InvalidEvent {
                 location: "execute_fact_gov",
@@ -470,19 +630,12 @@ impl Runner {
             }
         }
 
-        let add_change_schemas = if let Some(schema_event) = event.schemas {
-            let (add_schemas, remove_schemas, change_schemas) =
+        if let Some(schema_event) = event.schemas {
+            let (add_schemas, remove_schemas, _) =
                 Self::apply_schemas(&schema_event, &mut governance)?;
             governance.remove_schema(remove_schemas);
-            governance.add_schema(add_schemas.clone());
-
-            add_schemas
-                .union(&change_schemas)
-                .cloned()
-                .collect::<Vec<SchemaType>>()
-        } else {
-            vec![]
-        };
+            governance.add_schema(add_schemas);
+        }
 
         if let Some(roles_event) = event.roles {
             Self::check_roles(roles_event, &mut governance)?;
@@ -490,6 +643,14 @@ impl Runner {
 
         if let Some(policies_event) = event.policies {
             Self::check_policies(policies_event, &mut governance)?;
+        }
+
+        // Toolchain pin switch: one pin per version by construction.
+        // Unknown pins and no-op switches never reach here (the intake
+        // gate votes them `Error` first); this assignment only applies
+        // a pin every evaluator already accepted.
+        if let Some(pin) = event.toolchain {
+            governance.toolchain = pin;
         }
 
         if !governance.check_basic_gov() {
@@ -504,13 +665,10 @@ impl Runner {
 
         let mod_governance = governance.to_value_wrapper();
 
-        Ok((
-            RunnerResult {
-                final_state: mod_governance,
-                approval_required: true,
-            },
-            add_change_schemas,
-        ))
+        Ok(RunnerResult {
+            final_state: mod_governance,
+            approval_required: true,
+        })
     }
 
     fn check_policies(
@@ -599,6 +757,27 @@ impl Runner {
                     });
                 }
                 new_policies.validate = validate;
+            }
+
+            if let Some(compile) = gov.change.compile {
+                compile.check_values().map_err(|e| {
+                    RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::InvalidQuorum {
+                            context: "governance compile policy".to_owned(),
+                            details: e,
+                        },
+                    }
+                })?;
+                if compile == new_policies.compile {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "check_policies",
+                        kind: error::InvalidEventKind::SameValue {
+                            what: "governance compile policy".to_owned(),
+                        },
+                    });
+                }
+                new_policies.compile = compile;
             }
 
             governance.policies_gov = new_policies;
@@ -1472,47 +1651,94 @@ impl Runner {
 
 fn map_runtime_error_to_runner_error(error: RuntimeError) -> RunnerError {
     match error {
-        RuntimeError::EngineCreation(details)
-        | RuntimeError::PrecompileFailed(details)
-        | RuntimeError::DeserializationFailed(details) => {
-            RunnerError::WasmError {
-                operation: "compile module",
+        // The wasmtime engine itself cannot be built: the node is broken,
+        // not the contract — stays an internal error.
+        RuntimeError::EngineCreation(details) => RunnerError::WasmError {
+            operation: "create engine",
+            details,
+        },
+        // Resource limits whose ceiling derives from this machine's spec
+        // (memory, instantiation): another evaluator with more capacity may
+        // succeed, so the node casts no verdict instead of calling the
+        // request invalid.
+        RuntimeError::InstantiationFailed(details) => {
+            RunnerError::ResourceLimit {
+                operation: "instantiate",
                 details,
             }
         }
-        RuntimeError::InvalidModule(kind) => RunnerError::WasmError {
-            operation: "validate module",
-            details: kind.to_string(),
-        },
-        RuntimeError::EntryPointNotFound { function } => {
-            RunnerError::WasmError {
-                operation: "resolve entrypoint",
-                details: format!("entry point not found: {}", function),
-            }
-        }
-        RuntimeError::ContractExecutionFailed(details) => {
-            RunnerError::WasmError {
-                operation: "call entrypoint",
-                details,
-            }
-        }
-        RuntimeError::FuelLimitError(details) => RunnerError::WasmError {
-            operation: "set fuel",
-            details,
-        },
-        RuntimeError::InstantiationFailed(details) => RunnerError::WasmError {
-            operation: "instantiate",
-            details,
-        },
         RuntimeError::MemoryAllocationFailed(details) => {
-            RunnerError::MemoryError {
+            RunnerError::ResourceLimit {
                 operation: "contract memory operation",
                 details,
             }
         }
+        // These contexts deserialize bytes produced by the contract (its
+        // result buffers and final state): garbage there is a deterministic
+        // contract failure, not a node serialization problem.
+        RuntimeError::SerializationError { context, details }
+            if matches!(
+                context.as_str(),
+                "execution result" | "final state json" | "init check result"
+            ) =>
+        {
+            RunnerError::ContractFailed {
+                details: format!(
+                    "invalid contract output [{context}]: {details}"
+                ),
+            }
+        }
+        // Local (de)serialization of node data: internal error.
         RuntimeError::SerializationError { context, details } => {
             RunnerError::SerializationError { context, details }
         }
+        // Everything else is deterministic given the same artifact and the
+        // pinned engine: fuel is a fixed network-wide limit and module
+        // loading behaves identically on every evaluator, so all of them
+        // fail the same way. It is a contract failure (failed evaluation
+        // vote), never a node crash — a pathological contract must not take
+        // evaluators down.
+        RuntimeError::PrecompileFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("compile module: {}", details),
+            }
+        }
+        RuntimeError::DeserializationFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("load module: {}", details),
+            }
+        }
+        RuntimeError::InvalidModule(kind) => RunnerError::ContractFailed {
+            details: format!("validate module: {}", kind),
+        },
+        RuntimeError::EntryPointNotFound { function } => {
+            RunnerError::ContractFailed {
+                details: format!("entry point not found: {}", function),
+            }
+        }
+        RuntimeError::ContractExecutionFailed(details) => {
+            RunnerError::ContractFailed {
+                details: format!("execute contract: {}", details),
+            }
+        }
+        // Deterministic (same fuel budget on every node): a verdict
+        // on the contract, never an Unavailable for this node.
+        RuntimeError::OutOfFuel { consumed } => RunnerError::ContractFailed {
+            details: format!(
+                "contract ran out of fuel after consuming {consumed} units"
+            ),
+        },
+        // Wall-clock, not fuel: a slower machine hits this while a
+        // faster one completes, so the node steps down (unavailable)
+        // instead of voting against the contract.
+        RuntimeError::DeadlineExceeded => RunnerError::ResourceLimit {
+            operation: "contract execution wall-clock",
+            details: "contract did not finish within its wall-clock deadline"
+                .to_owned(),
+        },
+        RuntimeError::FuelLimitError(details) => RunnerError::ContractFailed {
+            details: format!("set fuel: {}", details),
+        },
     }
 }
 
@@ -1526,10 +1752,7 @@ impl Message for RunnerMessage {}
 
 #[derive(Debug, Clone)]
 pub enum RunnerResponse {
-    Ok {
-        result: RunnerResult,
-        compilations: Vec<SchemaType>,
-    },
+    Ok { result: RunnerResult },
     Error(RunnerError),
 }
 
@@ -1563,18 +1786,14 @@ impl Handler<Self> for Runner {
         ctx: &mut ActorContext<Self>,
     ) -> Result<RunnerResponse, ActorError> {
         match Self::execute_contract(ctx, &msg.data, msg.is_owner).await {
-            Ok((result, compilations)) => {
+            Ok(result) => {
                 debug!(
                     msg_type = "Execute",
                     approval_required = result.approval_required,
-                    compilations_count = compilations.len(),
                     is_owner = msg.is_owner,
                     "Contract executed successfully"
                 );
-                Ok(RunnerResponse::Ok {
-                    result,
-                    compilations,
-                })
+                Ok(RunnerResponse::Ok { result })
             }
             Err(e) => {
                 error!(
@@ -1586,5 +1805,131 @@ impl Handler<Self> for Runner {
                 Ok(RunnerResponse::Error(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use ave_common::identity::keys::{Ed25519Signer, KeyPair};
+    use ave_common::{Namespace, SchemaType};
+
+    use super::Runner;
+    use crate::evaluation::runner::error::{InvalidEventKind, RunnerError};
+
+    fn key() -> ave_common::identity::PublicKey {
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key()
+    }
+
+    fn schema() -> SchemaType {
+        SchemaType::Type("M".to_owned())
+    }
+
+    fn transfer_to(
+        holder: ave_common::identity::PublicKey,
+        grant: Namespace,
+        namespace: Namespace,
+    ) -> Result<super::types::RunnerResult, RunnerError> {
+        let old_owner = key();
+        let members = BTreeSet::from([holder.clone(), old_owner.clone()]);
+        let creators =
+            BTreeMap::from([(holder.clone(), BTreeSet::from([grant]))]);
+        Runner::execute_transfer_not_gov(
+            &members,
+            &creators,
+            &holder,
+            &old_owner,
+            namespace,
+            &schema(),
+        )
+    }
+
+    #[test]
+    fn transfer_creator_grant_is_exact() {
+        // Exact grant: passes the creator gate.
+        assert!(
+            transfer_to(
+                key(),
+                Namespace::from("org.A.records.R1"),
+                Namespace::from("org.A.records.R1"),
+            )
+            .is_ok()
+        );
+        // Parent grant for a child subject: rejected (Creator covers
+        // exactly its namespace; hierarchy is for serving roles).
+        let holder = key();
+        let err = transfer_to(
+            holder,
+            Namespace::from("org.A.records"),
+            Namespace::from("org.A.records.R1"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RunnerError::InvalidEvent {
+                kind: InvalidEventKind::MissingRole { .. },
+                ..
+            }
+        ));
+    }
+
+    /// Slow contract (host-call loop) hits the wall-clock deadline:
+    /// the runner reports `ResourceLimit` (node steps down,
+    /// `Unavailable`), never a `ContractFailed` vote against it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_contract_deadline_is_unavailable_not_verdict() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use ave_common::ValueWrapper;
+        use ave_contract_sdk::runtime::ContractRuntime;
+
+        // Host-call loop: ms of wall time per negligible fuel, so the
+        // epoch deadline (not fuel) fires. Same shape as the SDK's own
+        // deadline test.
+        let wat = r#"(module
+            (import "env" "pointer_len" (func (param i32) (result i32)))
+            (import "env" "alloc" (func (param i32) (result i32)))
+            (import "env" "read_bytes" (func (param i32 i32 i32)))
+            (import "env" "write_bytes" (func (param i32 i32 i32)))
+            (memory (export "memory") 64)
+            (func (export "main_function") (param i32 i32 i32 i32) (result i32)
+                (local $buf i32)
+                (local.set $buf (call 1 (i32.const 1048576)))
+                (loop $again
+                    (call 3 (local.get $buf) (local.get $buf) (i32.const 1048576))
+                    (br $again))
+                i32.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).expect("test wat must parse");
+        let runtime =
+            Arc::new(ContractRuntime::new(None).expect("runtime must build"));
+        let (module, _) =
+            runtime.compile(&wasm).expect("test module must compile");
+        let module = Arc::new(module);
+        let null = ValueWrapper(serde_json::Value::Null);
+
+        super::Runner::set_test_wall_timeout_for_tests(Duration::from_millis(
+            300,
+        ));
+        let err = match super::Runner::execute_bounded(
+            Arc::clone(&runtime),
+            Arc::clone(&module),
+            null.clone(),
+            null.clone(),
+            null.clone(),
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("loop must hit the wall-clock deadline"),
+            Err(e) => e,
+        };
+        super::Runner::set_test_wall_timeout_for_tests(Duration::from_secs(60));
+        assert!(
+            matches!(err, RunnerError::ResourceLimit { .. }),
+            "deadline must be ResourceLimit (Unavailable), never a vote: {err:?}"
+        );
     }
 }

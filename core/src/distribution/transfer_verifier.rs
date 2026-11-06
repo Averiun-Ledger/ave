@@ -4,7 +4,9 @@ use std::sync::Arc;
 use ave_actors::{ActorContext, ActorError};
 use ave_common::{
     Namespace, SchemaType,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey, Signed},
+    identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
+    },
     request::EventRequest,
 };
 
@@ -93,6 +95,8 @@ impl TransferVerifier {
             propierties_hash: propierties_hash.clone(),
             event_request_hash: event_request_hash.clone(),
             viewpoints_hash: viewpoints_hash.clone(),
+            // Transfers never carry an approval requirement.
+            approval_data_hash: None,
         };
 
         for signature in validation.validators_signatures.iter() {
@@ -114,6 +118,22 @@ impl TransferVerifier {
                 });
             }
         };
+
+        // 2b. Bind the quorum attestation to the presented request: the
+        // validator signatures above cover the stored request hash, so
+        // recompute it from the presented request. Without this, a valid
+        // quorum block from another event could back a different Transfer.
+        let recomputed_request_hash =
+            hash_borsh(&*self.hash.hasher(), event_request).map_err(|e| {
+                DistributorError::TransferEventInvalid {
+                    details: format!("request hash failed: {}", e),
+                }
+            })?;
+        if recomputed_request_hash != *event_request_hash {
+            return Err(DistributorError::TransferEventInvalid {
+                details: "event request hash mismatch".to_string(),
+            });
+        }
 
         // 3. Verificar firma del ledger_seal.
         let protocols_hash = transfer_event
@@ -277,6 +297,13 @@ impl TransferVerifier {
             .verify_light(ctx, transfer_event, subject_id, first_ledger)
             .await?;
 
+        // No sn-vs-batch gate here: the sender fetches the pending
+        // transfer separately from the offered window by design
+        // (`build_distribution_batch`), so a transfer ahead of the
+        // batch is the normal case, not an attack. The binding is the
+        // cryptographic verification above (seal + quorum + subject):
+        // a transfer that passes it is authentic, and the receiver
+        // still applies events strictly in order downstream.
         let (schema_id, namespace) = match subject_data {
             Some(SubjectData::Tracker {
                 schema_id,

@@ -21,6 +21,8 @@ use utoipa::{IntoParams, ToSchema};
 pub struct SubjectQuery {
     pub active: Option<bool>,
     pub schema_id: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Query flags for manually updating a subject.
@@ -42,6 +44,8 @@ pub struct UpdateSubjectQuery {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct GovQuery {
     pub active: Option<bool>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Filters approvals by state.
@@ -52,6 +56,19 @@ pub struct GovQuery {
 #[cfg_attr(feature = "typescript", ts(export))]
 pub struct ApprovalQuery {
     pub state: Option<ApprovalState>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+/// Plain limit/offset page for list endpoints without filters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ListQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Pagination and time filters for event queries.
@@ -143,6 +160,57 @@ pub struct AbortsQuery {
     pub reverse: Option<bool>,
 }
 
+/// Filters for watchdog incident queries (all optional; newest
+/// first, capped server-side).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct IncidentsQuery {
+    pub phase: Option<String>,
+    /// Nanosecond bounds. Query text is exact end to end, so serde
+    /// stays numeric; the TypeScript type is a string so clients are
+    /// forced to send exact digits instead of lossy JS numbers.
+    #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
+    pub from_nanos: Option<u64>,
+    #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
+    pub to_nanos: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+/// Cap for actor-tree snapshots: the tree is an ops/debugging view,
+/// not a paginated ledger, so it allows a larger single response
+/// than [`crate::bridge`] list endpoints but never unbounded.
+pub const MAX_TREE_LIMIT: u64 = 5000;
+
+/// Default actor-tree snapshot size when the caller passes no `limit`.
+pub const DEFAULT_TREE_LIMIT: u64 = 5000;
+
+/// Filters for the actor-tree endpoint (all optional; prunes the
+/// live supervision forest server-side and flags truncation).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeQuery {
+    pub subject: Option<String>,
+    pub limit: Option<u64>,
+}
+
+/// Filters for the sink deliveries audit (all optional; no filter
+/// returns every known sink/subject position).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkDeliveriesQuery {
+    pub subject: Option<String>,
+    pub sink: Option<String>,
+}
+
 /// Query for retrieving the first or last events of a subject.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema, IntoParams))]
@@ -225,6 +293,31 @@ impl Display for ApprovalStateRes {
         };
         write!(f, "{}", string,)
     }
+}
+
+/// Manual approval decision bound to the exact reviewed request.
+///
+/// The three expected coordinates identify the pending collection:
+/// any accepted replacement changes at least one of them, so a stale
+/// decision conflicts instead of voting wrong.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct PatchApproval {
+    /// Accept or reject the pending request.
+    pub state: ApprovalStateRes,
+    /// Collection request id seen when consulting.
+    pub expected_request_id: String,
+    /// Collection version seen when consulting.
+    pub expected_version: u64,
+    /// Request `issued_at` (nanoseconds) seen when consulting.
+    ///
+    /// Decimal string on the wire (see `quoted_u64`).
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub expected_issued_at: u64,
 }
 
 #[derive(

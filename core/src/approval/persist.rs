@@ -1,25 +1,26 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     ActorMessage, NetworkMessage,
     approval::types::VotationType,
     db::Storable,
     governance::data::GovernanceData,
-    helpers::network::service::NetworkSender,
+    helpers::network::{delivery_of, service::NetworkSender},
     model::common::{
         crash_system,
         node::{SignTypesNode, UpdateData, get_sign, update_ledger_network},
         purge_storage,
         subject::get_metadata,
     },
-    subject::RequestSubjectData,
+    subject::{Metadata, RequestSubjectData},
+    validation::worker::{ValiWorker, ValiWorkerMessage},
 };
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::{
     Namespace, SchemaType,
     bridge::request::{ApprovalState, ApprovalStateRes},
@@ -32,9 +33,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
 
-use super::{
-    Approval, ApprovalMessage, request::ApprovalReq, response::ApprovalRes,
-};
+use super::{request::ApprovalReq, response::ApprovalRes};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprPersist {
@@ -52,18 +51,38 @@ pub struct ApprPersist {
     version: u64,
     state: Option<ApprovalState>,
     request: Option<Signed<ApprovalReq>>,
+    /// Validators that asked for this vote and the actor path each one
+    /// listens on: every registered asker receives the vote once cast.
+    askers: Vec<(PublicKey, String)>,
+    /// Current validator set of the governance: pushed by the parent
+    /// governance actor on creation and on every governance change.
+    /// Not persisted; the version negotiation in `check_governance`
+    /// guarantees it is not stale when a request is gated.
+    #[serde(skip)]
+    validators: HashSet<PublicKey>,
+    /// Validator appointed to (re)send a full request missed by
+    /// hash-only probes, with the count of pings seen without the
+    /// request arriving. Volatile: a restart simply appoints the next
+    /// pinger.
+    #[serde(skip)]
+    needfull_supplier: Option<(PublicKey, u8)>,
 }
+
+/// Unanswered supplier pings before rotating to the next validator.
+const NEEDFULL_ROTATE_AFTER: u8 = 2;
 
 impl BorshSerialize for ApprPersist {
     fn serialize<W: std::io::Write>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        // Serialize only the fields we want to persist, skipping 'owner'
+        // Serialize only the persisted fields (request id, version,
+        // state, request and askers); live-only maps stay in memory.
         BorshSerialize::serialize(&self.request_id, writer)?;
         BorshSerialize::serialize(&self.version, writer)?;
         BorshSerialize::serialize(&self.state, writer)?;
         BorshSerialize::serialize(&self.request, writer)?;
+        BorshSerialize::serialize(&self.askers, writer)?;
 
         Ok(())
     }
@@ -79,6 +98,7 @@ impl BorshDeserialize for ApprPersist {
         let state = Option::<ApprovalState>::deserialize_reader(reader)?;
         let request =
             Option::<Signed<ApprovalReq>>::deserialize_reader(reader)?;
+        let askers = Vec::<(PublicKey, String)>::deserialize_reader(reader)?;
 
         let node_key = PublicKey::default();
         let our_key = Arc::new(PublicKey::default());
@@ -94,7 +114,10 @@ impl BorshDeserialize for ApprPersist {
             pass_votation,
             state,
             request,
+            askers,
             node_key,
+            validators: HashSet::new(),
+            needfull_supplier: None,
         })
     }
 }
@@ -105,28 +128,41 @@ pub struct InitApprPersist {
     pub subject_id: DigestIdentifier,
     pub pass_votation: VotationType,
     pub helpers: (HashAlgorithm, Arc<NetworkSender>),
+    pub validators: HashSet<PublicKey>,
+}
+
+/// Outcome of the governance version check against an approval request.
+enum GovernanceCheck {
+    /// Versions match: the approver can vote.
+    CanVote,
+    /// The approver is behind the request's governance version: it can
+    /// not vote until it updates (the update is requested by the check).
+    Behind,
+    /// The approver is ahead: the requester built the request on a stale
+    /// governance and the request must abort. Carries the reason.
+    Ahead(String),
 }
 
 impl ApprPersist {
+    /// Checks the local governance version against the request one.
     async fn check_governance(
         &self,
-        ctx: &mut ActorContext<Self>,
-        governance_id: &DigestIdentifier,
+        metadata: &Metadata,
         gov_version: u64,
-    ) -> Result<Option<String>, ActorError> {
+    ) -> Result<GovernanceCheck, ActorError> {
         let Some((.., network)) = &self.helpers else {
             return Err(ActorError::FunctionalCritical {
                 description: "Helpers are None".to_owned(),
             });
         };
 
-        let metadata = get_metadata(ctx, governance_id).await?;
         let governance =
             match GovernanceData::try_from(metadata.properties.clone()) {
                 Ok(gov) => gov,
                 Err(e) => {
                     error!(
-                        governance_id = %governance_id,
+                        msg_type = "Init",
+                        subject_id = %metadata.subject_id,
                         error = %e,
                         "Failed to convert governance from properties"
                     );
@@ -144,31 +180,35 @@ impl ApprPersist {
                 // If it is the same it means that we have the latest version of governance, we are up to date.
             }
             std::cmp::Ordering::Greater => {
-                // Me llega una versión mayor a la mía.
+                // Received a higher version than ours.
                 let data = UpdateData {
                     sn: metadata.sn,
                     gov_version: governance.version,
-                    subject_id: governance_id.clone(),
+                    subject_id: metadata.subject_id.clone(),
                     other_node: self.node_key.clone(),
                 };
                 update_ledger_network(data, network.clone()).await?;
+                return Ok(GovernanceCheck::Behind);
             }
             std::cmp::Ordering::Less => {
-                return Ok(Some(format!(
+                return Ok(GovernanceCheck::Ahead(format!(
                     "Abort approval, governance update is required by signer: local={}, request={}",
                     governance.version, gov_version
                 )));
             }
         }
 
-        Ok(None)
+        Ok(GovernanceCheck::CanVote)
     }
 
+    /// Signs the response and routes it to the asking validator: a tell
+    /// to its local worker actor when the asker is this node, a network
+    /// message otherwise.
     async fn send_signed_response(
         &self,
         ctx: &mut ActorContext<Self>,
         response: ApprovalRes,
-        request: &Signed<ApprovalReq>,
+        asker: &(PublicKey, String),
         request_id: &str,
         version: u64,
     ) -> Result<(), ActorError> {
@@ -180,47 +220,50 @@ impl ApprPersist {
 
         let sign_type = SignTypesNode::ApprovalRes(Box::new(response.clone()));
         let signature = get_sign(ctx, sign_type).await?;
+        let signed_response: Signed<ApprovalRes> =
+            Signed::from_parts(response, signature);
 
-        let subject_id = request.content().subject_id.clone();
-        if self.node_key == *self.our_key {
-            let approval_actor = ctx
+        if asker.0 == *self.our_key {
+            match ctx
                 .system()
-                .get_actor::<Approval>(&ActorPath::from(&format!(
-                    "/user/request/{}/approval",
-                    ctx.path().parent().key()
-                )))
-                .await;
-            if let Ok(approval_actor) = approval_actor {
-                approval_actor
-                    .tell(ApprovalMessage::Response {
-                        approval_res: response,
-                        sender: (*self.our_key).clone(),
-                        signature: Some(signature),
-                    })
-                    .await?;
+                .get_actor::<ValiWorker>(&ActorPath::from(&asker.1))
+                .await
+            {
+                Ok(worker) => {
+                    worker
+                        .tell(ValiWorkerMessage::ApprovalResponse {
+                            approval_res: Box::new(signed_response),
+                            request_id: request_id.to_owned(),
+                            version,
+                            sender: (*self.our_key).clone(),
+                        })
+                        .await?;
+                }
+                Err(e) => {
+                    // The collecting validator is gone: the vote is moot.
+                    debug!(
+                        msg_type = "Response",
+                        error = %e,
+                        asker_actor = %asker.1,
+                        "Validator worker not found, dropping approval response"
+                    );
+                }
             }
         } else {
-            let signed_response: Signed<ApprovalRes> =
-                Signed::from_parts(response, signature);
-
             let new_info = ComunicateInfo {
-                receiver: self.node_key.clone(),
-                request_id: request_id.to_string(),
+                receiver: asker.0.clone(),
+                request_id: request_id.to_owned(),
                 version,
-                receiver_actor: format!(
-                    "/user/request/{}/approval/{}",
-                    subject_id, self.our_key
-                ),
+                receiver_actor: asker.1.clone(),
             };
 
+            let message = ActorMessage::ApprovalRes {
+                res: Box::new(signed_response),
+            };
             if let Err(e) = network
                 .send_command(ave_network::CommandHelper::SendMessage {
-                    message: NetworkMessage {
-                        info: new_info,
-                        message: ActorMessage::ApprovalRes {
-                            res: Box::new(signed_response),
-                        },
-                    },
+                    delivery: delivery_of(&message),
+                    message: NetworkMessage::new(new_info, message),
                 })
                 .await
             {
@@ -236,6 +279,7 @@ impl ApprPersist {
         ctx: &mut ActorContext<Self>,
         request: &Signed<ApprovalReq>,
         response: bool,
+        asker: &(PublicKey, String),
         request_id: &str,
         version: u64,
     ) -> Result<(), ActorError> {
@@ -273,7 +317,7 @@ impl ApprPersist {
             agrees: response,
             req_subject_data_hash,
         };
-        self.send_signed_response(ctx, res, request, request_id, version)
+        self.send_signed_response(ctx, res, asker, request_id, version)
             .await
     }
 }
@@ -282,24 +326,42 @@ impl ApprPersist {
 pub enum ApprPersistMessage {
     MakeObsolete,
     PurgeStorage,
-    // Mensaje para aprobar localmente
-    LocalApproval {
-        request_id: DigestIdentifier,
-        version: u64,
-        approval_req: Signed<ApprovalReq>,
-    },
-    // Mensaje para pedir aprobación desde el helper y devolver ahi
+    // Message to request approval from the helper and return there
     NetworkRequest {
         approval_req: Signed<ApprovalReq>,
         info: ComunicateInfo,
         sender: PublicKey,
+        /// Actor path the asking validator listens on for the vote.
+        asker_actor: String,
+    },
+    /// A validator re-probes without the full request: answer from the
+    /// stored request, or appoint it as the supplier of the missing
+    /// full request (see `NeedFull`).
+    HashPing {
+        approval_req_hash: DigestIdentifier,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        /// Actor path the asking validator listens on for the vote.
+        asker_actor: String,
     },
     GetApproval {
         state: Option<ApprovalState>,
     },
     ChangeResponse {
         response: ApprovalStateRes,
-    }, // Necesito poder emitir un evento de aprobación, no solo el automático
+        /// Collection request id the operator reviewed.
+        expected_request_id: String,
+        /// Collection version the operator reviewed.
+        expected_version: u64,
+        /// Request `issued_at` the operator reviewed, in nanoseconds.
+        expected_issued_at: u64,
+    }, // Emit an approval event, not just the automatic one
+    /// The parent governance pushes the current validator set on every
+    /// governance change.
+    Update {
+        validators: HashSet<PublicKey>,
+        node_key: PublicKey,
+    },
 }
 
 impl Message for ApprPersistMessage {
@@ -321,6 +383,14 @@ pub enum ApprPersistEvent {
         version: u64,
         request: Box<Signed<ApprovalReq>>,
         state: ApprovalState,
+        /// First validator that asked for this vote; a new collection
+        /// resets the asker list to it.
+        asker: (PublicKey, String),
+    },
+    /// Another validator asked for the same vote.
+    AddAsker {
+        key: PublicKey,
+        actor: String,
     },
 }
 
@@ -331,6 +401,16 @@ pub enum ApprPersistResponse {
     Approval {
         request: ApprovalReq,
         state: ApprovalState,
+        request_id: String,
+        version: u64,
+    },
+    /// The pending request changed between consult and vote: the
+    /// stored coordinates identify what the vote would have hit.
+    /// No vote was cast and no state changed.
+    Conflict {
+        request_id: String,
+        version: u64,
+        issued_at: u64,
     },
 }
 
@@ -366,6 +446,7 @@ impl Actor for ApprPersist {
             .await
         {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize approver store"
             );
@@ -395,26 +476,51 @@ impl Handler<Self> for ApprPersist {
 
                 return Ok(ApprPersistResponse::Ok);
             }
+            ApprPersistMessage::Update {
+                validators,
+                node_key,
+            } => {
+                self.validators = validators;
+                self.node_key = node_key;
+
+                // A governance change obsoletes a still-pending vote:
+                // it was cast against the previous role set.
+                if self.state == Some(ApprovalState::Pending) {
+                    self.on_event(
+                        ApprPersistEvent::ChangeState {
+                            state: ApprovalState::Obsolete,
+                        },
+                        ctx,
+                    )
+                    .await;
+                }
+
+                debug!(
+                    msg_type = "Update",
+                    subject_id = %self.subject_id,
+                    validators = self.validators.len(),
+                    "Approver validator set updated"
+                );
+
+                return Ok(ApprPersistResponse::Ok);
+            }
             ApprPersistMessage::GetApproval { state } => {
                 let res = if let Some(req) = &self.request
                     && let Some(req_state) = &self.state
                 {
-                    state.map_or_else(
-                        || ApprPersistResponse::Approval {
-                            request: req.content().clone(),
-                            state: req_state.clone(),
-                        },
-                        |query| {
-                            if &query == req_state {
-                                ApprPersistResponse::Approval {
-                                    request: req.content().clone(),
-                                    state: query,
-                                }
-                            } else {
-                                ApprPersistResponse::Ok
-                            }
-                        },
-                    )
+                    let entry = || ApprPersistResponse::Approval {
+                        request: req.content().clone(),
+                        state: req_state.clone(),
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                    };
+                    state.map_or_else(entry, |query| {
+                        if &query == req_state {
+                            entry()
+                        } else {
+                            ApprPersistResponse::Ok
+                        }
+                    })
                 } else {
                     ApprPersistResponse::Ok
                 };
@@ -443,7 +549,12 @@ impl Handler<Self> for ApprPersist {
                     );
                 }
             }
-            ApprPersistMessage::ChangeResponse { response } => {
+            ApprPersistMessage::ChangeResponse {
+                response,
+                expected_request_id,
+                expected_version,
+                expected_issued_at,
+            } => {
                 let Some(state) = self.state.clone() else {
                     warn!(
                         msg_type = "ChangeResponse",
@@ -466,6 +577,42 @@ impl Handler<Self> for ApprPersist {
                     });
                 }
 
+                let Some(approval_req) = self.request.clone() else {
+                    error!(
+                        msg_type = "ChangeResponse",
+                        "Approval request not found"
+                    );
+                    return Err(ActorError::Functional {
+                        description: "Can not get approval request".to_owned(),
+                    });
+                };
+
+                // Compare-and-swap: the vote lands only on the exact
+                // request the operator reviewed. Any accepted
+                // replacement changes at least one coordinate, so a
+                // stale decision conflicts instead of signing the
+                // wrong patch. Same handler that persists the vote, so
+                // consult and vote cannot interleave here.
+                if self.request_id != expected_request_id
+                    || self.version != expected_version
+                    || approval_req.content().issued_at.as_nanos()
+                        != expected_issued_at
+                {
+                    warn!(
+                        msg_type = "ChangeResponse",
+                        expected_request_id = %expected_request_id,
+                        expected_version = expected_version,
+                        stored_request_id = %self.request_id,
+                        stored_version = self.version,
+                        "Manual vote targets a superseded approval request"
+                    );
+                    return Ok(ApprPersistResponse::Conflict {
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                        issued_at: approval_req.content().issued_at.as_nanos(),
+                    });
+                }
+
                 if state == ApprovalState::Pending {
                     let (response, state) =
                         if ApprovalStateRes::Accepted == response {
@@ -474,155 +621,91 @@ impl Handler<Self> for ApprPersist {
                             (false, ApprovalState::Rejected)
                         };
 
-                    let Some(approval_req) = self.request.clone() else {
-                        error!(
-                            msg_type = "ChangeResponse",
-                            "Approval request not found"
-                        );
-                        return Err(ActorError::Functional {
-                            description: "Can not get approval request"
-                                .to_owned(),
-                        });
-                    };
-
-                    if let Err(e) = self
-                        .send_response(
-                            ctx,
-                            &approval_req,
-                            response,
-                            &self.request_id.to_string(),
-                            self.version,
-                        )
-                        .await
-                    {
-                        error!(
-                            msg_type = "ChangeResponse",
-                            error = %e,
-                            "Failed to send approval response"
-                        );
-                        return Err(crash_system(ctx, e).await);
-                    };
-
+                    // Persist before emitting: a crash between the vote
+                    // and the state write must not allow a second,
+                    // contradictory signed vote (same order as
+                    // `NetworkRequest`).
                     debug!(
                         msg_type = "ChangeResponse",
                         new_state = ?state,
                         "State changed successfully"
                     );
 
-                    self.on_event(ApprPersistEvent::ChangeState { state }, ctx)
-                        .await;
-                }
-            }
-            // aprobar si esta por defecto
-            ApprPersistMessage::LocalApproval {
-                request_id,
-                version,
-                approval_req,
-            } => {
-                if request_id.to_string() != self.request_id
-                    || version != self.version
-                {
-                    let state =
-                        if self.pass_votation == VotationType::AlwaysAccept {
-                            if let Err(e) = self
-                                .send_response(
-                                    ctx,
-                                    &approval_req,
-                                    true,
-                                    &request_id.to_string(),
-                                    version,
-                                )
-                                .await
-                            {
-                                error!(
-                                    msg_type = "LocalApproval",
-                                    error = %e,
-                                    "Failed to send approval response"
-                                );
-                                return Err(crash_system(ctx, e).await);
-                            }
-
-                            ApprovalState::Accepted
-                        } else {
-                            ApprovalState::Pending
-                        };
-
-                    debug!(
-                        msg_type = "LocalApproval",
-                        request_id = %request_id,
-                        version = version,
-                        new_state = ?state,
-                        "New approval request processed"
-                    );
-
                     self.on_event(
-                        ApprPersistEvent::SafeState {
-                            subject_id: self.subject_id.clone(),
-                            version,
-                            request_id: request_id.to_string(),
-                            request: Box::new(approval_req),
-                            state,
+                        ApprPersistEvent::ChangeState {
+                            state: state.clone(),
                         },
                         ctx,
                     )
                     .await;
-                } else if let Some(state) = self.state.clone() {
-                    let response = if state == ApprovalState::Accepted {
-                        true
-                    } else if state == ApprovalState::Rejected {
-                        false
-                    } else {
-                        return Ok(ApprPersistResponse::Ok);
-                    };
 
-                    if let Err(e) = self
-                        .send_response(
-                            ctx,
-                            &approval_req,
-                            response,
-                            &request_id.to_string(),
-                            version,
-                        )
-                        .await
-                    {
-                        error!(
-                            msg_type = "LocalApproval",
-                            error = %e,
-                            "Failed to resend approval response"
-                        );
-                        return Err(crash_system(ctx, e).await);
+                    // Every validator that asked for this vote receives
+                    // it once cast.
+                    for asker in self.askers.clone() {
+                        if let Err(e) = self
+                            .send_response(
+                                ctx,
+                                &approval_req,
+                                response,
+                                &asker,
+                                &self.request_id.clone(),
+                                self.version,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "ChangeResponse",
+                                error = %e,
+                                asker = %asker.0,
+                                "Failed to send approval response"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        };
                     }
 
-                    debug!(
-                        msg_type = "LocalApproval",
-                        request_id = %request_id,
-                        version = version,
-                        "Response resent successfully"
-                    );
+                    return Ok(ApprPersistResponse::Approval {
+                        request: approval_req.content().clone(),
+                        state,
+                        request_id: self.request_id.clone(),
+                        version: self.version,
+                    });
                 }
+
+                // Repeating the same decision on the same request is
+                // idempotent: echo the persisted vote without signing
+                // again.
+                return Ok(ApprPersistResponse::Approval {
+                    request: approval_req.content().clone(),
+                    state,
+                    request_id: self.request_id.clone(),
+                    version: self.version,
+                });
             }
             ApprPersistMessage::NetworkRequest {
                 approval_req,
                 info,
                 sender,
+                asker_actor,
             } => {
-                if sender != approval_req.signature().signer
-                    || sender != self.node_key
-                {
-                    warn!(
-                        msg_type = "NetworkRequest",
-                        expected_sender = %self.node_key,
-                        received_sender = %sender,
-                        "Unexpected sender"
-                    );
-                    return Ok(ApprPersistResponse::Ok);
-                }
-
                 if info.request_id != self.request_id
                     || info.version != self.version
                 {
+                    // Free gates first: a mismatched subject is dropped
+                    // before burning a signature verification. Everything
+                    // below stays after the verify on purpose: denials
+                    // are signed responses, so they must only answer an
+                    // owner-signed request.
+                    if approval_req.content().subject_id != self.subject_id {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            subject_id = %approval_req.content().subject_id,
+                            "Approval request for another subject"
+                        );
+                        return Ok(ApprPersistResponse::Ok);
+                    }
+
                     if let Err(e) = approval_req.verify() {
-                        error!(
+                        warn!(
                             msg_type = "NetworkRequest",
                             error = %e,
                             "Invalid approval signature"
@@ -635,10 +718,32 @@ impl Handler<Self> for ApprPersist {
                         });
                     }
 
-                    let governance_check = match self
+                    let metadata =
+                        match get_metadata(ctx, &self.subject_id).await {
+                            Ok(metadata) => metadata,
+                            Err(e) => {
+                                warn!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to get subject metadata"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
+                        };
+
+                    if approval_req.signature().signer != metadata.owner {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            signer = %approval_req.signature().signer,
+                            owner = %metadata.owner,
+                            "Approval request signer is not the subject owner"
+                        );
+                        return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    let check = match self
                         .check_governance(
-                            ctx,
-                            &approval_req.content().subject_id,
+                            &metadata,
                             approval_req.content().gov_version,
                         )
                         .await
@@ -654,12 +759,28 @@ impl Handler<Self> for ApprPersist {
                         }
                     };
 
-                    if let Some(reason) = governance_check {
+                    let asker = (sender.clone(), asker_actor);
+
+                    let deny_response = match check {
+                        GovernanceCheck::CanVote => None,
+                        GovernanceCheck::Behind => {
+                            Some(ApprovalRes::Unavailable)
+                        }
+                        GovernanceCheck::Ahead(reason) => {
+                            Some(ApprovalRes::Abort(reason))
+                        }
+                    };
+
+                    // Denials are answered before the validator gate on
+                    // purpose: they signal a version mismatch, and a
+                    // stale or newer asker may legitimately be absent
+                    // from the current validator set.
+                    if let Some(response) = deny_response {
                         if let Err(e) = self
                             .send_signed_response(
                                 ctx,
-                                ApprovalRes::Abort(reason),
-                                &approval_req,
+                                response,
+                                &asker,
                                 &info.request_id,
                                 info.version,
                             )
@@ -668,12 +789,110 @@ impl Handler<Self> for ApprPersist {
                             error!(
                                 msg_type = "NetworkRequest",
                                 error = %e,
-                                "Failed to send approval abort response"
+                                "Failed to send approval deny response"
                             );
                             return Err(crash_system(ctx, e).await);
                         }
 
                         return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    // Only a current validator of the governance may ask
+                    // for votes. The set is pushed by the parent
+                    // governance on every change; the version negotiation
+                    // above guarantees it is not stale here.
+                    if !self.validators.contains(&sender) {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            sender = %sender,
+                            "Approval request from a non-validator"
+                        );
+                        return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    // Replay guard: with the governance version matched,
+                    // a live approval request always targets the next
+                    // event of the subject; an older sequence is a
+                    // replay of a committed or superseded request and
+                    // must not overwrite the persisted state. The asker
+                    // is told it was superseded so its collection
+                    // reboots with fresh coordinates instead of
+                    // retrying a sequence that can never be stored.
+                    if approval_req.content().sn <= metadata.sn {
+                        warn!(
+                            msg_type = "NetworkRequest",
+                            sn = approval_req.content().sn,
+                            subject_sn = metadata.sn,
+                            "Approval request for an already committed sequence"
+                        );
+                        if let Err(e) = self
+                            .send_signed_response(
+                                ctx,
+                                ApprovalRes::Superseded,
+                                &asker,
+                                &info.request_id,
+                                info.version,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "NetworkRequest",
+                                error = %e,
+                                "Failed to send superseded response"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        }
+                        return Ok(ApprPersistResponse::Ok);
+                    }
+
+                    // Freshness guard: a delayed request older than the
+                    // persisted one (earlier issued_at, then older
+                    // version, then request id as the tie-breaker) must
+                    // never overwrite the newer state. The loser is told
+                    // it was superseded so its collection reboots with
+                    // fresh coordinates instead of retrying a request
+                    // that can never be stored.
+                    if !self.request_id.is_empty() {
+                        let incoming = (
+                            approval_req.content().issued_at.as_nanos(),
+                            info.version,
+                            info.request_id.as_str(),
+                        );
+                        let stored = (
+                            self.request.as_ref().map_or(0, |request| {
+                                request.content().issued_at.as_nanos()
+                            }),
+                            self.version,
+                            self.request_id.as_str(),
+                        );
+                        if incoming <= stored {
+                            warn!(
+                                msg_type = "NetworkRequest",
+                                stored_request_id = %self.request_id,
+                                stored_version = self.version,
+                                incoming_request_id = %info.request_id,
+                                incoming_version = info.version,
+                                "Stale approval request ignored"
+                            );
+                            if let Err(e) = self
+                                .send_signed_response(
+                                    ctx,
+                                    ApprovalRes::Superseded,
+                                    &asker,
+                                    &info.request_id,
+                                    info.version,
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to send superseded response"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
+                            return Ok(ApprPersistResponse::Ok);
+                        }
                     }
 
                     let state =
@@ -690,29 +909,55 @@ impl Handler<Self> for ApprPersist {
                             version: info.version,
                             request: Box::new(approval_req.clone()),
                             state: state.clone(),
+                            asker: asker.clone(),
                         },
                         ctx,
                     )
                     .await;
 
-                    if state == ApprovalState::Accepted
-                        && let Err(e) = self
-                            .send_response(
-                                ctx,
-                                &approval_req,
-                                true,
-                                &info.request_id,
-                                info.version,
-                            )
-                            .await
-                    {
-                        error!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to send approval response"
-                        );
-                        return Err(crash_system(ctx, e).await);
-                    };
+                    match state {
+                        ApprovalState::Accepted => {
+                            if let Err(e) = self
+                                .send_response(
+                                    ctx,
+                                    &approval_req,
+                                    true,
+                                    &asker,
+                                    &info.request_id,
+                                    info.version,
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to send approval response"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            };
+                        }
+                        _ => {
+                            // Manual voting: the asker is told the vote
+                            // is pending instead of being kept waiting.
+                            if let Err(e) = self
+                                .send_signed_response(
+                                    ctx,
+                                    ApprovalRes::Pending,
+                                    &asker,
+                                    &info.request_id,
+                                    info.version,
+                                )
+                                .await
+                            {
+                                error!(
+                                    msg_type = "NetworkRequest",
+                                    error = %e,
+                                    "Failed to send approval pending response"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            };
+                        }
+                    }
 
                     debug!(
                         msg_type = "NetworkRequest",
@@ -722,70 +967,225 @@ impl Handler<Self> for ApprPersist {
                         "Network approval request processed"
                     );
                 } else if !self.request_id.is_empty() {
-                    let state = if let Some(state) = self.state.clone() {
-                        state
-                    } else {
+                    // A validator re-asking for the same collection (a
+                    // probe retry or a replacement validator): the same
+                    // gate as the first delivery applies, against the
+                    // current validator set pushed by the governance.
+                    if !self.validators.contains(&sender) {
                         warn!(
                             msg_type = "NetworkRequest",
-                            "Approval state not found"
+                            sender = %sender,
+                            "Approval re-ask from a non-validator"
                         );
-                        let e = ActorError::FunctionalCritical {
-                            description: "Can not get state".to_owned(),
-                        };
-                        return Err(crash_system(ctx, e).await);
-                    };
-
-                    let response = if ApprovalState::Accepted == state {
-                        true
-                    } else if ApprovalState::Rejected == state {
-                        false
-                    } else {
                         return Ok(ApprPersistResponse::Ok);
-                    };
+                    }
 
-                    let approval_req =
-                        if let Some(approval_req) = self.request.clone() {
-                            approval_req
-                        } else {
-                            error!(
-                                msg_type = "NetworkRequest",
-                                "Approval request not found"
-                            );
-                            let e = ActorError::FunctionalCritical {
-                                description: "Can not get approve request"
-                                    .to_owned(),
-                            };
-                            return Err(crash_system(ctx, e).await);
-                        };
-
-                    if let Err(e) = self
-                        .send_response(
-                            ctx,
-                            &approval_req,
-                            response,
-                            &self.request_id.to_string(),
-                            self.version,
-                        )
-                        .await
-                    {
-                        error!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to resend approval response"
-                        );
-                        return Err(crash_system(ctx, e).await);
-                    };
-
-                    debug!(
-                        msg_type = "NetworkRequest",
-                        request_id = %self.request_id,
-                        version = self.version,
-                        "Response resent successfully"
+                    self.resend_stored_answer(
+                        ctx,
+                        (sender, asker_actor),
+                        "NetworkRequest",
+                    )
+                    .await?;
+                }
+            }
+            ApprPersistMessage::HashPing {
+                approval_req_hash,
+                info,
+                sender,
+                asker_actor,
+            } => {
+                // Only a current validator may ping. The set is pushed
+                // by the parent governance on every change.
+                if !self.validators.contains(&sender) {
+                    warn!(
+                        msg_type = "HashPing",
+                        sender = %sender,
+                        "Hash ping from a non-validator"
                     );
+                    return Ok(ApprPersistResponse::Ok);
+                }
+
+                // Stored request for this collection: answer from it
+                // like a re-ask (vote, pending, or nothing when
+                // obsolete).
+                let stored_matches = info.request_id == self.request_id
+                    && info.version == self.version
+                    && !self.request_id.is_empty()
+                    && self.request.as_ref().is_some_and(|request| {
+                        let Some((hash, ..)) = self.helpers.clone() else {
+                            return false;
+                        };
+                        hash_borsh(&*hash.hasher(), request.content())
+                            .is_ok_and(|hash| hash == approval_req_hash)
+                    });
+                if stored_matches {
+                    self.resend_stored_answer(
+                        ctx,
+                        (sender, asker_actor),
+                        "HashPing",
+                    )
+                    .await?;
+                    return Ok(ApprPersistResponse::Ok);
+                }
+
+                // Missing request: appoint one supplier at a time and
+                // rotate to the most recent pinger when it does not
+                // deliver. No timers: every ping either appoints,
+                // counts, or rotates, so a dead supplier can never wedge
+                // the wait while other validators keep probing.
+                let asker = (sender.clone(), asker_actor);
+                let rotate = match &self.needfull_supplier {
+                    None => true,
+                    Some((current, attempts)) => {
+                        *current != sender
+                            || *attempts + 1 >= NEEDFULL_ROTATE_AFTER
+                    }
+                };
+                if rotate {
+                    self.needfull_supplier = Some((sender.clone(), 0));
+                    self.send_need_full(
+                        ctx,
+                        &approval_req_hash,
+                        &asker,
+                        &info.request_id,
+                        info.version,
+                    )
+                    .await?;
+                } else if let Some((current, attempts)) =
+                    self.needfull_supplier.clone()
+                {
+                    self.needfull_supplier = Some((current, attempts + 1));
                 }
             }
         }
         Ok(ApprPersistResponse::Ok)
+    }
+}
+
+impl ApprPersist {
+    /// Answers a validator from the stored request: registers it as an
+    /// asker and resends the vote (or the pending notice).
+    async fn resend_stored_answer(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        asker: (PublicKey, String),
+        msg_type: &'static str,
+    ) -> Result<(), ActorError> {
+        if !self.askers.contains(&asker) {
+            self.on_event(
+                ApprPersistEvent::AddAsker {
+                    key: asker.0.clone(),
+                    actor: asker.1.clone(),
+                },
+                ctx,
+            )
+            .await;
+        }
+
+        let state = if let Some(state) = self.state.clone() {
+            state
+        } else {
+            error!(msg_type = msg_type, "Approval state not found");
+            let e = ActorError::FunctionalCritical {
+                description: "Can not get state".to_owned(),
+            };
+            return Err(crash_system(ctx, e).await);
+        };
+
+        match state {
+            ApprovalState::Accepted | ApprovalState::Rejected => {
+                let approval_req = if let Some(approval_req) =
+                    self.request.clone()
+                {
+                    approval_req
+                } else {
+                    error!(msg_type = msg_type, "Approval request not found");
+                    let e = ActorError::FunctionalCritical {
+                        description: "Can not get approve request".to_owned(),
+                    };
+                    return Err(crash_system(ctx, e).await);
+                };
+
+                if let Err(e) = self
+                    .send_response(
+                        ctx,
+                        &approval_req,
+                        state == ApprovalState::Accepted,
+                        &asker,
+                        &self.request_id.clone(),
+                        self.version,
+                    )
+                    .await
+                {
+                    error!(
+                        msg_type = msg_type,
+                        error = %e,
+                        "Failed to resend approval response"
+                    );
+                    return Err(crash_system(ctx, e).await);
+                };
+
+                debug!(
+                    msg_type = msg_type,
+                    request_id = %self.request_id,
+                    version = self.version,
+                    "Response resent successfully"
+                );
+            }
+            ApprovalState::Pending => {
+                if let Err(e) = self
+                    .send_signed_response(
+                        ctx,
+                        ApprovalRes::Pending,
+                        &asker,
+                        &self.request_id.clone(),
+                        self.version,
+                    )
+                    .await
+                {
+                    error!(
+                        msg_type = msg_type,
+                        error = %e,
+                        "Failed to send approval pending response"
+                    );
+                    return Err(crash_system(ctx, e).await);
+                };
+            }
+            ApprovalState::Obsolete => {}
+        }
+        Ok(())
+    }
+
+    /// Asks one validator for the missing full request.
+    async fn send_need_full(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        approval_req_hash: &DigestIdentifier,
+        asker: &(PublicKey, String),
+        request_id: &str,
+        version: u64,
+    ) -> Result<(), ActorError> {
+        if let Err(e) = self
+            .send_signed_response(
+                ctx,
+                ApprovalRes::NeedFull {
+                    approval_req_hash: approval_req_hash.clone(),
+                },
+                asker,
+                request_id,
+                version,
+            )
+            .await
+        {
+            error!(
+                msg_type = "HashPing",
+                error = %e,
+                asker = %asker.0,
+                "Failed to send NeedFull"
+            );
+            return Err(crash_system(ctx, e).await);
+        }
+        Ok(())
     }
 
     async fn on_event(
@@ -800,12 +1200,24 @@ impl Handler<Self> for ApprPersist {
     }
 }
 
-// Debemos persistir el estado de la petición hasta que se apruebe
+// The request state is persisted until it is approved
 #[async_trait]
 impl PersistentActor for ApprPersist {
-    type Persistence = LightPersistence;
     type InitParams = InitApprPersist;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
+
+    fn snapshot_every() -> Option<u64> {
+        // Snapshot after every event: the state is small and the
+        // log stays flat (one snapshot, zero events).
+        Some(1)
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         let Self::InitParams {
@@ -814,6 +1226,7 @@ impl PersistentActor for ApprPersist {
             subject_id,
             pass_votation,
             helpers,
+            validators,
         } = params;
 
         Self {
@@ -826,6 +1239,9 @@ impl PersistentActor for ApprPersist {
             pass_votation,
             state: None,
             request: None,
+            askers: Vec::new(),
+            validators,
+            needfull_supplier: None,
         }
     }
 
@@ -838,17 +1254,21 @@ impl PersistentActor for ApprPersist {
         match event {
             ApprPersistEvent::ChangeState { state, .. } => {
                 debug!(
-                    event_type = "ChangeState",
+                    msg_type = "ChangeState",
                     new_state = ?state,
                     "Approval state changed"
                 );
                 inner.state = Some(state.clone());
+                // Any transition settles the wait for a missing full
+                // request (voted, or the request is dead).
+                inner.needfull_supplier = None;
             }
             ApprPersistEvent::SafeState {
                 request,
                 state,
                 request_id,
                 version,
+                asker,
                 ..
             } => {
                 debug!(
@@ -862,6 +1282,20 @@ impl PersistentActor for ApprPersist {
                 inner.request_id.clone_from(request_id);
                 inner.request = Some(*request.clone());
                 inner.state = Some(state.clone());
+                inner.askers = vec![asker.clone()];
+                // The full request arrived: no supplier needed.
+                inner.needfull_supplier = None;
+            }
+            ApprPersistEvent::AddAsker { key, actor } => {
+                debug!(
+                    event_type = "AddAsker",
+                    key = %key,
+                    "Approval asker registered"
+                );
+                let asker = (key.clone(), actor.clone());
+                if !inner.askers.contains(&asker) {
+                    inner.askers.push(asker);
+                }
             }
         };
 
@@ -878,6 +1312,7 @@ impl PersistentActor for ApprPersist {
         self.version = state.version;
         self.state.clone_from(&state.state);
         self.request.clone_from(&state.request);
+        self.askers.clone_from(&state.askers);
     }
 }
 

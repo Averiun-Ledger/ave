@@ -34,6 +34,22 @@ pub struct EvalCoordinator {
     hash: HashAlgorithm,
 }
 
+/// Send-retry budget per remote attempt (test/prod profiles
+/// differ like every other timeout here): the watchdog derives its
+/// envelope from this, so retuning the retry strategy moves the
+/// watchdog with it.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 1;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 20;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 3;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 10;
+
 impl EvalCoordinator {
     pub const fn new(
         node_key: PublicKey,
@@ -159,6 +175,7 @@ impl Handler<Self> for EvalCoordinator {
         match msg {
             EvalCoordinatorMessage::EndRetry => {
                 warn!(
+                    msg_type = "Retry",
                     node_key = %self.node_key,
                     request_id = %self.request_id,
                     version = self.version,
@@ -174,11 +191,12 @@ impl Handler<Self> for EvalCoordinator {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down while this timeout
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 error = %e,
-                                "Failed to send timeout response to evaluation actor"
+                                "Evaluation actor gone, dropping timeout response"
                             );
-                            crash_system(ctx, e).await;
                         } else {
                             debug!(
                                 request_id = %self.request_id,
@@ -188,12 +206,12 @@ impl Handler<Self> for EvalCoordinator {
                         }
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             error = %e,
                             path = %ctx.path().parent(),
-                            "Evaluation actor not found"
+                            "Evaluation actor not found, dropping timeout response"
                         );
-                        crash_system(ctx, e).await;
                     }
                 }
 
@@ -218,29 +236,23 @@ impl Handler<Self> for EvalCoordinator {
                     };
 
                 // Lanzar evento donde lanzar los retrys
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
                         receiver: node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::EvaluationReq {
+                    ActorMessage::EvaluationReq {
                         req: evaluation_req,
                     },
-                };
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
-                    1,
-                    Duration::from_secs(20),
-                ));
-                #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(IntervalStrategy::new(
-                    3,
-                    Duration::from_secs(60),
+                    SEND_RETRY_ATTEMPTS,
+                    Duration::from_secs(SEND_RETRY_INTERVAL_SECS),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
@@ -292,31 +304,64 @@ impl Handler<Self> for EvalCoordinator {
                 sender,
             } => {
                 if request_id == self.request_id && version == self.version {
+                    // A forged or misrouted response, or an unverifiable
+                    // result, reports the evaluator as timed out so the
+                    // phase drops and replaces it at once instead of
+                    // burning the slot on a discarded error.
+                    let mut invalid = false;
                     if self.node_key != sender {
-                        error!(
+                        warn!(
                             msg_type = "NetworkResponse",
                             expected_node = %self.node_key,
                             network_sender = %sender,
-                            "Evaluation response sender mismatch"
+                            "Evaluation response sender mismatch, dropping evaluator"
                         );
-                        return Err(ActorError::Functional {
-                            description:
-                                "We received an evaluation response from an unexpected sender"
-                                    .to_string(),
-                        });
-                    }
-
-                    if let EvaluationRes::Response {
+                        invalid = true;
+                    } else if let EvaluationRes::Response {
                         result,
                         result_hash,
                         result_hash_signature,
                     } = &*evaluation_res
-                    {
-                        self.verify_result_response(
+                        && let Err(e) = self.verify_result_response(
                             result,
                             result_hash,
                             result_hash_signature,
-                        )?;
+                        )
+                    {
+                        warn!(
+                            msg_type = "NetworkResponse",
+                            error = %e,
+                            sender = %sender,
+                            "Unverifiable evaluation result, dropping evaluator"
+                        );
+                        invalid = true;
+                    }
+                    if invalid {
+                        match ctx.get_parent::<Evaluation>().await {
+                            Ok(evaluation_actor) => {
+                                if let Err(e) = evaluation_actor
+                                    .tell(EvaluationMessage::Response {
+                                        evaluation_res: EvaluationRes::TimeOut,
+                                        sender: self.node_key.clone(),
+                                    })
+                                    .await
+                                {
+                                    debug!(
+                                        error = %e,
+                                        "Evaluation actor gone, dropping timeout response"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                debug!(
+                                    error = %e,
+                                    path = %ctx.path().parent(),
+                                    "Evaluation actor not found, dropping timeout response"
+                                );
+                            }
+                        }
+                        ctx.stop(None).await;
+                        return Ok(());
                     }
 
                     // Evaluation actor.
@@ -329,23 +374,24 @@ impl Handler<Self> for EvalCoordinator {
                                 })
                                 .await
                             {
-                                error!(
+                                // The phase was torn down while this
+                                // response was in flight: it is moot,
+                                // drop it.
+                                debug!(
                                     msg_type = "NetworkResponse",
                                     error = %e,
-                                    "Failed to send response to evaluation actor"
+                                    "Evaluation actor gone, dropping response"
                                 );
-                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
-                            error!(
+                            // Same teardown race: the phase actor is gone.
+                            debug!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 path = %ctx.path().parent(),
-                                "Evaluation actor not found"
+                                "Evaluation actor not found, dropping response"
                             );
-
-                            return Err(crash_system(ctx, e).await);
                         }
                     }
 
@@ -359,7 +405,7 @@ impl Handler<Self> for EvalCoordinator {
                                 sender = %sender,
                                 "Retry actor not found while closing evaluation coordinator"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
 
@@ -369,7 +415,7 @@ impl Handler<Self> for EvalCoordinator {
                                 error = %e,
                                 "Failed to end retry actor"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
                     }

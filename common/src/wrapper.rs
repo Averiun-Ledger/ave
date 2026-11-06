@@ -11,10 +11,10 @@ use serde_json::{Map, Number, Value};
 
 // Maximum recursion depth for deserializing nested structures
 // Prevents stack overflow from deeply nested JSON/Borsh data
-const MAX_RECURSION_DEPTH: usize = 128;
+pub const MAX_RECURSION_DEPTH: usize = 128;
 
 // Maximum array/object length to prevent memory exhaustion
-const MAX_COLLECTION_SIZE: u32 = 100_000;
+pub const MAX_COLLECTION_SIZE: u32 = 100_000;
 
 /// `serde_json::Value` with Borsh support and basic decoding limits.
 ///
@@ -41,7 +41,75 @@ impl Default for ValueWrapper {
 impl BorshSerialize for ValueWrapper {
     #[inline]
     fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        match &self.0 {
+        Self::serialize_value(&self.0, writer, 0)
+    }
+}
+
+impl ValueWrapper {
+    /// Checks collection size and nesting depth without serializing.
+    pub fn validate(&self) -> Result<(), String> {
+        Self::validate_value(&self.0, 0)
+    }
+
+    fn validate_value(value: &Value, depth: usize) -> Result<(), String> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(format!(
+                "Recursion depth limit exceeded: maximum depth is {}",
+                MAX_RECURSION_DEPTH
+            ));
+        }
+        match value {
+            Value::Array(data) => {
+                if data.len() > MAX_COLLECTION_SIZE as usize {
+                    return Err(format!(
+                        "Array size too large: {} exceeds maximum of {}",
+                        data.len(),
+                        MAX_COLLECTION_SIZE
+                    ));
+                }
+                let next_depth = depth.checked_add(1).ok_or_else(|| {
+                    "Recursion depth counter overflow".to_owned()
+                })?;
+                for element in data {
+                    Self::validate_value(element, next_depth)?;
+                }
+                Ok(())
+            }
+            Value::Object(data) => {
+                if data.len() > MAX_COLLECTION_SIZE as usize {
+                    return Err(format!(
+                        "Object size too large: {} exceeds maximum of {}",
+                        data.len(),
+                        MAX_COLLECTION_SIZE
+                    ));
+                }
+                let next_depth = depth.checked_add(1).ok_or_else(|| {
+                    "Recursion depth counter overflow".to_owned()
+                })?;
+                for (_, element) in data {
+                    Self::validate_value(element, next_depth)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn serialize_value<W: Write>(
+        value: &Value,
+        writer: &mut W,
+        depth: usize,
+    ) -> std::io::Result<()> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Recursion depth limit exceeded: maximum depth is {}",
+                    MAX_RECURSION_DEPTH
+                ),
+            ));
+        }
+        match value {
             // Serialize boolean: type tag (0) + boolean value
             Value::Bool(data) => {
                 BorshSerialize::serialize(&0u8, writer)?;
@@ -88,8 +156,17 @@ impl BorshSerialize for ValueWrapper {
             }
             // Serialize array: type tag (3) + length + elements
             Value::Array(data) => {
+                if data.len() > MAX_COLLECTION_SIZE as usize {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Array size too large: {} exceeds maximum of {}",
+                            data.len(),
+                            MAX_COLLECTION_SIZE
+                        ),
+                    ));
+                }
                 BorshSerialize::serialize(&3u8, writer)?;
-                // Check array length fits in u32
                 let len = u32::try_from(data.len()).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -100,16 +177,30 @@ impl BorshSerialize for ValueWrapper {
                     )
                 })?;
                 BorshSerialize::serialize(&len, writer)?;
+                let next_depth = depth.checked_add(1).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Recursion depth counter overflow",
+                    )
+                })?;
                 for element in data {
-                    let element = Self(element.to_owned());
-                    BorshSerialize::serialize(&element, writer)?;
+                    Self::serialize_value(element, writer, next_depth)?;
                 }
                 Ok(())
             }
             // Serialize object: type tag (4) + length + key-value pairs
             Value::Object(data) => {
+                if data.len() > MAX_COLLECTION_SIZE as usize {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Object size too large: {} exceeds maximum of {}",
+                            data.len(),
+                            MAX_COLLECTION_SIZE
+                        ),
+                    ));
+                }
                 BorshSerialize::serialize(&4u8, writer)?;
-                // Check object length fits in u32
                 let len = u32::try_from(data.len()).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -120,10 +211,15 @@ impl BorshSerialize for ValueWrapper {
                     )
                 })?;
                 BorshSerialize::serialize(&len, writer)?;
-                for (key, value) in data {
+                let next_depth = depth.checked_add(1).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Recursion depth counter overflow",
+                    )
+                })?;
+                for (key, element) in data {
                     BorshSerialize::serialize(&key, writer)?;
-                    let value = Self(value.to_owned());
-                    BorshSerialize::serialize(&value, writer)?;
+                    Self::serialize_value(element, writer, next_depth)?;
                 }
                 Ok(())
             }
@@ -461,10 +557,7 @@ mod tests {
         }
 
         let wrapper = ValueWrapper(value);
-        let vec = borsh::to_vec(&wrapper).unwrap();
-
-        let result: Result<ValueWrapper, _> =
-            BorshDeserialize::try_from_slice(&vec);
+        let result = borsh::to_vec(&wrapper);
         assert!(result.is_err());
         assert!(
             result
@@ -518,6 +611,22 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Object size too large")
+        );
+    }
+
+    // Writer rejects what the reader rejects (no persistable poison)
+    #[test]
+    fn test_value_wrapper_writer_rejects_oversized_array() {
+        let oversized = vec![Value::Null; MAX_COLLECTION_SIZE as usize + 1];
+        let value = ValueWrapper(Value::Array(oversized));
+        assert!(value.validate().is_err());
+        let result = borsh::to_vec(&value);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Array size too large")
         );
     }
 
@@ -954,26 +1063,27 @@ mod tests {
     }
 }
 
-/// Payload de boundary host-contrato.
+/// Host-contract boundary payload.
 ///
-/// Transporta bytes JSON crudos entre el runtime Ave y los contratos WASM.
-/// No contiene un DOM; es una envoltura Borsh nativa de `Vec<u8>`.
+/// Carries raw JSON bytes between the Ave runtime and WASM contracts.
+/// It holds no DOM; it is a native Borsh wrapper over `Vec<u8>`.
 ///
-/// El host serializa su `serde_json::Value` a bytes UTF-8, los envuelve en
-/// `ContractData` y los envía al contrato. El contrato recibe `ContractData`,
-/// extrae los bytes y hace `serde_json::from_slice::<T>()` directamente.
+/// The host serializes its `serde_json::Value` to UTF-8 bytes, wraps
+/// them in `ContractData` and sends them to the contract. The contract
+/// receives `ContractData`, extracts the bytes and calls
+/// `serde_json::from_slice::<T>()` directly.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractData(pub Vec<u8>);
 
 impl ContractData {
-    /// Crea `ContractData` a partir de un `serde_json::Value`.
+    /// Creates `ContractData` from a `serde_json::Value`.
     pub fn from_json_value(
         value: &serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self(serde_json::to_vec(value)?))
     }
 
-    /// Reconstruye un `serde_json::Value` a partir de los bytes internos.
+    /// Rebuilds a `serde_json::Value` from the inner bytes.
     pub fn to_json_value(
         &self,
     ) -> Result<serde_json::Value, serde_json::Error> {
@@ -981,10 +1091,10 @@ impl ContractData {
     }
 }
 
-/// Resultado de ejecución de contrato en el boundary.
+/// Contract execution result at the boundary.
 ///
-/// Usado por el contrato para devolver el estado final al host.
-/// El host convierte `ContractData` → `ValueWrapper` para uso interno.
+/// Used by the contract to return the final state to the host.
+/// The host converts `ContractData` → `ValueWrapper` for internal use.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractResultData {
     pub final_state: ContractData,
@@ -1006,9 +1116,9 @@ impl ContractResultData {
     }
 }
 
-/// Resultado de validación de inicialización en el boundary.
+/// Init-check validation result at the boundary.
 ///
-/// Usado por el contrato para devolver el resultado de `init_check_function`.
+/// Used by the contract to return the result of `init_check_function`.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ContractInitCheckData {
     pub success: bool,

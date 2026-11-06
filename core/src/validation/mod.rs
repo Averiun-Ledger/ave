@@ -1,12 +1,13 @@
 //! # Validation module.
 //!
 use crate::{
-    governance::model::Quorum,
+    governance::{model::Quorum, role_register::RoleDataRegister},
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, crash_system, send_reboot_to_req, take_random_signers,
+            abort_req, crash_system, send_reboot_to_req, take_hedge_spares,
+            take_random_signers, take_seeded_signers,
         },
         event::{ValidationData, ValidationMetadata},
     },
@@ -32,19 +33,30 @@ use ave_common::{
         CryptoError, DigestIdentifier, HashAlgorithm, PublicKey, Signature,
         Signed, hash_borsh,
     },
+    request::EventRequest,
 };
 
-use request::ValidationReq;
+use request::{ActualProtocols, ValidationReq};
 use response::ValidationRes;
 use tracing::{Span, debug, error, info_span, warn};
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 pub mod coordinator;
 pub mod request;
 pub mod response;
 pub mod schema;
 pub mod worker;
+
+/// One named check and its detail for the report.
+#[derive(Debug, Clone)]
+pub struct Check {
+    pub name: &'static str,
+    pub detail: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct Validation {
@@ -58,6 +70,13 @@ pub struct Validation {
 
     validators_quantity: u32,
 
+    /// Abort votes by signer (reason attached for the abort detail
+    /// only — tally is by outcome-kind, never by reason string). An
+    /// abort wins only at quorum; below it the aborter is already out
+    /// of the round (dropped by `check_validator` like `Unavailable`)
+    /// and replaced from the pool.
+    aborts: Vec<(PublicKey, String)>,
+
     request: Signed<ValidationReq>,
 
     hash: HashAlgorithm,
@@ -70,7 +89,10 @@ pub struct Validation {
 
     validation_request_hash: DigestIdentifier,
 
-    reboot: bool,
+    /// The round is closed (result, reboot or abort already sent): late
+    /// responses are ignored. Responses only matter until the quorum
+    /// closes or the validator list runs out.
+    closed: bool,
 
     current_validators: HashSet<PublicKey>,
 
@@ -79,6 +101,17 @@ pub struct Validation {
     init_state: Option<ValueWrapper>,
 
     current_request_roles: CurrentRequestRoles,
+
+    /// Full validation role set of the governance, captured in `Create`:
+    /// the local validator worker needs it to verify the
+    /// validator-signed timeout attestations inside the approval
+    /// evidence carried by the request.
+    validation_roles: RoleDataRegister,
+
+    /// Hash of the approval evidence carried by the request, present
+    /// when the request went through the approval phase: the final
+    /// response of every validator must attest exactly this hash.
+    approval_data_hash: Option<DigestIdentifier>,
 }
 
 impl Validation {
@@ -104,21 +137,51 @@ impl Validation {
             validators_response: vec![],
             validators_signatures: vec![],
             validators_quantity: 0,
+            aborts: vec![],
             request,
             hash,
             network,
             request_id: DigestIdentifier::default(),
             version: 0,
             validation_request_hash: DigestIdentifier::default(),
-            reboot: false,
+            closed: false,
             current_validators: HashSet::new(),
             pending_validators: HashSet::new(),
             current_request_roles,
+            validation_roles: RoleDataRegister {
+                workers: HashSet::new(),
+                quorum: Quorum::default(),
+            },
+            approval_data_hash: None,
         }
     }
 
     fn check_validator(&mut self, validator: PublicKey) -> bool {
         self.current_validators.remove(&validator)
+    }
+
+    /// True when the request targets the governance itself (as
+    /// opposed to a tracker subject): abort votes on governance
+    /// requests fire immediately (fork prevention), while tracker
+    /// requests tally aborts to quorum.
+    fn request_is_governance(request: &Signed<ValidationReq>) -> bool {
+        match request.content() {
+            ValidationReq::Create { event_request, .. } => {
+                matches!(
+                    event_request.content(),
+                    EventRequest::Create(create)
+                        if create.schema_id.is_gov()
+                )
+            }
+            ValidationReq::Event { metadata, .. } => {
+                metadata.subject_id == metadata.governance_id
+            }
+        }
+    }
+
+    /// Validators still expected to answer.
+    fn awaiting_count(&self) -> usize {
+        self.current_validators.len()
     }
 
     async fn create_validators(
@@ -139,12 +202,29 @@ impl Validation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ValiCoordinatorMessage::NetworkValidation {
                     validation_req: Box::new(self.request.clone()),
-                    node_key: signer,
+                    node_key: signer.clone(),
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    msg_type = "Supervise",
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to validation coordinator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        msg_type = "Supervise",
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan validation coordinator"
+                    );
+                }
+                return Err(e);
+            }
         } else {
             let child = ctx
                 .create_child(
@@ -155,8 +235,11 @@ impl Validation {
                         init_state: self.init_state.clone(),
                         governance_id: self
                             .request
-                            .content().get_governance_id().expect("The build process verified that the event request is valid")
-                            ,
+                            .content()
+                            .get_governance_id()
+                            .map_err(|e| ActorError::Functional {
+                                description: e,
+                            })?,
                         gov_version: self.request.content().get_gov_version(),
                         sn: self.request.content().get_sn(),
                         hash: self.hash,
@@ -166,18 +249,47 @@ impl Validation {
                                 .current_request_roles
                                 .evaluation
                                 .clone(),
-                            approval: self.current_request_roles.approval.clone(),
+                            compilation: self
+                                .current_request_roles
+                                .compilation
+                                .clone(),
+                            approval: self
+                                .current_request_roles
+                                .approval
+                                .clone(),
+                            validation: self.validation_roles.clone(),
                         },
-                        stop:true
+                        stop: true,
+                        pending: None,
+                        approvals: HashMap::new(),
                     },
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(ValiWorkerMessage::LocalValidation {
                     validation_req: Box::new(self.request.clone()),
+                    request_id: self.request_id.to_string(),
+                    version: self.version,
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    msg_type = "Supervise",
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to local validator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        msg_type = "Supervise",
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan local validator"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -190,11 +302,27 @@ impl Validation {
     ) -> Result<(), ActorError> {
         let req_actor = ctx.get_parent::<RequestManager>().await?;
 
+        // The approval evidence travels inside the request itself,
+        // already closed by the approval phase.
+        let approval_data = match self.request.content() {
+            ValidationReq::Event {
+                actual_protocols, ..
+            } => match actual_protocols.as_ref() {
+                ActualProtocols::EvalApprove { approval_data, .. }
+                | ActualProtocols::CompileEvalApprove {
+                    approval_data, ..
+                } => Some(approval_data.clone()),
+                _ => None,
+            },
+            ValidationReq::Create { .. } => None,
+        };
+
         req_actor
             .tell(RequestManagerMessage::ValidationRes {
                 request_id: self.request_id.clone(),
                 val_req: Box::new(self.request.content().clone()),
                 val_res: response,
+                approval_data,
             })
             .await?;
 
@@ -298,6 +426,10 @@ impl Handler<Self> for Validation {
 
                 self.validation_request_hash = vali_req_hash;
                 self.validators_quantity = signers.len() as u32;
+                self.validation_roles = RoleDataRegister {
+                    workers: signers.iter().cloned().collect(),
+                    quorum: self.quorum.clone(),
+                };
                 self.request_id = request_id.clone();
                 self.version = version;
 
@@ -306,10 +438,20 @@ impl Handler<Self> for Validation {
                     signers.len() as u32,
                 );
 
-                let (current_vali, pending_vali) =
-                    take_random_signers(signers, validators_quantity as usize);
+                let (mut current_vali, pending_vali) = take_seeded_signers(
+                    signers,
+                    validators_quantity as usize,
+                    &self.validation_request_hash,
+                );
+                // Hedging spares, like evaluators: extra validators up
+                // front instead of timeout plus replenish on failure.
+                let (spares, rest) = take_hedge_spares(
+                    pending_vali,
+                    validators_quantity as usize,
+                );
+                current_vali.extend(spares);
                 self.current_validators.clone_from(&current_vali);
-                self.pending_validators.clone_from(&pending_vali);
+                self.pending_validators.clone_from(&rest);
 
                 for signer in current_vali.clone() {
                     if let Err(e) =
@@ -321,8 +463,97 @@ impl Handler<Self> for Validation {
                             signer = %signer,
                             "Failed to create validator"
                         );
+                        // Drop the failed signer so the round can
+                        // exhaust itself instead of hanging forever
+                        // waiting for a response that will never come.
+                        self.current_validators.remove(&signer);
                     }
                 }
+
+                if self.current_validators.is_empty() {
+                    let governance_id =
+                        match self.request.content().get_governance_id() {
+                            Ok(governance_id) => governance_id,
+                            Err(e) => {
+                                error!(
+                                    msg_type = "Create",
+                                    error = %e,
+                                    "Failed to get governance id"
+                                );
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Cannot get governance id: {}",
+                                            e
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                        };
+
+                    if let Err(e) = send_reboot_to_req(
+                        ctx,
+                        request_id.clone(),
+                        governance_id,
+                        RebootType::TimeOut,
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to send reboot to request actor"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    Self::observe_event("reboot");
+                    self.closed = true;
+                    return Ok(());
+                }
+
+                // Requests that went through the approval phase carry
+                // the closed approval evidence: the final response of
+                // every validator must attest exactly its hash.
+                self.approval_data_hash = match self.request.content() {
+                    ValidationReq::Event {
+                        actual_protocols, ..
+                    } => match actual_protocols.as_ref() {
+                        ActualProtocols::EvalApprove {
+                            approval_data, ..
+                        }
+                        | ActualProtocols::CompileEvalApprove {
+                            approval_data,
+                            ..
+                        } => {
+                            let hash =
+                                hash_borsh(&*self.hash.hasher(), approval_data);
+                            match hash {
+                                Ok(hash) => Some(hash),
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "Create",
+                                        error = %e,
+                                        "Failed to hash approval data"
+                                    );
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Cannot hash approval data: {}",
+                                                e
+                                            ),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            }
+                        }
+                        _ => None,
+                    },
+                    ValidationReq::Create { .. } => None,
+                };
 
                 debug!(
                     msg_type = "Create",
@@ -337,43 +568,38 @@ impl Handler<Self> for Validation {
                 sender,
                 signature,
             } => {
-                if !self.reboot {
+                if !self.closed {
                     if self.check_validator(sender.clone()) {
                         match *validation_res {
                             ValidationRes::Create {
                                 vali_req_hash,
                                 subject_metadata,
                             } => {
-                                let Some(signature) = signature else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Validation response without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Validation Response solver without signature".to_owned(),
-                                    });
-                                };
-
-                                if vali_req_hash != self.validation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.validation_request_hash,
-                                        received_hash = %vali_req_hash,
-                                        "Invalid validation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Validation Response, Invalid validation request hash".to_owned(),
-                                    });
+                                match (
+                                    signature,
+                                    vali_req_hash
+                                        == self.validation_request_hash,
+                                ) {
+                                    (Some(signature), true) => {
+                                        self.validators_response.push(
+                                            ValidationMetadata::Metadata(
+                                                subject_metadata,
+                                            ),
+                                        );
+                                        self.validators_signatures
+                                            .push(signature);
+                                    }
+                                    (signed, _) => {
+                                        warn!(
+                                            msg_type = "Response",
+                                            sender = %sender,
+                                            signed = signed.is_some(),
+                                            expected_hash = %self.validation_request_hash,
+                                            received_hash = %vali_req_hash,
+                                            "Rejected validation create response"
+                                        );
+                                    }
                                 }
-
-                                self.validators_response.push(
-                                    ValidationMetadata::Metadata(
-                                        subject_metadata,
-                                    ),
-                                );
-                                self.validators_signatures.push(signature);
                             }
                             ValidationRes::Response {
                                 vali_req_hash,
@@ -381,63 +607,117 @@ impl Handler<Self> for Validation {
                                 propierties_hash,
                                 event_request_hash,
                                 viewpoints_hash,
+                                approval_data_hash,
                             } => {
-                                let Some(signature) = signature else {
-                                    error!(
-                                        msg_type = "Response",
-                                        sender = %sender,
-                                        "Validation response without signature"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Validation Response solver without signature".to_owned(),
-                                    });
-                                };
+                                // The final response must attest exactly
+                                // the approval evidence carried by the
+                                // request (and none when the request did
+                                // not go through the approval phase).
+                                let approval_hash_matches = approval_data_hash
+                                    == self.approval_data_hash;
 
-                                if vali_req_hash != self.validation_request_hash
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        expected_hash = %self.validation_request_hash,
-                                        received_hash = %vali_req_hash,
-                                        "Invalid validation request hash"
-                                    );
-                                    return Err(ActorError::Functional {
-                                        description: "Validation Response, Invalid validation request hash".to_owned(),
-                                    });
+                                match (
+                                    signature,
+                                    vali_req_hash
+                                        == self.validation_request_hash,
+                                    approval_hash_matches,
+                                ) {
+                                    (Some(signature), true, true) => {
+                                        self.validators_response.push(
+                                            ValidationMetadata::ModifiedHash {
+                                                modified_metadata_without_propierties_hash,
+                                                propierties_hash,
+                                                event_request_hash,
+                                                viewpoints_hash,
+                                            },
+                                        );
+                                        self.validators_signatures
+                                            .push(signature);
+                                    }
+                                    (
+                                        signed,
+                                        req_hash_matches,
+                                        approval_matches,
+                                    ) => {
+                                        warn!(
+                                            msg_type = "Response",
+                                            sender = %sender,
+                                            signed = signed.is_some(),
+                                            req_hash_matches = req_hash_matches,
+                                            approval_hash_matches = approval_matches,
+                                            "Rejected validation response"
+                                        );
+                                    }
                                 }
-
-                                self.validators_response.push(
-                                    ValidationMetadata::ModifiedHash {
-                                        modified_metadata_without_propierties_hash,
-                                        propierties_hash,
-                                        event_request_hash,
-                                        viewpoints_hash,
-                                    },
-                                );
-                                self.validators_signatures.push(signature);
                             }
                             ValidationRes::TimeOut => {
                                 Self::observe_event("timeout");
                             }
+                            ValidationRes::Unavailable => {
+                                Self::observe_event("unavailable");
+                            }
                             ValidationRes::Abort(error) => {
                                 Self::observe_event("abort");
-                                if let Err(e) = abort_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    sender.clone(),
-                                    error,
-                                    self.request.content().get_sn(),
-                                )
-                                .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        sender = %sender,
-                                        "Failed to abort request"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
+                                // Governance requests abort at the first
+                                // vote (stale governance intent must die,
+                                // not reboot-loop); tracker requests
+                                // tally below.
+                                if Self::request_is_governance(&self.request) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error,
+                                        self.request.content().get_sn(),
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            sender = %sender,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    self.closed = true;
+
+                                    return Ok(());
                                 }
+                                self.aborts
+                                    .push((sender.clone(), error.clone()));
+                                if self.quorum.check_quorum(
+                                    self.validators_quantity,
+                                    self.aborts.len() as u32,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error,
+                                        self.request.content().get_sn(),
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            sender = %sender,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    self.closed = true;
+
+                                    return Ok(());
+                                }
+                                // Below quorum: the aborter is already out
+                                // of the round — fall through so the
+                                // remaining set still resolves, replaces
+                                // and times out exactly like any other
+                                // non-response.
                             }
                             ValidationRes::Reboot => {
                                 Self::observe_event("reboot");
@@ -445,8 +725,14 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
-                                    RebootType::Normal
+                                        .content()
+                                        .get_governance_id()
+                                        .map_err(|e| {
+                                            ActorError::Functional {
+                                                description: e,
+                                            }
+                                        })?,
+                                    RebootType::Normal,
                                 )
                                 .await
                                 {
@@ -458,7 +744,7 @@ impl Handler<Self> for Validation {
                                     return Err(crash_system(ctx, e).await);
                                 }
 
-                                self.reboot = true;
+                                self.closed = true;
 
                                 return Ok(());
                             }
@@ -474,20 +760,27 @@ impl Handler<Self> for Validation {
                                     ctx,
                                     self.request_id.clone(),
                                     self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
-                                    RebootType::Diff
+                                        .content()
+                                        .get_governance_id()
+                                        .map_err(|e| {
+                                            ActorError::Functional {
+                                                description: e,
+                                            }
+                                        })?,
+                                    RebootType::Diff,
                                 )
                                 .await
-                                {
-                                    error!(
-                                        msg_type = "Response",
-                                        error = %e,
-                                        "Failed to send reboot to request actor"
-                                    );
-                                    return Err(crash_system(ctx, e).await);
-                                }
+                            {
+                                error!(
+                                    msg_type = "Response",
+                                    error = %e,
+                                    "Failed to send reboot to request actor"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                self.closed = true;
                                 return Ok(());
                             }
 
@@ -505,6 +798,8 @@ impl Handler<Self> for Validation {
                                 return Err(crash_system(ctx, e).await);
                             };
 
+                            self.closed = true;
+
                             if !matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("success");
                             }
@@ -515,7 +810,7 @@ impl Handler<Self> for Validation {
                                 version = self.version,
                                 "Validation completed and sent to request"
                             );
-                        } else if self.current_validators.is_empty()
+                        } else if self.awaiting_count() == 0
                             && !self.pending_validators.is_empty()
                         {
                             let validators_quantity = self.quorum.get_signers(
@@ -542,21 +837,44 @@ impl Handler<Self> for Validation {
                                         signer = %signer,
                                         "Failed to create validator from pending pool"
                                     );
+                                    // Drop the failed signer so the
+                                    // round can exhaust itself instead
+                                    // of hanging forever.
+                                    self.current_validators.remove(&signer);
                                 }
                             }
 
-                            debug!(
-                                msg_type = "Response",
-                                new_validators = curren_vali.len(),
-                                "Created additional validators from pending pool"
-                            );
-                        } else if self.current_validators.is_empty()
-                            && let Err(e) = send_reboot_to_req(
+                            if self.current_validators.is_empty() {
+                                let governance_id = match self
+                                    .request
+                                    .content()
+                                    .get_governance_id()
+                                {
+                                    Ok(governance_id) => governance_id,
+                                    Err(e) => {
+                                        error!(
+                                            msg_type = "Response",
+                                            error = %e,
+                                            "Failed to get governance id"
+                                        );
+                                        return Err(crash_system(
+                                            ctx,
+                                            ActorError::FunctionalCritical {
+                                                description: format!(
+                                                    "Cannot get governance id: {}",
+                                                    e
+                                                ),
+                                            },
+                                        )
+                                        .await);
+                                    }
+                                };
+
+                                if let Err(e) = send_reboot_to_req(
                                     ctx,
                                     self.request_id.clone(),
-                                    self.request
-                                        .content().get_governance_id().expect("The build process verified that the event request is valid"),
-                                    RebootType::TimeOut
+                                    governance_id,
+                                    RebootType::TimeOut,
                                 )
                                 .await
                                 {
@@ -566,9 +884,40 @@ impl Handler<Self> for Validation {
                                         "Failed to send reboot to request actor"
                                     );
                                     return Err(crash_system(ctx, e).await);
-                                } else if self.current_validators.is_empty() {
-                                    Self::observe_event("reboot");
                                 }
+                                Self::observe_event("reboot");
+                                self.closed = true;
+                            }
+
+                            debug!(
+                                msg_type = "Response",
+                                new_validators = curren_vali.len(),
+                                "Created additional validators from pending pool"
+                            );
+                        } else if self.awaiting_count() == 0
+                            && let Err(e) = send_reboot_to_req(
+                                ctx,
+                                self.request_id.clone(),
+                                self.request
+                                    .content()
+                                    .get_governance_id()
+                                    .map_err(|e| ActorError::Functional {
+                                        description: e,
+                                    })?,
+                                RebootType::TimeOut,
+                            )
+                            .await
+                        {
+                            error!(
+                                msg_type = "Response",
+                                error = %e,
+                                "Failed to send reboot to request actor"
+                            );
+                            return Err(crash_system(ctx, e).await);
+                        } else if self.awaiting_count() == 0 {
+                            Self::observe_event("reboot");
+                            self.closed = true;
+                        }
                     } else {
                         warn!(
                             msg_type = "Response",
@@ -689,12 +1038,23 @@ pub mod tests {
         ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
+        ave_common::identity::PublicKey,
     ) {
         let node_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
         let (system, .., _dirs) = create_system().await;
 
         let (command_sender, command_receiver) = mpsc::channel(10);
         spawn_dummy_network(command_receiver);
+        #[cfg(feature = "test")]
+        let network = Arc::new(NetworkSender::new(
+            command_sender.clone(),
+            Arc::new(std::sync::Mutex::new(
+                crate::helpers::network::test_faults::TestFaultRegistry::new(
+                    command_sender,
+                ),
+            )),
+        ));
+        #[cfg(not(feature = "test"))]
         let network = Arc::new(NetworkSender::new(command_sender));
 
         system.add_helper("network", network.clone());
@@ -750,7 +1110,7 @@ pub mod tests {
 
         let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .unwrap()
@@ -863,6 +1223,7 @@ pub mod tests {
             tracking,
             metadata.subject_id,
             _dirs,
+            (*public_key).clone(),
         )
     }
 
@@ -882,6 +1243,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dirs,
+            _node_key,
         ) = create_gov().await;
 
         let eol_reques = EventRequest::EOL(EOLRequest {
@@ -902,7 +1264,7 @@ pub mod tests {
 
         let RequestHandlerResponse::Ok(response) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .unwrap()
@@ -982,7 +1344,7 @@ pub mod tests {
 
         if request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .is_ok()

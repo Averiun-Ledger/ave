@@ -22,6 +22,39 @@ use crate::{Namespace, SchemaType};
 
 pub type MemberName = String;
 
+/// Default toolchain pin used when a governance event omits it.
+/// A real registered pin (changing the default is a design decision,
+/// never a silent edit).
+pub const DEFAULT_PIN: &str = "rust-1.95.0_sdk-0.8.0_wasm32";
+
+/// A known build toolchain: normalized (no host triple, no paths).
+///
+/// The registry only grows between releases: entries are never removed
+/// so old events keep verifying. Unknown IDs simply match nothing —
+/// callers stand down, never reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolchainInfo {
+    pub rustc_version: &'static str,
+    pub cargo_config_hash: &'static str,
+    pub sdk_version: &'static str,
+    pub lock_hash: &'static str,
+    pub builder_image: &'static str,
+    /// Pinned reproducible cargo binaries by architecture key
+    /// (`"amd64"`, `"arm64"`): blake3 of the patched cargo binary
+    /// (rust-lang/cargo#17522 backport) the pin was measured with.
+    /// Annotative like `builder_image` (never voted: binary bytes
+    /// are arch-specific), enforced locally — a node configured
+    /// with a cargo binary whose hash matches no entry for its
+    /// architecture fails the boot loud instead of voting divergent
+    /// bytes.
+    pub cargo_bins: &'static [(&'static str, &'static str)],
+}
+
+/// The registry itself lives in `crate::registry` (generated file,
+/// re-exported here so paths stay stable): hand edits there would be
+/// overwritten by `refresh-all.sh` without warning.
+pub use crate::registry::{registry_ids, toolchain_info};
+
 /// Governance change set grouped by concern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -31,6 +64,11 @@ pub struct GovernanceEvent {
     pub roles: Option<RolesEvent>,
     pub schemas: Option<SchemasEvent>,
     pub policies: Option<PoliciesEvent>,
+    /// Toolchain pin change. `None` keeps the current pin; the pin
+    /// travels inside the signed payload, so `None` always resolves to
+    /// the deterministic `DEFAULT_PIN` on create.
+    #[serde(default)]
+    pub toolchain: Option<String>,
 }
 
 ///// Members /////
@@ -100,6 +138,7 @@ pub struct GovRolesEvent {
     pub validator: Option<BTreeSet<MemberName>>,
     pub witness: Option<BTreeSet<MemberName>>,
     pub issuer: Option<BTreeSet<MemberName>>,
+    pub compiler: Option<BTreeSet<MemberName>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -256,6 +295,7 @@ pub struct GovPolicieChange {
     pub approve: Option<Quorum>,
     pub evaluate: Option<Quorum>,
     pub validate: Option<Quorum>,
+    pub compile: Option<Quorum>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -320,11 +360,20 @@ impl<'de> Deserialize<'de> for CreatorQuantity {
                 Ok(Self::Infinity)
             }
             serde_json::Value::Number(n) if n.is_u64() => {
-                Ok(Self::Quantity(n.as_u64().ok_or_else(|| {
+                let raw = n.as_u64().ok_or_else(|| {
                     serde::de::Error::custom(
                         "Quantity must be a number or 'infinity'",
                     )
-                })? as u32))
+                })?;
+                // Never truncate: a quantity above `u32::MAX` is
+                // rejected so the interpreted value always matches
+                // the signed one.
+                let quantity = u32::try_from(raw).map_err(|_| {
+                    serde::de::Error::custom(
+                        "Quantity exceeds the maximum (u32::MAX)",
+                    )
+                })?;
+                Ok(Self::Quantity(quantity))
             }
             _ => Err(serde::de::Error::custom(
                 "Quantity must be a number or 'infinity'",
@@ -598,6 +647,12 @@ impl Quorum {
             return Err("the percentage must be between 1 and 100".to_owned());
         }
 
+        if let Self::Fixed(fixed) = self
+            && *fixed == 0_u32
+        {
+            return Err("the fixed quorum must be greater than 0".to_owned());
+        }
+
         Ok(())
     }
 
@@ -609,7 +664,9 @@ impl Quorum {
             }
             Self::Majority => total_members / 2 + 1,
             Self::Percentage(percentage) => {
-                total_members * (percentage / 100) as u32
+                // Multiply before dividing to keep precision; ceil so any
+                // valid percentage (1..=100) never yields a zero quorum.
+                (total_members as u64 * *percentage as u64).div_ceil(100) as u32
             }
         };
 
@@ -617,6 +674,11 @@ impl Quorum {
     }
 
     pub fn check_quorum(&self, total_members: u32, signers: u32) -> bool {
+        // An empty committee never reaches quorum: approving with zero
+        // signatures (`Fixed(0)`/`0 >= 0`) would bypass the phase.
+        if total_members == 0 {
+            return false;
+        }
         match self {
             Self::Fixed(fixed) => {
                 let min = std::cmp::min(fixed, &total_members);
@@ -624,7 +686,8 @@ impl Quorum {
             }
             Self::Majority => signers > total_members / 2,
             Self::Percentage(percentage) => {
-                signers >= (total_members * (percentage / 100) as u32)
+                signers as u64 * 100
+                    >= total_members as u64 * *percentage as u64
             }
         }
     }
@@ -668,6 +731,82 @@ mod tests {
             change.new_viewpoints,
             Some(vec!["agua".to_owned(), "agua".to_owned()])
         );
+    }
+
+    /// Registry drift guard: entries are GENERATED by `ave-pin
+    /// register` (additive, never hand-edited). These exact values
+    /// are what nodes and tools agree on — any change breaks pin
+    /// identity everywhere at once. Adding a pin extends this test
+    /// with its blessed values (the count assertion forces it).
+    #[test]
+    fn test_toolchain_registry_entries_are_frozen() {
+        // New pins land here with human-blessed values: silent
+        // additions fail loudly instead of slipping through.
+        assert_eq!(super::registry_ids().len(), 2);
+        let entry = super::toolchain_info("rust-1.95.0_sdk-0.8.0_wasm32")
+            .expect("rust-1.95.0_sdk-0.8.0_wasm32 registered");
+        assert_eq!(entry.rustc_version, "1.95.0");
+        assert_eq!(entry.sdk_version, "0.8.0");
+        assert_eq!(
+            entry.cargo_config_hash,
+            "fe0e35ce03729266e3423466f3135885995f5b5a1d691b9d9d6c2da55d4ee2b0"
+        );
+        assert_eq!(
+            entry.lock_hash,
+            "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25"
+        );
+
+        let entry = super::toolchain_info("rust-1.98.1_sdk-0.8.0_wasm32")
+            .expect("rust-1.98.1_sdk-0.8.0_wasm32 registered");
+        assert_eq!(entry.rustc_version, "1.98.1");
+        assert_eq!(entry.sdk_version, "0.8.0");
+        assert_eq!(
+            entry.cargo_config_hash,
+            "fe0e35ce03729266e3423466f3135885995f5b5a1d691b9d9d6c2da55d4ee2b0"
+        );
+        assert_eq!(
+            entry.lock_hash,
+            "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25"
+        );
+
+        assert!(super::toolchain_info("rust-9.99-ficticio").is_none());
+
+        // Generic coverage for every registered pin (present and
+        // future): unknown IDs match nothing, and every entry naming
+        // a lock hash resolves a frozen file for it.
+        for id in super::registry_ids() {
+            let entry = super::toolchain_info(id)
+                .unwrap_or_else(|| panic!("{id} registered"));
+            assert!(!entry.rustc_version.is_empty());
+            assert!(!entry.sdk_version.is_empty());
+            assert!(!entry.cargo_config_hash.is_empty());
+            if !entry.lock_hash.is_empty() {
+                assert!(
+                    crate::build::pin_lockfile(id).is_some(),
+                    "{id} names a lock hash but no frozen file"
+                );
+            }
+        }
+
+        // The frozen lockfile the entries point at (v1, shared).
+        let lock = crate::build::pin_lockfile("rust-1.95.0_sdk-0.8.0_wasm32")
+            .expect("frozen lockfile");
+        assert_eq!(lock.version, 1);
+        assert!(lock.content.contains("name = \"serde\""));
+        assert_eq!(
+            lock.content,
+            crate::build::pin_lockfile("rust-1.98.1_sdk-0.8.0_wasm32")
+                .unwrap()
+                .content
+        );
+        assert!(!lock.provenance.is_empty());
+    }
+
+    /// Registry self-integrity is enforced, not assumed: embedded
+    /// files match the registered hashes.
+    #[test]
+    fn test_registry_integrity_holds() {
+        assert!(crate::build::verify_registry_integrity().is_ok());
     }
 
     #[test]
@@ -746,6 +885,7 @@ mod tests {
     fn test_quorum_check_values() {
         assert!(Quorum::Majority.check_values().is_ok());
         assert!(Quorum::Fixed(3).check_values().is_ok());
+        assert!(Quorum::Fixed(0).check_values().is_err());
         assert!(Quorum::Percentage(50).check_values().is_ok());
         assert!(Quorum::Percentage(0).check_values().is_err());
         assert!(Quorum::Percentage(101).check_values().is_err());
@@ -756,7 +896,12 @@ mod tests {
         assert_eq!(Quorum::Majority.get_signers(10, 10), 6);
         assert_eq!(Quorum::Fixed(3).get_signers(10, 10), 3);
         assert_eq!(Quorum::Fixed(15).get_signers(10, 10), 10);
-        assert_eq!(Quorum::Percentage(50).get_signers(10, 10), 0);
+        assert_eq!(Quorum::Percentage(50).get_signers(10, 10), 5);
+        assert_eq!(Quorum::Percentage(50).get_signers(3, 3), 2);
+        assert_eq!(Quorum::Percentage(1).get_signers(10, 10), 1);
+        assert_eq!(Quorum::Percentage(100).get_signers(10, 10), 10);
+        // Capped by pending signers.
+        assert_eq!(Quorum::Percentage(50).get_signers(10, 2), 2);
         assert_eq!(Quorum::Majority.get_signers(10, 3), 3);
     }
 
@@ -766,8 +911,8 @@ mod tests {
         assert!(!Quorum::Majority.check_quorum(10, 5));
         assert!(Quorum::Fixed(3).check_quorum(10, 3));
         assert!(!Quorum::Fixed(3).check_quorum(10, 2));
-        // Percentage uses integer division percentage/100, so any value <100 yields 0
-        assert!(Quorum::Percentage(50).check_quorum(10, 0));
+        assert!(Quorum::Percentage(50).check_quorum(10, 5));
+        assert!(!Quorum::Percentage(50).check_quorum(10, 4));
         assert!(Quorum::Percentage(100).check_quorum(10, 10));
         assert!(!Quorum::Percentage(100).check_quorum(10, 9));
     }
@@ -838,6 +983,7 @@ pub enum ProtocolTypes {
     Approval,
     Evaluation,
     Validation,
+    Compilation,
 }
 
 impl fmt::Display for ProtocolTypes {
@@ -846,6 +992,7 @@ impl fmt::Display for ProtocolTypes {
             Self::Approval => write!(f, "Approval"),
             Self::Evaluation => write!(f, "Evaluation"),
             Self::Validation => write!(f, "Validation"),
+            Self::Compilation => write!(f, "Compilation"),
         }
     }
 }

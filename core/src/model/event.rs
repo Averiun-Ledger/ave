@@ -1,15 +1,15 @@
 //! # Event data model.
 //!
 
-use std::collections::BTreeSet;
-
-use super::network::TimeOut;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    evaluation::response::{EvaluatorError, EvaluatorResponse},
-    subject::Metadata,
+    compilation::response::{CompilationError, CompilerResponse},
     validation::request::ActualProtocols,
 };
+
+use crate::evaluation::response::{EvaluatorError, EvaluatorResponse};
+use crate::subject::Metadata;
 
 use ave_common::{
     bridge::request::EventRequestType,
@@ -18,7 +18,7 @@ use ave_common::{
         TimeStamp, hash_borsh,
     },
     request::{CreateRequest, EventRequest},
-    response::{EvalResDB, LedgerDB, RequestEventDB},
+    response::{CompResDB, EvalResDB, LedgerDB, RequestEventDB},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -61,6 +61,24 @@ pub enum EvaluationResponseOpaque {
     Error { result_hash: DigestIdentifier },
 }
 
+impl EvaluationDataOpaque {
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.response, EvaluationResponseOpaque::Ok { .. })
+    }
+}
+
+/// Envelope data of an opaque tracker fact: who asked, when, for
+/// which subject. The viewpoints themselves never leave the
+/// originator.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct OpaqueData {
+    pub subject_id: DigestIdentifier,
+    pub event_request_timestamp: TimeStamp,
+    pub signer: PublicKey,
+}
+
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
@@ -70,12 +88,6 @@ pub struct EvaluationDataOpaque {
     pub evaluators_signatures: Vec<Signature>,
     pub viewpoints: BTreeSet<String>,
     pub response: EvaluationResponseOpaque,
-}
-
-impl EvaluationDataOpaque {
-    pub const fn is_ok(&self) -> bool {
-        matches!(&self.response, EvaluationResponseOpaque::Ok { .. })
-    }
 }
 
 #[derive(
@@ -104,12 +116,75 @@ impl EvaluationData {
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
 )]
+pub enum CompilationResponse {
+    Ok {
+        result: CompilerResponse,
+        result_hash: DigestIdentifier,
+        /// rustc version the quorum built with, voted inside the
+        /// result hash: validators compare it against the registry
+        /// entry for the pin (valid ID, wrong toolchain is
+        /// rejected). Always measured, in tests as in production.
+        toolchain_version: String,
+    },
+    Error {
+        result: CompilationError,
+        result_hash: DigestIdentifier,
+        /// Same attestation for deterministic failures.
+        toolchain_version: String,
+    },
+}
+
+impl CompilationResponse {
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self, Self::Ok { .. })
+    }
+}
+
+/// Evidence of the compilation phase of a governance fact.
+///
+/// The owner's
+/// signature over the compilation request, its hash, and one signature
+/// per compiler over the agreed result. Follows the same shape as
+/// `EvaluationData` / `ApprovalData` / `ValidationData`.
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
+pub struct CompilationData {
+    pub compile_req_signature: Signature,
+    pub compile_req_hash: DigestIdentifier,
+    pub compilers_signatures: Vec<Signature>,
+    pub response: CompilationResponse,
+}
+
+impl CompilationData {
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.response, CompilationResponse::Ok { .. })
+    }
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+)]
 pub struct ApprovalData {
     pub approval_req_signature: Signature,
     pub approval_req_hash: DigestIdentifier,
+    /// Anchored from the signed `ApprovalReq` so the request can be
+    /// rebuilt exactly during verification.
+    pub issued_at: TimeStamp,
+    pub deadline: TimeStamp,
     pub approvers_agrees_signatures: Vec<Signature>,
     pub approvers_disagrees_signatures: Vec<Signature>,
-    pub approvers_timeout: Vec<TimeOut>,
+    /// Approvers that signed both an accept and a reject for the same
+    /// request: excluded from both tallies and counted as absent. The
+    /// pair of signatures is the portable evidence of the misbehavior.
+    pub double_votes: Vec<(Signature, Signature)>,
+    /// Approvers that never answered before the deadline, each with the
+    /// validator-signed timeout attestations (signed `ApprovalRes::TimeOut`)
+    /// that prove the absence instead of leaving it implicit. Sorted by
+    /// approver key, then by validator key. Empty in early closures. An
+    /// approver present here must NOT appear in any of the vote lists
+    /// (a late answer wins over the timeout attestation).
+    pub approvers_timeouts: Vec<(PublicKey, Vec<Signature>)>,
     pub approved: bool,
 }
 
@@ -147,22 +222,13 @@ pub enum ValidationMetadata {
 #[derive(
     Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-pub struct OpaqueData {
-    pub subject_id: DigestIdentifier,
-    pub event_request_timestamp: TimeStamp,
-    pub signer: PublicKey,
-}
-
-#[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
 pub enum Protocols {
     Create {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     TrackerFactFull {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
@@ -173,33 +239,68 @@ pub enum Protocols {
         data: OpaqueData,
     },
     GovFact {
-        event_request: Signed<EventRequest>,
-        evaluation: EvaluationData,
+        event_request: Arc<Signed<EventRequest>>,
+        /// Compilation evidence, present when the fact adds a schema or
+        /// changes a contract (or its initial value). Boxed to keep the
+        /// enum size close to the other variants.
+        compilation: Option<Box<CompilationData>>,
+        /// `None` when the compilation phase rejected the contracts:
+        /// there is nothing to evaluate and the event commits as failed.
+        evaluation: Option<EvaluationData>,
         approval: Option<ApprovalData>,
-        validation: ValidationData,
+        /// Boxed to keep the enum size close to the other variants,
+        /// like the compilation evidence above.
+        validation: Box<ValidationData>,
     },
     Transfer {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
     TrackerConfirm {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     GovConfirm {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         evaluation: EvaluationData,
         validation: ValidationData,
     },
     Reject {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
     EOL {
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         validation: ValidationData,
     },
+}
+
+/// Checks the evaluation/approval combination of a governance fact:
+/// without approval the evaluation must have failed; with approval the
+/// evaluation must be correct and require it.
+fn check_eval_approval(
+    eval_data: EvaluationData,
+    approval_data: Option<ApprovalData>,
+) -> Result<(Option<EvaluationData>, Option<ApprovalData>), ProtocolsError> {
+    match approval_data {
+        None => {
+            if eval_data.is_ok() {
+                return Err(ProtocolsError::InvalidEvaluation);
+            }
+            Ok((Some(eval_data), None))
+        }
+        Some(approval_data) => {
+            if let EvaluationResponse::Ok { result, .. } = &eval_data.response {
+                if !result.appr_required {
+                    return Err(ProtocolsError::ApprovalRequired);
+                }
+            } else {
+                return Err(ProtocolsError::InvalidEvaluation);
+            }
+            Ok((Some(eval_data), Some(approval_data)))
+        }
+    }
 }
 
 impl Protocols {
@@ -272,28 +373,31 @@ impl Protocols {
         }
     }
 
-    pub fn buidl_event_db(&self) -> (RequestEventDB, DigestIdentifier, u64) {
+    pub fn buidl_event_db(
+        &self,
+    ) -> Result<(RequestEventDB, DigestIdentifier, u64), ProtocolsError> {
         match self {
             Self::Create {
                 validation,
                 event_request,
             } => {
+                // A corrupt ledger (bad sync or DB) must surface as an
+                // error, never panic the node into disagreeing with its
+                // peers about determinism.
                 let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 else {
-                    unreachable!(
-                        "Unreachable combination is a create event request"
-                    )
+                    return Err(ProtocolsError::NotCreateWithMetadata);
                 };
 
                 let EventRequest::Create(create) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a create event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "create event without a create request".to_owned(),
+                    ));
                 };
 
-                (
+                Ok((
                     RequestEventDB::Create {
                         name: create.name.clone(),
                         description: create.description.clone(),
@@ -302,7 +406,7 @@ impl Protocols {
                     },
                     metadata.subject_id.clone(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::TrackerFactFull {
                 evaluation,
@@ -320,12 +424,12 @@ impl Protocols {
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a fact event request"
-                    )
+                    return Err(
+                        ProtocolsError::InvalidTrackerFactFullEventRequest,
+                    );
                 };
 
-                (
+                Ok((
                     RequestEventDB::TrackerFactFull {
                         payload: fact_request.payload.0.clone(),
                         viewpoints: fact_request
@@ -337,61 +441,114 @@ impl Protocols {
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::TrackerFactOpaque {
                 evaluation, data, ..
-            } => (
+            } => Ok((
                 RequestEventDB::TrackerFactOpaque {
                     viewpoints: evaluation.viewpoints.iter().cloned().collect(),
                     evaluation_success: evaluation.is_ok(),
                 },
                 data.subject_id.clone(),
                 data.event_request_timestamp.as_nanos(),
-            ),
+            )),
             Self::GovFact {
                 evaluation,
                 approval,
+                compilation,
                 event_request,
                 ..
             } => {
                 let (evaluation_response, approval_success) = match evaluation
-                    .response
-                    .clone()
+                    .as_ref()
                 {
-                    EvaluationResponse::Ok { result, .. } => {
-                        if let Some(appr) = approval {
+                    // No evaluation means the compilation phase
+                    // rejected the contracts.
+                    None => {
+                        let Some(compilation) = compilation.as_ref() else {
+                            return Err(ProtocolsError::CorruptLedgerShape(
+                                "gov fact without evaluation or compilation"
+                                    .to_owned(),
+                            ));
+                        };
+                        let CompilationResponse::Error { result, .. } =
+                            &compilation.response
+                        else {
+                            return Err(ProtocolsError::CorruptLedgerShape(
+                                    "gov fact without evaluation but successful compilation"
+                                        .to_owned(),
+                                ));
+                        };
+                        (
+                            EvalResDB::Error(format!(
+                                "compilation: {}",
+                                result
+                            )),
+                            None,
+                        )
+                    }
+                    Some(evaluation) => match evaluation.response.clone() {
+                        EvaluationResponse::Ok { result, .. } => {
+                            let Some(appr) = approval else {
+                                return Err(ProtocolsError::ApprovalRequired);
+                            };
                             (
                                 EvalResDB::Patch(result.patch.0),
                                 Some(appr.approved),
                             )
-                        } else {
-                            unreachable!(
-                                "In a fact governance event, if the assessment is correct, there should be approval"
-                            )
                         }
-                    }
-                    EvaluationResponse::Error { result, .. } => {
-                        (EvalResDB::Error(result.to_string()), None)
-                    }
+                        EvaluationResponse::Error { result, .. } => {
+                            (EvalResDB::Error(result.to_string()), None)
+                        }
+                    },
                 };
 
                 let EventRequest::Fact(fact_request) = event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a fact event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "gov fact without a fact request".to_owned(),
+                    ));
                 };
 
-                (
+                let compilation_response =
+                    compilation.as_ref().map(|compilation| match &compilation
+                        .response
+                    {
+                        CompilationResponse::Ok {
+                            result,
+                            toolchain_version,
+                            ..
+                        } => CompResDB::Ok {
+                            contracts: result
+                                .contracts
+                                .iter()
+                                .map(|(schema, hash)| {
+                                    (schema.to_string(), hash.to_string())
+                                })
+                                .collect(),
+                            toolchain_version: toolchain_version.clone(),
+                        },
+                        CompilationResponse::Error {
+                            result,
+                            toolchain_version,
+                            ..
+                        } => CompResDB::Error {
+                            error: result.to_string(),
+                            toolchain_version: toolchain_version.clone(),
+                        },
+                    });
+
+                Ok((
                     RequestEventDB::GovernanceFact {
                         payload: fact_request.payload.0.clone(),
                         evaluation_response,
                         approval_success,
+                        compilation_response,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
             Self::Transfer {
                 evaluation,
@@ -401,9 +558,9 @@ impl Protocols {
                 let EventRequest::Transfer(transfer_request) =
                     event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a transfer event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "transfer event without a transfer request".to_owned(),
+                    ));
                 };
 
                 let evaluation_error = match evaluation.response.clone() {
@@ -413,20 +570,20 @@ impl Protocols {
                     }
                 };
 
-                (
+                Ok((
                     RequestEventDB::Transfer {
                         new_owner: transfer_request.new_owner.to_string(),
                         evaluation_error,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
-            Self::TrackerConfirm { event_request, .. } => (
+            Self::TrackerConfirm { event_request, .. } => Ok((
                 RequestEventDB::TrackerConfirm,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
+            )),
             Self::GovConfirm {
                 evaluation,
                 event_request,
@@ -435,9 +592,9 @@ impl Protocols {
                 let EventRequest::Confirm(confirm_request) =
                     event_request.content()
                 else {
-                    unreachable!(
-                        "Unreachable combination is a confirm event request"
-                    )
+                    return Err(ProtocolsError::CorruptLedgerShape(
+                        "confirm event without a confirm request".to_owned(),
+                    ));
                 };
 
                 let evaluation_response = match evaluation.response.clone() {
@@ -448,39 +605,56 @@ impl Protocols {
                         EvalResDB::Error(result.to_string())
                     }
                 };
-                (
+                Ok((
                     RequestEventDB::GovernanceConfirm {
                         name_old_owner: confirm_request.name_old_owner.clone(),
                         evaluation_response,
                     },
                     event_request.content().get_subject_id(),
                     event_request.signature().timestamp.as_nanos(),
-                )
+                ))
             }
-            Self::Reject { event_request, .. } => (
+            Self::Reject { event_request, .. } => Ok((
                 RequestEventDB::Reject,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
-            Self::EOL { event_request, .. } => (
+            )),
+            Self::EOL { event_request, .. } => Ok((
                 RequestEventDB::EOL,
                 event_request.content().get_subject_id(),
                 event_request.signature().timestamp.as_nanos(),
-            ),
+            )),
         }
     }
 
     pub fn get_validation_data(&self) -> ValidationData {
         match self {
+            Self::GovFact { validation, .. } => validation.as_ref().clone(),
             Self::Create { validation, .. }
             | Self::TrackerFactFull { validation, .. }
             | Self::TrackerFactOpaque { validation, .. }
-            | Self::GovFact { validation, .. }
             | Self::Transfer { validation, .. }
             | Self::TrackerConfirm { validation, .. }
             | Self::GovConfirm { validation, .. }
             | Self::Reject { validation, .. }
             | Self::EOL { validation, .. } => validation.clone(),
+        }
+    }
+
+    /// Hash of the approval tally carried by this event, present only for
+    /// approved governance facts that went through approval.
+    pub fn approval_data_hash(
+        &self,
+        hash: &HashAlgorithm,
+    ) -> Result<Option<DigestIdentifier>, ProtocolsError> {
+        match self {
+            Self::GovFact {
+                approval: Some(approval),
+                ..
+            } => hash_borsh(&*hash.hasher(), approval)
+                .map(Some)
+                .map_err(|e| ProtocolsError::HashingFailed(e.to_string())),
+            _ => Ok(None),
         }
     }
 
@@ -502,8 +676,9 @@ impl Protocols {
 
     pub fn build(
         is_gov: bool,
-        event_request: Signed<EventRequest>,
+        event_request: Arc<Signed<EventRequest>>,
         actual_protocols: ActualProtocols,
+        approval_data: Option<ApprovalData>,
         validation: ValidationData,
     ) -> Result<Self, ProtocolsError> {
         let event_request_type =
@@ -517,29 +692,88 @@ impl Protocols {
                 })
             }
             (EventRequestType::Fact, true) => {
-                let (evaluation, approval) = match actual_protocols {
+                if actual_protocols.needs_approval() != approval_data.is_some()
+                {
+                    return Err(ProtocolsError::InvalidActualProtocols {
+                        expected: "approval data iff approval variant",
+                        got: "approval data mismatch",
+                    });
+                }
+                let (compilation, evaluation, approval) = match actual_protocols
+                {
                     ActualProtocols::Eval { eval_data } => {
-                        if eval_data.is_ok() {
-                            return Err(ProtocolsError::InvalidEvaluation);
-                        } else {
-                            (eval_data, None)
-                        }
+                        let (evaluation, approval) =
+                            check_eval_approval(eval_data, None)?;
+                        (None, evaluation, approval)
                     }
-                    ActualProtocols::EvalApprove {
-                        eval_data,
-                        approval_data,
-                    } => {
-                        if let EvaluationResponse::Ok { result, .. } =
-                            &eval_data.response
-                        {
-                            if !result.appr_required {
-                                return Err(ProtocolsError::ApprovalRequired);
-                            }
-                        } else {
-                            return Err(ProtocolsError::InvalidEvaluation);
+                    ActualProtocols::EvalApprove { eval_data, .. } => {
+                        let Some(approval_data) = approval_data else {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "approval data for EvalApprove",
+                                    got: "no approval data",
+                                },
+                            );
+                        };
+                        let (evaluation, approval) = check_eval_approval(
+                            eval_data,
+                            Some(approval_data),
+                        )?;
+                        (None, evaluation, approval)
+                    }
+                    ActualProtocols::Compile { compile_data } => {
+                        if compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "failed Compile",
+                                    got: "successful Compile",
+                                },
+                            );
                         }
-
-                        (eval_data, Some(approval_data))
+                        (Some(Box::new(compile_data)), None, None)
+                    }
+                    ActualProtocols::CompileEval {
+                        compile_data,
+                        eval_data,
+                    } => {
+                        if !compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "successful Compile",
+                                    got: "failed Compile",
+                                },
+                            );
+                        }
+                        let (evaluation, approval) =
+                            check_eval_approval(eval_data, None)?;
+                        (Some(Box::new(compile_data)), evaluation, approval)
+                    }
+                    ActualProtocols::CompileEvalApprove {
+                        compile_data,
+                        eval_data,
+                        ..
+                    } => {
+                        if !compile_data.is_ok() {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "successful Compile",
+                                    got: "failed Compile",
+                                },
+                            );
+                        }
+                        let Some(approval_data) = approval_data else {
+                            return Err(
+                                ProtocolsError::InvalidActualProtocols {
+                                    expected: "approval data for CompileEvalApprove",
+                                    got: "no approval data",
+                                },
+                            );
+                        };
+                        let (evaluation, approval) = check_eval_approval(
+                            eval_data,
+                            Some(approval_data),
+                        )?;
+                        (Some(Box::new(compile_data)), evaluation, approval)
                     }
                     ActualProtocols::None => {
                         return Err(ProtocolsError::InvalidActualProtocols {
@@ -551,9 +785,10 @@ impl Protocols {
 
                 Ok(Self::GovFact {
                     event_request,
+                    compilation,
                     evaluation,
                     approval,
-                    validation,
+                    validation: Box::new(validation),
                 })
             }
             (EventRequestType::Fact, false) => {
@@ -569,6 +804,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "Eval",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
                         });
                     }
                 };
@@ -595,6 +838,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
+                        });
+                    }
                 };
 
                 Ok(Self::Transfer {
@@ -618,6 +869,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "Eval",
+                            got: "Compile",
+                        });
+                    }
                 };
                 Ok(Self::GovConfirm {
                     event_request,
@@ -637,6 +896,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "None",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
                         });
                     }
                     ActualProtocols::None => {}
@@ -661,6 +928,14 @@ impl Protocols {
                             got: "EvalApprove",
                         });
                     }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
+                        });
+                    }
                     ActualProtocols::None => {}
                 }
                 Ok(Self::Reject {
@@ -680,6 +955,14 @@ impl Protocols {
                         return Err(ProtocolsError::InvalidActualProtocols {
                             expected: "None",
                             got: "EvalApprove",
+                        });
+                    }
+                    ActualProtocols::Compile { .. }
+                    | ActualProtocols::CompileEval { .. }
+                    | ActualProtocols::CompileEvalApprove { .. } => {
+                        return Err(ProtocolsError::InvalidActualProtocols {
+                            expected: "None",
+                            got: "Compile",
                         });
                     }
                     ActualProtocols::None => {}
@@ -851,11 +1134,14 @@ impl Ledger {
         }
     }
 
-    pub fn build_ledger_db(&self, signature_timestamp: u64) -> LedgerDB {
+    pub fn build_ledger_db(
+        &self,
+        signature_timestamp: u64,
+    ) -> Result<LedgerDB, ProtocolsError> {
         let (event, subject_id, event_request_timestamp) =
-            self.protocols.buidl_event_db();
+            self.protocols.buidl_event_db()?;
 
-        LedgerDB {
+        Ok(LedgerDB {
             subject_id: subject_id.to_string(),
             sn: self.sn,
             event_request_timestamp,
@@ -863,7 +1149,7 @@ impl Ledger {
             sink_timestamp: TimeStamp::now().as_nanos(),
             event_type: event.get_event_type(),
             event,
-        }
+        })
     }
     pub fn get_create_metadata(&self) -> Result<Metadata, ProtocolsError> {
         if let Protocols::Create { validation, .. } = &self.protocols
@@ -874,5 +1160,58 @@ impl Ledger {
         } else {
             Err(ProtocolsError::NotCreateWithMetadata)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_common::identity::{
+        HashAlgorithm, KeyPair, Signature, TimeStamp, hash_borsh,
+        keys::Ed25519Signer,
+    };
+    use std::collections::{BTreeSet, HashSet};
+
+    fn keys(n: usize) -> HashSet<PublicKey> {
+        (0..n)
+            .map(|_| {
+                KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"))
+                    .public_key()
+            })
+            .collect()
+    }
+
+    fn dummy_sig() -> Signature {
+        let signer =
+            KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"));
+        Signature::new(&42u8, &signer).expect("sign")
+    }
+
+    fn roundtrip<T>(value: &T)
+    where
+        T: borsh::BorshSerialize + borsh::BorshDeserialize,
+    {
+        let bytes = borsh::to_vec(value).expect("encode");
+        let back = T::try_from_slice(&bytes).expect("decode");
+        assert_eq!(borsh::to_vec(&back).expect("re-encode"), bytes);
+    }
+
+    #[test]
+    fn subject_wire_roundtrip() {
+        let id = |b: u8| {
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &b).expect("hash")
+        };
+        roundtrip(&OpaqueData {
+            subject_id: id(1),
+            event_request_timestamp: TimeStamp::from_nanos(7),
+            signer: keys(1).into_iter().next().expect("key"),
+        });
+        roundtrip(&EvaluationDataOpaque {
+            eval_req_signature: dummy_sig(),
+            eval_req_hash: id(3),
+            evaluators_signatures: vec![dummy_sig()],
+            viewpoints: BTreeSet::from(["agua".to_owned()]),
+            response: EvaluationResponseOpaque::Error { result_hash: id(4) },
+        });
     }
 }

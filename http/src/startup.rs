@@ -155,16 +155,30 @@ fn log_effective_configuration(
     config: &BridgeConfig,
     secrets: &StartupSecrets,
 ) {
-    info!(target: TARGET, "--- configuration ---");
-    info!(target: TARGET, "[runtime]");
+    info!(target: TARGET, msg_type = "startup_config", "--- configuration ---");
+    info!(target: TARGET, msg_type = "startup_config", "[runtime]");
     if config_path.is_empty() {
-        info!(target: TARGET, "  config    : default (built-in)");
+        info!(
+            target: TARGET,
+            msg_type = "startup_config",
+            "  config    : default (built-in)"
+        );
     } else {
-        info!(target: TARGET, "  config    : {}", config_path);
+        info!(
+            target: TARGET,
+            msg_type = "startup_config",
+            "  config    : {}",
+            config_path
+        );
     }
-    info!(target: TARGET, "  safe mode : {}", config.node.safe_mode);
+    info!(
+        target: TARGET,
+        msg_type = "startup_config",
+        "  safe mode : {}",
+        config.node.safe_mode
+    );
 
-    info!(target: TARGET, "[secrets]");
+    info!(target: TARGET, msg_type = "startup_config", "[secrets]");
     info!(
         target: TARGET,
         "  auth pass : {} ({})",
@@ -209,9 +223,17 @@ fn log_effective_configuration(
     match config_log_sections(config) {
         Ok(sections) => {
             for (section, lines) in &sections {
-                info!(target: TARGET, "[{section}]");
+                info!(
+                    target: TARGET,
+                    msg_type = "startup_config",
+                    "[{section}]"
+                );
                 for line in lines {
-                    info!(target: TARGET, "  {line}");
+                    info!(
+                        target: TARGET,
+                        msg_type = "startup_config",
+                        "  {line}"
+                    );
                 }
             }
         }
@@ -223,7 +245,7 @@ fn log_effective_configuration(
         }
     }
 
-    info!(target: TARGET, "--- end ---");
+    info!(target: TARGET, msg_type = "startup_config", "--- end ---");
 }
 
 /// Config keys whose values must never appear in logs. Non-empty values are
@@ -575,13 +597,11 @@ async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
 
     let cert_path = config
         .http
-        .https_cert_path
-        .clone()
+        .https_cert_path()
         .ok_or(StartupError::MissingHttpsCertPath)?;
     let key_path = config
         .http
-        .https_private_key_path
-        .clone()
+        .https_private_key_path()
         .ok_or(StartupError::MissingHttpsKeyPath)?;
 
     let self_signed_config = config.http.self_signed_cert.clone();
@@ -612,7 +632,7 @@ async fn serve_https(args: HttpsServeArgs<'_>) -> Result<(), StartupError> {
     tokio::spawn(async move {
         join_all(runners).await;
         handle.graceful_shutdown(Some(Duration::from_secs(10)));
-        info!(target: TARGET, "all runners stopped");
+        info!(target: TARGET, msg_type = "shutdown", "all runners stopped");
     });
 
     let app = tower_trace(build_routes(
@@ -696,7 +716,7 @@ async fn serve_http(
         )
         .with_graceful_shutdown(async move {
             join_all(runners).await;
-            info!(target: TARGET, "all runners stopped");
+            info!(target: TARGET, msg_type = "shutdown", "all runners stopped");
             let _ = shutdown_tx.send(());
         }),
     );
@@ -951,8 +971,13 @@ mod tests {
             .flat_map(|(_, lines)| lines.iter())
             .collect();
         for leaf in &expected {
+            // A sensitive leaf is redacted only when it carries a value;
+            // empty strings and nulls mean "not configured" and stay
+            // visible, matching redact_sensitive_values.
             let sensitive = REDACTED_CONFIG_KEYS.iter().any(|key| {
-                leaf.contains(&format!(".{key}: ")) && !leaf.ends_with(": \"\"")
+                leaf.contains(&format!(".{key}: "))
+                    && !leaf.ends_with(": \"\"")
+                    && !leaf.ends_with(": null")
             });
             let expected_line = if sensitive {
                 let (path, _) = leaf.rsplit_once(": ").unwrap();
@@ -1069,7 +1094,8 @@ mod tests {
         let url = start_cors_app(cors).await;
 
         assert_eq!(
-            cors_header_for_origin(&url, "https://app.example.com").await
+            cors_header_for_origin(&url, "https://app.example.com")
+                .await
                 .as_deref(),
             Some("https://app.example.com"),
             "the configured origin must receive the allow-origin header"
@@ -1095,7 +1121,8 @@ mod tests {
         let url = start_cors_app(cors).await;
 
         assert_eq!(
-            cors_header_for_origin(&url, "https://app.example.com").await
+            cors_header_for_origin(&url, "https://app.example.com")
+                .await
                 .as_deref(),
             Some("*"),
             "the wildcard opt-in must emit '*' for any origin"

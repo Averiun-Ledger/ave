@@ -41,3 +41,7 @@ AGENTS.md
 
 .agents/
 
+.opencode/
+
+AI_CONTEXT/
+.codegraph-cache/

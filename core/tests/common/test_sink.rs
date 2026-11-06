@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -6,7 +7,7 @@ use std::{
 
 use ave_common::IncomingSinkEvent;
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -66,6 +67,10 @@ pub enum AuthResponseMode {
     TokenSuccess,
     /// Return HTTP 401 to simulate invalid credentials.
     TokenFailure,
+    /// Return HTTP 503 with a `Retry-After: <secs>` header on every
+    /// token request. Used to test that the token refresh honors a
+    /// configured upper bound instead of stalling for the hint.
+    TokenServerErrorWithRetryAfter(u64),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -803,8 +808,12 @@ impl TestSink {
 
     async fn auth(
         State(state): State<Arc<Mutex<TestSinkState>>>,
-        Json(req): Json<AuthRequest>,
+        Form(params): Form<HashMap<String, String>>,
     ) -> Response {
+        let req = AuthRequest {
+            username: params.get("username").cloned().unwrap_or_default(),
+            password: params.get("password").cloned().unwrap_or_default(),
+        };
         let mut guard = state.lock().await;
         guard.auth_requests.push(req);
 
@@ -821,6 +830,15 @@ impl TestSink {
             AuthResponseMode::TokenFailure => {
                 drop(guard);
                 (StatusCode::UNAUTHORIZED, "invalid credentials")
+                    .into_response()
+            }
+            AuthResponseMode::TokenServerErrorWithRetryAfter(secs) => {
+                drop(guard);
+                axum::http::Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header("retry-after", secs.to_string())
+                    .body(axum::body::Body::from("idp overloaded"))
+                    .expect("test response builds")
                     .into_response()
             }
         }

@@ -1,0 +1,2994 @@
+#[cfg(feature = "test")]
+use std::collections::HashMap;
+use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use ave_actors::{
+    Actor, ActorContext, ActorError, ActorPath, Handler, Message,
+    NotPersistentActor, TimerKey,
+};
+use serde_json::Value;
+use tracing::{Span, debug, error, info, info_span, warn};
+
+use ave_common::SchemaType;
+use ave_common::identity::{
+    DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh,
+};
+use ave_network::ComunicateInfo;
+
+use super::error::CompilerError;
+use super::pipeline;
+use super::support::{
+    CompilerResponse, CompilerSupport, ContractSourceInput, HEAL_RETRY_BASE_MS,
+    HEAL_RETRY_MAX_MS, RegisteredLoadInput, SERVING_CACHE_TTL, ServedArtifact,
+    ServingCacheEntry, is_compiler_infra_error, is_local_fatal_compiler_error,
+    is_retryable_compiler_recovery_error,
+};
+use crate::compilation::artifact::{
+    ArtifactData, ArtifactFetchResult, ArtifactProbeResult,
+};
+use crate::governance::contract_register::{
+    ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
+};
+use crate::governance::{Governance, GovernanceMessage};
+use crate::helpers::network::{
+    ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
+};
+use crate::metrics::try_core_metrics;
+use crate::model::common::{
+    GovVersionSync, crash_system, gov_version_sync, take_random_signers,
+};
+use crate::sink::retry_delay_ms;
+
+/// Response timeout of a single artifact request attempt.
+#[cfg(any(test, feature = "test"))]
+const FETCH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Response timeout of a single artifact request attempt.
+#[cfg(not(any(test, feature = "test")))]
+const FETCH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Response timeout of a light availability probe batch: the probe
+/// only asks who can serve, slow peers are simply skipped.
+#[cfg(any(test, feature = "test"))]
+const PROBE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Response timeout of a light availability probe batch: the probe
+/// only asks who can serve, slow peers are simply skipped.
+#[cfg(not(any(test, feature = "test")))]
+const PROBE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Peers probed at a time (the `take_random_signers` batch pattern of
+/// the protocol rounds): after a contract change every evaluator needs
+/// the artifact at once, and batching spreads the herd over the
+/// compiler set instead of sweeping it.
+const PROBE_BATCH_SIZE: usize = 3;
+
+/// Total budget waiting for a busy batch to finish compiling before
+/// moving to the next one. Very generous: compilations take seconds,
+/// not minutes.
+#[cfg(any(test, feature = "test"))]
+const BUSY_TOTAL_BUDGET: Duration = Duration::from_secs(60);
+/// Total budget waiting for a busy batch to finish compiling before
+/// moving to the next one. Very generous: compilations take seconds,
+/// not minutes.
+#[cfg(not(any(test, feature = "test")))]
+const BUSY_TOTAL_BUDGET: Duration = Duration::from_secs(180);
+
+/// Wait between re-probes to the same busy batch, stepped: compilations
+/// are not instant, give them room.
+#[cfg(any(test, feature = "test"))]
+fn busy_retry_delay(_attempt: usize) -> Duration {
+    Duration::from_secs(1)
+}
+/// Wait between re-probes to the same busy batch, stepped: compilations
+/// are not instant, give them room.
+#[cfg(not(any(test, feature = "test")))]
+const fn busy_retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        1..=5 => Duration::from_secs(3),
+        6..=10 => Duration::from_secs(5),
+        _ => Duration::from_secs(10),
+    }
+}
+
+/// Timeoff between exhausted fetch cycles. Non-aggressive: the
+/// artifact is needed for sure, so the cycle never gives up — the
+/// timeoff is what keeps the retry cheap.
+#[cfg(any(test, feature = "test"))]
+const TIMEOFF_BASE_MS: u64 = 1_000;
+/// Timeoff between exhausted fetch cycles. Non-aggressive: the
+/// artifact is needed for sure, so the cycle never gives up — the
+/// timeoff is what keeps the retry cheap.
+#[cfg(not(any(test, feature = "test")))]
+const TIMEOFF_BASE_MS: u64 = 5_000;
+
+#[cfg(any(test, feature = "test"))]
+const TIMEOFF_MAX_MS: u64 = 5_000;
+#[cfg(not(any(test, feature = "test")))]
+const TIMEOFF_MAX_MS: u64 = 60_000;
+
+/// Fetch start input: what to fetch and where it is anchored. Groups
+/// the data parameters so the entry point stays readable.
+struct FetchInput {
+    contract: String,
+    contract_name: String,
+    initial_value: Value,
+    contract_path: PathBuf,
+    gov_id: DigestIdentifier,
+    schema_id: SchemaType,
+    contract_hash: DigestIdentifier,
+}
+
+#[derive(Debug)]
+pub struct ContractCompiler {
+    contract: DigestIdentifier,
+    hash: HashAlgorithm,
+    our_key: Arc<PublicKey>,
+    next_nonce: u64,
+    /// This node's governance version and the artifact whitelists, kept
+    /// in memory and refreshed by `Reconcile` — no per-operation lookups
+    /// against the governance actor. The governance compilers are plan A
+    /// fetch targets only (they compile their artifacts, they never
+    /// request them); the evaluators of this schema (schema-level and
+    /// tracker-schemas roles — namespaces only balance the load, the
+    /// artifact bytes are the same for all) validate incoming requests
+    /// when serving and are the plan B fetch targets.
+    gov_version: u64,
+    compilers: BTreeSet<PublicKey>,
+    evaluators: BTreeSet<PublicKey>,
+    /// While the governance applies an update (promoting and refreshing
+    /// artifacts) nothing is served: between versions there is no good
+    /// answer.
+    serving_blocked: bool,
+    /// The official artifact recently served to other nodes (plan B
+    /// serving): same serving cache policy as the compile worker, but a
+    /// single entry — this actor only serves its own schema. Cleared
+    /// whenever the module is evicted (the artifact is changing).
+    serving_cache: Option<ServingCacheEntry>,
+    fetch: Option<FetchState>,
+    /// The provisioning action of the last `Reconcile`: how this node
+    /// obtains the artifact (compile locally or fetch it). Healing a
+    /// corrupt persisted artifact re-runs it.
+    provision: Option<ContractCompilerAction>,
+}
+
+/// An in-flight artifact fetch: message-driven (no blocked ask awaiting
+/// the network). Light probe batches discover who can serve at our
+/// governance version, the bytes come from the first one that answered,
+/// busy batches (compiling) are waited on with a stepped schedule, and
+/// an exhausted cycle triggers a manual governance update and a
+/// non-aggressive timeoff — the artifact is needed for sure, so the
+/// cycle never gives up.
+#[derive(Debug)]
+struct FetchState {
+    contract: String,
+    contract_hash: DigestIdentifier,
+    contract_name: String,
+    initial_value: Value,
+    contract_path: PathBuf,
+    gov_id: DigestIdentifier,
+    schema_id: SchemaType,
+    /// Ledger anchor: the received bytes are verified against it.
+    wasm_hash: DigestIdentifier,
+    phase: FetchPhase,
+    /// Nonce of the in-flight probe round or artifact request.
+    nonce: u64,
+    timer: Option<TimerKey>,
+    started_at: Instant,
+    /// Exhausted cycles so far: paces the timeoff backoff.
+    cycles: usize,
+}
+
+/// A probe batch and everything it produced: who has not answered, who
+/// can serve, who is busy compiling, and the candidates left for the
+/// next batches.
+#[derive(Debug, Default)]
+struct ProbeRound {
+    plan_b: bool,
+    /// Batch members that have not answered yet.
+    pending: HashSet<PublicKey>,
+    /// Batch members that answered `CanServe`: the failover list.
+    can_serve: VecDeque<PublicKey>,
+    /// Batch members that answered `Busy` (compiling): re-probed after
+    /// the stepped wait — after a contract change every compiler is
+    /// busy at once, so moving to another batch is pointless.
+    busy: HashSet<PublicKey>,
+    /// Candidates not tried yet (the next batches).
+    untried: Vec<PublicKey>,
+    /// Peers whose fetch attempt already failed this round: never
+    /// re-probed nor re-admitted as failover candidates.
+    failed: HashSet<PublicKey>,
+    /// Re-probes sent to the busy batch (steps the wait).
+    busy_attempts: usize,
+    /// When the busy waiting of this batch started (total budget).
+    busy_started: Option<Instant>,
+}
+
+#[derive(Debug)]
+enum FetchPhase {
+    /// Light probes in flight: who can serve at our version?
+    Probe(ProbeRound),
+    /// Fetching the bytes from a peer that answered the probe.
+    Fetch {
+        round: ProbeRound,
+        peer: PublicKey,
+        /// Nonce of the probe round that found this peer: late answers
+        /// still feed the round (failover, busy, pending).
+        probe_nonce: u64,
+    },
+    /// Waiting to re-probe the same busy batch.
+    BusyWait(ProbeRound),
+    /// Waiting between cycles (non-aggressive timeoff).
+    Timeoff,
+}
+
+/// Test-only (feature `test`) observability snapshot of the fetch state
+/// machine: the suites read this through the API instead of racing
+/// timers or tracing logs.
+#[cfg(feature = "test")]
+#[derive(Debug, Clone, Default)]
+pub struct FetchObs {
+    /// Probe requests sent so far.
+    pub probes_sent: usize,
+    /// Artifact downloads started so far.
+    pub downloads_started: usize,
+    /// Cycles exhausted (timeoff entered) so far.
+    pub cycles_exhausted: usize,
+    /// Current phase of the fetch, if any.
+    pub phase: Option<&'static str>,
+}
+
+/// Handle of the per-node fetch observability registry (feature
+/// `test`), keyed by contract name.
+#[cfg(feature = "test")]
+pub type SharedFetchObs = Arc<std::sync::Mutex<HashMap<String, FetchObs>>>;
+
+impl ContractCompiler {
+    pub fn new(hash: HashAlgorithm, our_key: Arc<PublicKey>) -> Self {
+        Self {
+            contract: DigestIdentifier::default(),
+            hash,
+            our_key,
+            // Sequential from zero: probe/fetch nonces are pinned by
+            // tests, and predictability is harmless — responses are
+            // gated by whitelist and nonce match, and the ledger anchor
+            // enforces byte safety either way.
+            next_nonce: 0,
+            gov_version: 0,
+            compilers: BTreeSet::new(),
+            evaluators: BTreeSet::new(),
+            serving_blocked: false,
+            serving_cache: None,
+            fetch: None,
+            provision: None,
+        }
+    }
+
+    fn register_path(ctx: &ActorContext<Self>) -> ActorPath {
+        ActorPath::from(format!("{}/contract_register", ctx.path().parent()))
+    }
+
+    fn network<A>(
+        ctx: &ActorContext<A>,
+    ) -> Result<Arc<NetworkSender>, ActorError>
+    where
+        A: Actor,
+    {
+        ctx.system()
+            .get_helper::<Arc<NetworkSender>>("network")
+            .ok_or_else(|| ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            })
+    }
+
+    fn cancel_fetch_timer(&mut self, ctx: &ActorContext<Self>) {
+        if let Some(fetch) = &mut self.fetch
+            && let Some(key) = fetch.timer.take()
+        {
+            ctx.cancel_timer(key);
+        }
+    }
+
+    /// Records a test-only (feature `test`) fetch observability update.
+    #[cfg(feature = "test")]
+    fn record_fetch_obs(
+        ctx: &ActorContext<Self>,
+        contract_name: &str,
+        update: impl FnOnce(&mut FetchObs),
+    ) {
+        let Some(obs) =
+            ctx.system().get_helper::<SharedFetchObs>("test_fetch_obs")
+        else {
+            return;
+        };
+        // Test infrastructure: the lock is never held across an await;
+        // on poisoning (a test already panicked) keep going with the
+        // guarded state.
+        let mut obs =
+            obs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        update(obs.entry(contract_name.to_owned()).or_default());
+    }
+
+    /// Whether any evaluator can be asked for the artifact (plan B).
+    fn has_evaluator_targets(&self) -> bool {
+        self.evaluators.iter().any(|peer| peer != &*self.our_key)
+    }
+
+    /// The serving path of a peer for this fetch: compilers serve from
+    /// the governance compile worker, evaluators (plan B) from the
+    /// per-schema contract compiler.
+    fn peer_path(fetch: &FetchState, plan_b: bool) -> String {
+        if plan_b {
+            format!(
+                "/user/node/subject_manager/{}/{}_contract_compiler",
+                fetch.gov_id, fetch.schema_id
+            )
+        } else {
+            format!("/user/node/subject_manager/{}/compiler", fetch.gov_id)
+        }
+    }
+
+    /// Starts a probe set (compilers, or the schema evaluators as plan
+    /// B): candidates are batched at random and probed batch by batch.
+    async fn start_probe_set(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        plan_b: bool,
+    ) -> Result<(), ActorError> {
+        let candidates: HashSet<PublicKey> = if plan_b {
+            self.evaluators.clone()
+        } else {
+            self.compilers.clone()
+        }
+        .into_iter()
+        .filter(|peer| peer != &*self.our_key)
+        .collect();
+
+        if candidates.is_empty() {
+            // No one to ask in this set: plan B over the evaluators, or
+            // an exhausted cycle (boxed — direct async recursion).
+            if !plan_b && self.has_evaluator_targets() {
+                return Box::pin(self.start_probe_set(ctx, true)).await;
+            }
+            return self.cycle_exhausted(ctx).await;
+        }
+
+        let (batch, untried) =
+            take_random_signers(candidates, PROBE_BATCH_SIZE);
+        self.probe_batch(
+            ctx,
+            ProbeRound {
+                plan_b,
+                pending: batch.into_iter().collect(),
+                can_serve: VecDeque::new(),
+                busy: HashSet::new(),
+                untried: untried.into_iter().collect(),
+                failed: HashSet::new(),
+                busy_attempts: 0,
+                busy_started: None,
+            },
+        )
+        .await
+    }
+
+    /// Sends the probe to every member of the batch and arms the round
+    /// timeout.
+    async fn probe_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        let Some((gov_id, schema_id, contract_name)) =
+            self.fetch.as_ref().map(|fetch| {
+                (
+                    fetch.gov_id.clone(),
+                    fetch.schema_id.clone(),
+                    fetch.contract_name.clone(),
+                )
+            })
+        else {
+            return Ok(());
+        };
+
+        let plan_b = round.plan_b;
+        let batch_size = round.pending.len();
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        let network = Self::network(ctx)?;
+        for peer in &round.pending {
+            let target_path = match self.fetch.as_ref() {
+                Some(fetch) => Self::peer_path(fetch, plan_b),
+                None => return Ok(()),
+            };
+            // A send failure would leave the probes half-sent with no
+            // live timer: local infrastructure failure, fail loud.
+            let message = ActorMessage::ArtifactProbeReq {
+                subject_id: gov_id.clone(),
+                schema_id: schema_id.clone(),
+                gov_version: self.gov_version,
+                request_nonce: nonce,
+                receiver_actor: ctx.path().to_string(),
+            };
+            if let Err(e) = network
+                .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message),
+                    message: NetworkMessage::new(
+                        ComunicateInfo {
+                            receiver: peer.clone(),
+                            request_id: String::default(),
+                            version: 0,
+                            receiver_actor: target_path,
+                        },
+                        message,
+                    ),
+                })
+                .await
+            {
+                return Err(crash_system(ctx, e).await);
+            }
+        }
+
+        // One live timer per fetch: cancel the previous phase's timer
+        // before arming the round timeout.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
+            PROBE_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::ProbeTimeout {
+                request_nonce: nonce,
+            },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.nonce = nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Probe(round);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %contract_name,
+            plan_b,
+            batch_size,
+            "Artifact probe batch sent"
+        );
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.probes_sent += batch_size;
+            obs.phase = Some("probe");
+        });
+
+        Ok(())
+    }
+
+    /// Re-probes the busy members of the batch after the stepped wait.
+    async fn reprobe_busy(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        mut round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        round.pending = std::mem::take(&mut round.busy);
+        round.busy_attempts += 1;
+        self.probe_batch(ctx, round).await
+    }
+
+    /// The probe round closed (timeout or every member answered):
+    /// fetch from the first `CanServe`, wait for the busy ones, or move
+    /// to the next batch.
+    async fn resolve_probe_round(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        let FetchPhase::Probe(round) = &mut fetch.phase else {
+            return Ok(());
+        };
+
+        if let Some(peer) = round.can_serve.pop_front() {
+            let round = std::mem::take(round);
+            return self.start_fetch_from(ctx, round, peer).await;
+        }
+
+        if !round.busy.is_empty() {
+            let round = std::mem::take(round);
+            return self.wait_busy_batch(ctx, round).await;
+        }
+
+        let round = std::mem::take(round);
+        self.next_batch(ctx, round).await
+    }
+
+    /// Resumes a probe round whose answers are still in flight, with a
+    /// fresh timeout.
+    async fn resume_probe(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        probe_nonce: u64,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        // One live timer per fetch: cancel the failed attempt's timer
+        // before arming the resumed round timeout.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
+            PROBE_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::ProbeTimeout {
+                request_nonce: probe_nonce,
+            },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.nonce = probe_nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Probe(round);
+
+        Ok(())
+    }
+
+    /// Waits for a busy batch (stepped delay), or gives up on it when
+    /// the total budget is spent.
+    async fn wait_busy_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        mut round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        if round.busy_started.is_none() {
+            round.busy_started = Some(Instant::now());
+        }
+        let budget_spent = round
+            .busy_started
+            .is_some_and(|started| started.elapsed() >= BUSY_TOTAL_BUDGET);
+        if budget_spent {
+            debug!(
+                msg_type = "Fetch",
+                "Busy batch budget exhausted, moving to the next batch"
+            );
+            return self.next_batch(ctx, round).await;
+        }
+
+        let delay = busy_retry_delay(round.busy_attempts + 1);
+        let Some(nonce) = self.fetch.as_ref().map(|fetch| fetch.nonce) else {
+            return Ok(());
+        };
+        // One live timer per fetch: cancel the probe round's timeout
+        // before arming the busy wait.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
+            delay,
+            ContractCompilerMessage::BusyRetry {
+                request_nonce: nonce,
+            },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::BusyWait(round);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %fetch.contract_name,
+            delay_ms = delay.as_millis(),
+            "Probe batch is busy compiling; re-probing after the wait"
+        );
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &fetch.contract_name, |obs| {
+            obs.phase = Some("busy_wait");
+        });
+
+        Ok(())
+    }
+
+    /// Moves to the next batch of the set, or to the next phase when
+    /// the set is exhausted.
+    async fn next_batch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+    ) -> Result<(), ActorError> {
+        if round.untried.is_empty() {
+            return self.advance_set(ctx, round.plan_b).await;
+        }
+
+        let untried: HashSet<PublicKey> = round.untried.into_iter().collect();
+        let (batch, rest) = take_random_signers(untried, PROBE_BATCH_SIZE);
+        self.probe_batch(
+            ctx,
+            ProbeRound {
+                plan_b: round.plan_b,
+                pending: batch.into_iter().collect(),
+                can_serve: VecDeque::new(),
+                busy: HashSet::new(),
+                untried: rest.into_iter().collect(),
+                failed: HashSet::new(),
+                busy_attempts: 0,
+                busy_started: None,
+            },
+        )
+        .await
+    }
+
+    /// Moves to the next phase: plan B over the schema evaluators, or
+    /// an exhausted cycle (manual governance update + timeoff).
+    async fn advance_set(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        plan_b: bool,
+    ) -> Result<(), ActorError> {
+        if !plan_b && self.has_evaluator_targets() {
+            return self.start_probe_set(ctx, true).await;
+        }
+
+        self.cycle_exhausted(ctx).await
+    }
+
+    /// Starts the artifact request to a peer that answered the probe,
+    /// re-sending the current governance version in case it changed
+    /// since the probe.
+    async fn start_fetch_from(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        round: ProbeRound,
+        peer: PublicKey,
+    ) -> Result<(), ActorError> {
+        let Some((gov_id, schema_id, contract_name)) =
+            self.fetch.as_ref().map(|fetch| {
+                (
+                    fetch.gov_id.clone(),
+                    fetch.schema_id.clone(),
+                    fetch.contract_name.clone(),
+                )
+            })
+        else {
+            return Ok(());
+        };
+
+        let plan_b = round.plan_b;
+        let nonce = self.next_nonce;
+        self.next_nonce += 1;
+        let target_path = match self.fetch.as_ref() {
+            Some(fetch) => Self::peer_path(fetch, plan_b),
+            None => return Ok(()),
+        };
+
+        let network = Self::network(ctx)?;
+        // A send failure would leave the fetch with no live timer:
+        // local infrastructure failure, fail loud.
+        let message = ActorMessage::ArtifactReq {
+            subject_id: gov_id,
+            schema_id,
+            gov_version: self.gov_version,
+            request_nonce: nonce,
+            receiver_actor: ctx.path().to_string(),
+        };
+        if let Err(e) = network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(
+                    ComunicateInfo {
+                        receiver: peer.clone(),
+                        request_id: String::default(),
+                        version: 0,
+                        receiver_actor: target_path,
+                    },
+                    message,
+                ),
+            })
+            .await
+        {
+            return Err(crash_system(ctx, e).await);
+        }
+
+        // One live timer per fetch: cancel the probe round's timeout
+        // before arming the fetch timeout — a stale ProbeTimeout could
+        // close a later resumed round reusing the same nonce.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
+            FETCH_RESPONSE_TIMEOUT,
+            ContractCompilerMessage::FetchTimeout {
+                request_nonce: nonce,
+            },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        let probe_nonce = fetch.nonce;
+        fetch.nonce = nonce;
+        fetch.timer = Some(key);
+        fetch.phase = FetchPhase::Fetch {
+            round,
+            peer: peer.clone(),
+            probe_nonce,
+        };
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %contract_name,
+            peer = %peer,
+            plan_b,
+            "Artifact request sent"
+        );
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.downloads_started += 1;
+            obs.phase = Some("fetch");
+        });
+
+        Ok(())
+    }
+
+    /// The current fetch attempt failed: failover peer, probe answers
+    /// still in flight, the busy batch, the next batch, or an exhausted
+    /// cycle. A burned peer is never re-probed nor re-admitted as a
+    /// failover candidate for the rest of the round; a `Busy` answer
+    /// mid-fetch is NOT a failure (the peer joined the busy set and is
+    /// re-probed as such).
+    async fn attempt_failed(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        error: Option<String>,
+        burn_peer: bool,
+    ) -> Result<(), ActorError> {
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+
+        if let Some(error) = error {
+            warn!(
+                msg_type = "Fetch",
+                contract_name = %fetch.contract_name,
+                error = %error,
+                "Artifact fetch attempt failed, trying next option"
+            );
+        }
+
+        let FetchPhase::Fetch {
+            round,
+            peer,
+            probe_nonce,
+        } = &mut fetch.phase
+        else {
+            return Ok(());
+        };
+        let probe_nonce = *probe_nonce;
+
+        if burn_peer {
+            round.pending.remove(peer);
+            round.busy.remove(peer);
+            round.can_serve.retain(|candidate| candidate != peer);
+            round.failed.insert(peer.clone());
+        }
+
+        if let Some(peer) = round.can_serve.pop_front() {
+            let round = std::mem::take(round);
+            return self.start_fetch_from(ctx, round, peer).await;
+        }
+
+        // Probe answers still in flight: resume the round with a fresh
+        // timeout instead of giving up.
+        if !round.pending.is_empty() {
+            let round = std::mem::take(round);
+            return self.resume_probe(ctx, probe_nonce, round).await;
+        }
+
+        // Batch members compiling: wait for them.
+        if !round.busy.is_empty() {
+            let round = std::mem::take(round);
+            return self.wait_busy_batch(ctx, round).await;
+        }
+
+        let round = std::mem::take(round);
+        self.next_batch(ctx, round).await
+    }
+
+    /// Nobody could serve the artifact at our version. Maybe this node
+    /// is so outdated that it is asking nodes that no longer serve it:
+    /// force a manual governance update (the applied events re-trigger
+    /// the fetch) and wait a non-aggressive timeoff before the next
+    /// cycle. The artifact is needed for sure — the cycle never gives
+    /// up.
+    async fn cycle_exhausted(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // The parent is expected to exist and accept messages: a failure
+        // here is local infrastructure, fail loud.
+        let governance = match ctx.get_parent::<Governance>().await {
+            Ok(governance) => governance,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+        if let Err(e) =
+            governance.tell(GovernanceMessage::TriggerGovUpdate).await
+        {
+            return Err(crash_system(ctx, e).await);
+        }
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.phase = FetchPhase::Timeoff;
+        fetch.cycles += 1;
+        let cycles = fetch.cycles;
+        let contract_name = fetch.contract_name.clone();
+        let delay =
+            retry_delay_ms(TIMEOFF_BASE_MS, TIMEOFF_MAX_MS, cycles, None);
+
+        // One live timer per fetch: cancel the exhausted cycle's timer
+        // before arming the timeoff.
+        self.cancel_fetch_timer(ctx);
+        let key = match ctx.schedule_once(
+            Duration::from_millis(delay),
+            ContractCompilerMessage::CycleStart { cycle: cycles },
+        ) {
+            Ok(key) => key,
+            Err(e) => return Err(crash_system(ctx, e).await),
+        };
+
+        let Some(fetch) = &mut self.fetch else {
+            return Ok(());
+        };
+        fetch.timer = Some(key);
+
+        debug!(
+            msg_type = "Fetch",
+            contract_name = %contract_name,
+            cycles,
+            delay_ms = delay,
+            "Fetch cycle exhausted; governance update triggered, next cycle after timeoff"
+        );
+
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_fetch_cycle_exhausted();
+        }
+
+        #[cfg(feature = "test")]
+        Self::record_fetch_obs(ctx, &contract_name, |obs| {
+            obs.cycles_exhausted += 1;
+            obs.phase = Some("timeoff");
+        });
+
+        Ok(())
+    }
+
+    /// Obtains the official artifact of the schema from the network
+    /// path: local disk first (the artifact may already be there), a
+    /// fetch cycle that never gives up otherwise. The ledger anchor is
+    /// the authority for local and fetched bytes alike — without it
+    /// this node cannot know what is safe to execute or request, so a
+    /// missing anchor is fatal.
+    async fn begin_fetch(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        input: FetchInput,
+    ) -> Result<CompilerResponse, ActorError> {
+        let FetchInput {
+            contract,
+            contract_name,
+            initial_value,
+            contract_path,
+            gov_id,
+            schema_id,
+            contract_hash,
+        } = input;
+        let register_path = Self::register_path(ctx);
+
+        let register = match ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+        {
+            Ok(register) => register,
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not access contract register for anchor: {}",
+                            error
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let wasm_hash = match register
+            .ask(ContractRegisterMessage::GetAnchor {
+                contract_name: contract_name.clone(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Anchor(Some(anchor))) => anchor,
+            Ok(_) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "No ledger anchor for contract artifact {}",
+                            contract_name
+                        ),
+                    },
+                )
+                .await);
+            }
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read contract anchor: {}",
+                            error
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+
+        // Local first: the artifact may already be on disk.
+        let manifest = pipeline::compilation_toml();
+        let manifest_hash = hash_borsh(&*self.hash.hasher(), &manifest);
+        let manifest_hash = match manifest_hash {
+            Ok(manifest_hash) => manifest_hash,
+            Err(e) => {
+                return self
+                    .fetch_failed(
+                        ctx,
+                        CompilerError::SerializationError {
+                            context: "contract manifest hash".to_owned(),
+                            details: e.to_string(),
+                        },
+                    )
+                    .await
+                    .map(|()| CompilerResponse::Ok);
+            }
+        };
+        let contract_runtime =
+            match CompilerSupport::contract_runtime(ctx).await {
+                Ok(contract_runtime) => contract_runtime,
+                Err(error) => {
+                    return self
+                        .fetch_failed(ctx, error)
+                        .await
+                        .map(|()| CompilerResponse::Ok);
+                }
+            };
+        let engine_fingerprint =
+            match contract_runtime.engine_fingerprint(self.hash) {
+                Ok(engine_fingerprint) => engine_fingerprint,
+                Err(e) => {
+                    return self
+                        .fetch_failed(
+                            ctx,
+                            pipeline::map_runtime_error_to_compiler_error(e),
+                        )
+                        .await
+                        .map(|()| CompilerResponse::Ok);
+                }
+            };
+
+        match CompilerSupport::load_registered_artifact(
+            self.hash,
+            ctx,
+            RegisteredLoadInput {
+                contract_name: &contract_name,
+                contract_path: &contract_path,
+                initial_value: &initial_value,
+                register_path: &register_path,
+                contract_hash: &contract_hash,
+                manifest_hash: &manifest_hash,
+                engine_fingerprint: &engine_fingerprint,
+                expected_toolchain: None,
+                expected_wasm_hash: Some(&wasm_hash),
+            },
+        )
+        .await
+        {
+            Ok(Some((module, metadata, _))) => {
+                let contracts = CompilerSupport::contracts_helper(ctx).await?;
+                contracts
+                    .write()
+                    .await
+                    .insert(contract_name.clone(), module);
+                self.contract = metadata.contract_hash.clone();
+                debug!(
+                    msg_type = "Fetch",
+                    contract_name = %contract_name,
+                    "Contract artifact loaded from local disk"
+                );
+                return Ok(CompilerResponse::Ok);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.fetch_failed(ctx, error).await?;
+                return Ok(CompilerResponse::Ok);
+            }
+        }
+
+        self.fetch = Some(FetchState {
+            contract,
+            contract_hash,
+            contract_name,
+            initial_value,
+            contract_path,
+            gov_id,
+            schema_id,
+            wasm_hash,
+            phase: FetchPhase::Timeoff,
+            nonce: 0,
+            timer: None,
+            started_at: Instant::now(),
+            cycles: 0,
+        });
+
+        self.start_probe_set(ctx, false).await?;
+
+        Ok(CompilerResponse::Ok)
+    }
+
+    /// Drops the in-memory module of the contract: serving evaluations
+    /// with a stale contract would diverge from the network.
+    async fn evict_module(
+        ctx: &ActorContext<Self>,
+        contract_name: &str,
+    ) -> Result<(), ActorError> {
+        let contracts = CompilerSupport::contracts_helper(ctx).await?;
+        contracts.write().await.remove(contract_name);
+        Ok(())
+    }
+
+    /// Serves the official artifact to another node (plan B), from the
+    /// serving cache while the entry is fresh and from disk otherwise —
+    /// filling the cache and scheduling its expiry on a miss. Same
+    /// policy as the compile worker: the cache exists for the fetch
+    /// burst after a contract change and must not live forever.
+    /// Persisted bytes that fail verification are discarded by the
+    /// support layer: nothing is served and healing is scheduled at
+    /// once — the provisioning action decides how the artifact is
+    /// re-obtained.
+    async fn serve_artifact(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        contract_name: &str,
+    ) -> Result<Option<ArtifactData>, ActorError> {
+        // The anchor decides, not the TTL: a hit counts only while
+        // the cached bytes are still the official ones. Anything
+        // else (including anchor gone) drops the entry and falls
+        // through to disk, which re-verifies.
+        let anchor = match CompilerSupport::current_anchor_hash(
+            ctx,
+            contract_name,
+            &Self::register_path(ctx),
+        )
+        .await
+        {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read anchor to serve {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        if let Some(entry) = self.serving_cache.as_ref()
+            && CompilerSupport::serving_cache_hit(
+                Some(entry),
+                anchor.as_ref(),
+                Instant::now(),
+            )
+        {
+            return Ok(Some(entry.artifact.clone()));
+        }
+        self.serving_cache = None;
+        let Some(anchor) = anchor else {
+            // Nothing registered under this name: nothing to serve,
+            // and no stale entry may survive.
+            return Ok(None);
+        };
+
+        let artifact = match CompilerSupport::serve_official_artifact(
+            self.hash,
+            ctx,
+            contract_name,
+            &Self::register_path(ctx),
+        )
+        .await
+        {
+            Ok(ServedArtifact::Verified(artifact)) => artifact,
+            Ok(ServedArtifact::Missing) => return Ok(None),
+            Ok(ServedArtifact::Corrupt) => {
+                // Serving nothing until the artifact is healed: the
+                // in-memory module (from a verified load) keeps
+                // evaluating meanwhile. Resetting the provisioned
+                // contract re-arms the provisioning guards.
+                self.contract = DigestIdentifier::default();
+                if self.provision.is_some()
+                    && let Err(e) = ctx.schedule_once(
+                        Duration::ZERO,
+                        ContractCompilerMessage::HealArtifact { attempts: 1 },
+                    )
+                {
+                    return Err(crash_system(ctx, e).await);
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not serve official artifact {contract_name}: {error}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+
+        let filled_at = Instant::now();
+        // The expiry is scheduled before filling: a scheduling failure
+        // leaves no entry behind, so the RAM is never held forever.
+        ctx.schedule_once(
+            SERVING_CACHE_TTL,
+            ContractCompilerMessage::EvictServingCache { filled_at },
+        )?;
+
+        self.serving_cache = Some(ServingCacheEntry {
+            artifact: artifact.clone(),
+            wasm_hash: anchor,
+            filled_at,
+        });
+
+        Ok(Some(artifact))
+    }
+
+    /// Re-verifies persisted bytes against the ledger anchor on the
+    /// reconcile skip path (contract unchanged): a node that never
+    /// serves would otherwise keep corrupt bytes on disk indefinitely
+    /// — execution is unaffected (the in-memory module was verified at
+    /// load) but the next serve or reboot would trip on them. Returns
+    /// whether the artifact is healthy; unhealthy artifacts are
+    /// discarded (anchor kept, module kept) for the caller to heal.
+    async fn reverify_persisted(
+        hash: HashAlgorithm,
+        ctx: &mut ActorContext<Self>,
+        contract_name: &str,
+        contract_path: &std::path::Path,
+    ) -> Result<bool, ActorError> {
+        let register_path = Self::register_path(ctx);
+        let register = match ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+        {
+            Ok(register) => register,
+            Err(e) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not access contract register for anchor: {e}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let anchor = match register
+            .ask(ContractRegisterMessage::GetAnchor {
+                contract_name: contract_name.to_owned(),
+            })
+            .await
+        {
+            Ok(ContractRegisterResponse::Anchor(anchor)) => anchor,
+            Ok(_) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::UnexpectedResponse {
+                        path: register_path.clone(),
+                        expected: "ContractRegisterResponse::Anchor".to_owned(),
+                    },
+                )
+                .await);
+            }
+            Err(e) => {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not read contract anchor: {e}"
+                        ),
+                    },
+                )
+                .await);
+            }
+        };
+        let Some(anchor) = anchor else {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "No ledger anchor for committed contract {contract_name}"
+                    ),
+                },
+            )
+            .await);
+        };
+        // Absent bytes are normal (an evaluator that has not fetched
+        // yet owns nothing): only persisted bytes that mismatch the
+        // anchor are corrupt. Treating a missing artifact as unhealthy
+        // would reset provisioning and disturb an already-running fetch.
+        let wasm_bytes = match pipeline::load_artifact_wasm(contract_path).await
+        {
+            Ok(wasm_bytes) => Some(wasm_bytes),
+            Err(CompilerError::FileReadFailed {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            }) => {
+                return Ok(true);
+            }
+            Err(_) => None,
+        };
+        let healthy = wasm_bytes.is_some_and(|wasm_bytes| {
+            matches!(
+                pipeline::hash_bytes(hash, &wasm_bytes, "reconcile reverify"),
+                Ok(wasm_hash) if wasm_hash == anchor
+            )
+        });
+        if healthy {
+            return Ok(true);
+        }
+        warn!(
+            msg_type = "Reconcile",
+            contract_name = %contract_name,
+            "Persisted artifact failed reconcile re-verification, discarding it"
+        );
+        if let Err(e) = CompilerSupport::discard_persisted_artifact(
+            ctx,
+            contract_name,
+            contract_path,
+            &register,
+            false,
+        )
+        .await
+        {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "Can not discard unverified artifact {contract_name}: {e}"
+                    ),
+                },
+            )
+            .await);
+        }
+        Ok(false)
+    }
+
+    /// Terminal handling of a fetch error: fatal local problems (disk,
+    /// register, helpers, engine) bring the node down controlled, like
+    /// the compile path; anything else ends the fetch — the next
+    /// governance event or restart tries again.
+    async fn fetch_failed(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        error: CompilerError,
+    ) -> Result<(), ActorError> {
+        if is_local_fatal_compiler_error(&error) {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "Can not register fetched contract artifact: {}",
+                        error
+                    ),
+                },
+            )
+            .await);
+        }
+
+        let contract_name =
+            self.fetch.as_ref().map(|fetch| fetch.contract_name.clone());
+        error!(
+            msg_type = "Fetch",
+            error = %error,
+            "Contract artifact fetch failed"
+        );
+        // Cancel the timer with the fetch: a late timeout firing on an
+        // empty fetch is ignored by its guards, but one live timer per
+        // fetch is the invariant.
+        self.cancel_fetch_timer(ctx);
+        self.fetch = None;
+        if let Some(contract_name) = contract_name {
+            Self::evict_module(ctx, &contract_name).await?;
+            self.serving_cache = None;
+        }
+        Ok(())
+    }
+
+    /// Whitelist and version negotiation of an incoming artifact
+    /// probe/request, in the `EvaluationSchema` order: legitimate
+    /// requester first (silent reject otherwise), then the blocked
+    /// update window, then the governance version.
+    fn artifact_gate(
+        &self,
+        ctx: &ActorContext<Self>,
+        msg_type: &'static str,
+        subject_id: &DigestIdentifier,
+        schema_id: &SchemaType,
+        gov_version: u64,
+        sender: &PublicKey,
+    ) -> ArtifactGate {
+        if subject_id.to_string() != ctx.path().parent().key() {
+            warn!(
+                msg_type,
+                sender = %sender,
+                received_governance_id = %subject_id,
+                "Invalid governance_id in artifact request"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        if ctx.path().key() != format!("{}_contract_compiler", schema_id) {
+            warn!(
+                msg_type,
+                sender = %sender,
+                schema_id = ?schema_id,
+                "Invalid schema_id in artifact request"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        // Only evaluators of the schema may request artifacts:
+        // compilers compile their artifacts locally and never fetch —
+        // even a compiler is rejected.
+        if !self.evaluators.contains(sender) {
+            warn!(
+                msg_type,
+                sender = %sender,
+                "Artifact request from a node that is not an evaluator of the schema"
+            );
+            return ArtifactGate::Reject;
+        }
+
+        // Updating our own artifacts: after a contract change every
+        // compiler is busy at once — tell the requester to wait for us
+        // instead of pointlessly moving to another compiler.
+        if self.serving_blocked {
+            return ArtifactGate::Busy;
+        }
+
+        match gov_version_sync(self.gov_version, gov_version) {
+            // This node is behind the request's governance version and
+            // can not have the artifact: try another peer.
+            GovVersionSync::NodeBehind => ArtifactGate::NotServed,
+            // The requester is behind: it must sync and retry.
+            GovVersionSync::RequesterBehind => ArtifactGate::Outdated,
+            GovVersionSync::Current => ArtifactGate::Allowed,
+        }
+    }
+
+    async fn send_artifact_message(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        msg_type: &'static str,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+        message: ActorMessage,
+    ) -> Result<(), ActorError> {
+        let new_info = ComunicateInfo {
+            receiver: sender,
+            request_id: info.request_id.clone(),
+            version: info.version,
+            receiver_actor,
+        };
+
+        let network = Self::network(ctx)?;
+        let delivery = delivery_of(&message);
+        if let Err(e) = network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                delivery,
+                message: NetworkMessage::new(new_info, message),
+            })
+            .await
+        {
+            error!(
+                msg_type,
+                error = %e,
+                "Failed to send artifact response to network"
+            );
+            return Err(crash_system(ctx, e).await);
+        }
+
+        Ok(())
+    }
+}
+
+/// Gate of an incoming artifact probe/request (see
+/// `ContractCompiler::artifact_gate`).
+enum ArtifactGate {
+    /// Whitelist and version negotiation passed: the request can be
+    /// served.
+    Allowed,
+    /// Answer `NotServed`: this node is itself behind — the requester
+    /// tries another peer.
+    NotServed,
+    /// Answer `Busy`: this node is applying an update — the requester
+    /// waits and retries us, every compiler is busy at once.
+    Busy,
+    /// Answer `Outdated`: the requester is behind and must sync.
+    Outdated,
+    /// Silent reject (bad governance or schema, or non-whitelisted
+    /// sender), like the `EvaluationSchema` rejects.
+    Reject,
+}
+
+#[derive(Debug, Clone)]
+pub enum ContractCompilerAction {
+    Compile {
+        contract: String,
+        contract_name: String,
+        initial_value: Value,
+        contract_path: PathBuf,
+        toolchain_pin: String,
+    },
+    /// Fetches the official artifact from the network instead of
+    /// compiling: this node evaluates the schema but has no compiler
+    /// role. The received bytes are verified against the compilation
+    /// evidence anchored in this node's own ledger.
+    Fetch {
+        contract: String,
+        contract_name: String,
+        initial_value: Value,
+        contract_path: PathBuf,
+        gov_id: DigestIdentifier,
+        schema_id: SchemaType,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ContractCompilerMessage {
+    /// Applies the governance snapshot used by this actor, then prepares
+    /// the schema from that same snapshot.
+    Reconcile {
+        gov_version: u64,
+        compilers: BTreeSet<PublicKey>,
+        evaluators: BTreeSet<PublicKey>,
+        action: ContractCompilerAction,
+    },
+    /// The governance is applying an update (promoting and refreshing
+    /// artifacts): serving is blocked until it finishes — between
+    /// versions there is no good answer.
+    ServingBlocked {
+        blocked: bool,
+    },
+    /// Light availability probe from another node (plan B serving).
+    ArtifactProbeRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
+    ArtifactProbeResponse {
+        result: ArtifactProbeResult,
+        request_nonce: u64,
+        sender: PublicKey,
+    },
+    /// Another node asks for the official artifact of the contract
+    /// (plan B serving).
+    ArtifactRequest {
+        subject_id: DigestIdentifier,
+        schema_id: SchemaType,
+        gov_version: u64,
+        request_nonce: u64,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        receiver_actor: String,
+    },
+    ArtifactResponse {
+        result: ArtifactFetchResult,
+        request_nonce: u64,
+        sender: PublicKey,
+    },
+    ProbeTimeout {
+        request_nonce: u64,
+    },
+    FetchTimeout {
+        request_nonce: u64,
+    },
+    /// The stepped wait for a busy batch expired: re-probe it (or move
+    /// to the next batch if the total budget is spent).
+    BusyRetry {
+        request_nonce: u64,
+    },
+    /// The timeoff of an exhausted cycle expired: start the next one.
+    CycleStart {
+        cycle: usize,
+    },
+    /// Re-obtains the official artifact after the serving path found
+    /// the persisted bytes corrupt and discarded them: a compiler
+    /// recompiles against the ledger anchor (transient failures retry
+    /// with backoff — healing never gives up), an evaluator restarts
+    /// the fetch cycle.
+    HealArtifact {
+        attempts: usize,
+    },
+    /// Expiry of the serving cache entry. Guarded by `filled_at`: a
+    /// late eviction of an entry that was already refilled is moot.
+    EvictServingCache {
+        filled_at: Instant,
+    },
+}
+
+impl Message for ContractCompilerMessage {}
+
+impl NotPersistentActor for ContractCompiler {}
+
+#[async_trait]
+impl Actor for ContractCompiler {
+    type Event = ();
+    type Message = ContractCompilerMessage;
+    type Response = CompilerResponse;
+    type SinkEvent = ();
+    type ChildError = ActorError;
+    type ChildFault = ActorError;
+
+    fn get_span(id: &str, parent_span: Option<Span>) -> tracing::Span {
+        parent_span.map_or_else(
+            || info_span!("ContractCompiler", id),
+            |parent_span| {
+                info_span!(parent: parent_span, "ContractCompiler", id)
+            },
+        )
+    }
+}
+
+#[async_trait]
+impl Handler<Self> for ContractCompiler {
+    async fn handle_message(
+        &mut self,
+        _: ActorPath,
+        msg: ContractCompilerMessage,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<CompilerResponse, ActorError> {
+        match msg {
+            ContractCompilerMessage::Reconcile {
+                gov_version,
+                compilers,
+                evaluators,
+                action,
+            } => {
+                let whitelists_changed = self.compilers != compilers
+                    || self.evaluators != evaluators;
+                self.gov_version = gov_version;
+                self.compilers = compilers;
+                self.evaluators = evaluators;
+                self.provision = Some(action.clone());
+
+                match action {
+                    ContractCompilerAction::Compile {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                        toolchain_pin,
+                    } => {
+                        // A local compiler must not let an obsolete fetch
+                        // register an artifact after taking over the schema.
+                        self.cancel_fetch_timer(ctx);
+                        self.fetch = None;
+                        // No local toolchain for the pinned toolchain:
+                        // stay dormant (keep serving retained bytes),
+                        // never crash-loop. The build runs on the next
+                        // `Reconcile` once the toolchain exists.
+                        if !toolchain_pin.is_empty()
+                            && CompilerSupport::resolve_toolchain(
+                                &*ctx,
+                                &toolchain_pin,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            debug!(
+                                msg_type = "Compile",
+                                toolchain_pin = %toolchain_pin,
+                                contract_name = %contract_name,
+                                "No local toolchain for pin, staying dormant"
+                            );
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        let contract_hash =
+                            match hash_borsh(&*self.hash.hasher(), &contract) {
+                                Ok(hash) => hash,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "Compile",
+                                        error = %e,
+                                        "Failed to hash contract"
+                                    );
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
+                                }
+                            };
+
+                        if contract_hash != self.contract {
+                            // The contract changed: the cached module is stale,
+                            // evict it before recompiling — evaluating with it
+                            // would diverge from the network (same policy as
+                            // the fetch path).
+                            Self::evict_module(ctx, &contract_name).await?;
+                            // The artifact itself is changing too: nothing
+                            // cached for serving may survive.
+                            self.serving_cache = None;
+
+                            let register_path = Self::register_path(ctx);
+                            // The ledger anchor pins the wasm bytes
+                            // this compile must produce or load: it is
+                            // recorded at commit before this action
+                            // runs, so a missing anchor is a local
+                            // register failure, never a miss — fail
+                            // loud instead of persisting unverified
+                            // bytes as official.
+                            let register = match ctx
+                                .system()
+                                .get_actor::<ContractRegister>(&register_path)
+                                .await
+                            {
+                                Ok(register) => register,
+                                Err(e) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not access contract register for anchor: {e}"
+                                            ),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            };
+                            let expected_wasm_hash = match register
+                                .ask(ContractRegisterMessage::GetAnchor {
+                                    contract_name: contract_name.clone(),
+                                })
+                                .await
+                            {
+                                Ok(ContractRegisterResponse::Anchor(
+                                    anchor,
+                                )) => anchor,
+                                Ok(_) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::UnexpectedResponse {
+                                            path: register_path.clone(),
+                                            expected:
+                                                "ContractRegisterResponse::Anchor"
+                                                    .to_owned(),
+                                        },
+                                    )
+                                    .await);
+                                }
+                                Err(e) => {
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not read contract anchor: {e}"
+                                            ),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            };
+                            if expected_wasm_hash.is_none() {
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "No ledger anchor for committed contract {contract_name}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                            let (module, metadata) =
+                                match CompilerSupport::compile_or_load_registered(
+                                    self.hash,
+                                    ctx,
+                                    ContractSourceInput {
+                                        contract_name: &contract_name,
+                                        contract: &contract,
+                                        contract_path: &contract_path,
+                                        initial_value,
+                                    },
+                                    &register_path,
+                                    expected_wasm_hash.as_ref(),
+                                    &toolchain_pin,
+                                    false,
+                                )
+                                .await
+                                {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        error!(
+                                            msg_type = "Compile",
+                                            error = %e,
+                                            contract_name = %contract_name,
+                                            path = %contract_path.display(),
+                                            "Contract compilation or validation failed"
+                                        );
+                                        return Ok(CompilerResponse::Error(e));
+                                    }
+                                };
+
+                            {
+                                let contracts =
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
+                                let mut contracts = contracts.write().await;
+                                contracts.insert(contract_name.clone(), module);
+                            }
+
+                            self.contract = metadata.contract_hash.clone();
+
+                            debug!(
+                                msg_type = "Compile",
+                                contract_name = %contract_name,
+                                contract_hash = %metadata.contract_hash,
+                                "Contract compiled and validated successfully"
+                            );
+                        } else {
+                            if let Some(metrics) = try_core_metrics() {
+                                metrics.observe_contract_prepare(
+                                    "registered",
+                                    "skipped",
+                                    std::time::Duration::default(),
+                                );
+                            }
+                            // The skip guard alone would keep corrupt
+                            // bytes on disk forever on a node that never
+                            // serves: re-verify against the anchor.
+                            if !Self::reverify_persisted(
+                                self.hash,
+                                ctx,
+                                &contract_name,
+                                &contract_path,
+                            )
+                            .await?
+                            {
+                                self.serving_cache = None;
+                                self.contract = DigestIdentifier::default();
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::ZERO,
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
+                            debug!(
+                                msg_type = "Compile",
+                                contract_name = %contract_name,
+                                "Contract already compiled, skipping"
+                            );
+                        }
+
+                        Ok(CompilerResponse::Ok)
+                    }
+                    ContractCompilerAction::Fetch {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                        gov_id,
+                        schema_id,
+                    } => {
+                        let contract_hash =
+                            match hash_borsh(&*self.hash.hasher(), &contract) {
+                                Ok(hash) => hash,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "Fetch",
+                                        error = %e,
+                                        "Failed to hash contract"
+                                    );
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
+                                }
+                            };
+
+                        // Already obtained: an unrelated governance event
+                        // must not reset anything.
+                        if contract_hash == self.contract {
+                            // Same re-verification as the compile path:
+                            // disk corruption must not linger on a node
+                            // that never serves.
+                            if !Self::reverify_persisted(
+                                self.hash,
+                                ctx,
+                                &contract_name,
+                                &contract_path,
+                            )
+                            .await?
+                            {
+                                self.serving_cache = None;
+                                self.contract = DigestIdentifier::default();
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::ZERO,
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
+                            debug!(
+                                msg_type = "Fetch",
+                                contract_name = %contract_name,
+                                "Contract already available, skipping"
+                            );
+                            return Ok(CompilerResponse::Ok);
+                        }
+
+                        // In-flight fetch of the same contract: an
+                        // unrelated governance event must not reset it.
+                        // A whitelist change only matters when it drops
+                        // peers this fetch is using (probing, waiting on
+                        // or downloading from); then re-probe with the
+                        // live sets, keeping the fetch (contract, anchor,
+                        // cycle backoff). Probes and requests always
+                        // carry the current governance version.
+                        if self.fetch.as_ref().is_some_and(|fetch| {
+                            fetch.contract_hash == contract_hash
+                        }) {
+                            let fetch_peers_dropped = whitelists_changed
+                                && self.fetch.as_ref().is_some_and(|fetch| {
+                                    match &fetch.phase {
+                                        FetchPhase::Fetch {
+                                            round,
+                                            peer,
+                                            ..
+                                        } => {
+                                            let live = if round.plan_b {
+                                                &self.evaluators
+                                            } else {
+                                                &self.compilers
+                                            };
+                                            !live.contains(peer)
+                                        }
+                                        FetchPhase::Probe(round)
+                                        | FetchPhase::BusyWait(round) => {
+                                            let live = if round.plan_b {
+                                                &self.evaluators
+                                            } else {
+                                                &self.compilers
+                                            };
+                                            round
+                                                .pending
+                                                .iter()
+                                                .chain(round.busy.iter())
+                                                .chain(round.can_serve.iter())
+                                                .chain(round.untried.iter())
+                                                .any(|peer| {
+                                                    !live.contains(peer)
+                                                })
+                                        }
+                                        // The next cycle re-reads the
+                                        // live sets anyway.
+                                        FetchPhase::Timeoff => false,
+                                    }
+                                });
+
+                            if fetch_peers_dropped {
+                                debug!(
+                                    msg_type = "Fetch",
+                                    contract_name = %contract_name,
+                                    "Fetch peers left the whitelist, re-probing with the live sets"
+                                );
+                                self.cancel_fetch_timer(ctx);
+                                self.start_probe_set(ctx, false).await?;
+                            } else {
+                                debug!(
+                                    msg_type = "Fetch",
+                                    contract_name = %contract_name,
+                                    "Contract already being fetched, skipping"
+                                );
+                            }
+                            return Ok(CompilerResponse::Ok);
+                        }
+
+                        // The contract changed (or was never loaded): the cached
+                        // module is stale, evict it before fetching — evaluating
+                        // with it would diverge from the network.
+                        Self::evict_module(ctx, &contract_name).await?;
+                        // The artifact itself is changing too: nothing cached
+                        // for serving may survive.
+                        self.serving_cache = None;
+                        self.cancel_fetch_timer(ctx);
+                        self.fetch = None;
+
+                        self.begin_fetch(
+                            ctx,
+                            FetchInput {
+                                contract,
+                                contract_name,
+                                initial_value,
+                                contract_path,
+                                gov_id,
+                                schema_id,
+                                contract_hash,
+                            },
+                        )
+                        .await
+                    }
+                }
+            }
+            ContractCompilerMessage::HealArtifact { attempts } => {
+                match self.provision.clone() {
+                    Some(ContractCompilerAction::Compile {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                        toolchain_pin,
+                    }) => {
+                        if self.contract != DigestIdentifier::default() {
+                            // A governance apply already re-provisioned
+                            // the artifact.
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        // Same dormancy as `Reconcile`: no toolchain for
+                        // the pin means no rebuild, not a crash.
+                        if !toolchain_pin.is_empty()
+                            && CompilerSupport::resolve_toolchain(
+                                &*ctx,
+                                &toolchain_pin,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            debug!(
+                                msg_type = "Heal",
+                                toolchain_pin = %toolchain_pin,
+                                contract_name = %contract_name,
+                                "No local toolchain for pin, healing stays dormant"
+                            );
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        match CompilerSupport::recover_official_artifact(
+                            self.hash,
+                            ctx,
+                            ContractSourceInput {
+                                contract_name: &contract_name,
+                                contract: &contract,
+                                contract_path: &contract_path,
+                                initial_value,
+                            },
+                            &Self::register_path(ctx),
+                            &toolchain_pin,
+                        )
+                        .await
+                        {
+                            Ok(module) => {
+                                let contracts =
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
+                                contracts
+                                    .write()
+                                    .await
+                                    .insert(contract_name.clone(), module);
+                                self.contract =
+                                    hash_borsh(&*self.hash.hasher(), &contract)
+                                        .map_err(|e| {
+                                            ActorError::FunctionalCritical {
+                                                description: format!(
+                                                    "Can not hash contract: {}",
+                                                    e
+                                                ),
+                                            }
+                                        })?;
+                                info!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    "Official artifact healed: recompiled against the ledger anchor"
+                                );
+                            }
+                            Err(
+                                error @ CompilerError::ToolchainDrift { .. },
+                            ) => {
+                                // Drifted toolchain can not reproduce the
+                                // anchor, and rebuilding would fail the
+                                // same way forever: stay dormant (serve
+                                // retained/fetched bytes, vote
+                                // Unavailable) instead of looping builds
+                                // or crashing.
+                                warn!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    error = %error,
+                                    "Toolchain drift, healing stays dormant"
+                                );
+                            }
+                            Err(error)
+                                if is_compiler_infra_error(&error)
+                                    || is_retryable_compiler_recovery_error(
+                                        &error,
+                                    ) =>
+                            {
+                                let delay = retry_delay_ms(
+                                    HEAL_RETRY_BASE_MS,
+                                    HEAL_RETRY_MAX_MS,
+                                    attempts,
+                                    None,
+                                );
+                                warn!(
+                                    msg_type = "HealArtifact",
+                                    contract_name = %contract_name,
+                                    error = %error,
+                                    delay_ms = delay,
+                                    "Artifact healing failed transiently, retrying"
+                                );
+                                if let Err(e) = ctx.schedule_once(
+                                    Duration::from_millis(delay),
+                                    ContractCompilerMessage::HealArtifact {
+                                        attempts: attempts + 1,
+                                    },
+                                ) {
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                            }
+                            Err(error) => {
+                                // The committed, quorum-anchored
+                                // contract can not be reproduced
+                                // locally: this node can not fulfill
+                                // its compiler role — same fatal policy
+                                // as boot recovery.
+                                return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Can not heal official artifact {contract_name}: {error}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                            }
+                        }
+                        Ok(CompilerResponse::Ok)
+                    }
+                    Some(ContractCompilerAction::Fetch {
+                        contract,
+                        contract_name,
+                        initial_value,
+                        contract_path,
+                        gov_id,
+                        schema_id,
+                    }) => {
+                        // A governance apply (or a fetch already in
+                        // flight) is re-obtaining the artifact: the
+                        // in-memory module stays, the fetch cycle does
+                        // the rest.
+                        if self.contract != DigestIdentifier::default()
+                            || self.fetch.is_some()
+                        {
+                            return Ok(CompilerResponse::Ok);
+                        }
+                        let contract_hash =
+                            match hash_borsh(&*self.hash.hasher(), &contract) {
+                                Ok(hash) => hash,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "HealArtifact",
+                                        error = %e,
+                                        "Failed to hash contract"
+                                    );
+                                    return Err(
+                                        ActorError::FunctionalCritical {
+                                            description: format!(
+                                                "Can not hash contract: {}",
+                                                e
+                                            ),
+                                        },
+                                    );
+                                }
+                            };
+                        self.begin_fetch(
+                            ctx,
+                            FetchInput {
+                                contract,
+                                contract_name,
+                                initial_value,
+                                contract_path,
+                                gov_id,
+                                schema_id,
+                                contract_hash,
+                            },
+                        )
+                        .await
+                    }
+                    // Never provisioned: the next Reconcile provisions
+                    // from scratch.
+                    None => Ok(CompilerResponse::Ok),
+                }
+            }
+            ContractCompilerMessage::ServingBlocked { blocked } => {
+                self.serving_blocked = blocked;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::EvictServingCache { filled_at } => {
+                // Guarded: a late eviction must not drop an entry that
+                // was already refilled.
+                if self
+                    .serving_cache
+                    .as_ref()
+                    .is_some_and(|entry| entry.filled_at == filled_at)
+                {
+                    self.serving_cache = None;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactProbeRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    ctx,
+                    "ArtifactProbeRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => return Ok(CompilerResponse::Ok),
+                    ArtifactGate::NotServed => ArtifactProbeResult::NotServed,
+                    ArtifactGate::Busy => ArtifactProbeResult::Busy,
+                    ArtifactGate::Outdated => ArtifactProbeResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        if CompilerSupport::has_official_artifact(
+                            ctx,
+                            &contract_name,
+                            &Self::register_path(ctx),
+                        )
+                        .await
+                        {
+                            ArtifactProbeResult::CanServe
+                        } else {
+                            ArtifactProbeResult::NotServed
+                        }
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactProbeRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactProbeRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactProbeResponse {
+                result,
+                request_nonce,
+                sender,
+            } => {
+                // Requests carry a whitelist gate but responses did not:
+                // ignore answers from peers outside the known compiler
+                // and evaluator sets.
+                if !self.compilers.contains(&sender)
+                    && !self.evaluators.contains(&sender)
+                {
+                    debug!(
+                        msg_type = "ArtifactProbeResponse",
+                        sender = %sender,
+                        "Probe response from unknown peer, dropping"
+                    );
+                    return Ok(CompilerResponse::Ok);
+                }
+                // Probe round in flight.
+                let in_probe_round = self.fetch.as_ref().is_some_and(|fetch| {
+                    fetch.nonce == request_nonce
+                        && matches!(fetch.phase, FetchPhase::Probe { .. })
+                });
+
+                if in_probe_round {
+                    match result {
+                        ArtifactProbeResult::CanServe => {
+                            // First answer wins: fetch the bytes from
+                            // this peer; the rest of the round keeps
+                            // feeding the failover and busy lists.
+                            let Some(fetch) = &mut self.fetch else {
+                                return Ok(CompilerResponse::Ok);
+                            };
+                            let FetchPhase::Probe(round) = &mut fetch.phase
+                            else {
+                                return Ok(CompilerResponse::Ok);
+                            };
+                            // Stale, duplicate or already-burned answers
+                            // (the nonce is reused across re-probes) must
+                            // not readmit the peer as fetch origin.
+                            if !round.pending.remove(&sender)
+                                || round.failed.contains(&sender)
+                            {
+                                return Ok(CompilerResponse::Ok);
+                            }
+                            let round = std::mem::take(round);
+                            self.start_fetch_from(ctx, round, sender).await?;
+                        }
+                        ArtifactProbeResult::NotServed
+                        | ArtifactProbeResult::Busy => {
+                            let round_closed = if let Some(fetch) =
+                                &mut self.fetch
+                                && let FetchPhase::Probe(round) =
+                                    &mut fetch.phase
+                            {
+                                round.pending.remove(&sender);
+                                if matches!(result, ArtifactProbeResult::Busy) {
+                                    round.busy.insert(sender.clone());
+                                }
+                                round.pending.is_empty()
+                            } else {
+                                false
+                            };
+                            if round_closed {
+                                self.resolve_probe_round(ctx).await?;
+                            }
+                        }
+                        ArtifactProbeResult::Outdated { .. } => {
+                            // We are behind: sync instead of burning the
+                            // rest of the round.
+                            self.cycle_exhausted(ctx).await?;
+                        }
+                    }
+                    return Ok(CompilerResponse::Ok);
+                }
+
+                // Late probe answers while fetching still feed the
+                // round — nothing is lost.
+                if let Some(fetch) = &mut self.fetch
+                    && let FetchPhase::Fetch {
+                        round,
+                        probe_nonce,
+                        peer,
+                        ..
+                    } = &mut fetch.phase
+                    && *probe_nonce == request_nonce
+                {
+                    match result {
+                        ArtifactProbeResult::CanServe => {
+                            // A peer burned this round (failed attempt)
+                            // is never re-admitted as a failover
+                            // candidate.
+                            if sender != *peer
+                                && !round.failed.contains(&sender)
+                                && !round.can_serve.contains(&sender)
+                            {
+                                round.can_serve.push_back(sender.clone());
+                            }
+                        }
+                        ArtifactProbeResult::Busy => {
+                            if !round.failed.contains(&sender) {
+                                round.busy.insert(sender.clone());
+                            }
+                        }
+                        ArtifactProbeResult::NotServed
+                        | ArtifactProbeResult::Outdated { .. } => {}
+                    }
+                    round.pending.remove(&sender);
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactRequest {
+                subject_id,
+                schema_id,
+                gov_version,
+                request_nonce,
+                info,
+                sender,
+                receiver_actor,
+            } => {
+                let result = match self.artifact_gate(
+                    ctx,
+                    "ArtifactRequest",
+                    &subject_id,
+                    &schema_id,
+                    gov_version,
+                    &sender,
+                ) {
+                    ArtifactGate::Reject => return Ok(CompilerResponse::Ok),
+                    ArtifactGate::NotServed => ArtifactFetchResult::NotServed,
+                    ArtifactGate::Busy => ArtifactFetchResult::Busy,
+                    ArtifactGate::Outdated => ArtifactFetchResult::Outdated {
+                        gov_version: self.gov_version,
+                    },
+                    ArtifactGate::Allowed => {
+                        let contract_name =
+                            format!("{}_{}", subject_id, schema_id);
+                        self.serve_artifact(ctx, &contract_name).await?.map_or(
+                            ArtifactFetchResult::NotServed,
+                            ArtifactFetchResult::Artifact,
+                        )
+                    }
+                };
+
+                self.send_artifact_message(
+                    ctx,
+                    "ArtifactRequest",
+                    info,
+                    sender,
+                    receiver_actor,
+                    ActorMessage::ArtifactRes {
+                        request_nonce,
+                        result,
+                    },
+                )
+                .await?;
+
+                debug!(
+                    msg_type = "ArtifactRequest",
+                    schema_id = ?schema_id,
+                    "Artifact request served"
+                );
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ArtifactResponse {
+                result,
+                request_nonce,
+                sender,
+            } => {
+                // Stale or unexpected response: the fetch moved on.
+                let matches_current = self.fetch.as_ref().is_some_and(|fetch| {
+                    fetch.nonce == request_nonce
+                        && matches!(
+                            &fetch.phase,
+                            FetchPhase::Fetch { peer, .. } if *peer == sender
+                        )
+                });
+                if !matches_current {
+                    debug!(
+                        msg_type = "ArtifactResponse",
+                        request_nonce,
+                        sender = %sender,
+                        "Stale artifact response, dropping"
+                    );
+                    return Ok(CompilerResponse::Ok);
+                }
+
+                self.cancel_fetch_timer(ctx);
+
+                match result {
+                    ArtifactFetchResult::Artifact(artifact) => {
+                        let Some(fetch) = self.fetch.take() else {
+                            return Ok(CompilerResponse::Ok);
+                        };
+                        match CompilerSupport::register_fetched_artifact(
+                            self.hash,
+                            ctx,
+                            ContractSourceInput {
+                                contract_name: &fetch.contract_name,
+                                contract: &fetch.contract,
+                                contract_path: &fetch.contract_path,
+                                initial_value: fetch.initial_value.clone(),
+                            },
+                            &Self::register_path(ctx),
+                            &fetch.wasm_hash,
+                            artifact,
+                        )
+                        .await
+                        {
+                            Ok((module, metadata)) => {
+                                let contracts =
+                                    CompilerSupport::contracts_helper(ctx)
+                                        .await?;
+                                contracts.write().await.insert(
+                                    fetch.contract_name.clone(),
+                                    module,
+                                );
+                                self.contract = metadata.contract_hash.clone();
+                                #[cfg(feature = "test")]
+                                Self::record_fetch_obs(
+                                    ctx,
+                                    &fetch.contract_name,
+                                    |obs| {
+                                        obs.phase = Some("done");
+                                    },
+                                );
+                                if let Some(metrics) = try_core_metrics() {
+                                    metrics.observe_contract_prepare(
+                                        "fetched",
+                                        "ok",
+                                        fetch.started_at.elapsed(),
+                                    );
+                                }
+                                debug!(
+                                    msg_type = "ArtifactResponse",
+                                    contract_name = %fetch.contract_name,
+                                    sender = %sender,
+                                    "Contract artifact fetched and verified"
+                                );
+                            }
+                            Err(error) => {
+                                self.fetch = Some(fetch);
+                                // A peer that answers a same-version
+                                // request with corrupt bytes or bytes
+                                // that do not match the ledger anchor is
+                                // lying or corrupt: security log and next
+                                // peer. The alerts system (future work)
+                                // will report it.
+                                if matches!(
+                                    error,
+                                    CompilerError::FetchedArtifactMismatch { .. }
+                                        | CompilerError::FetchedArtifactDecompressionFailed { .. }
+                                ) {
+                                    warn!(
+                                        msg_type = "ArtifactResponse",
+                                        contract_name = %self
+                                            .fetch
+                                            .as_ref()
+                                            .map(|f| f.contract_name.as_str())
+                                            .unwrap_or_default(),
+                                        sender = %sender,
+                                        error = %error,
+                                        "Fetched artifact is corrupt or does not match the ledger anchor"
+                                    );
+                                    if let Some(metrics) =
+                                        try_core_metrics()
+                                    {
+                                        metrics
+                                            .observe_fetch_failover("corrupt");
+                                    }
+                                    self.attempt_failed(
+                                        ctx,
+                                        Some(error.to_string()),
+                                        true,
+                                    )
+                                    .await?;
+                                } else {
+                                    self.fetch_failed(ctx, error).await?;
+                                }
+                            }
+                        }
+                    }
+                    ArtifactFetchResult::NotServed => {
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_fetch_failover("not_served");
+                        }
+                        self.attempt_failed(
+                            ctx,
+                            Some("peer can not serve the artifact".to_owned()),
+                            true,
+                        )
+                        .await?;
+                    }
+                    ArtifactFetchResult::Busy => {
+                        // The peer started compiling after answering the
+                        // probe: it joins the busy set of the round.
+                        if let Some(fetch) = &mut self.fetch
+                            && let FetchPhase::Fetch { round, peer, .. } =
+                                &mut fetch.phase
+                        {
+                            round.busy.insert(peer.clone());
+                        }
+                        self.attempt_failed(
+                            ctx,
+                            Some("peer started compiling mid-fetch".to_owned()),
+                            false,
+                        )
+                        .await?;
+                    }
+                    ArtifactFetchResult::Outdated { .. } => {
+                        // We are behind: sync instead of burning the
+                        // rest of the candidates.
+                        self.cycle_exhausted(ctx).await?;
+                    }
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::ProbeTimeout { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(fetch.phase, FetchPhase::Probe { .. })
+                    });
+                if matches_current {
+                    // The round is closed: whoever did not answer is
+                    // skipped (maybe down), the answered ones decide.
+                    if let Some(fetch) = &mut self.fetch
+                        && let FetchPhase::Probe(round) = &mut fetch.phase
+                    {
+                        round.pending.clear();
+                    }
+                    self.resolve_probe_round(ctx).await?;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::FetchTimeout { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(fetch.phase, FetchPhase::Fetch { .. })
+                    });
+                if matches_current {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_fetch_failover("timeout");
+                    }
+                    self.attempt_failed(
+                        ctx,
+                        Some("artifact fetch timed out".to_owned()),
+                        true,
+                    )
+                    .await?;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::BusyRetry { request_nonce } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.nonce == request_nonce
+                            && matches!(
+                                fetch.phase,
+                                FetchPhase::BusyWait { .. }
+                            )
+                    });
+                if matches_current {
+                    let Some(fetch) = &mut self.fetch else {
+                        return Ok(CompilerResponse::Ok);
+                    };
+                    let FetchPhase::BusyWait(round) = &mut fetch.phase else {
+                        return Ok(CompilerResponse::Ok);
+                    };
+                    let budget_spent =
+                        round.busy_started.is_some_and(|started| {
+                            started.elapsed() >= BUSY_TOTAL_BUDGET
+                        });
+                    let round = std::mem::take(round);
+                    if budget_spent {
+                        debug!(
+                            msg_type = "Fetch",
+                            "Busy batch budget exhausted, moving to the next batch"
+                        );
+                        self.next_batch(ctx, round).await?;
+                    } else {
+                        self.reprobe_busy(ctx, round).await?;
+                    }
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+            ContractCompilerMessage::CycleStart { cycle } => {
+                let matches_current =
+                    self.fetch.as_ref().is_some_and(|fetch| {
+                        fetch.cycles == cycle
+                            && matches!(fetch.phase, FetchPhase::Timeoff)
+                    });
+                if matches_current {
+                    debug!(
+                        msg_type = "Fetch",
+                        cycle, "Timeoff expired, starting new fetch cycle"
+                    );
+                    self.start_probe_set(ctx, false).await?;
+                }
+
+                Ok(CompilerResponse::Ok)
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    use crate::{
+        helpers::network::test_faults::{
+            FaultAction, FaultDirection, FaultMessage, FaultRule,
+            SharedFaultRegistry, TestFaultRegistry,
+        },
+        system::tests::create_system,
+    };
+
+    use ave_common::identity::{KeyPair, keys::Ed25519Signer};
+
+    use ave_actors::{ActorRef, PersistentActor, SystemRef};
+    use ave_network::CommandHelper;
+
+    use std::sync::Mutex;
+
+    use tempfile::TempDir;
+    use test_log::test;
+    use tokio::{
+        sync::mpsc,
+        task::JoinHandle,
+        time::{sleep, timeout},
+    };
+
+    const CONTRACT_NAME: &str = "gov_Example";
+
+    fn test_public_key() -> PublicKey {
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key()
+    }
+
+    async fn recv_outbound(
+        rx: &mut mpsc::Receiver<CommandHelper<NetworkMessage>>,
+    ) -> NetworkMessage {
+        let command = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("expected an outbound network message within 5s")
+            .expect("network channel closed");
+        let CommandHelper::SendMessage { message, .. } = command else {
+            panic!("expected an outbound send command");
+        };
+        message
+    }
+
+    /// A contract compiler with a fetch anchor recorded in the register
+    /// and the network helper wired to a test-owned channel. The
+    /// contract is absent on disk, so the fetch cycle starts probing.
+    struct FetchHarness {
+        // Held for ownership only: dropping them would shut the test
+        // system down and delete the tempdirs early.
+        _system: SystemRef,
+        runner: JoinHandle<()>,
+        _dirs: Vec<TempDir>,
+        contracts_dir: TempDir,
+        rx: mpsc::Receiver<CommandHelper<NetworkMessage>>,
+        faults: SharedFaultRegistry,
+        compiler: ActorRef<ContractCompiler>,
+    }
+
+    async fn setup_actors() -> FetchHarness {
+        let (system, runner, dirs) = create_system().await;
+
+        let (command_sender, command_receiver) = mpsc::channel(32);
+        let faults: SharedFaultRegistry = Arc::new(Mutex::new(
+            TestFaultRegistry::new(command_sender.clone()),
+        ));
+        let network =
+            Arc::new(NetworkSender::new(command_sender, faults.clone()));
+        system.add_helper("network", network);
+
+        let register = system
+            .create_root_actor(
+                "contract_register",
+                ContractRegister::initial(()),
+            )
+            .await
+            .unwrap();
+        let wasm_hash =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &"anchored wasm")
+                .unwrap();
+        let response = register
+            .ask(ContractRegisterMessage::SetAnchor {
+                contract_name: CONTRACT_NAME.to_owned(),
+                wasm_hash,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ContractRegisterResponse::Ok));
+
+        let compiler = system
+            .create_root_actor(
+                "Example_contract_compiler",
+                ContractCompiler::new(
+                    HashAlgorithm::Blake3,
+                    Arc::new(test_public_key()),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let contracts_dir = tempfile::tempdir().unwrap();
+        FetchHarness {
+            _system: system,
+            runner,
+            _dirs: dirs,
+            contracts_dir,
+            rx: command_receiver,
+            faults,
+            compiler,
+        }
+    }
+
+    async fn reconcile_fetch(
+        compiler: &ActorRef<ContractCompiler>,
+        compilers: BTreeSet<PublicKey>,
+        contracts_dir: &TempDir,
+    ) {
+        compiler
+            .tell(ContractCompilerMessage::Reconcile {
+                gov_version: 1,
+                compilers,
+                evaluators: BTreeSet::new(),
+                action: ContractCompilerAction::Fetch {
+                    contract: "contract source".to_owned(),
+                    contract_name: CONTRACT_NAME.to_owned(),
+                    initial_value: serde_json::json!({}),
+                    contract_path: contracts_dir
+                        .path()
+                        .join("contracts")
+                        .join(CONTRACT_NAME),
+                    gov_id: DigestIdentifier::default(),
+                    schema_id: SchemaType::Type("Example".to_owned()),
+                },
+            })
+            .await
+            .unwrap();
+    }
+
+    /// After a failed fetch attempt the probe round resumes with the
+    /// SAME nonce: answers arriving before the resumed timeout count,
+    /// and the stale probe timer (cancelled when the fetch started) must
+    /// not close the resumed round early.
+    #[test(tokio::test)]
+    async fn resumed_probe_keeps_nonce_and_outlives_stale_timer() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let FetchHarness {
+            contracts_dir,
+            mut rx,
+            compiler,
+            ..
+        } = setup_actors().await;
+
+        let start = Instant::now();
+        reconcile_fetch(
+            &compiler,
+            BTreeSet::from([p1.clone(), p2.clone()]),
+            &contracts_dir,
+        )
+        .await;
+
+        // The probe batch reaches both peers with one nonce.
+        let mut probe_nonce = None;
+        let mut probed = BTreeSet::new();
+        for _ in 0..2 {
+            let message = recv_outbound(&mut rx).await;
+            let ActorMessage::ArtifactProbeReq { request_nonce, .. } =
+                message.message
+            else {
+                panic!("expected a probe request");
+            };
+            if let Some(nonce) = probe_nonce {
+                assert_eq!(request_nonce, nonce);
+            } else {
+                probe_nonce = Some(request_nonce);
+            }
+            probed.insert(message.info.receiver);
+        }
+        let probe_nonce = probe_nonce.unwrap();
+        assert_eq!(probed, BTreeSet::from([p1.clone(), p2.clone()]));
+
+        // First answer wins: the fetch starts from p1 with a fresh
+        // nonce.
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce,
+                sender: p1.clone(),
+            })
+            .await
+            .unwrap();
+        let message = recv_outbound(&mut rx).await;
+        let ActorMessage::ArtifactReq {
+            request_nonce: fetch_nonce,
+            ..
+        } = message.message
+        else {
+            panic!("expected an artifact request");
+        };
+        assert_eq!(message.info.receiver, p1);
+        assert_ne!(fetch_nonce, probe_nonce);
+
+        // Fail the attempt right before the original probe timeout: the
+        // round resumes with the same probe nonce.
+        sleep(
+            (PROBE_RESPONSE_TIMEOUT - Duration::from_millis(500))
+                .saturating_sub(start.elapsed()),
+        )
+        .await;
+        compiler
+            .tell(ContractCompilerMessage::ArtifactResponse {
+                result: ArtifactFetchResult::NotServed,
+                request_nonce: fetch_nonce,
+                sender: p1.clone(),
+            })
+            .await
+            .unwrap();
+
+        // An answer carrying the consumed fetch nonce is stale: it must
+        // not start a fetch.
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: fetch_nonce,
+                sender: p2.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err(),
+            "a stale probe answer triggered an artifact request"
+        );
+
+        // Outlive the stale probe timer (armed with the batch, cancelled
+        // at the fetch start), then answer before the resumed timeout:
+        // the answer must still count.
+        sleep(
+            (PROBE_RESPONSE_TIMEOUT + Duration::from_millis(700))
+                .saturating_sub(start.elapsed()),
+        )
+        .await;
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce,
+                sender: p2.clone(),
+            })
+            .await
+            .unwrap();
+        let message = recv_outbound(&mut rx).await;
+        assert!(
+            matches!(message.message, ActorMessage::ArtifactReq { .. }),
+            "the answer before the resumed timeout did not start a fetch"
+        );
+        assert_eq!(message.info.receiver, p2);
+    }
+
+    /// An injected `send_command` failure mid probe batch is a local
+    /// infrastructure failure: the node fails loud (`crash_system`),
+    /// never a silent stall with no live timer.
+    #[test(tokio::test)]
+    async fn probe_send_failure_crashes_system() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let FetchHarness {
+            runner,
+            contracts_dir,
+            faults,
+            compiler,
+            ..
+        } = setup_actors().await;
+        faults.lock().unwrap().install(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactProbeReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::FailSend,
+        });
+
+        reconcile_fetch(&compiler, BTreeSet::from([p1, p2]), &contracts_dir)
+            .await;
+
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect("an injected probe send failure must crash the system")
+            .unwrap();
+    }
+
+    /// Same fail-loud policy at the fetch start: an injected
+    /// `send_command` failure of the artifact request crashes the system
+    /// instead of leaving the fetch with no live timer.
+    #[test(tokio::test)]
+    async fn artifact_request_send_failure_crashes_system() {
+        let p1 = test_public_key();
+        let p2 = test_public_key();
+        let FetchHarness {
+            runner,
+            contracts_dir,
+            mut rx,
+            faults,
+            compiler,
+            ..
+        } = setup_actors().await;
+        faults.lock().unwrap().install(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::ArtifactReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::FailSend,
+        });
+
+        reconcile_fetch(
+            &compiler,
+            BTreeSet::from([p1.clone(), p2.clone()]),
+            &contracts_dir,
+        )
+        .await;
+
+        // Drain the probe batch, then let p1 serve: the artifact
+        // request send fails.
+        let mut probe_nonce = None;
+        for _ in 0..2 {
+            let message = recv_outbound(&mut rx).await;
+            let ActorMessage::ArtifactProbeReq { request_nonce, .. } =
+                message.message
+            else {
+                panic!("expected a probe request");
+            };
+            probe_nonce = Some(request_nonce);
+        }
+        compiler
+            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                result: ArtifactProbeResult::CanServe,
+                request_nonce: probe_nonce.unwrap(),
+                sender: p1,
+            })
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(15), runner)
+            .await
+            .expect(
+                "an injected artifact request send failure must crash \
+                 the system",
+            )
+            .unwrap();
+    }
+}

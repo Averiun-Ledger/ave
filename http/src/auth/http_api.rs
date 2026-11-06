@@ -3,7 +3,7 @@ use super::models::{ErrorResponse, PaginationQuery};
 use axum::{Json, http::StatusCode};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::error;
+use tracing::{error, warn};
 
 const TARGET: &str = "ave::http::auth";
 
@@ -54,7 +54,12 @@ pub fn db_error_to_response(
         }
         other => {
             // Never leak internal database details to clients
-            error!(target: TARGET, error = %other, "unmapped database error");
+            error!(
+                target: TARGET,
+                msg_type = "db_unmapped",
+                error = %other,
+                "unmapped database error"
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
@@ -76,7 +81,12 @@ pub fn rate_limit_error_response(err: DatabaseError) -> HttpErrorResponse {
             Json(ErrorResponse { error: msg }),
         ),
         other => {
-            error!(target: TARGET, error = %other, "rate limit check failed");
+            warn!(
+                target: TARGET,
+                msg_type = "rate_limit_failed",
+                error = %other,
+                "rate limit check failed"
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {

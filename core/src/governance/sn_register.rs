@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::identity::DigestIdentifier;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,11 @@ impl SnRegister {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding:
+    /// highest sn recorded for the subject, if any.
+    GetMaxSn {
+        subject_id: DigestIdentifier,
+    },
     DeleteSubject {
         subject_id: DigestIdentifier,
     },
@@ -100,6 +105,7 @@ pub enum SnRegisterResponse {
     Ok,
     Sns(Vec<SnLimit>),
     GovVersionWindow(Vec<SnGovVersionRange>),
+    MaxSn(Option<u64>),
 }
 
 impl Response for SnRegisterResponse {}
@@ -217,6 +223,17 @@ impl Handler<Self> for SnRegister {
 
                 Ok(SnRegisterResponse::Sns(results))
             }
+            SnRegisterMessage::GetMaxSn { subject_id } => {
+                // Highest sn recorded for this subject (values grow
+                // with event order; a missing tail means an empty map
+                // here, which reads as unknown and scans fully —
+                // safe direction).
+                let max = self.register.get(&subject_id).and_then(|versions| {
+                    versions.iter().map(|(_, sn)| *sn).max()
+                });
+
+                return Ok(SnRegisterResponse::MaxSn(max));
+            }
             SnRegisterMessage::RegisterSn {
                 subject_id,
                 gov_version,
@@ -251,6 +268,7 @@ impl Handler<Self> for SnRegister {
 
                 if let Some(register) = self.register.get(&subject_id) {
                     let mut prev_end_sn: Option<u64> = None;
+                    let mut last_gov_version = None;
 
                     for (gov_version, end_sn) in register.iter() {
                         let start_sn = prev_end_sn
@@ -266,11 +284,32 @@ impl Handler<Self> for SnRegister {
                             });
                         }
 
+                        last_gov_version = Some(*gov_version);
                         if *end_sn >= to_sn {
                             break;
                         }
 
                         prev_end_sn = Some(*end_sn);
+                    }
+
+                    // No newer gov version recorded: later sns share
+                    // the last one, so extend the window to the
+                    // requested tip instead of leaving a gap.
+                    if let Some(gov_version) = last_gov_version {
+                        let covered_to = ranges.last().map(|r| r.to_sn);
+                        let extend_from = covered_to
+                            .map_or(from_sn, |covered| {
+                                covered.saturating_add(1).max(from_sn)
+                            });
+                        if extend_from <= to_sn
+                            && covered_to.is_none_or(|c| c < to_sn)
+                        {
+                            ranges.push(SnGovVersionRange {
+                                from_sn: extend_from,
+                                to_sn,
+                                gov_version,
+                            });
+                        }
                     }
                 }
 
@@ -296,9 +335,15 @@ impl Handler<Self> for SnRegister {
 
 #[async_trait]
 impl PersistentActor for SnRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()

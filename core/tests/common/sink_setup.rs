@@ -1,12 +1,13 @@
 use std::{collections::BTreeSet, collections::HashMap, time::Duration};
 
 use ave_common::{
-    IncomingSinkEvent, SinkTypes,
+    IncomingSinkEvent, LightEvent, SchemaType, SinkTypes,
     sink::{
         DataToSink, DataToSinkEvent, HttpProxyConfig, HttpTlsConfig,
         SinkAuthMethod, SinkCompression,
     },
 };
+use ave_core::test_contracts::EXAMPLE_CONTRACT;
 use ave_core::{
     Api,
     config::{
@@ -18,8 +19,6 @@ use ave_network::NodeType;
 use serde_json::{Value, json};
 
 use crate::common::CreateNodeConfig;
-
-pub const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[allow(dead_code)]
 pub fn example_schema_governance_fact() -> serde_json::Value {
@@ -100,8 +99,9 @@ pub fn make_sink_entry_with_concurrency(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -131,9 +131,10 @@ pub fn make_sink_entry_with_auth(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 auth: Some(auth),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -178,10 +179,11 @@ pub fn make_sink_entry_with_signature_and_retries(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 signature: true,
                 max_retries,
                 retry_base_delay_ms: 100,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -212,9 +214,10 @@ pub fn make_sink_entry_with_tls(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 tls: Some(tls),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -249,7 +252,7 @@ pub fn make_sink_entry_batch(
                 batch_max_delay_ms: 100,
                 compression,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -280,9 +283,10 @@ pub fn make_sink_entry_with_proxy(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 proxy: Some(proxy),
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -313,9 +317,10 @@ pub fn make_sink_entry_with_headers(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 headers,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -348,10 +353,53 @@ pub fn make_sink_entry_with_retry_policy(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries,
                 retry_base_delay_ms,
                 retry_max_delay_ms,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            })),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            ..Default::default()
+        }],
+    }
+}
+
+/// Sink entry with OAuth2 authentication and an explicit retry
+/// policy (base/max delays plus token refresh margin), for tests
+/// that need small deterministic bounds instead of the defaults.
+#[allow(dead_code)]
+pub fn make_sink_entry_with_auth_and_retry_policy(
+    server_name: &str,
+    url: String,
+    governance_id: Option<String>,
+    events: BTreeSet<SinkTypes>,
+    auth: SinkAuthMethod,
+    max_retries: usize,
+    retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
+    token_refresh_margin_secs: u64,
+) -> SinkConfigEntry {
+    SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: server_name.to_owned(),
+            events,
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url,
+                batch_delivery: false,
+                auth: Some(auth),
+                max_retries,
+                retry_base_delay_ms,
+                retry_max_delay_ms,
+                token_refresh_margin_secs,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -375,6 +423,38 @@ pub fn example_sink_config(
     )]
 }
 
+/// Returns a sink configuration with a short request timeout (2s) so tests
+/// that simulate a hung or unreachable sink (`ResponseMode::Drop`) see the
+/// client timeout fire quickly instead of waiting the default 10s.
+#[allow(dead_code)]
+pub fn short_timeout_sink_config(
+    url: String,
+    governance_id: Option<String>,
+) -> Vec<SinkConfigEntry> {
+    vec![SinkConfigEntry {
+        target: SinkTarget::Schema {
+            schema_id: "Example".to_owned(),
+            governance_id,
+        },
+        servers: vec![SinkServer {
+            server: "example-sink".to_owned(),
+            events: BTreeSet::from([SinkTypes::All]),
+            transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
+                url,
+                batch_delivery: false,
+                max_retries: 0,
+                request_timeout_ms: 2000,
+                connect_timeout_ms: 1000,
+                ..Default::default()
+            })),
+            healthcheck_intervals_secs: vec![1],
+            startup_healthcheck_delay_secs: 0,
+            max_catch_up_concurrency: 2,
+            ..Default::default()
+        }],
+    }]
+}
+
 /// Returns a sink configuration designed to trigger flapping detection after
 /// one failed recovery.
 #[allow(dead_code)]
@@ -392,6 +472,7 @@ pub fn flapping_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
@@ -422,6 +503,7 @@ pub fn transient_error_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 2,
                 request_timeout_ms: 500,
                 retry_base_delay_ms: 100,
@@ -455,6 +537,7 @@ pub fn short_idle_sink_config(
             events: BTreeSet::from([SinkTypes::All]),
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
                 request_timeout_ms: 500,
                 ..Default::default()
@@ -811,8 +894,9 @@ pub fn make_governance_sink_entry(
             events,
             transport: SinkTransportConfig::Http(Box::new(HttpSinkConfig {
                 url,
+                batch_delivery: false,
                 max_retries: 0,
-                request_timeout_ms: 2000,
+                request_timeout_ms: 10_000,
                 connect_timeout_ms: 1000,
                 ..Default::default()
             })),
@@ -902,6 +986,14 @@ pub const fn restart_config_with_peers_and_safe_mode(
         ledger_batch_size: None,
         safe_mode,
         sinks,
+        #[cfg(feature = "test")]
+        compiler: None,
+        contracts_path: None,
+        governance_sync: None,
+        tracker_sync: None,
+        approval: None,
+        toolchains: None,
+        cargo_bin: None,
     }
 }
 
@@ -1539,3 +1631,39 @@ pub fn assert_sink_events_page(
     assert_eq!(page.next_sn, expected_next_sn);
     assert_eq!(page.events.len(), expected_events_len);
 }
+
+#[allow(dead_code)]
+pub fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
+    DataToSink {
+        payload: DataToSinkEvent::Create {
+            governance_id: None,
+            subject_id: subject_id.to_string(),
+            owner: "owner".to_string(),
+            schema_id: SchemaType::Type(schema_id.to_string()),
+            namespace: "".to_string(),
+            sn: 0,
+            gov_version: 1,
+            state: serde_json::json!({ "one": 1 }),
+        },
+        public_key: "pk".to_string(),
+        event_request_timestamp: 1,
+        event_ledger_timestamp: 2,
+        sink_timestamp: 3,
+    }
+}
+
+#[allow(dead_code)]
+pub fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
+    LightEvent {
+        subject_id: subject_id.to_string(),
+        schema_id: schema_id.to_string(),
+        governance_id: None,
+        sn: 1,
+        event_type: SinkTypes::Fact,
+        success: true,
+    }
+}
+
+/// Schema id shared by the sink suites.
+#[allow(dead_code)]
+pub const SCHEMA_ID: &str = "Example";

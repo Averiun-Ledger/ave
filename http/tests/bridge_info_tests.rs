@@ -12,21 +12,24 @@ use utoipa::OpenApi;
 
 use ave_bridge::ave_common::{
     DataToSinkEvent, SchemaType,
-    bridge::request::ApprovalState,
+    bridge::request::{ActorTreeQuery, ApprovalState, SinkDeliveriesQuery},
     identity::{KeyPair, keys::Ed25519Signer},
     response::{
-        ApprovalEntry, GovsData, LedgerDB, PaginatorEvents, RequestData,
-        RequestInfo, RequestInfoExtend, RequestState, SinkEventsPage,
-        SubjectDB, SubjsData, TransferSubject,
+        ActorTreeNodeView, ActorTreeResponse, ApprovalEntry, CompResDB,
+        EvalResDB, GovsData, LedgerDB, PaginatorAborts, PaginatorEvents,
+        RequestData, RequestEventDB, RequestInfo, RequestInfoExtend,
+        RequestState, SinkDeliveryState, SinkEventsPage, SubjectDB, SubjsData,
+        TransferSubject, WatchdogIncidentRow,
     },
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 
 use crate::common::{
-    TestServer, add_example_schema_to_governance,
-    add_governance_member_as_witness, create_governance, create_subject,
-    make_request, materialize_role_test_path, role_test_request_body,
+    EXAMPLE_CONTRACT, MEMBER_PUBLIC_KEY, TestServer,
+    add_example_schema_to_governance, add_governance_member_as_witness,
+    create_governance, create_subject, make_request,
+    materialize_role_test_path, role_test_request_body,
     server_auth_route_catalog, server_main_route_catalog,
     server_public_auth_route_catalog, wait_request_finish,
 };
@@ -64,7 +67,7 @@ async fn fact_req_schema(
                     "add": [
                         {
                             "id": "Example1",
-                            "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                            "contract": EXAMPLE_CONTRACT,
                             "initial_value": {
                                 "one": 0,
                                 "two": 0,
@@ -73,7 +76,7 @@ async fn fact_req_schema(
                         },
                                                 {
                             "id": "Example2",
-                            "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                            "contract": EXAMPLE_CONTRACT,
                             "initial_value": {
                                 "one": 0,
                                 "two": 0,
@@ -376,6 +379,20 @@ async fn test_request_deserialization() {
     assert_eq!(request_info.len(), 1);
     assert_eq!(request_info[0].state, RequestState::Finish);
     assert_eq!(request_info[0].version, 0);
+
+    // `limit`/`offset` page, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/requests?limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let request_info: Vec<RequestInfoExtend> =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(request_info.len(), 1);
     assert_eq!(request_info[0].request_id, request_data.request_id);
 }
 
@@ -384,7 +401,7 @@ async fn test_request_deserialization() {
 async fn test_approval_deserialization() {
     // GET /approvals/{subject_id}?state={ApprovalState} -> Option<ApprovalEntry>
     // GET /approvals?state={ApprovalState} -> Vec<ApprovalEntry>
-    // PATCH /approvals/{subject_id} + Json<String> -> String
+    // PATCH /approvals/{subject_id} + Json<PatchApproval> -> String
 
     let Some((server, _dirs)) = TestServer::build(false, false, None).await
     else {
@@ -439,6 +456,7 @@ async fn test_approval_deserialization() {
     assert_eq!(approval.request.sn, 1);
     assert_eq!(approval.request.gov_version, 0);
     assert_eq!(approval.request.subject_id, request_data.subject_id);
+    assert!(!approval.request_id.is_empty());
 
     let (.., body) = make_request(
         &client,
@@ -489,7 +507,12 @@ async fn test_approval_deserialization() {
         &server.url(&format!("/approvals/{}", request_data.subject_id)),
         "PATCH",
         None,
-        Some(json!("accepted")),
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval.request_id,
+            "expected_version": approval.version,
+            "expected_issued_at": approval.request.issued_at,
+        })),
     )
     .await;
 
@@ -499,8 +522,8 @@ async fn test_approval_deserialization() {
     assert_eq!(
         res,
         format!(
-            "The approval request for subject {} has changed to accepted",
-            request_data.subject_id
+            "The approval request {} (version {}) for subject {} has changed to accepted",
+            approval.request_id, approval.version, request_data.subject_id
         )
     );
 
@@ -538,6 +561,217 @@ async fn test_approval_deserialization() {
     assert_eq!(approvals[0].request.sn, 1);
     assert_eq!(approvals[0].request.gov_version, 0);
     assert_eq!(approvals[0].request.subject_id, request_data.subject_id);
+
+    // `limit`/`offset` page with `state`, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&"/approvals?state=accepted&limit=10&offset=0".to_string()),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let approvals: Vec<ApprovalEntry> = serde_json::from_value(body).unwrap();
+    assert_eq!(approvals.len(), 1);
+}
+
+// --- Manual approval binds the vote to the consulted request ---
+#[test(tokio::test)]
+async fn test_approval_rejects_stale_identity() {
+    // A vote for a superseded request must fail with 409 instead of
+    // signing a change the operator never reviewed; repeating the
+    // same decision on the same request stays accepted.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let body = create_governance(&client, &server, None).await;
+    let request_data: RequestData = serde_json::from_value(body).unwrap();
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
+
+    async fn poll_pending(
+        client: &Client,
+        server: &TestServer,
+        subject_id: &str,
+    ) -> ApprovalEntry {
+        let started = std::time::Instant::now();
+        loop {
+            let (status, body) = make_request(
+                client,
+                &server.url(&format!("/approvals/{subject_id}")),
+                "GET",
+                None,
+                None,
+            )
+            .await;
+            assert!(status.is_success(), "{body}");
+            let approval: Option<ApprovalEntry> =
+                serde_json::from_value(body).unwrap();
+            if let Some(approval) = approval
+                && approval.state == ApprovalState::Pending
+            {
+                return approval;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "no pending approval for {subject_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    let key_a = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let body = add_governance_member_as_witness(
+        &client,
+        &server,
+        None,
+        &request_data.subject_id,
+        &key_a,
+    )
+    .await;
+    let _request_data: RequestData = serde_json::from_value(body).unwrap();
+
+    let approval_a =
+        poll_pending(&client, &server, &request_data.subject_id).await;
+    assert!(!approval_a.request_id.is_empty());
+
+    // An unknown identity never matches: 409, nothing voted.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": "no-such-request",
+            "expected_version": 0,
+            "expected_issued_at": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("conflict"), "{body}");
+
+    // The consulted identity votes once.
+    let vote_a = json!({
+        "state": "accepted",
+        "expected_request_id": approval_a.request_id,
+        "expected_version": approval_a.version,
+        "expected_issued_at": approval_a.request.issued_at,
+    });
+    let (status, first) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(vote_a.clone()),
+    )
+    .await;
+    assert!(status.is_success(), "{first}");
+
+    // Repeating the same decision on the same request is idempotent.
+    let (status, second) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(vote_a),
+    )
+    .await;
+    assert!(status.is_success(), "{second}");
+    assert_eq!(first, second);
+
+    // A second fact replaces the pending request: the old identity
+    // must now conflict while the fresh one still votes. New member
+    // name on purpose (the shared helper hardcodes "Node1").
+    let key_b = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    let (status, body) = make_request(
+        &client,
+        &server.url("/requests"),
+        "POST",
+        None,
+        Some(json!({
+            "request": {
+                "event": "fact",
+                "data": {
+                    "subject_id": request_data.subject_id,
+                    "payload": {
+                        "members": {
+                            "add": [
+                                {
+                                    "name": "Node2",
+                                    "key": key_b
+                                }
+                            ]
+                        },
+                        "roles": {
+                            "governance": {
+                                "add": {
+                                    "witness": ["Node2"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "governance fact failed: {body}");
+    let _request_data: RequestData = serde_json::from_value(body).unwrap();
+
+    let approval_b =
+        poll_pending(&client, &server, &request_data.subject_id).await;
+    assert_ne!(
+        (
+            approval_b.request_id.clone(),
+            approval_b.version,
+            approval_b.request.issued_at
+        ),
+        (
+            approval_a.request_id.clone(),
+            approval_a.version,
+            approval_a.request.issued_at
+        ),
+        "the second fact must open a new approval collection"
+    );
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval_a.request_id,
+            "expected_version": approval_a.version,
+            "expected_issued_at": approval_a.request.issued_at,
+        })),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/approvals/{}", request_data.subject_id)),
+        "PATCH",
+        None,
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": approval_b.request_id,
+            "expected_version": approval_b.version,
+            "expected_issued_at": approval_b.request.issued_at,
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
 }
 
 // --- SubjectAccess Endpoints ---
@@ -559,7 +793,7 @@ async fn test_subject_access_endpoints_deserialization() {
         &server.url("/governances/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGY/authorize"),
         "PUT",
         None,
-        Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
+        Some(json!([MEMBER_PUBLIC_KEY])),
     )
     .await;
     assert!(status.is_success());
@@ -569,7 +803,7 @@ async fn test_subject_access_endpoints_deserialization() {
         &server.url("/governances/BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA/authorize"),
         "PUT",
         None,
-        Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
+        Some(json!([MEMBER_PUBLIC_KEY])),
     )
     .await;
     assert!(status.is_success());
@@ -608,9 +842,7 @@ async fn test_subject_access_endpoints_deserialization() {
     let public_key: HashSet<String> = serde_json::from_value(body).unwrap();
     assert_eq!(
         public_key,
-        HashSet::from_iter([
-            "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk".to_string()
-        ])
+        HashSet::from_iter([MEMBER_PUBLIC_KEY.to_string()])
     );
 
     let (status, _body) = make_request(
@@ -650,7 +882,7 @@ async fn test_sync_peers_add_and_remove_by_path() {
     };
     let client = Client::new();
     let subject = "BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA";
-    let peer1 = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
+    let peer1 = MEMBER_PUBLIC_KEY;
     let peer2 = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
         .public_key()
         .to_string();
@@ -731,14 +963,18 @@ async fn test_update_and_transfer_deserialization() {
         )),
         "PUT",
         None,
-        Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
+        Some(json!([MEMBER_PUBLIC_KEY])),
     )
     .await;
     assert!(status.is_success());
 
+    // `strict` flag deserializes (false keeps default behavior).
     let (status, body) = make_request(
         &client,
-        &server.url(&format!("/subjects/{}/update", request_data.subject_id)),
+        &server.url(&format!(
+            "/subjects/{}/update?strict=false",
+            request_data.subject_id
+        )),
         "POST",
         None,
         None,
@@ -840,6 +1076,19 @@ async fn test_update_and_transfer_deserialization() {
     assert_eq!(res[0].actual_owner, owner);
     assert_eq!(res[0].new_owner, public_key);
     assert_eq!(res[0].subject_id, subject_id);
+
+    // `limit`/`offset` page, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/pending-transfers?limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<TransferSubject> = serde_json::from_value(body).unwrap();
+    assert!(!res.is_empty());
 }
 
 // --- Gov Sub Endpoints ---
@@ -900,6 +1149,38 @@ async fn test_gov_sub_deserialization() {
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await
         }
+    }
+
+    // SN 1 compiló Example1+Example2: el evento sirve el veredicto
+    // con sus contratos y la toolchain atestiguada.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{}/events/1", governance_id)),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success());
+    let event: LedgerDB = serde_json::from_value(body).unwrap();
+    assert_eq!(event.sn, 1);
+    match &event.event {
+        RequestEventDB::GovernanceFact {
+            compilation_response,
+            ..
+        } => match compilation_response {
+            Some(CompResDB::Ok {
+                contracts,
+                toolchain_version,
+            }) => {
+                assert_eq!(contracts.len(), 2);
+                assert!(contracts.contains_key("Example1"));
+                assert!(contracts.contains_key("Example2"));
+                assert!(!toolchain_version.is_empty());
+            }
+            other => panic!("unexpected compilation result: {other:?}"),
+        },
+        other => panic!("unexpected governance fact event: {other:?}"),
     }
 
     let body = create_subject(
@@ -1221,6 +1502,34 @@ async fn test_gov_sub_deserialization() {
     assert_eq!(res[0].description, Some("A governance".to_string()));
     assert_eq!(res[0].name, Some("Governance".to_string()));
     assert_eq!(res[0].governance_id, governance_id);
+
+    // `limit`/`offset` page with `active`, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/governances?active=false&limit=10&offset=0"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<GovsData> = serde_json::from_value(body).unwrap();
+    assert!(!res.is_empty());
+
+    // `limit`/`offset` page with every subject filter, typed.
+    let (status, body) = make_request(
+        &client,
+        &server.url(&format!(
+            "/governances/{governance_id}/subjects?active=false&schema_id=Example2&limit=10&offset=0"
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let res: Vec<SubjsData> = serde_json::from_value(body).unwrap();
+    assert_eq!(res.len(), 1);
 }
 
 // --- Event Endpoints ---
@@ -1652,6 +1961,18 @@ async fn test_subject_deserialization() {
     assert_eq!(paginator_reverse.events[5].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[5].sn, 1);
     assert_eq!(paginator_reverse.events[5].event_type.to_string(), "fact");
+    // SN 1 solo añade un witness: no compila, el campo viaja como
+    // nulo y deserializa sin error.
+    match &paginator_reverse.events[5].event {
+        RequestEventDB::GovernanceFact {
+            compilation_response,
+            ..
+        } => assert!(
+            compilation_response.is_none(),
+            "witness-only fact runs no compilation: {compilation_response:?}"
+        ),
+        other => panic!("unexpected governance fact event: {other:?}"),
+    }
 
     assert_eq!(paginator_reverse.events[6].subject_id, governance_id);
     assert_eq!(paginator_reverse.events[6].sn, 0);
@@ -1723,7 +2044,7 @@ async fn test_subject_deserialization() {
     let future_date = "2099-01-01T00:00:00Z";
 
     // event_request_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_request_ts_from={}",
@@ -1734,10 +2055,11 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // event_ledger_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_ledger_ts_from={}",
@@ -1749,10 +2071,11 @@ async fn test_subject_deserialization() {
     )
     .await;
 
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // sink_ts_from with future date -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?sink_ts_from={}",
@@ -1763,10 +2086,11 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // event_request_ts_to in the past -> no events
-    let (status, ..) = make_request(
+    let (status, body) = make_request(
         &client,
         &server2.url(&format!(
             "/subjects/{}/events?event_request_ts_to=2000-01-01T00:00:00Z",
@@ -1777,7 +2101,8 @@ async fn test_subject_deserialization() {
         None,
     )
     .await;
-    assert!(!status.is_success());
+    assert!(status.is_success());
+    assert_eq!(body["events"], serde_json::Value::Array(vec![]));
 
     // Range covering the events -> all 7 events are returned
     let (status, body) = make_request(
@@ -1808,6 +2133,120 @@ async fn test_subject_deserialization() {
     )
     .await;
     assert_eq!(status, 400, "invalid timestamp must be rejected: {body}");
+
+    // Remaining `*_to` filters, each excluding every event.
+    for filter in [
+        "event_ledger_ts_to=2000-01-01T00:00:00Z",
+        "sink_ts_to=2000-01-01T00:00:00Z",
+    ] {
+        let (status, body) = make_request(
+            &client,
+            &server2
+                .url(&format!("/subjects/{}/events?{}", governance_id, filter)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{filter}: {body}");
+        assert_eq!(
+            body["events"],
+            serde_json::Value::Array(vec![]),
+            "{filter}"
+        );
+    }
+
+    // Full range with every filter at once -> all 7 events, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?quantity=100&event_request_ts_from=2000-01-01T00:00:00Z&event_request_ts_to={}&event_ledger_ts_from=2000-01-01T00:00:00Z&event_ledger_ts_to={}&sink_ts_from=2000-01-01T00:00:00Z&sink_ts_to={}",
+            governance_id, future_date, future_date, future_date
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 7);
+
+    // `event_type` filter -> only the fact, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events?event_type=fact",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let paginator: PaginatorEvents = serde_json::from_value(body).unwrap();
+    assert_eq!(paginator.events.len(), 1);
+    assert_eq!(paginator.events[0].sn, 1);
+
+    // `events-first-last` with `event_type` -> only the fact, typed.
+    let (status, body) = make_request(
+        &client,
+        &server2.url(&format!(
+            "/subjects/{}/events-first-last?quantity=7&event_type=fact",
+            governance_id
+        )),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let events: Vec<LedgerDB> = serde_json::from_value(body).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].sn, 1);
+
+    // `aborts` with every variable, typed (no aborts here, but the
+    // shape must deserialize; the request id is real but never
+    // aborted, so it matches nothing).
+    for query in [
+        "quantity=10&page=1".to_owned(),
+        "quantity=10&page=1&reverse=true".to_owned(),
+        format!(
+            "request_id={}&sn=999999&quantity=10&page=1&reverse=true",
+            request_data.request_id
+        ),
+    ] {
+        let (status, body) = make_request(
+            &client,
+            &server2
+                .url(&format!("/subjects/{}/aborts?{}", governance_id, query)),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "{query}: {body}");
+        let paginator: PaginatorAborts = serde_json::from_value(body).unwrap();
+        assert!(paginator.events.is_empty(), "{query}");
+    }
+
+    // `watchdog/incidents` with every variable, typed (nominal
+    // operation never fires, but the shape must deserialize).
+    let (status, body) = make_request(
+        &client,
+        &server2.url(
+            "/watchdog/incidents?phase=compilation&from_nanos=0&to_nanos=4102444800000000000&limit=10",
+        ),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let incidents: Vec<WatchdogIncidentRow> =
+        serde_json::from_value(body).unwrap();
+    assert!(incidents.is_empty());
 }
 
 /// The shared query cap (`MAX_QUERY_LIMIT` = 1000) is enforced end-to-end:
@@ -1824,8 +2263,7 @@ async fn test_events_query_quantity_cap_is_enforced() {
     let body = create_governance(&client, &server, None).await;
     let request_data: RequestData = serde_json::from_value(body).unwrap();
     let governance_id = request_data.subject_id;
-    wait_request_finish(&client, &server, None, &request_data.request_id)
-        .await;
+    wait_request_finish(&client, &server, None, &request_data.request_id).await;
 
     for path in [
         format!("/subjects/{governance_id}/events?quantity=1001"),
@@ -1840,17 +2278,31 @@ async fn test_events_query_quantity_cap_is_enforced() {
         );
     }
 
-    // The cap itself is accepted on every endpoint.
+    // The cap itself is accepted on every endpoint. The events
+    // projection in the external database is written asynchronously
+    // once the request finishes, so the read polls until it lands,
+    // like every downstream-state helper does.
     for path in [
         format!("/subjects/{governance_id}/events?quantity=1000"),
         format!("/subjects/{governance_id}/events-first-last?quantity=1000"),
         format!("/subjects/{governance_id}/aborts?quantity=1000"),
     ] {
-        let (status, body) =
-            make_request(&client, &server.url(&path), "GET", None, None).await;
+        let mut last_body = Value::Null;
+        let mut success = false;
+        for _ in 0..40 {
+            let (status, body) =
+                make_request(&client, &server.url(&path), "GET", None, None)
+                    .await;
+            if status.is_success() {
+                success = true;
+                break;
+            }
+            last_body = body;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         assert!(
-            status.is_success(),
-            "the cap itself must be accepted on {path}: {body}"
+            success,
+            "the cap itself must be accepted on {path}: {last_body}"
         );
     }
 }
@@ -2281,7 +2733,7 @@ async fn test_system_info_deserialization() {
     assert!(!config.logging.output.file);
     assert!(!config.logging.output.api);
     assert!(config.logging.api_url.is_none());
-    assert_eq!(config.logging.file_path, "logs");
+    assert_eq!(config.logging.file_path, "/logs");
     assert_eq!(config.logging.rotation, LoggingRotationHttp::Size);
     assert_eq!(config.logging.max_size, 104_857_600);
     assert_eq!(config.logging.max_files, 3);
@@ -2353,8 +2805,15 @@ async fn test_system_info_deserialization() {
         config.node.network.max_pending_outbound_bytes_per_peer,
         8_388_608
     );
-    assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
-    assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
+    assert_eq!(
+        config.node.network.max_pending_inbound_bytes_total,
+        128 * 1024 * 1024
+    );
+    assert_eq!(
+        config.node.network.max_pending_outbound_bytes_total,
+        128 * 1024 * 1024
+    );
+    assert_eq!(config.node.network.max_pending_messages_per_peer, 100);
 
     // Control list timeout/concurrency defaults
     assert_eq!(config.node.network.control_list.request_timeout_secs, 5);
@@ -2542,4 +3001,447 @@ fn openapi_covers_every_declared_route() {
         stale.is_empty(),
         "OpenAPI documents routes that are not mounted: {stale:?}"
     );
+}
+
+#[test(tokio::test)]
+async fn test_actor_tree_snapshot_filter_and_truncation() {
+    // GET /actor-tree -> full pre-order snapshot; ?subject= prunes
+    // to matching subtrees; ?limit= truncates with a flag.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let (status, body) =
+        make_request(&client, &server.url("/actor-tree"), "GET", None, None)
+            .await;
+    assert!(status.is_success(), "GET /actor-tree failed: {body}");
+    let total = body
+        .pointer("/total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap();
+    let nodes = body
+        .pointer("/nodes")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert!(!nodes.is_empty(), "a live node serves its own tree");
+    assert_eq!(body.pointer("/truncated"), Some(&json!(false)));
+    assert_eq!(total, nodes.len() as u64);
+    for node in nodes {
+        let path = node.pointer("/path").and_then(Value::as_str).unwrap();
+        assert!(path.starts_with("/user/"), "unexpected path: {path}");
+        let actor_type =
+            node.pointer("/actor_type").and_then(Value::as_str).unwrap();
+        assert!(!actor_type.is_empty(), "type missing at {path}");
+    }
+    assert_eq!(nodes[0].pointer("/depth"), Some(&json!(0)));
+
+    // Truncation keeps the pre-order head and flags the cut.
+    let (status, body) = make_request(
+        &client,
+        &server.url("/actor-tree?limit=1"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "truncated tree failed: {body}");
+    assert_eq!(body.pointer("/truncated"), Some(&json!(true)));
+    assert_eq!(body.pointer("/total"), Some(&json!(total)));
+    assert_eq!(
+        body.pointer("/nodes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Subject pruning: unknown ids find no subtree (URL-safe
+    // base64 without padding, 32 zero bytes: valid shape).
+    let unknown = "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let url = reqwest::Url::parse_with_params(
+        &server.url("/actor-tree"),
+        &[("subject", unknown)],
+    )
+    .unwrap();
+    let (status, _) =
+        make_request(&client, url.as_str(), "GET", None, None).await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    // ...and malformed ones are rejected.
+    let (status, _) = make_request(
+        &client,
+        &server.url("/actor-tree?subject=!!!"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    // Degenerate values are rejected, never served partial.
+    for bad in ["limit=0", "limit=5001"] {
+        let (status, _) = make_request(
+            &client,
+            &server.url(&format!("/actor-tree?{bad}")),
+            "GET",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[test(tokio::test)]
+async fn test_sync_lift_round_trip() {
+    // POST /subjects/{id}/sync-lift lifts the tracker through boot
+    // healing and releases it; unknown ids (and governance ids,
+    // which boot with the node) report not found.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+    let subject = "BvqeI4ZCxMZQWOSTVau3-PFjplI6__3EJN5qyi0XpEGA";
+
+    let (status, _) = make_request(
+        &client,
+        &server.url(&format!("/subjects/{subject}/sync-lift")),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/subjects/not-a-subject!!!/sync-lift"),
+        "POST",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[test(tokio::test)]
+async fn test_sink_deliveries_wiring() {
+    // GET /sinks/deliveries wiring on a fresh node: empty view,
+    // unknown sink 404s, malformed subject 400s. Delivery content
+    // is covered by the core sink e2e.
+    let Some((server, _dirs)) = TestServer::build(false, false, None).await
+    else {
+        return;
+    };
+    let client = Client::new();
+
+    let (status, body) = make_request(
+        &client,
+        &server.url("/sinks/deliveries"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "deliveries failed: {body}");
+    assert_eq!(body, json!([]));
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/sinks/deliveries?sink=no-such-sink"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    let (status, _) = make_request(
+        &client,
+        &server.url("/sinks/deliveries?subject=!!!"),
+        "GET",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn test_actor_tree_and_deliveries_deserialization() {
+    // Shape stability for the ops views: query filters default to
+    // None, responses round-trip with every combination of
+    // truncation, missing cursors and lag flags.
+    let query: ActorTreeQuery = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(query.subject, None);
+    assert_eq!(query.limit, None);
+    let query: ActorTreeQuery =
+        serde_json::from_value(json!({"subject": "s", "limit": 10})).unwrap();
+    assert_eq!(query.subject.as_deref(), Some("s"));
+    assert_eq!(query.limit, Some(10));
+
+    let query: SinkDeliveriesQuery = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(query.subject, None);
+    assert_eq!(query.sink, None);
+
+    let tree = ActorTreeResponse {
+        nodes: vec![
+            ActorTreeNodeView {
+                path: "/user/a".to_owned(),
+                actor_type: "crate::A".to_owned(),
+                depth: 0,
+            },
+            ActorTreeNodeView {
+                path: "/user/a/b".to_owned(),
+                actor_type: "crate::B".to_owned(),
+                depth: 1,
+            },
+        ],
+        total: 3,
+        truncated: true,
+    };
+    let body: Value = serde_json::to_value(&tree).unwrap();
+    assert_eq!(body.pointer("/nodes/1/depth"), Some(&json!(1)));
+    assert_eq!(body.pointer("/truncated"), Some(&json!(true)));
+    let back: ActorTreeResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(back.nodes.len(), 2);
+    assert_eq!(back.total, 3);
+    assert!(back.truncated);
+
+    let row = SinkDeliveryState {
+        sink: "s".to_owned(),
+        subject_id: "sub".to_owned(),
+        cursor_sn: None,
+        last_seen_sn: 0,
+        lagging: false,
+    };
+    let body: Value = serde_json::to_value(&row).unwrap();
+    assert_eq!(body.pointer("/cursor_sn"), Some(&Value::Null));
+    let back: SinkDeliveryState = serde_json::from_value(body).unwrap();
+    assert_eq!(back.cursor_sn, None);
+    assert!(!back.lagging);
+
+    let row = SinkDeliveryState {
+        sink: "s".to_owned(),
+        subject_id: "sub".to_owned(),
+        cursor_sn: Some(10),
+        last_seen_sn: 10,
+        lagging: false,
+    };
+    let back: SinkDeliveryState =
+        serde_json::from_value(serde_json::to_value(&row).unwrap()).unwrap();
+    assert_eq!(back.cursor_sn, Some(10));
+}
+
+#[test]
+fn test_request_event_db_all_variants_deserialize() {
+    // Every ledger event shape served by the query endpoints must
+    // deserialize with its tag and map to its filter type: a new
+    // variant or a renamed tag breaks clients silently otherwise.
+    use ave_bridge::ave_common::bridge::request::EventRequestType;
+
+    let cases: Vec<(Value, fn(&RequestEventDB))> = vec![
+        (
+            json!({
+                "event": "create",
+                "data": {
+                    "name": "n",
+                    "description": "d",
+                    "schema_id": "S",
+                    "namespace": "ns",
+                },
+            }),
+            |event| {
+                assert!(matches!(event, RequestEventDB::Create { .. }));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Create
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "tracker_fact_full",
+                "data": {
+                    "payload": {"one": 0},
+                    "viewpoints": [],
+                    "evaluation_response": {"Patch": {"one": 0}},
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::TrackerFactFull { .. }
+                ));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Fact
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "tracker_fact_opaque",
+                "data": {
+                    "viewpoints": ["a"],
+                    "evaluation_success": true,
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::TrackerFactOpaque { .. }
+                ));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Fact
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "governance_fact",
+                "data": {
+                    "payload": {},
+                    "evaluation_response": {"Error": "boom"},
+                    "approval_success": true,
+                    "compilation_response": {
+                        "Ok": {
+                            "contracts": {},
+                            "toolchain_version": "t",
+                        },
+                    },
+                },
+            }),
+            |event| {
+                assert!(matches!(event, RequestEventDB::GovernanceFact { .. }));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Fact
+                ));
+            },
+        ),
+        (
+            json!({
+                "event": "transfer",
+                "data": {
+                    "evaluation_error": null,
+                    "new_owner": "owner",
+                },
+            }),
+            |event| {
+                assert!(matches!(event, RequestEventDB::Transfer { .. }));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Transfer
+                ));
+            },
+        ),
+        (json!({"event": "tracker_confirm"}), |event| {
+            assert!(matches!(event, RequestEventDB::TrackerConfirm));
+            assert!(matches!(
+                event.get_event_type(),
+                EventRequestType::Confirm
+            ));
+        }),
+        (
+            json!({
+                "event": "governance_confirm",
+                "data": {
+                    "name_old_owner": null,
+                    "evaluation_response": {"Error": "boom"},
+                },
+            }),
+            |event| {
+                assert!(matches!(
+                    event,
+                    RequestEventDB::GovernanceConfirm { .. }
+                ));
+                assert!(matches!(
+                    event.get_event_type(),
+                    EventRequestType::Confirm
+                ));
+            },
+        ),
+        (json!({"event": "reject"}), |event| {
+            assert!(matches!(event, RequestEventDB::Reject));
+            assert!(matches!(event.get_event_type(), EventRequestType::Reject));
+        }),
+        (json!({"event": "e_o_l"}), |event| {
+            assert!(matches!(event, RequestEventDB::EOL));
+            assert!(matches!(event.get_event_type(), EventRequestType::Eol));
+        }),
+    ];
+    assert_eq!(cases.len(), 9);
+    for (body, check) in cases {
+        let event: RequestEventDB = serde_json::from_value(body).unwrap();
+        check(&event);
+        // Round-trip: what we serve parses back identically.
+        let back: RequestEventDB =
+            serde_json::from_value(serde_json::to_value(&event).unwrap())
+                .unwrap();
+        check(&back);
+    }
+
+    // Error verdicts keep their shape too.
+    let eval: EvalResDB =
+        serde_json::from_value(json!({"Error": "boom"})).unwrap();
+    assert!(matches!(eval, EvalResDB::Error(_)));
+    let comp: CompResDB = serde_json::from_value(json!({
+        "Error": {"error": "boom", "toolchain_version": "t"},
+    }))
+    .unwrap();
+    assert!(matches!(comp, CompResDB::Error { .. }));
+
+    // Every request state round-trips (terminal or not).
+    let states = vec![
+        json!("InQueue"),
+        json!("Handling"),
+        json!({"Invalid": {
+            "subject_id": "s",
+            "who": "w",
+            "sn": 1,
+            "error": "e",
+        }}),
+        json!({"Abort": {
+            "subject_id": "s",
+            "who": "w",
+            "sn": null,
+            "error": "e",
+        }}),
+        json!("Reboot"),
+        json!({"RebootDiff": {"seconds": 1, "count": 2}}),
+        json!({"RebootTimeOut": {"seconds": 1, "count": 2}}),
+        json!("Compilation"),
+        json!("Evaluation"),
+        json!("Approval"),
+        json!("Validation"),
+        json!("Distribution"),
+        json!("Finish"),
+    ];
+    assert_eq!(states.len(), 13);
+    for body in states {
+        let state: RequestState = serde_json::from_value(body).unwrap();
+        let back: RequestState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap())
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
+    }
+
+    // Approval states keep their snake_case wire shape.
+    for (body, expected) in [
+        (json!("pending"), "pending"),
+        (json!("accepted"), "accepted"),
+        (json!("rejected"), "rejected"),
+        (json!("obsolete"), "obsolete"),
+    ] {
+        let state: ApprovalState = serde_json::from_value(body).unwrap();
+        assert_eq!(state.to_string(), expected);
+    }
 }

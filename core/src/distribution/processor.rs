@@ -1,9 +1,10 @@
 use ave_actors::{ActorContext, ActorError};
-use ave_common::identity::PublicKey;
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
 
 use crate::model::common::subject::{
-    acquire_subject, create_subject, get_local_subject_sn, update_ledger,
+    acquire_subject, create_subject, get_local_subject_sn,
+    get_subject_path_and_data, update_ledger,
 };
 use crate::model::common::{
     check_subject_creation, crash_system, record_verified_transfer,
@@ -13,7 +14,11 @@ use crate::{
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
-    model::event::Ledger,
+    governance::{
+        Governance, GovernanceMessage,
+        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
+    },
+    model::event::{Ledger, Protocols},
 };
 use tracing::{debug, error, warn};
 
@@ -35,6 +40,32 @@ impl DistriWorker {
         let ledger_count = dist_ctx.ledger_count;
         let transfer_event = transfer_batch.event;
         let transfer_simulation = transfer_batch.simulation;
+
+        // Truncation detection: the sender's `is_all` is a claim, so
+        // the offered tip is checked against our own window. A batch
+        // claiming completeness below it is treated as partial (more
+        // is requested) instead of stalling short. The ranges double
+        // as the receipt-side visibility check below.
+        let (window_sn, receive_ranges): (
+            Option<u64>,
+            Vec<TrackerDeliveryRange>,
+        ) = if common.is_gov {
+            (None, Vec::new())
+        } else if let Some(data) = common.subject_data.as_ref() {
+            self.get_tracker_window(
+                ctx,
+                &subject_id,
+                (*self.our_key).clone(),
+                None,
+                data,
+            )
+            .await
+            .ok()
+            .map(|(sn, _, _, ranges)| (Some(sn), ranges))
+            .unwrap_or((None, Vec::new()))
+        } else {
+            (None, Vec::new())
+        };
 
         loop {
             if pending_ledger.is_empty() {
@@ -97,7 +128,31 @@ impl DistriWorker {
                 return Err(DistributorError::ReceiverNoAccess.into());
             }
 
-            let chunk_is_all = remaining_ledger.is_empty() && sender_is_all;
+            Self::reproject_receipt_visibility(
+                &mut pending_ledger,
+                &receive_ranges,
+                &subject_id,
+                &sender,
+            )?;
+
+            let truncated = window_sn.is_some_and(|window| {
+                sender_is_all && chunk_offered_hi_sn < window
+            });
+            if truncated {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    sender = %sender,
+                    offered_hi_sn = chunk_offered_hi_sn,
+                    window_sn = window_sn,
+                    "Batch claims completeness below our window; requesting more"
+                );
+                if let Some(metrics) = crate::metrics::try_core_metrics() {
+                    metrics.observe_distribution_failure("truncated_batch");
+                }
+            }
+            let chunk_is_all =
+                remaining_ledger.is_empty() && sender_is_all && !truncated;
 
             let lease = if pending_ledger[0].is_create_event() && !is_register {
                 let create_ledger = pending_ledger[0].clone();
@@ -191,16 +246,16 @@ impl DistriWorker {
                     {
                         Ok(lease) => Some(lease),
                         Err(e) => {
-                            error!(
+                            // Remote-triggered bring-up failure must not stop
+                            // the node: reject the batch, keep local crash
+                            // policy to the caller's taxonomy check.
+                            warn!(
                                 msg_type = "LedgerDistribution",
                                 subject_id = %subject_id,
                                 error = %e,
                                 "Failed to bring up tracker for subject update"
                             );
-                            let error = DistributorError::UpTrackerFailed {
-                                details: e.to_string(),
-                            };
-                            return Err(crash_system(ctx, error.into()).await);
+                            return Err(e);
                         }
                     }
                 } else {
@@ -214,8 +269,16 @@ impl DistriWorker {
                 .unwrap_or(safe_hi_sn);
 
             if !pending_ledger.is_empty() {
-                let update_result =
-                    update_ledger(ctx, &subject_id, pending_ledger).await;
+                let update_result = update_ledger(
+                    ctx,
+                    &subject_id,
+                    pending_ledger,
+                    // Governance catch-up defers artifact acquisition to
+                    // the certified tip; tracker apply never
+                    // compiles.
+                    is_gov,
+                )
+                .await;
 
                 if let Some(lease) = lease.clone()
                     && update_result.is_err()
@@ -262,6 +325,12 @@ impl DistriWorker {
                                 );
                                 return Err(crash_system(ctx, e).await);
                             };
+                        } else if is_gov {
+                            // The catch-up round reached the
+                            // witness-certified tip: run the deferred
+                            // artifact acquisition pass.
+                            self.trigger_deferred_acquisition(ctx, &subject_id)
+                                .await;
                         }
                     }
                     Err(e) => {
@@ -327,6 +396,10 @@ impl DistriWorker {
                         );
                         return Err(crash_system(ctx, e).await);
                     };
+                } else if is_gov {
+                    // The catch-up round reached the witness-certified
+                    // tip: run the deferred artifact acquisition pass.
+                    self.trigger_deferred_acquisition(ctx, &subject_id).await;
                 }
             }
 
@@ -334,6 +407,117 @@ impl DistriWorker {
         }
 
         Ok(())
+    }
+
+    /// Receipt-side visibility: the sender's projection is a claim.
+    /// Every full fact is re-checked against our own window: facts
+    /// in an Opaque range are masked locally (the same bytes an
+    /// honest sender would deliver); everything else passes through
+    /// (missing ranges must not stall legit sync).
+    fn reproject_receipt_visibility(
+        ledger: &mut [Ledger],
+        ranges: &[TrackerDeliveryRange],
+        subject_id: &DigestIdentifier,
+        sender: &PublicKey,
+    ) -> Result<(), ActorError> {
+        if ranges.is_empty() {
+            return Ok(());
+        }
+        for event in ledger.iter_mut() {
+            if !matches!(event.protocols, Protocols::TrackerFactFull { .. }) {
+                continue;
+            }
+            let mode = ranges
+                .iter()
+                .find(|range| {
+                    range.from_sn <= event.sn && event.sn <= range.to_sn
+                })
+                .map(|range| &range.mode);
+            match mode {
+                Some(TrackerDeliveryMode::Clear) => {}
+                Some(TrackerDeliveryMode::Opaque) => {
+                    *event = event.to_tracker_opaque().map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Failed to mask opaque fact: {e:?}"
+                            ),
+                        }
+                    })?;
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        sn = event.sn,
+                        "Masked over-clear fact on receipt"
+                    );
+                    if let Some(metrics) = crate::metrics::try_core_metrics() {
+                        metrics.observe_distribution_failure(
+                            "visibility_remasked",
+                        );
+                    }
+                }
+                None => {
+                    // No covering range (owner paths, stale window):
+                    // pass through. Blocking here stalls legit sync;
+                    // numeric safe_hi_sn above already bounded it.
+                    debug!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        sender = %sender,
+                        sn = event.sn,
+                        "Fact without covering range on receipt, kept as-is"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A governance catch-up round reached the witness-certified tip:
+    /// notify the governance actor that the deferred artifact
+    /// acquisition pass is due. A missing actor means the
+    /// governance was purged mid-sync: the pass is moot, drop it.
+    async fn trigger_deferred_acquisition(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let path = match get_subject_path_and_data(ctx, subject_id).await {
+            Ok((path, _)) => path,
+            Err(e) => {
+                debug!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Governance actor not found, dropping deferred acquisition trigger"
+                );
+                return;
+            }
+        };
+
+        match ctx.system().get_actor::<Governance>(&path).await {
+            Ok(governance_actor) => {
+                if let Err(e) = governance_actor
+                    .tell(GovernanceMessage::RunDeferredAcquisition)
+                    .await
+                {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %e,
+                        "Failed to trigger the deferred acquisition pass"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %e,
+                    "Governance actor not found, dropping deferred acquisition trigger"
+                );
+            }
+        }
     }
 
     pub(crate) async fn process_last_event_distribution(
@@ -427,24 +611,29 @@ impl DistriWorker {
                 {
                     Ok(lease) => Some(lease),
                     Err(e) => {
-                        error!(
+                        warn!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
                             error = %e,
                             "Failed to bring up tracker for subject update"
                         );
-                        let error = DistributorError::UpTrackerFailed {
-                            details: e.to_string(),
-                        };
-                        return Err(crash_system(ctx, error.into()).await);
+                        return Err(e);
                     }
                 }
             } else {
                 None
             };
 
-            let update_result =
-                update_ledger(ctx, &subject_id, vec![ledger.clone()]).await;
+            let update_result = update_ledger(
+                ctx,
+                &subject_id,
+                vec![ledger.clone()],
+                // A last-event push is live propagation of an event the
+                // network just committed: this node is at the tip,
+                // acquire the artifact now (only catch-up defers it).
+                false,
+            )
+            .await;
 
             if let Some(lease) = lease.clone()
                 && update_result.is_err()
@@ -486,6 +675,22 @@ impl DistriWorker {
                     if let Some(lease) = lease.clone() {
                         lease.finish(ctx).await?;
                     }
+
+                    // The received event is ours even with a gap behind:
+                    // ack it so the sender stops retrying, the missing
+                    // range was already re-requested above.
+                    if let Err(e) =
+                        self.send_last_event_ack(sender.clone(), &info).await
+                    {
+                        error!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to send distribution acknowledgment"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    };
 
                     return Ok(());
                 }

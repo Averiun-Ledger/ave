@@ -3,16 +3,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    LightPersistence, Message, PersistentActor, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    PersistentActor, Response,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
+use ave_common::identity::DigestIdentifier;
+
 use crate::{
+    compilation::support::ContractArtifactRecord,
     db::Storable,
-    evaluation::compiler::ContractArtifactRecord,
     model::common::{crash_system, purge_storage},
 };
 
@@ -27,6 +29,21 @@ use crate::{
 )]
 pub struct ContractRegister {
     contracts: HashMap<String, ContractArtifactRecord>,
+    /// Ledger-anchored wasm hash per official contract name: the
+    /// compilation evidence of the last committed event that touched the
+    /// contract, recorded at apply time by every node — whether or not
+    /// it holds the artifact bytes. It is the local projection used to
+    /// request and verify artifacts fetched from the network.
+    anchors: HashMap<String, DigestIdentifier>,
+    /// Contracts whose artifact acquisition was deferred while catching
+    /// up via distribution: intermediate versions of a sync window
+    /// are never built — a single acquisition pass runs when the window
+    /// reaches the witness-certified tip. At boot, a missing artifact
+    /// WITH a pending marker is the expected state of a node that
+    /// crashed mid-sync (defer again, no compile, no crash); missing
+    /// WITHOUT the marker keeps the corruption policy (immediate
+    /// anchored heal / crash-fast).
+    acquisition_pending: std::collections::BTreeSet<String>,
 }
 
 impl ContractRegister {
@@ -41,14 +58,42 @@ pub enum ContractRegisterMessage {
     GetMetadata {
         contract_name: String,
     },
+    GetAnchor {
+        contract_name: String,
+    },
+    /// Registered contract names: artifact entries and anchor-only ones.
     ListContracts,
+    /// Contract names with artifact metadata only (no anchor-only
+    /// entries): what the startup sweep prunes by role. Anchors are a
+    /// ledger projection and are never swept.
+    ListArtifacts,
+    /// Forgets everything about the contract: artifact metadata and
+    /// ledger anchor.
     DeleteMetadata {
+        contract_name: String,
+    },
+    /// Forgets only the artifact metadata, keeping the ledger anchor:
+    /// the anchor is a projection of the applied events and remains
+    /// valid regardless of the node's roles.
+    DeleteArtifact {
         contract_name: String,
     },
     SetMetadata {
         contract_name: String,
         metadata: ContractArtifactRecord,
     },
+    SetAnchor {
+        contract_name: String,
+        wasm_hash: DigestIdentifier,
+    },
+    /// Marks/unmarks a contract whose artifact acquisition was deferred
+    /// during a catch-up sync; cleared by the acquisition pass.
+    SetAcquisitionPending {
+        contract_name: String,
+        pending: bool,
+    },
+    /// Contract names with a deferred acquisition pending.
+    ListPending,
 }
 
 impl Message for ContractRegisterMessage {
@@ -58,6 +103,9 @@ impl Message for ContractRegisterMessage {
             Self::PurgeStorage
                 | Self::SetMetadata { .. }
                 | Self::DeleteMetadata { .. }
+                | Self::DeleteArtifact { .. }
+                | Self::SetAnchor { .. }
+                | Self::SetAcquisitionPending { .. }
         )
     }
 }
@@ -65,6 +113,7 @@ impl Message for ContractRegisterMessage {
 #[derive(Debug, Clone)]
 pub enum ContractRegisterResponse {
     Metadata(Option<ContractArtifactRecord>),
+    Anchor(Option<DigestIdentifier>),
     Contracts(Vec<String>),
     Ok,
 }
@@ -78,9 +127,20 @@ pub enum ContractRegisterEvent {
     DeleteMetadata {
         contract_name: String,
     },
+    DeleteArtifact {
+        contract_name: String,
+    },
     SetMetadata {
         contract_name: String,
         metadata: ContractArtifactRecord,
+    },
+    SetAnchor {
+        contract_name: String,
+        wasm_hash: DigestIdentifier,
+    },
+    SetAcquisitionPending {
+        contract_name: String,
+        pending: bool,
     },
 }
 
@@ -132,6 +192,17 @@ impl Handler<Self> for ContractRegister {
             }
             ContractRegisterMessage::ListContracts => {
                 Ok(ContractRegisterResponse::Contracts(
+                    self.contracts
+                        .keys()
+                        .chain(self.anchors.keys())
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ))
+            }
+            ContractRegisterMessage::ListArtifacts => {
+                Ok(ContractRegisterResponse::Contracts(
                     self.contracts.keys().cloned().collect(),
                 ))
             }
@@ -140,9 +211,23 @@ impl Handler<Self> for ContractRegister {
                     self.contracts.get(&contract_name).cloned(),
                 ))
             }
+            ContractRegisterMessage::GetAnchor { contract_name } => {
+                Ok(ContractRegisterResponse::Anchor(
+                    self.anchors.get(&contract_name).cloned(),
+                ))
+            }
             ContractRegisterMessage::DeleteMetadata { contract_name } => {
                 self.on_event(
                     ContractRegisterEvent::DeleteMetadata { contract_name },
+                    ctx,
+                )
+                .await;
+
+                Ok(ContractRegisterResponse::Ok)
+            }
+            ContractRegisterMessage::DeleteArtifact { contract_name } => {
+                self.on_event(
+                    ContractRegisterEvent::DeleteArtifact { contract_name },
                     ctx,
                 )
                 .await;
@@ -164,6 +249,41 @@ impl Handler<Self> for ContractRegister {
 
                 Ok(ContractRegisterResponse::Ok)
             }
+            ContractRegisterMessage::SetAnchor {
+                contract_name,
+                wasm_hash,
+            } => {
+                self.on_event(
+                    ContractRegisterEvent::SetAnchor {
+                        contract_name,
+                        wasm_hash,
+                    },
+                    ctx,
+                )
+                .await;
+
+                Ok(ContractRegisterResponse::Ok)
+            }
+            ContractRegisterMessage::SetAcquisitionPending {
+                contract_name,
+                pending,
+            } => {
+                self.on_event(
+                    ContractRegisterEvent::SetAcquisitionPending {
+                        contract_name,
+                        pending,
+                    },
+                    ctx,
+                )
+                .await;
+
+                Ok(ContractRegisterResponse::Ok)
+            }
+            ContractRegisterMessage::ListPending => {
+                Ok(ContractRegisterResponse::Contracts(
+                    self.acquisition_pending.iter().cloned().collect(),
+                ))
+            }
         }
     }
 
@@ -184,9 +304,15 @@ impl Handler<Self> for ContractRegister {
 
 #[async_trait]
 impl PersistentActor for ContractRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::new()
@@ -201,6 +327,10 @@ impl PersistentActor for ContractRegister {
         match event {
             ContractRegisterEvent::DeleteMetadata { contract_name } => {
                 inner.contracts.remove(contract_name);
+                inner.anchors.remove(contract_name);
+            }
+            ContractRegisterEvent::DeleteArtifact { contract_name } => {
+                inner.contracts.remove(contract_name);
             }
             ContractRegisterEvent::SetMetadata {
                 contract_name,
@@ -209,6 +339,24 @@ impl PersistentActor for ContractRegister {
                 inner
                     .contracts
                     .insert(contract_name.clone(), metadata.clone());
+            }
+            ContractRegisterEvent::SetAnchor {
+                contract_name,
+                wasm_hash,
+            } => {
+                inner
+                    .anchors
+                    .insert(contract_name.clone(), wasm_hash.clone());
+            }
+            ContractRegisterEvent::SetAcquisitionPending {
+                contract_name,
+                pending,
+            } => {
+                if *pending {
+                    inner.acquisition_pending.insert(contract_name.clone());
+                } else {
+                    inner.acquisition_pending.remove(contract_name);
+                }
             }
         }
 

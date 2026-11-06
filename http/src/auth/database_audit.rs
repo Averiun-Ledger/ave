@@ -9,6 +9,7 @@ use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };
+use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // =============================================================================
@@ -123,6 +124,44 @@ pub struct AuditLogParams<'a> {
     pub error_message: Option<&'a str>,
 }
 
+/// Owned audit write for the background queue.
+///
+/// Everything the middleware needs after the response is already
+/// on its way. Dropped (with a warning) only if the bounded queue
+/// is full — audit writes were already best-effort (failures only
+/// logged).
+pub struct QueuedAuditLog {
+    pub user_id: Option<i64>,
+    pub api_key_id: Option<String>,
+    pub action_type: &'static str,
+    pub endpoint: Option<String>,
+    pub http_method: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub request_id: Option<String>,
+    pub details: Option<String>,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+impl QueuedAuditLog {
+    fn as_params(&self) -> AuditLogParams<'_> {
+        AuditLogParams {
+            user_id: self.user_id,
+            api_key_id: self.api_key_id.as_deref(),
+            action_type: self.action_type,
+            endpoint: self.endpoint.as_deref(),
+            http_method: self.http_method.as_deref(),
+            ip_address: self.ip_address.as_deref(),
+            user_agent: self.user_agent.as_deref(),
+            request_id: self.request_id.as_deref(),
+            details: self.details.as_deref(),
+            success: self.success,
+            error_message: self.error_message.as_deref(),
+        }
+    }
+}
+
 /// Parameters for logging an API request
 pub struct ApiRequestParams<'a> {
     pub path: &'a str,
@@ -134,7 +173,59 @@ pub struct ApiRequestParams<'a> {
     pub error_message: Option<&'a str>,
 }
 
+/// Bounded audit queue: responses never wait for SQLite. A full
+/// queue drops with a warning (audit was already best-effort).
+const AUDIT_QUEUE_CAPACITY: usize = 1024;
+
 impl AuthDatabase {
+    /// Enqueues an audit write for the background worker, starting it
+    /// on first use. Never blocks the caller.
+    pub fn audit_async(self: &Arc<Self>, job: QueuedAuditLog) {
+        let sender = {
+            let mut guard = self.audit_sender.lock().unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "ave::http::auth",
+                    msg_type = "audit_poisoned",
+                    "audit sender lock poisoned, recovering"
+                );
+                e.into_inner()
+            });
+            if guard.is_none() {
+                let (sender, mut receiver) =
+                    tokio::sync::mpsc::channel::<QueuedAuditLog>(
+                        AUDIT_QUEUE_CAPACITY,
+                    );
+                let db = Arc::clone(self);
+                tokio::spawn(async move {
+                    while let Some(job) = receiver.recv().await {
+                        if let Err(error) = db
+                            .run_blocking("audit_background_write", move |db| {
+                                db.create_audit_log(job.as_params())
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                target: "ave::http::auth",
+                                msg_type = "audit_failed",
+                                error = %error,
+                                "background audit write failed"
+                            );
+                        }
+                    }
+                });
+                guard.replace(sender);
+            }
+            guard.as_ref().expect("audit sender set above").clone()
+        };
+        if sender.try_send(job).is_err() {
+            tracing::warn!(
+                target: "ave::http::auth",
+                msg_type = "audit_dropped",
+                "audit queue full, entry dropped"
+            );
+        }
+    }
+
     pub(crate) fn create_audit_log_with_conn(
         conn: &rusqlite::Connection,
         audit_enabled: bool,
@@ -232,6 +323,9 @@ impl AuthDatabase {
     ) -> Result<AuditLogPage, DatabaseError> {
         let conn = self.lock_conn()?;
 
+        // The filtered total rides along as a window count: one
+        // query instead of building the same filters twice (page +
+        // COUNT).
         let mut sql = String::from(
             "SELECT audit_logs.id, audit_logs.timestamp, audit_logs.user_id,
                     users.username, audit_logs.api_key_id, api_keys.name,
@@ -239,7 +333,7 @@ impl AuthDatabase {
                     audit_logs.http_method, audit_logs.ip_address,
                     audit_logs.user_agent, audit_logs.request_id,
                     audit_logs.details, audit_logs.success,
-                    audit_logs.error_message
+                    audit_logs.error_message, COUNT(*) OVER() AS __total
              FROM audit_logs
              LEFT JOIN users ON audit_logs.user_id = users.id
              LEFT JOIN api_keys ON audit_logs.api_key_id = api_keys.id
@@ -291,24 +385,14 @@ impl AuthDatabase {
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
 
-        let mut count_sql =
-            String::from("SELECT COUNT(*) FROM audit_logs WHERE 1=1");
-        let mut count_params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        append_audit_log_filters(query, &mut count_sql, &mut count_params_vec);
-        let count_params_refs: Vec<&dyn rusqlite::ToSql> =
-            count_params_vec.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = conn
-            .query_row(&count_sql, count_params_refs.as_slice(), |row| {
-                row.get(0)
-            })
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        let mut total: i64 = 0;
         let logs = stmt
             .query_map(params_refs.as_slice(), |row| {
+                total = row.get(15)?;
                 Ok(AuditLog {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
@@ -444,29 +528,15 @@ impl AuthDatabase {
 
         let cutoff = Self::now() - (days as i64 * 86400);
 
-        // Total logs
-        let total: i64 = conn
+        // Total + success/failure in a single scan instead of three.
+        let (total, success_count, failure_count): (i64, i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1",
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0)
+                 FROM audit_logs WHERE timestamp >= ?1",
                 params![cutoff],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        // Success/failure counts
-        let success_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1 AND success = 1",
-                params![cutoff],
-                |row| row.get(0),
-            )
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let failure_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?1 AND success = 0",
-                params![cutoff],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -760,9 +830,15 @@ impl AuthDatabase {
         Ok(self.rate_limit_defaults())
     }
 
-    /// Cleanup old rate limit entries
+    /// Cleanup old rate limit entries. Retention is the configured
+    /// cleanup interval, raised to the largest window any admission
+    /// query can still consult: deleting a counter its window still
+    /// gates would silently lift the limit before it expires.
     pub fn cleanup_rate_limits(&self) -> Result<usize, DatabaseError> {
-        let cutoff = Self::now() - self.rate_limit_cleanup_interval_seconds();
+        let retention = self
+            .rate_limit_cleanup_interval_seconds()
+            .max(self.rate_limit_max_window_seconds());
+        let cutoff = Self::now() - retention;
         let conn = self.lock_maintenance_conn()?;
         let mut total_deleted = 0usize;
         let batch_size = self.rate_limit_cleanup_batch_size();
@@ -1067,16 +1143,25 @@ impl AuthDatabase {
         value: &str,
         updated_by: Option<i64>,
     ) -> Result<SystemConfig, DatabaseError> {
+        let _write = self.system_config_write.lock().map_err(|e| {
+            DatabaseError::Query(format!(
+                "system config write lock poisoned: {e}"
+            ))
+        })?;
         let key_id = SystemConfigKey::parse(key)?;
         let typed_value = key_id.parse_persisted_value(value)?;
         key_id.validate_value(&typed_value)?;
         let persisted_value = key_id.serialize_value(&typed_value)?;
+        self.check_rate_limit_retention(&key_id, &typed_value)?;
 
         let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE system_config SET value = ?1, updated_by = ?2, updated_at = strftime('%s', 'now') WHERE key = ?3",
             params![persisted_value, updated_by, key],
         ).map_err(|e| DatabaseError::Update(e.to_string()))?;
+
+        #[cfg(any(test, feature = "test"))]
+        self.wait_commit_publish_hook();
 
         self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
@@ -1100,7 +1185,13 @@ impl AuthDatabase {
         let typed_value = key_id.parse_persisted_value(value)?;
         key_id.validate_value(&typed_value)?;
         let persisted_value = key_id.serialize_value(&typed_value)?;
+        self.check_rate_limit_retention(&key_id, &typed_value)?;
 
+        let _write = self.system_config_write.lock().map_err(|e| {
+            DatabaseError::Query(format!(
+                "system config write lock poisoned: {e}"
+            ))
+        })?;
         let mut conn = self.lock_conn()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1120,6 +1211,9 @@ impl AuthDatabase {
         tx.commit()
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
+        #[cfg(any(test, feature = "test"))]
+        self.wait_commit_publish_hook();
+
         self.apply_runtime_system_config_value(key_id, &typed_value)?;
 
         Ok(result)
@@ -1134,11 +1228,206 @@ impl AuthDatabase {
     ) -> Result<SystemConfig, DatabaseError> {
         let key_id = SystemConfigKey::parse(key)?;
         let persisted_value = key_id.serialize_value(value)?;
+        self.check_rate_limit_retention(&key_id, value)?;
         self.update_system_config_transactional(
             key,
             &persisted_value,
             updated_by,
             audit,
         )
+    }
+
+    /// Cross-key guard for dynamic rate limit updates: retention must
+    /// cover the largest window admission queries can still consult,
+    /// no matter which side of the relation is being changed.
+    fn check_rate_limit_retention(
+        &self,
+        key_id: &SystemConfigKey,
+        value: &SystemConfigValue,
+    ) -> Result<(), DatabaseError> {
+        use crate::auth::system_config::SystemConfigKey::*;
+        // Unrelated keys keep the current (already validated)
+        // combination untouched.
+        if !matches!(
+            key_id,
+            RateLimitWindowSeconds
+                | RateLimitCleanupIntervalSeconds
+                | RateLimitSensitiveEndpoints
+        ) {
+            return Ok(());
+        }
+        // Effective default after this update (unchanged keys keep
+        // their current runtime value).
+        let (_, current_default) = self.rate_limit_defaults();
+        let new_default = match (key_id, value) {
+            (RateLimitWindowSeconds, SystemConfigValue::Integer(window)) => {
+                *window
+            }
+            _ => current_default,
+        }
+        .max(0);
+        // Effective endpoint list after this update.
+        let endpoints: Vec<(String, Option<i64>)> = match (key_id, value) {
+            (
+                RateLimitSensitiveEndpoints,
+                SystemConfigValue::EndpointRateLimits(endpoints),
+            ) => endpoints
+                .iter()
+                .map(|endpoint| {
+                    (endpoint.endpoint.clone(), endpoint.window_seconds)
+                })
+                .collect(),
+            _ => self
+                .rate_limit_sensitive_endpoints()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|endpoint| (endpoint.endpoint, endpoint.window_seconds))
+                .collect(),
+        };
+        let new_max = endpoints
+            .iter()
+            .map(|(_, window)| window.unwrap_or(new_default).max(0))
+            .max()
+            .unwrap_or(0)
+            .max(new_default);
+        let new_interval = match (key_id, value) {
+            (
+                RateLimitCleanupIntervalSeconds,
+                SystemConfigValue::Integer(interval),
+            ) => *interval,
+            _ => self.rate_limit_cleanup_interval_seconds(),
+        }
+        .max(0);
+        if new_interval < new_max {
+            return Err(DatabaseError::Validation(format!(
+                "rate limit retention ({new_interval}s) must cover the largest active window ({new_max}s), or live counters get deleted early"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ave_bridge::auth::AuthConfig;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    const KEY: &str = "rate_limit_enable";
+
+    fn test_db() -> (AuthDatabase, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut config = AuthConfig::default();
+        config.enable = true;
+        config.database_path = dir.path().to_path_buf();
+        let db = AuthDatabase::new(config, "AdminPass123!", None).expect("db");
+        (db, dir)
+    }
+
+    fn db_flag(db: &AuthDatabase) -> bool {
+        db.list_system_config()
+            .expect("list config")
+            .into_iter()
+            .find(|entry| entry.key == KEY)
+            .and_then(|entry| match entry.value {
+                SystemConfigValue::Boolean(enabled) => Some(enabled),
+                _ => None,
+            })
+            .expect("rate_limit_enable present")
+    }
+
+    fn poll_db_flag(db: &AuthDatabase, expected: bool) {
+        let started = Instant::now();
+        while db_flag(db) != expected {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "timed out waiting for persisted {KEY} == {expected}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn audit_params() -> AuditLogParams<'static> {
+        AuditLogParams {
+            user_id: None,
+            api_key_id: None,
+            action_type: "test",
+            endpoint: None,
+            http_method: None,
+            ip_address: None,
+            user_agent: None,
+            request_id: None,
+            details: None,
+            success: true,
+            error_message: None,
+        }
+    }
+
+    /// Forced stale-publish interleave, once per update path: A commits
+    /// and waits on the hook, B commits (and publishes unless the
+    /// write lock holds it), then A resumes and publishes the older
+    /// value. Serialized updates converge on the last commit; without
+    /// the lock the process keeps applying the stale value after the
+    /// newer one was confirmed.
+    fn stale_publish_round(
+        update: impl Fn(&AuthDatabase, bool) + Send + Sync + Copy,
+    ) {
+        let (db, _dir) = test_db();
+        let barrier = Arc::new(Barrier::new(2));
+        db.commit_publish_hook
+            .lock()
+            .expect("hook slot")
+            .replace(barrier.clone());
+
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let db_ref = &db;
+            scope.spawn(move || {
+                update(db_ref, false);
+            });
+            // A committed (both with and without the write lock: the
+            // lock only moves its publish after the release below).
+            poll_db_flag(db_ref, false);
+            scope.spawn(move || {
+                let _ = done_tx.send(update(db_ref, true));
+            });
+            // Without the lock B is done here; with the lock B waits
+            // on it, so the timeout only fires when the fix holds and
+            // the release below still unblocks A first.
+            let _ = done_rx.recv_timeout(Duration::from_secs(5));
+            barrier.wait();
+        });
+
+        assert!(
+            db.rate_limit_enabled(),
+            "memory must apply the last confirmed value"
+        );
+        assert!(db_flag(&db), "persisted value must be the last one");
+    }
+
+    #[test]
+    fn concurrent_plain_updates_keep_memory_and_db_in_agreement() {
+        stale_publish_round(|db, enabled| {
+            db.update_system_config(
+                KEY,
+                if enabled { "true" } else { "false" },
+                None,
+            )
+            .expect("plain update");
+        });
+    }
+
+    #[test]
+    fn concurrent_audited_updates_keep_memory_and_db_in_agreement() {
+        stale_publish_round(|db, enabled| {
+            db.update_system_config_typed_transactional(
+                KEY,
+                &SystemConfigValue::Boolean(enabled),
+                None,
+                Some(audit_params()),
+            )
+            .expect("audited update");
+        });
     }
 }

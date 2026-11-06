@@ -69,6 +69,7 @@ pub(crate) struct ValidationLimits {
     pub system_config_default_limit: i64,
     pub system_config_max_limit: i64,
     pub management_key_max_ttl_seconds: i64,
+    pub service_key_max_ttl_seconds: i64,
 }
 
 pub(crate) struct MaintenanceLimits {
@@ -109,6 +110,9 @@ pub(crate) const VALIDATION_LIMITS: ValidationLimits = ValidationLimits {
     // Interactive (management) keys are login sessions, not long-lived
     // credentials: they always expire, at most after 7 days.
     management_key_max_ttl_seconds: 7 * 24 * 3600,
+    // Service keys may live longer, but the expiry must stay representable
+    // as i64 seconds and inside the API date range (10 years is ample).
+    service_key_max_ttl_seconds: 10 * 365 * 24 * 3600,
 };
 
 pub(crate) const MAINTENANCE_LIMITS: MaintenanceLimits = MaintenanceLimits {

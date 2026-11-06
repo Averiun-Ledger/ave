@@ -185,6 +185,11 @@ impl std::str::FromStr for SignatureIdentifier {
         let algorithm_char = chars.next().ok_or_else(|| {
             CryptoError::InvalidSignatureFormat("Empty string".to_string())
         })?;
+        if !algorithm_char.is_ascii() {
+            return Err(CryptoError::InvalidSignatureFormat(
+                "Non-ASCII algorithm prefix".to_string(),
+            ));
+        }
 
         let algorithm = DSAlgorithm::from_identifier(algorithm_char as u8)?;
 
@@ -222,6 +227,18 @@ mod tests {
         assert!(
             matches!(err, CryptoError::UnknownAlgorithm(_)),
             "expected UnknownAlgorithm, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_signature_identifier_rejects_non_ascii_prefix() {
+        // U+0145 shares its low byte with 'E' (Ed25519).
+        let spoofed = format!("{}abc123", '\u{0145}');
+        let err = spoofed.parse::<SignatureIdentifier>().unwrap_err();
+        assert!(
+            matches!(err, CryptoError::InvalidSignatureFormat(_)),
+            "expected InvalidSignatureFormat, got {:?}",
             err
         );
     }

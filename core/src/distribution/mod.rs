@@ -119,6 +119,7 @@ pub enum DistributionType {
 pub struct Distribution {
     network: Arc<NetworkSender>,
     witnesses: HashSet<PublicKey>,
+    unacked: HashSet<PublicKey>,
     distribution_type: DistributionType,
     subject_id: DigestIdentifier,
     request_id: DigestIdentifier,
@@ -154,6 +155,7 @@ impl Distribution {
             network,
             distribution_type,
             witnesses: HashSet::new(),
+            unacked: HashSet::new(),
             subject_id: DigestIdentifier::default(),
             start_time: None,
         }
@@ -266,6 +268,9 @@ pub enum DistributionMessage {
     Response {
         sender: PublicKey,
     },
+    Timeout {
+        sender: PublicKey,
+    },
 }
 
 impl Message for DistributionMessage {}
@@ -325,12 +330,42 @@ impl Handler<Self> for Distribution {
                             })?,
                     };
 
-                    if let Err(e) =
-                        self.create_distributor(ctx, ledger, entry.node).await
+                    if let Err(e) = self
+                        .create_distributor(ctx, ledger, entry.node.clone())
+                        .await
                     {
+                        // A failed coordinator would leave its witness
+                        // in the set forever (its response never comes):
+                        // drop the witness and distribute to the rest
+                        // instead of hanging the request.
                         Self::observe_failure("coordinator_creation_failed");
-                        return Err(e);
+                        warn!(
+                            msg_type = "Create",
+                            subject_id = %self.subject_id,
+                            witness = %entry.node,
+                            error = %e,
+                            "Failed to create distributor coordinator, dropping witness"
+                        );
+                        self.check_witness(entry.node.clone());
                     }
+                }
+
+                // Every coordinator failed: nobody will answer, so close
+                // the request instead of waiting forever.
+                if self.witnesses.is_empty() {
+                    Self::observe_failure("all_coordinators_failed");
+                    if let Err(e) = self.end_request(ctx).await {
+                        Self::observe_failure("end_request_failed");
+                        error!(
+                            msg_type = "Create",
+                            subject_id = %self.subject_id,
+                            request_id = %self.request_id,
+                            error = %e,
+                            "Failed to end distribution request"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    return Ok(());
                 }
 
                 debug!(
@@ -363,7 +398,17 @@ impl Handler<Self> for Distribution {
                 );
 
                 if remaining_witnesses == 0 {
-                    Self::observe_event("success");
+                    if self.unacked.is_empty() {
+                        Self::observe_event("success");
+                    } else {
+                        Self::observe_event("partial");
+                        warn!(
+                            msg_type = "Response",
+                            subject_id = %self.subject_id,
+                            unacked = ?self.unacked,
+                            "Distribution ended with unacked witnesses"
+                        );
+                    }
                     if let Some(start) = self.start_time.take() {
                         Self::observe_duration("success", start);
                     }
@@ -377,6 +422,47 @@ impl Handler<Self> for Distribution {
                         Self::observe_failure("end_request_failed");
                         error!(
                             msg_type = "Response",
+                            subject_id = %self.subject_id,
+                            request_id = %self.request_id,
+                            error = %e,
+                            "Failed to end distribution request"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    };
+                }
+            }
+            DistributionMessage::Timeout { sender } => {
+                // Retry exhaustion is not an ack: the witness leaves
+                // the pending set so the request still closes, but it
+                // is recorded as unacked for honest accounting below.
+                if self.check_witness(sender.clone()) {
+                    self.unacked.insert(sender.clone());
+                } else {
+                    warn!(
+                        msg_type = "Timeout",
+                        subject_id = %self.subject_id,
+                        sender = %sender,
+                        "Ignoring timeout from unexpected or already-processed witness"
+                    );
+                    return Ok(());
+                }
+
+                if self.witnesses.is_empty() {
+                    Self::observe_event("partial");
+                    if let Some(start) = self.start_time.take() {
+                        Self::observe_duration("success", start);
+                    }
+                    warn!(
+                        msg_type = "Timeout",
+                        subject_id = %self.subject_id,
+                        unacked = ?self.unacked,
+                        "Distribution ended with unacked witnesses"
+                    );
+
+                    if let Err(e) = self.end_request(ctx).await {
+                        Self::observe_failure("end_request_failed");
+                        error!(
+                            msg_type = "Timeout",
                             subject_id = %self.subject_id,
                             request_id = %self.request_id,
                             error = %e,

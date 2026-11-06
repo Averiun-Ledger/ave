@@ -13,12 +13,24 @@ pub fn build_config(file: &str) -> Result<BridgeConfig, BridgeError> {
         config = config.add_source(config::File::with_name(file));
 
         let config = config.build().map_err(|e| {
-            error!(file = %file, error = %e, "Failed to build configuration");
+            error!(
+                target: "ave::bridge",
+                msg_type = "config_build_failed",
+                file = %file,
+                error = %e,
+                "Failed to build configuration"
+            );
             BridgeError::ConfigBuild(e.to_string())
         })?;
 
         config.try_deserialize().map_err(|e| {
-            error!(file = %file, error = %e, "Failed to deserialize configuration");
+            error!(
+                target: "ave::bridge",
+                msg_type = "config_parse_failed",
+                file = %file,
+                error = %e,
+                "Failed to deserialize configuration"
+            );
             BridgeError::ConfigDeserialize(e.to_string())
         })?
     } else {
@@ -820,7 +832,7 @@ http:
                             signature: false,
                             proxy: None,
                             retry_max_delay_ms: 30_000,
-                            batch_delivery: false,
+                            batch_delivery: true,
                             batch_max_delay_ms: 100,
                             compression: SinkCompression::None,
                             max_error_body_bytes: 4_096,
@@ -839,6 +851,7 @@ http:
                     max_recoveries_after_failure: 5,
                     healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
+                    catch_up_stall_timeout_secs: 600,
                 },
                 SinkServer {
                     server: "SinkTwo".to_owned(),
@@ -857,7 +870,7 @@ http:
                             signature: false,
                             proxy: None,
                             retry_max_delay_ms: 30_000,
-                            batch_delivery: false,
+                            batch_delivery: true,
                             batch_max_delay_ms: 100,
                             compression: SinkCompression::None,
                             max_error_body_bytes: 4_096,
@@ -876,6 +889,7 @@ http:
                     max_recoveries_after_failure: 5,
                     healthcheck_max_failures: 3,
                     startup_healthcheck_delay_secs: 1,
+                    catch_up_stall_timeout_secs: 600,
                 },
             ],
         }];
@@ -948,13 +962,13 @@ http:
         assert!(config.logging.output.stdout);
         assert!(!config.logging.output.file);
         assert_eq!(config.logging.rotation, LoggingRotation::Size);
-        assert_eq!(config.logging.file_path, PathBuf::from("logs"));
+        assert_eq!(config.logging.file_path, PathBuf::from("/logs"));
         assert_eq!(config.logging.max_files, 3);
         assert_eq!(config.sinks.len(), 0);
 
         assert_eq!(config.node.keypair_algorithm, KeyPairAlgorithm::Ed25519);
         assert_eq!(config.node.hash_algorithm, HashAlgorithm::Blake3);
-        assert_eq!(config.node.contracts_path, PathBuf::from("contracts"));
+        assert_eq!(config.node.contracts_path, PathBuf::from("/contracts"));
         assert_eq!(
             config.node.internal_db.db,
             AveInternalDBFeatureConfig::default()
@@ -1004,8 +1018,14 @@ http:
             config.node.network.max_pending_inbound_bytes_per_peer,
             8 * 1024 * 1024
         );
-        assert_eq!(config.node.network.max_pending_outbound_bytes_total, 0);
-        assert_eq!(config.node.network.max_pending_inbound_bytes_total, 0);
+        assert_eq!(
+            config.node.network.max_pending_outbound_bytes_total,
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            config.node.network.max_pending_inbound_bytes_total,
+            128 * 1024 * 1024
+        );
         assert!(config.node.spec.is_none());
 
         // node defaults

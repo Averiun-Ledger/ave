@@ -13,12 +13,10 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    CreateNodeConfig, PORT_COUNTER, create_and_authorize_governance,
-    create_node, create_subject, emit_fact, emit_transfer, get_subject,
-    node_running, wait_request,
+    CreateNodeConfig, EXAMPLE_CONTRACT, PORT_COUNTER,
+    create_and_authorize_governance, create_node, create_subject, emit_fact,
+    emit_transfer, get_subject, node_running, wait_request,
 };
-
-const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
 
 /// Helper: configura una gobernanza con schema "Example1", miembro "node1" y
 /// roles necesarios para que el miembro pueda recibir transferencias.
@@ -177,7 +175,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     assert_eq!(state.subject_id, tracker_id.to_string());
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert!(
@@ -186,7 +184,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             .any(|s| s.subject_id == tracker_id.to_string())
     );
 
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // Delete tracker in safe mode
@@ -207,7 +205,7 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
     );
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert!(
@@ -216,12 +214,12 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             .any(|s| s.subject_id == tracker_id.to_string())
     );
 
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(!transfers.iter().any(|t| t.subject_id == tracker_id));
 
-    // After deletion the DBs are purged; both endpoints may return NoEventsFound
-    // or SubjectNotFound/MissingResource depending on whether the actor is gone.
-    let events_err = owner
+    // After deletion the DBs are purged; the events list reads empty
+    // (list endpoints answer `[]`, only single-item lookups 404).
+    let events = owner
         .get_events(
             tracker_id.clone(),
             EventsQuery {
@@ -230,16 +228,11 @@ async fn safe_mode_tracker_delete_removes_tracker_from_views_and_query_data() {
             },
         )
         .await
-        .unwrap_err();
+        .unwrap();
     assert!(
-        matches!(
-            events_err,
-            Error::NoEventsFound(_)
-                | Error::SubjectNotFound(_)
-                | Error::MissingResource { .. }
-        ),
-        "unexpected events error: {:?}",
-        events_err
+        events.events.is_empty(),
+        "unexpected events after deletion: {:?}",
+        events.events.len()
     );
 
     let sink_err = owner
@@ -349,7 +342,7 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     let owner = &node.api;
 
     // Verify pending transfer exists for the first tracker
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfers.iter().any(|t| t.subject_id == tracker_id));
 
     // Launch 12 concurrent deletes alternating between the two trackers.
@@ -399,7 +392,7 @@ async fn safe_mode_tracker_delete_clears_pending_transfer_and_serializes_global_
     }
 
     // Verify pending transfer for the transferred tracker is cleared
-    let transfers = owner.get_pending_transfers().await.unwrap();
+    let transfers = owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(
         !transfers.iter().any(|t| t.subject_id == tracker_id),
         "pending transfer for tracker should have been cleared"
@@ -453,7 +446,7 @@ async fn safe_mode_governance_delete_lists_pending_trackers() {
     assert_eq!(gov_state.subject_id, governance_id.to_string());
 
     let subjects = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap();
     assert_eq!(subjects.len(), tracker_ids.len());
@@ -522,7 +515,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
     let owner = &node.api;
 
     // Verify governance exists
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         govs.iter()
             .any(|g| g.governance_id == governance_id.to_string())
@@ -549,7 +542,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
         .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         !govs
             .iter()
@@ -557,7 +550,7 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
     );
 
     let err = owner
-        .all_subjs(governance_id.clone(), None, None)
+        .all_subjs(governance_id.clone(), None, None, 1000, 0)
         .await
         .unwrap_err();
     assert!(
@@ -576,10 +569,74 @@ async fn safe_mode_governance_delete_removes_views_after_trackers_are_deleted()
         .unwrap_err();
     assert!(matches!(err, Error::SubjectNotFound(_)));
 
-    let govs = owner.all_govs(None).await.unwrap();
+    let govs = owner.all_govs(None, 1000, 0).await.unwrap();
     assert!(
         !govs
             .iter()
             .any(|g| g.governance_id == governance_id.to_string())
     );
+}
+
+#[test(tokio::test)]
+async fn safe_mode_tracker_delete_retry_is_clean_and_node_keeps_working() {
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let owner = &node.api;
+
+    let witness_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let witness_pk = witness_keypair.public_key().to_string();
+    let governance_id =
+        setup_governance_with_example_schema(owner, &witness_pk).await;
+    let (tracker_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .unwrap();
+
+    restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
+    let owner = &node.api;
+
+    // First delete succeeds.
+    owner
+        .delete_subject(tracker_id.clone())
+        .await
+        .expect("first tracker delete failed");
+    // Retry after a completed delete: the subject is already gone, so
+    // the retry must report SubjectNotFound (clean, terminal) instead
+    // of a partial-failure Internal error or a wedged retry.
+    let err = owner.delete_subject(tracker_id.clone()).await.unwrap_err();
+    assert!(
+        matches!(err, Error::SubjectNotFound(_)),
+        "retry must be clean SubjectNotFound, got {err:?}"
+    );
+    // A restart must not resurrect anything: the retry stays clean and
+    // the node keeps operating (new tracker + fact succeed). Creating
+    // needs normal mode (safe mode only deletes).
+    restart_node_with_safe_mode(&mut node, &mut dirs, true).await;
+    let owner = &node.api;
+    let err = owner.delete_subject(tracker_id.clone()).await.unwrap_err();
+    assert!(matches!(err, Error::SubjectNotFound(_)));
+    restart_node_with_safe_mode(&mut node, &mut dirs, false).await;
+    let owner = &node.api;
+    let (fresh_id, _) =
+        create_subject(owner, governance_id.clone(), "Example1", "", true)
+            .await
+            .expect("node must keep working after delete retry");
+    let request_id = emit_fact(
+        owner,
+        fresh_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .expect("fact on fresh tracker must work");
+    wait_request(owner, request_id).await.unwrap();
 }

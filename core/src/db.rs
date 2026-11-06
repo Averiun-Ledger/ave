@@ -6,7 +6,9 @@ use crate::config::{AveInternalDBConfig, AveInternalDBFeatureConfig};
 #[cfg(feature = "sqlite")]
 use ave_actors::SqliteManager;
 use ave_actors::{Actor, ActorContext, ActorError, EncryptedKey, MachineSpec};
-use ave_actors::{Collection, DbManager, PersistentActor, State, StoreError};
+use ave_actors::{
+    Collection, DbManager, Durability, PersistentActor, State, StoreError,
+};
 #[cfg(feature = "rocksdb")]
 use ave_actors::{RocksDbManager, RocksDbStore};
 
@@ -29,28 +31,42 @@ impl Database {
         // Passive permission check before opening the database
         #[cfg(feature = "rocksdb")]
         #[allow(irrefutable_let_patterns)]
-        if let AveInternalDBFeatureConfig::Rocksdb { path } = &config.db {
-            check_dir_writable(path)
+        if let AveInternalDBFeatureConfig::Rocksdb { .. } = &config.db {
+            check_dir_writable(&config.db.path())
                 .map_err(|e| StoreError::CreateStore { reason: e })?;
         }
         #[cfg(feature = "sqlite")]
         #[allow(irrefutable_let_patterns)]
-        if let AveInternalDBFeatureConfig::Sqlite { path } = &config.db {
-            check_dir_writable(path)
+        if let AveInternalDBFeatureConfig::Sqlite { .. } = &config.db {
+            check_dir_writable(&config.db.path())
                 .map_err(|e| StoreError::CreateStore { reason: e })?;
         }
 
         match &config.db {
             #[cfg(feature = "rocksdb")]
-            AveInternalDBFeatureConfig::Rocksdb { path } => {
-                let manager =
-                    RocksDbManager::new(path, config.durability, spec)?;
+            AveInternalDBFeatureConfig::Rocksdb { .. } => {
+                let manager = RocksDbManager::new(
+                    &config.db.path(),
+                    if config.durability {
+                        Durability::Sync
+                    } else {
+                        Durability::Relaxed
+                    },
+                    spec,
+                )?;
                 Ok(Database::RocksDb(manager))
             }
             #[cfg(feature = "sqlite")]
-            AveInternalDBFeatureConfig::Sqlite { path } => {
-                let manager =
-                    SqliteManager::new(path, config.durability, spec)?;
+            AveInternalDBFeatureConfig::Sqlite { .. } => {
+                let manager = SqliteManager::new(
+                    &config.db.path(),
+                    if config.durability {
+                        Durability::Sync
+                    } else {
+                        Durability::Relaxed
+                    },
+                    spec,
+                )?;
                 Ok(Self::SQLite(manager))
             }
         }
@@ -59,7 +75,11 @@ impl Database {
 
 /// Check that a directory exists and is writable.
 /// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
+/// Single canonical copy: the former duplicates in `helpers::db` and
+/// `node` were removed. Symlinks are accepted (operators mount disks
+/// through them); the probe is best-effort, the database open itself
+/// is the enforcement point.
+pub(crate) fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
     let target = if path.exists() {
         if !path.is_dir() {
             return Err(format!(
@@ -90,8 +110,15 @@ fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
         ancestor
     };
 
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
+    let test_file =
+        target.join(format!(".ave_write_test.{}", std::process::id()));
+    // Exclusive create: never truncate a pre-existing file or follow a
+    // pre-existing symlink at the probe path.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
         }
@@ -150,6 +177,18 @@ impl DbManager<DbCollection, DbCollection> for Database {
             Self::SQLite(manager) => manager.stop(),
         }
     }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[ave_actors::PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Database::RocksDb(manager) => manager.purge_scopes(scopes),
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(manager) => manager.purge_scopes(scopes),
+        }
+    }
 }
 
 impl DbManager<DbCollection, DbCollection> for Arc<Database> {
@@ -176,6 +215,13 @@ impl DbManager<DbCollection, DbCollection> for Arc<Database> {
         // The real shutdown is performed on the owned `Database` after removing
         // this helper from the actor system.
         Ok(())
+    }
+
+    fn purge_scopes(
+        &self,
+        scopes: &[ave_actors::PurgeScope<'_>],
+    ) -> Result<(), StoreError> {
+        self.as_ref().purge_scopes(scopes)
     }
 }
 

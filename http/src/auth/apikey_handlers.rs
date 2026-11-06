@@ -1,9 +1,9 @@
 // Ave HTTP Auth System - API Key Endpoint Handlers
 //
 // REST API endpoints for API key management
-
 use super::database::AuthDatabase;
-use super::http_api::run_db_admin as run_db;
+
+use super::http_api::{normalize_pagination, run_db_admin as run_db};
 use super::middleware::{AuthContextExtractor, check_permission};
 use super::models::*;
 use crate::extract::{ApiJson, ApiPath, ApiQuery, OptionalApiJson};
@@ -117,9 +117,18 @@ pub async fn list_all_api_keys(
     // Check permission
     check_permission(&auth_ctx, "admin_api_key", "get")?;
 
+    // Same server-side page caps as the users listing.
+    let (limit, offset) = normalize_pagination(
+        &PaginationQuery {
+            limit: params.limit,
+            offset: params.offset,
+        },
+        db.users_default_limit(),
+        db.users_max_limit(),
+    )?;
     let include_revoked = params.include_revoked.unwrap_or(false);
     let keys = run_db(&db, "list_all_api_keys", move |db| {
-        db.list_all_api_keys(include_revoked)
+        db.list_all_api_keys(include_revoked, limit, offset)
     })
     .await?;
 
@@ -131,6 +140,10 @@ pub async fn list_all_api_keys(
 pub struct ListApiKeysQuery {
     /// Include revoked keys
     pub include_revoked: Option<bool>,
+    /// Maximum number of keys to return (default: 100, max: 1000)
+    pub limit: Option<i64>,
+    /// Number of keys to skip (default: 0)
+    pub offset: Option<i64>,
 }
 
 /// List API keys for a user (admin)
@@ -235,26 +248,9 @@ pub async fn revoke_api_key(
         ));
     }
 
-    // SECURITY FIX: Prevent API key DoS by revoking other users' keys
-    // Get the key to check ownership
-    let lookup_id = id.clone();
-    let key_info = run_db(&db, "get_api_key_for_revoke", move |db| {
-        db.get_api_key_info(&lookup_id)
-    })
-    .await?;
-
-    // Only superadmin can revoke keys of other users. A key owned by
-    // another user is reported as not found to avoid leaking key ids
-    // (same policy as the self-service route).
-    if key_info.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "API key not found".to_string(),
-            }),
-        ));
-    }
-
+    // Ownership is enforced inside the revoking tx (a key owned by
+    // another user reports as not found to avoid leaking key ids,
+    // same policy as the self-service route).
     let reason = query.reason.clone();
     let audit_details = serde_json::to_string(&query).unwrap_or_default();
     let revoke_id = id.clone();
@@ -277,6 +273,8 @@ pub async fn revoke_api_key(
                 success: true,
                 error_message: None,
             }),
+            Some((auth_ctx_for_db.user_id, auth_ctx_for_db.is_superadmin())),
+            false,
         )
     })
     .await?;
@@ -325,31 +323,13 @@ pub async fn rotate_api_key(
         ));
     }
 
-    // Fetch existing key for user and defaults
-    let lookup_id = id.clone();
-    let existing = run_db(&db, "get_api_key_for_rotate", move |db| {
-        db.get_api_key_info(&lookup_id)
-    })
-    .await?;
-
-    // SECURITY FIX: Prevent API key theft via rotation of other users' keys
-    // Only superadmin can rotate keys of other users
-    if existing.user_id != auth_ctx.user_id && !auth_ctx.is_superadmin() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Only superadmin can rotate API keys of other users"
-                    .to_string(),
-            }),
-        ));
-    }
-
+    // Ownership is enforced inside the rotating tx.
     // Audit details only when a body was sent (a body-less rotation has none)
     let audit_details = req
         .as_ref()
         .map(|r| serde_json::to_string(r).unwrap_or_default());
 
-    let existing_id = existing.id.clone();
+    let existing_id = id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
     let req_name = req.as_ref().and_then(|r| r.name.clone());
     let req_description = req.as_ref().and_then(|r| r.description.clone());
@@ -364,6 +344,10 @@ pub async fn rotate_api_key(
             expires_in_seconds: req_expires,
             revoked_by: Some(auth_ctx_for_db.user_id),
             reason: req_reason.as_deref(),
+            owner_check: Some((
+                auth_ctx_for_db.user_id,
+                auth_ctx_for_db.is_superadmin(),
+            )),
             audit: Some(crate::auth::database_audit::AuditLogParams {
                 user_id: Some(auth_ctx_for_db.user_id),
                 api_key_id: Some(&auth_ctx_for_db.api_key_id),
@@ -933,25 +917,10 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    // Verify the key exists and belongs to the caller. A key owned by
-    // another user is reported as not found to avoid leaking key ids.
-    let user_id = auth_ctx.user_id;
-    let lookup_id = key_id.clone();
-    let key_info = run_db(&db, "get_api_key_for_my_revoke", move |db| {
-        db.get_api_key_info(&lookup_id)
-    })
-    .await?;
-    if key_info.user_id != user_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "API key not found".to_string(),
-            }),
-        ));
-    }
-
-    // Cannot revoke the current key
-    if key_info.id == auth_ctx.api_key_id {
+    // Cannot revoke the current key (compared on the path id: no
+    // lookup trip). Ownership and the management guard run inside
+    // the revoking tx; a foreign key reports as not found.
+    if key_id == auth_ctx.api_key_id {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -960,19 +929,9 @@ pub async fn revoke_my_api_key(
         ));
     }
 
-    // Prevent revoking management key
-    if key_info.is_management {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Cannot revoke the management API key".to_string(),
-            }),
-        ));
-    }
-
     let reason = query.reason.clone();
     let audit_details = serde_json::to_string(&query).unwrap_or_default();
-    let revoke_id = key_info.id.clone();
+    let revoke_id = key_id.clone();
     let auth_ctx_for_db = auth_ctx.clone();
     let endpoint = format!("/me/api-keys/{}", key_id);
     run_db(&db, "revoke_my_api_key", move |db| {
@@ -993,6 +952,8 @@ pub async fn revoke_my_api_key(
                 success: true,
                 error_message: None,
             }),
+            Some((auth_ctx_for_db.user_id, false)),
+            true,
         )
     })
     .await?;

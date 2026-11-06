@@ -186,7 +186,9 @@ async fn build_pinned_tls_config(
 
     let versions: &[&'static rustls::SupportedProtocolVersion] =
         match &tls.min_tls_version {
-            Some(HttpTlsVersion::Tls12) => &[&rustls::version::TLS12],
+            Some(HttpTlsVersion::Tls12) => {
+                &[&rustls::version::TLS12, &rustls::version::TLS13]
+            }
             Some(HttpTlsVersion::Tls13) => &[&rustls::version::TLS13],
             None => &[&rustls::version::TLS12, &rustls::version::TLS13],
         };
@@ -461,6 +463,7 @@ impl HttpTransport {
                 password,
                 config.token_refresh_margin_secs,
                 config.retry_base_delay_ms,
+                config.retry_max_delay_ms,
             ));
         }
         let static_auth = match &config.auth {
@@ -815,16 +818,18 @@ impl SinkTransport for HttpTransport {
         request = self.apply_healthcheck_headers(request);
         request = request.header(REQUEST_ID_HEADER, &request_id);
 
-        // Add auth header if available
+        // Add auth header if available. When auth is configured but
+        // the header cannot be built, fail instead of probing without
+        // auth: a public health endpoint would report healthy while
+        // every authenticated delivery fails.
         if self.config.auth.is_some() {
             match self.build_auth_header().await {
                 Ok(Some(header)) => {
                     request = request.header("Authorization", header);
                 }
                 Ok(None) => {}
-                Err(_e) => {
-                    // If auth is required but we can't build a header, still try without auth
-                    // Some sinks have public health endpoints even when delivery requires auth
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }
@@ -939,17 +944,24 @@ impl SinkTransport for HttpTransport {
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        for (event_type, group) in
+        // Route groups are independent deliveries (per-group order is
+        // trivially preserved: one send per group): run them together
+        // so batch latency is the slowest group, not the sum. A failed
+        // group fails the whole batch like the sequential loop did,
+        // and the caller retries it whole.
+        let sends =
             group_events_by_type(events, self.url_template.has_event_type())
-        {
-            let Some((url, payload)) =
-                self.prepare_group(&event_type, &group).await?
-            else {
-                continue;
-            };
+                .into_iter()
+                .map(|(event_type, group)| async move {
+                    let Some((url, payload)) =
+                        self.prepare_group(&event_type, &group).await?
+                    else {
+                        return Ok(());
+                    };
 
-            self.send_with_retry(&url, payload, None).await?;
-        }
+                    self.send_with_retry(&url, payload, None).await
+                });
+        futures::future::try_join_all(sends).await?;
 
         Ok(())
     }

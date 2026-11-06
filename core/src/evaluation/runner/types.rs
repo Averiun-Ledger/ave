@@ -9,15 +9,6 @@ use crate::governance::data::GovernanceData;
 #[derive(
     Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
 )]
-pub struct ContractResult {
-    pub final_state: ValueWrapper,
-    pub success: bool,
-    pub error: String,
-}
-
-#[derive(
-    Serialize, Deserialize, BorshSerialize, BorshDeserialize, Debug, Clone,
-)]
 pub struct RunnerResult {
     pub final_state: ValueWrapper,
     pub approval_required: bool,

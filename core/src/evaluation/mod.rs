@@ -12,7 +12,8 @@ use crate::{
     metrics::try_core_metrics,
     model::{
         common::{
-            abort_req, crash_system, send_reboot_to_req, take_random_signers,
+            abort_req, crash_system, send_reboot_to_req, take_hedge_spares,
+            take_random_signers, take_seeded_signers,
         },
         event::{EvaluationData, EvaluationResponse},
     },
@@ -37,7 +38,6 @@ use response::{EvaluationRes, EvaluatorResponse as EvalRes};
 
 use tracing::{Span, debug, error, info_span, warn};
 
-pub mod compiler;
 pub mod coordinator;
 pub mod request;
 pub mod response;
@@ -69,9 +69,19 @@ pub struct Evaluation {
 
     errors: Vec<(EvaluatorError, DigestIdentifier)>,
 
+    /// Abort votes by signer (reason attached for the abort detail
+    /// only — tally is by outcome-kind, never by reason string). An
+    /// abort wins only at quorum; below it the aborter is already out
+    /// of the round (dropped by `check_evaluator` like `Unavailable`)
+    /// and replaced from the pool.
+    aborts: Vec<(PublicKey, String)>,
+
     evaluation_request_hash: DigestIdentifier,
 
-    reboot: bool,
+    /// The round is closed (result, reboot or abort already sent): late
+    /// responses are ignored. Responses only matter until the quorum
+    /// closes or the evaluator list runs out.
+    closed: bool,
 
     current_evaluators: HashSet<PublicKey>,
 
@@ -108,12 +118,13 @@ impl Evaluation {
             context,
             current_evaluators: HashSet::new(),
             errors: vec![],
+            aborts: vec![],
             evaluation_request_hash: DigestIdentifier::default(),
             evaluators_quantity: 0,
             evaluators_response: vec![],
             evaluators_signatures: vec![],
             pending_evaluators: HashSet::new(),
-            reboot: false,
+            closed: false,
             request_id: DigestIdentifier::default(),
             version: 0,
         }
@@ -121,6 +132,15 @@ impl Evaluation {
 
     fn check_evaluator(&mut self, evaluator: PublicKey) -> bool {
         self.current_evaluators.remove(&evaluator)
+    }
+
+    /// True when the request targets the governance itself (as
+    /// opposed to a tracker subject): abort votes on governance
+    /// requests fire immediately (fork prevention), while tracker
+    /// requests tally aborts to quorum.
+    fn request_is_governance(request: &Signed<EvaluationReq>) -> bool {
+        request.content().event_request.content().get_subject_id()
+            == request.content().governance_id
     }
 
     fn worker_context(&self) -> EvalWorkerContext {
@@ -132,6 +152,7 @@ impl Evaluation {
                 EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain: state.toolchain.clone(),
                 }
             }
             request::EvaluateData::TrackerSchemasFact { .. }
@@ -160,12 +181,31 @@ impl Evaluation {
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(EvalCoordinatorMessage::NetworkEvaluation {
                     evaluation_req: Box::new(self.request.clone()),
-                    node_key: signer,
+                    node_key: signer.clone(),
                 })
-                .await?
+                .await
+            {
+                // The child would stay idle forever under the signer
+                // name: stop the orphan before propagating.
+                warn!(
+                    msg_type = "Supervise",
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to evaluation coordinator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        msg_type = "Supervise",
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan evaluation coordinator"
+                    );
+                }
+                return Err(e);
+            }
         } else {
             let child = ctx
                 .create_child(
@@ -180,20 +220,37 @@ impl Evaluation {
                             .governance_id
                             .clone(),
                         gov_version: self.request.content().gov_version,
-                        sn: self.request.content().sn,
                         context: self.worker_context(),
                         hash: self.hash,
                         network: self.network.clone(),
                         stop: true,
+                        pending: None,
                     },
                 )
                 .await?;
 
-            child
+            if let Err(e) = child
                 .tell(EvalWorkerMessage::LocalEvaluation {
                     evaluation_req: self.request.clone(),
                 })
-                .await?
+                .await
+            {
+                warn!(
+                    msg_type = "Supervise",
+                    signer = %signer,
+                    error = %e,
+                    "Failed to dispatch to local evaluator, stopping orphan"
+                );
+                if let Err(stop_err) = child.ask_stop().await {
+                    warn!(
+                        msg_type = "Supervise",
+                        signer = %signer,
+                        error = %stop_err,
+                        "Failed to stop orphan local evaluator"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -261,54 +318,42 @@ impl Evaluation {
         hash_borsh(&*self.hash.hasher(), &self.request)
     }
 
-    fn ensure_eval_req_hash(
-        &self,
-        eval_req_hash: DigestIdentifier,
-    ) -> Result<(), ActorError> {
-        if eval_req_hash != self.evaluation_request_hash {
+    /// Stores an evaluator response. A response that does not bind to
+    /// this request (request-hash mismatch) is dropped: the responder
+    /// was already removed from the current set, and the
+    /// round-exhaustion logic replaces it or reboots the request.
+    fn store_response_result(
+        &mut self,
+        result: response::EvaluationResult,
+        result_hash: DigestIdentifier,
+        result_hash_signature: Signature,
+    ) {
+        let eval_req_hash = match &result {
+            response::EvaluationResult::Ok { eval_req_hash, .. }
+            | response::EvaluationResult::Error { eval_req_hash, .. } => {
+                eval_req_hash
+            }
+        };
+        if *eval_req_hash != self.evaluation_request_hash {
             error!(
                 msg_type = "Response",
                 expected_hash = %self.evaluation_request_hash,
                 received_hash = %eval_req_hash,
                 "Invalid evaluation request hash"
             );
-            return Err(ActorError::Functional {
-                description:
-                    "Evaluation Response, Invalid evaluation request hash"
-                        .to_owned(),
-            });
+            return;
         }
 
-        Ok(())
-    }
-
-    fn store_response_result(
-        &mut self,
-        result: response::EvaluationResult,
-        result_hash: DigestIdentifier,
-        result_hash_signature: Signature,
-    ) -> Result<(), ActorError> {
         match result {
-            response::EvaluationResult::Ok {
-                response,
-                eval_req_hash,
-                ..
-            } => {
-                self.ensure_eval_req_hash(eval_req_hash)?;
+            response::EvaluationResult::Ok { response, .. } => {
                 self.evaluators_response.push((response, result_hash));
             }
-            response::EvaluationResult::Error {
-                error,
-                eval_req_hash,
-                ..
-            } => {
-                self.ensure_eval_req_hash(eval_req_hash)?;
+            response::EvaluationResult::Error { error, .. } => {
                 self.errors.push((error, result_hash));
             }
         }
 
         self.evaluators_signatures.push(result_hash_signature);
-        Ok(())
     }
 }
 
@@ -391,10 +436,22 @@ impl Handler<Self> for Evaluation {
                     signers.len() as u32,
                 );
 
-                let (current_eval, pending_eval) =
-                    take_random_signers(signers, evaluators_quantity as usize);
+                let (mut current_eval, pending_eval) = take_seeded_signers(
+                    signers,
+                    evaluators_quantity as usize,
+                    &self.evaluation_request_hash,
+                );
+                // Hedging spares: contact ceil(10%) extra evaluators
+                // so one dead or slow signer does not stall the round
+                // to timeout plus replenish. Spare votes count like
+                // any other; stragglers are ignored after close.
+                let (spares, rest) = take_hedge_spares(
+                    pending_eval,
+                    evaluators_quantity as usize,
+                );
+                current_eval.extend(spares);
                 self.current_evaluators.clone_from(&current_eval);
-                self.pending_evaluators.clone_from(&pending_eval);
+                self.pending_evaluators.clone_from(&rest);
 
                 for signer in current_eval.clone() {
                     if let Err(e) =
@@ -406,7 +463,32 @@ impl Handler<Self> for Evaluation {
                             signer = %signer,
                             "Failed to create evaluator"
                         );
+                        // Drop the failed signer so the round can
+                        // exhaust itself instead of hanging forever
+                        // waiting for a response that will never come.
+                        self.current_evaluators.remove(&signer);
                     }
+                }
+
+                if self.current_evaluators.is_empty() {
+                    if let Err(e) = send_reboot_to_req(
+                        ctx,
+                        request_id.clone(),
+                        self.request.content().governance_id.clone(),
+                        RebootType::TimeOut,
+                    )
+                    .await
+                    {
+                        error!(
+                            msg_type = "Create",
+                            error = %e,
+                            "Failed to send reboot to request actor"
+                        );
+                        return Err(crash_system(ctx, e).await);
+                    }
+                    Self::observe_event("reboot");
+                    self.closed = true;
+                    return Ok(());
                 }
 
                 debug!(
@@ -421,7 +503,7 @@ impl Handler<Self> for Evaluation {
                 evaluation_res,
                 sender,
             } => {
-                if !self.reboot {
+                if !self.closed {
                     // If node is in evaluator list
                     if self.check_evaluator(sender.clone()) {
                         // Check type of validation
@@ -435,42 +517,101 @@ impl Handler<Self> for Evaluation {
                                     result,
                                     result_hash,
                                     result_hash_signature,
-                                )?;
+                                );
+                                Self::observe_event("success");
                             }
                             EvaluationRes::TimeOut => {
                                 Self::observe_event("timeout");
                             }
+                            // Same handling as a timeout — the evaluator is
+                            // dropped from the current set and replaced
+                            // from the pending pool — but explicit and
+                            // immediate: no coordinator timeout wait.
+                            EvaluationRes::Unavailable => {
+                                Self::observe_event("unavailable");
+                            }
                             EvaluationRes::Abort(error) => {
                                 Self::observe_event("abort");
-                                if let Err(e) = abort_req(
-                                    ctx,
-                                    self.request_id.clone(),
-                                    sender.clone(),
-                                    error.clone(),
-                                    self.request.content().sn,
-                                )
-                                .await
-                                {
-                                    error!(
+                                // Governance requests abort at the first
+                                // vote (stale governance intent must die,
+                                // not reboot-loop); tracker requests
+                                // tally below.
+                                if Self::request_is_governance(&self.request) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            msg_type = "Response",
+                                            request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    }
+
+                                    debug!(
                                         msg_type = "Response",
                                         request_id = %self.request_id,
                                         sender = %sender,
                                         abort_reason = %error,
-                                        error = %e,
-                                        "Failed to abort request"
+                                        "Evaluation aborted (governance)"
                                     );
-                                    return Err(crash_system(ctx, e).await);
-                                };
 
-                                debug!(
-                                    msg_type = "Response",
-                                    request_id = %self.request_id,
-                                    sender = %sender,
-                                    abort_reason = %error,
-                                    "Evaluation aborted"
-                                );
+                                    self.closed = true;
 
-                                return Ok(());
+                                    return Ok(());
+                                }
+                                self.aborts
+                                    .push((sender.clone(), error.clone()));
+                                if self.quorum.check_quorum(
+                                    self.evaluators_quantity,
+                                    self.aborts.len() as u32,
+                                ) {
+                                    if let Err(e) = abort_req(
+                                        ctx,
+                                        self.request_id.clone(),
+                                        sender.clone(),
+                                        error.clone(),
+                                        self.request.content().sn,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                                msg_type = "Response",
+                                                request_id = %self.request_id,
+                                            sender = %sender,
+                                            abort_reason = %error,
+                                            error = %e,
+                                            "Failed to abort request"
+                                        );
+                                        return Err(crash_system(ctx, e).await);
+                                    };
+
+                                    debug!(
+                                        msg_type = "Response",
+                                        request_id = %self.request_id,
+                                        sender = %sender,
+                                        abort_reason = %error,
+                                        "Evaluation aborted by quorum"
+                                    );
+
+                                    self.closed = true;
+
+                                    return Ok(());
+                                }
+                                // Below quorum: the aborter is already out
+                                // of the round — fall through so the
+                                // remaining set still resolves, replaces
+                                // and times out exactly like any other
+                                // non-response.
                             }
                             EvaluationRes::Reboot => {
                                 Self::observe_event("reboot");
@@ -493,7 +634,7 @@ impl Handler<Self> for Evaluation {
                                     return Err(crash_system(ctx, e).await);
                                 }
 
-                                self.reboot = true;
+                                self.closed = true;
 
                                 return Ok(());
                             }
@@ -526,6 +667,7 @@ impl Handler<Self> for Evaluation {
                             }
                             if matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event("reboot");
+                                self.closed = true;
                                 return Ok(());
                             }
 
@@ -554,6 +696,8 @@ impl Handler<Self> for Evaluation {
                                 );
                                 return Err(crash_system(ctx, e).await);
                             };
+
+                            self.closed = true;
 
                             if !matches!(summary, ResponseSummary::Reboot) {
                                 Self::observe_event(if summary.is_ok() {
@@ -597,7 +741,34 @@ impl Handler<Self> for Evaluation {
                                         signer = %signer,
                                         "Failed to create evaluator from pending pool"
                                     );
+                                    // Drop the failed signer so the
+                                    // round can exhaust itself instead
+                                    // of hanging forever.
+                                    self.current_evaluators.remove(&signer);
                                 }
+                            }
+
+                            if self.current_evaluators.is_empty() {
+                                if let Err(e) = send_reboot_to_req(
+                                    ctx,
+                                    self.request_id.clone(),
+                                    self.request
+                                        .content()
+                                        .governance_id
+                                        .clone(),
+                                    RebootType::TimeOut,
+                                )
+                                .await
+                                {
+                                    error!(
+                                        msg_type = "Response",
+                                        error = %e,
+                                        "Failed to send reboot to request actor"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                                Self::observe_event("reboot");
+                                self.closed = true;
                             }
 
                             debug!(
@@ -622,6 +793,7 @@ impl Handler<Self> for Evaluation {
                             return Err(crash_system(ctx, e).await);
                         } else if self.current_evaluators.is_empty() {
                             Self::observe_event("reboot");
+                            self.closed = true;
                         }
                     } else {
                         warn!(
@@ -752,7 +924,7 @@ pub mod tests {
 
         let RequestHandlerResponse::Ok(request_data) = request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .unwrap()
@@ -789,46 +961,162 @@ pub mod tests {
         }
     }
 
+    /// Waits until the approver has registered the request as pending
+    /// (manual voting). The approval request now reaches the approver
+    /// from a collecting validator, asynchronously, so the test polls
+    /// instead of assuming a requester-side approval phase.
+    pub async fn wait_pending_approval(
+        request_actor: &ActorRef<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let started = tokio::time::Instant::now();
+        loop {
+            if let Ok(RequestHandlerResponse::Approval(Some(..))) =
+                request_actor
+                    .ask(RequestHandlerMessage::GetApproval {
+                        subject_id: subject_id.clone(),
+                        state: Some(ApprovalState::Pending),
+                    })
+                    .await
+            {
+                return;
+            }
+            if started.elapsed() >= Duration::from_secs(10) {
+                panic!(
+                    "approval request not registered as pending in time for {}",
+                    subject_id
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Accepts the pending manual vote with the exact identity seen
+    /// when consulting it, then checks the persisted vote echoes
+    /// that identity back.
+    pub async fn accept_pending_approval(
+        request_actor: &ActorRef<RequestHandler>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let RequestHandlerResponse::Approval(Some(stored)) = request_actor
+            .ask(RequestHandlerMessage::GetApproval {
+                subject_id: subject_id.clone(),
+                state: Some(ApprovalState::Pending),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(stored.state.to_string(), "pending");
+
+        let RequestHandlerResponse::Response(res) = request_actor
+            .ask(RequestHandlerMessage::ChangeApprovalState {
+                subject_id: subject_id.clone(),
+                state: ApprovalStateRes::Accepted,
+                expected_request_id: stored.request_id.clone(),
+                expected_version: stored.version,
+                expected_issued_at: stored.request.issued_at.as_nanos(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("Invalid response")
+        };
+
+        assert_eq!(
+            res,
+            format!(
+                "The approval request {} (version {}) for subject {} has changed to accepted",
+                stored.request_id, stored.version, subject_id
+            )
+        );
+    }
+
     async fn get_sink_events(
+        system: &SystemRef,
         node_actor: &ActorRef<Node>,
+        our_key: &PublicKey,
         subject_id: &DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
         limit: u64,
     ) -> ave_common::response::SinkEventsPage {
         let response = node_actor
-            .ask(NodeMessage::GetSinkEvents {
-                subject_id: subject_id.clone(),
-                from_sn,
-                to_sn,
-                limit,
-            })
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
             .await
             .unwrap();
 
-        let NodeResponse::SinkEvents(events) = response else {
+        let NodeResponse::SubjectData(Some(subject_data)) = response else {
             panic!("Invalid response")
         };
 
-        events
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+
+        crate::node::Node::replay_sink_events(crate::node::SinkReplayInput {
+            system,
+            subject_manager: &subject_manager,
+            our_key: &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        })
+        .await
+        .unwrap()
     }
 
     async fn get_sink_events_error(
+        system: &SystemRef,
         node_actor: &ActorRef<Node>,
+        our_key: &PublicKey,
         subject_id: &DigestIdentifier,
         from_sn: u64,
         to_sn: Option<u64>,
         limit: u64,
     ) -> ActorError {
-        node_actor
-            .ask(NodeMessage::GetSinkEvents {
-                subject_id: subject_id.clone(),
-                from_sn,
-                to_sn,
-                limit,
-            })
+        let response = node_actor
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
             .await
-            .unwrap_err()
+            .unwrap();
+
+        let NodeResponse::SubjectData(Some(subject_data)) = response else {
+            return ActorError::NotFound {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}",
+                    subject_id
+                )),
+            };
+        };
+
+        let subject_manager = system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .unwrap();
+
+        crate::node::Node::replay_sink_events(crate::node::SinkReplayInput {
+            system,
+            subject_manager: &subject_manager,
+            our_key: &our_key.to_string(),
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size: crate::node::SINK_REPLAY_LEDGER_BATCH_SIZE,
+        })
+        .await
+        .unwrap_err()
     }
 
     async fn get_tracker_metadata(
@@ -897,6 +1185,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let payload = ValueWrapper(json!({
@@ -920,41 +1209,13 @@ pub mod tests {
             &node_actor,
             &request_actor,
             &tracking,
-            true,
+            false,
         )
         .await;
 
-        let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
-            .ask(RequestHandlerMessage::GetApproval {
-                subject_id: subject_id.clone(),
-                state: Some(ApprovalState::Pending),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        wait_pending_approval(&request_actor, &subject_id).await;
 
-        assert_eq!(state.to_string(), "pending");
-
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         wait_request(&tracking, request_data.request_id).await;
 
@@ -973,6 +1234,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } = event.event
         else {
             panic!()
@@ -983,6 +1245,10 @@ pub mod tests {
         };
 
         assert!(approval_success.unwrap());
+        assert!(
+            compilation_response.is_none(),
+            "name/description fact runs no compilation: {compilation_response:?}"
+        );
 
         assert_eq!(metadata.name, subject_data.name);
         assert_eq!(metadata.name.unwrap(), "Name");
@@ -1049,6 +1315,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let payload = ValueWrapper(json!({
@@ -1091,6 +1358,7 @@ pub mod tests {
             payload: request_payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } = event.event
         else {
             panic!()
@@ -1099,6 +1367,10 @@ pub mod tests {
         let EvalResDB::Error(e) = evaluation_response else {
             panic!("");
         };
+        assert!(
+            compilation_response.is_none(),
+            "name/description fact runs no compilation: {compilation_response:?}"
+        );
 
         assert_eq!(
             "runner error: invalid event: [check_members] invalid event: member name cannot be 'Owner' (reserved word)",
@@ -1171,6 +1443,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1197,24 +1470,7 @@ pub mod tests {
         )
         .await;
 
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
@@ -1330,7 +1586,7 @@ pub mod tests {
 
         if request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .is_ok()
@@ -1350,6 +1606,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1376,24 +1633,7 @@ pub mod tests {
         )
         .await;
 
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
             subject_id: subject_id.clone(),
@@ -1502,6 +1742,7 @@ pub mod tests {
         ActorRef<RequestTracking>,
         DigestIdentifier,
         Vec<TempDir>,
+        PublicKey,
     ) {
         let (
             system,
@@ -1512,6 +1753,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            node_key,
         ) = create_gov().await;
 
         let fact_request = EventRequest::Fact(FactRequest {
@@ -1529,7 +1771,7 @@ pub mod tests {
                     "add": [
                         {
                             "id": "Example",
-                            "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                            "contract": crate::test_contracts::EXAMPLE_CONTRACT,
                             "initial_value": {
                                 "one": 0,
                                 "two": 0,
@@ -1597,41 +1839,13 @@ pub mod tests {
             &node_actor,
             &request_actor,
             &tracking,
-            true,
+            false,
         )
         .await;
 
-        let RequestHandlerResponse::Approval(Some((.., state))) = request_actor
-            .ask(RequestHandlerMessage::GetApproval {
-                subject_id: subject_id.clone(),
-                state: Some(ApprovalState::Pending),
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
+        wait_pending_approval(&request_actor, &subject_id).await;
 
-        assert_eq!(state.to_string(), "pending");
-
-        let RequestHandlerResponse::Response(res) = request_actor
-            .ask(RequestHandlerMessage::ChangeApprovalState {
-                subject_id: subject_id.clone(),
-                state: ApprovalStateRes::Accepted,
-            })
-            .await
-            .unwrap()
-        else {
-            panic!("Invalid response")
-        };
-
-        assert_eq!(
-            res,
-            format!(
-                "The approval request for subject {} has changed to accepted",
-                subject_id
-            )
-        );
+        accept_pending_approval(&request_actor, &subject_id).await;
 
         wait_request(&tracking, request_data.request_id).await;
 
@@ -1697,6 +1911,7 @@ pub mod tests {
             tracking,
             subject_id,
             _dir,
+            node_key,
         )
     }
 
@@ -1714,6 +1929,7 @@ pub mod tests {
         DigestIdentifier,
         DigestIdentifier,
         Vec<TempDir>,
+        PublicKey,
     ) {
         let (
             system,
@@ -1724,6 +1940,7 @@ pub mod tests {
             tracking,
             gov_id,
             _dir,
+            node_key,
         ) = init_gov_with_member_and_schema().await;
 
         let create_request = EventRequest::Create(CreateRequest {
@@ -1822,6 +2039,7 @@ pub mod tests {
             request_data.subject_id,
             gov_id,
             _dir,
+            node_key,
         )
     }
 
@@ -1841,10 +2059,19 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
-        let replay =
-            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         assert_eq!(replay.from_sn, 0);
         assert_eq!(replay.to_sn, None);
@@ -1896,6 +2123,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -1919,8 +2147,16 @@ pub mod tests {
         )
         .await;
 
-        let first_page =
-            get_sink_events(&node_actor, &subject_id, 0, None, 1).await;
+        let first_page = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            1,
+        )
+        .await;
         assert_eq!(first_page.events.len(), 1);
         assert!(first_page.has_more);
         assert_eq!(first_page.next_sn, Some(1));
@@ -1941,8 +2177,16 @@ pub mod tests {
             other => panic!("Unexpected event: {other:?}"),
         }
 
-        let second_page =
-            get_sink_events(&node_actor, &subject_id, 1, None, 10).await;
+        let second_page = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            1,
+            None,
+            10,
+        )
+        .await;
         assert_eq!(second_page.events.len(), 1);
         assert!(!second_page.has_more);
         assert!(second_page.next_sn.is_none());
@@ -1981,10 +2225,19 @@ pub mod tests {
             _tracking,
             subject_id,
             _dir,
+            _node_key,
         ) = create_gov().await;
 
-        let replay =
-            get_sink_events(&node_actor, &subject_id, 0, None, 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2020,6 +2273,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
@@ -2039,8 +2293,16 @@ pub mod tests {
         )
         .await;
 
-        let replay =
-            get_sink_events(&node_actor, &subject_id, 1, Some(1), 100).await;
+        let replay = get_sink_events(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            1,
+            Some(1),
+            100,
+        )
+        .await;
 
         assert_eq!(replay.events.len(), 1);
         assert!(!replay.has_more);
@@ -2086,11 +2348,19 @@ pub mod tests {
             subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
-        let error =
-            get_sink_events_error(&node_actor, &subject_id, 5, Some(4), 100)
-                .await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            5,
+            Some(4),
+            100,
+        )
+        .await;
 
         let ActorError::Functional { description } = error else {
             panic!("Expected functional error")
@@ -2109,10 +2379,19 @@ pub mod tests {
             subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
-        let error =
-            get_sink_events_error(&node_actor, &subject_id, 0, None, 0).await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &subject_id,
+            0,
+            None,
+            0,
+        )
+        .await;
 
         let ActorError::Functional { description } = error else {
             panic!("Expected functional error")
@@ -2131,6 +2410,7 @@ pub mod tests {
             _subject_id,
             _gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let missing = DigestIdentifier::from_str(
@@ -2138,8 +2418,16 @@ pub mod tests {
         )
         .unwrap();
 
-        let error =
-            get_sink_events_error(&node_actor, &missing, 0, None, 100).await;
+        let error = get_sink_events_error(
+            &_system,
+            &node_actor,
+            &_node_key,
+            &missing,
+            0,
+            None,
+            100,
+        )
+        .await;
 
         let ActorError::NotFound { path } = error else {
             panic!("Expected not found error")
@@ -2161,6 +2449,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -2266,6 +2555,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let payload = json!({
@@ -2375,6 +2665,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {
@@ -2482,7 +2773,7 @@ pub mod tests {
 
         if request_actor
             .ask(RequestHandlerMessage::NewRequest {
-                request: signed_event_req.clone(),
+                request: Arc::new(signed_event_req.clone()),
             })
             .await
             .is_ok()
@@ -2502,6 +2793,7 @@ pub mod tests {
             subject_id,
             gov_id,
             _dir,
+            _node_key,
         ) = create_tracker().await;
 
         let transfer_request = EventRequest::Transfer(TransferRequest {

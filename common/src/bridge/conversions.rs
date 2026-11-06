@@ -26,8 +26,9 @@ use crate::{
 
 impl From<Signed<EventRequest>> for BridgeSignedEventRequest {
     fn from(value: Signed<EventRequest>) -> Self {
-        let request = BridgeEventRequest::from(value.content().clone());
-        let signature = Some(BridgeSignature::from(value.signature().clone()));
+        let (content, signature) = value.into_parts();
+        let request = BridgeEventRequest::from(content);
+        let signature = Some(BridgeSignature::from(signature));
 
         Self { request, signature }
     }
@@ -146,16 +147,22 @@ impl TryFrom<BridgeFactRequest> for FactRequest {
 
         let mut viewpoints = BTreeSet::new();
         for viewpoint in request.viewpoints {
-            if !viewpoints.insert(viewpoint.clone()) {
+            if viewpoints.contains(&viewpoint) {
                 return Err(ConversionError::InvalidViewpoints(format!(
                     "duplicated viewpoint '{viewpoint}'"
                 )));
             }
+            viewpoints.insert(viewpoint);
         }
+
+        let payload = ValueWrapper(request.payload);
+        payload
+            .validate()
+            .map_err(ConversionError::InvalidPayload)?;
 
         Ok(Self {
             subject_id,
-            payload: ValueWrapper(request.payload),
+            payload,
             viewpoints,
         })
     }
@@ -356,6 +363,28 @@ mod tests {
         assert!(matches!(
             fact.unwrap_err(),
             ConversionError::InvalidViewpoints(_)
+        ));
+    }
+
+    #[test]
+    fn test_fact_request_rejects_oversized_collection() {
+        let oversized = serde_json::Value::Array(vec![
+            serde_json::Value::Null;
+            crate::MAX_COLLECTION_SIZE
+                as usize
+                + 1
+        ]);
+        let bridge_fact = BridgeFactRequest {
+            subject_id: "BKZgYibuHNJjiNS179FUDpLGgdLq0C04TZRGb6AXMd1s"
+                .to_string(),
+            payload: oversized,
+            viewpoints: vec![],
+        };
+
+        let fact: Result<FactRequest, _> = bridge_fact.try_into();
+        assert!(matches!(
+            fact.unwrap_err(),
+            ConversionError::InvalidPayload(_)
         ));
     }
 

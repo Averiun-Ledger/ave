@@ -8,7 +8,8 @@
 use std::str::FromStr;
 
 use ave_common::bridge::request::{
-    AbortsQuery, EventsQuery, SinkEventsQuery, SinkReplayRequest, SinksQuery,
+    AbortsQuery, ActorTreeQuery, EventsQuery, IncidentsQuery, SinkEventsQuery,
+    SinkReplayRequest, SinksQuery,
 };
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
@@ -18,11 +19,60 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::Error;
 
-/// Maximum number of items a single query page may request. Shared by every
-/// paginated/limited endpoint (events, aborts, sink events, first/last
-/// events). Keeps a malicious or misconfigured client from forcing
-/// unbounded in-memory reads.
-const MAX_QUERY_LIMIT: u64 = 1000;
+/// Maximum number of items a single query page may request.
+///
+/// Shared by every paginated/limited endpoint (events, aborts,
+/// sink events, first/last events). Keeps a malicious or
+/// misconfigured client from forcing unbounded in-memory reads.
+pub const MAX_QUERY_LIMIT: u64 = 1000;
+
+/// Page size used when the caller passes no explicit `limit`.
+/// Every list endpoint pages by default so a growing ledger can
+/// never turn a plain GET into an unbounded read.
+pub const DEFAULT_QUERY_LIMIT: u64 = 100;
+
+/// Validates an optional limit/offset pair and resolves the effective
+/// `(limit, offset)`: missing limit falls back to
+/// [`DEFAULT_QUERY_LIMIT`], missing offset to `0`.
+pub fn resolve_page(
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> Result<(u64, u64), Error> {
+    if let Some(limit) = limit {
+        require_query_limit("limit", limit)?;
+    }
+    Ok((limit.unwrap_or(DEFAULT_QUERY_LIMIT), offset.unwrap_or(0)))
+}
+
+/// Sorts `items` by `key` for stable pages, then applies
+/// `offset`/`limit`. Limits are clamped to [`MAX_QUERY_LIMIT`]
+/// so direct (non-HTTP) callers can never force an unbounded
+/// read either.
+pub fn page_sorted<T, K: Ord>(
+    items: Vec<T>,
+    limit: u64,
+    offset: u64,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    // Decorate once: the key is computed per item, not per comparison.
+    let mut keyed: Vec<(K, T)> = items
+        .into_iter()
+        .map(|item| {
+            let sort_key = key(&item);
+            (sort_key, item)
+        })
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    let limit =
+        usize::try_from(limit.min(MAX_QUERY_LIMIT)).unwrap_or(usize::MAX);
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    keyed
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, item)| item)
+        .collect()
+}
 
 /// Rejects `0` with a message that names the field.
 pub fn require_positive_u64(name: &str, value: u64) -> Result<(), Error> {
@@ -176,6 +226,38 @@ pub fn validate_aborts_query(query: &AbortsQuery) -> Result<(), Error> {
     Ok(())
 }
 
+/// Validates filters of an [`IncidentsQuery`].
+pub fn validate_incidents_query(query: &IncidentsQuery) -> Result<(), Error> {
+    if let Some(limit) = query.limit {
+        require_query_limit("limit", limit)?;
+    }
+    if let (Some(from), Some(to)) = (query.from_nanos, query.to_nanos)
+        && from > to
+    {
+        return Err(Error::InvalidQueryParams(
+            "from_nanos must not exceed to_nanos".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates filters of an [`ActorTreeQuery`]: the tree snapshot is
+/// bounded by its own cap (larger than paged ledgers, still finite).
+pub fn validate_actor_tree_query(query: &ActorTreeQuery) -> Result<(), Error> {
+    use ave_common::bridge::request::{DEFAULT_TREE_LIMIT, MAX_TREE_LIMIT};
+    let limit = query.limit.unwrap_or(DEFAULT_TREE_LIMIT);
+    require_positive_u64("limit", limit)?;
+    if limit > MAX_TREE_LIMIT {
+        return Err(Error::InvalidQueryParams(format!(
+            "limit must not exceed {MAX_TREE_LIMIT}"
+        )));
+    }
+    if let Some(subject) = &query.subject {
+        require_non_empty_str("subject", subject)?;
+    }
+    Ok(())
+}
+
 /// Validates filters of a [`SinksQuery`].
 pub fn validate_sinks_query(query: &SinksQuery) -> Result<(), Error> {
     if let Some(target) = &query.target
@@ -204,6 +286,13 @@ pub fn validate_sink_replay_request(
             "requests must not be empty".to_owned(),
         ));
     }
+    // Bound the fan-out: the actor joins every item with per-item
+    // buffers, so an unbounded batch exhausts memory and CPU.
+    if request.requests.len() > MAX_QUERY_LIMIT as usize {
+        return Err(Error::InvalidQueryParams(format!(
+            "requests must not exceed {MAX_QUERY_LIMIT}"
+        )));
+    }
     for item in &request.requests {
         require_non_empty_str("sink", &item.sink)?;
         require_non_empty_str("subject_id", &item.subject_id)?;
@@ -221,6 +310,23 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
             if !create.schema_id.is_valid_in_request() {
                 return Err(Error::InvalidEventRequest(
                     "schema_id is not valid in request".to_owned(),
+                ));
+            }
+            // Same bounds the pipeline enforces downstream (fail fast at
+            // the edge with identical limits, never stricter).
+            if let Some(name) = &create.name
+                && (name.is_empty() || name.len() > 100)
+            {
+                return Err(Error::InvalidEventRequest(
+                    "name must be between 1 and 100 characters".to_owned(),
+                ));
+            }
+            if let Some(description) = &create.description
+                && (description.is_empty() || description.len() > 200)
+            {
+                return Err(Error::InvalidEventRequest(
+                    "description must be between 1 and 200 characters"
+                        .to_owned(),
                 ));
             }
             let is_governance =
@@ -249,6 +355,9 @@ pub fn validate_event_request(request: &EventRequest) -> Result<(), Error> {
                 return Err(Error::InvalidSubjectId(
                     "subject_id must not be empty".to_owned(),
                 ));
+            }
+            if let Err(reason) = fact.payload.validate() {
+                return Err(Error::InvalidEventRequest(reason));
             }
         }
         EventRequest::Transfer(transfer) => {
@@ -300,7 +409,8 @@ mod tests {
         let zero = require_query_limit("quantity", 0)
             .expect_err("zero must be rejected");
         assert!(
-            zero.to_string().contains("quantity must be greater than zero")
+            zero.to_string()
+                .contains("quantity must be greater than zero")
         );
 
         let over = require_query_limit("quantity", MAX_QUERY_LIMIT + 1)
@@ -324,6 +434,28 @@ mod tests {
             ..EventsQuery::default()
         };
         assert!(validate_events_query(&over).is_err());
+    }
+
+    #[test]
+    fn page_sorted_sorts_slices_and_clamps() {
+        let items = vec![(3, "c"), (1, "a"), (2, "b")];
+        let page: Vec<_> = page_sorted(items, 2, 1, |x| x.0);
+        assert_eq!(page, vec![(2, "b"), (3, "c")]);
+        let all: Vec<_> =
+            page_sorted(vec![(2, "b"), (1, "a")], u64::MAX, 0, |x| x.0);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, 1);
+        let empty: Vec<(i32, &str)> =
+            page_sorted(vec![(1, "a")], 10, 5, |x| x.0);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn resolve_page_defaults_validates_and_caps() {
+        assert_eq!(resolve_page(None, None).unwrap(), (DEFAULT_QUERY_LIMIT, 0));
+        assert_eq!(resolve_page(Some(10), Some(5)).unwrap(), (10, 5));
+        assert!(resolve_page(Some(0), None).is_err());
+        assert!(resolve_page(Some(MAX_QUERY_LIMIT + 1), None).is_err());
     }
 
     #[test]

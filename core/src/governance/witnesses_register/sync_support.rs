@@ -99,9 +99,16 @@ impl WitnessesRegister {
             }
         }
 
-        let limit = limit.max(1);
+        // The limit comes from the remote peer: floor it so the query
+        // is not empty, cap it so it can not force a huge allocation
+        // (`limit + 1` capacity) or a panic on overflow.
+        let limit = limit.clamp(1, 1024);
         let mut items = Vec::with_capacity(limit + 1);
-        let effective_cursor = if governance_version == self.gov_sn {
+        // The listing is always current state: honor the cursor
+        // whenever the requester is not ahead of this node, so
+        // pagination terminates; a requester ahead restarts from
+        // scratch against newer data.
+        let effective_cursor = if governance_version <= self.gov_sn {
             after_subject_id
         } else {
             None

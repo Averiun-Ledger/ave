@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::governance::sn_register::SnLimit;
-use crate::model::common::{
-    Interval, IntervalSet, OwnerContext, TrackerIdentity,
-};
+use crate::model::common::{IntervalSet, OwnerContext, TrackerIdentity};
 use ave_actors::{ActorContext, ActorError};
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::{Namespace, SchemaType};
@@ -28,10 +26,7 @@ impl WitnessesRegister {
         )) {
             for (.., (interval, last)) in entry.intervals.iter_mut() {
                 if let Some(last) = last.take() {
-                    interval.insert(Interval {
-                        lo: last,
-                        hi: version - 1,
-                    });
+                    interval.close_open(last, version);
                 }
             }
 
@@ -60,10 +55,7 @@ impl WitnessesRegister {
             if !witnesses.contains(witness_type)
                 && let Some(lo) = last.take()
             {
-                interval.insert(Interval {
-                    lo,
-                    hi: version - 1,
-                });
+                interval.close_open(lo, version);
             }
         }
 

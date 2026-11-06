@@ -21,8 +21,18 @@ use utoipa::ToSchema;
 pub struct DataToSink {
     pub payload: DataToSinkEvent,
     pub public_key: String,
+    /// Decimal strings on the wire (see `crate::bridge::quoted_u64`).
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_request_timestamp: u64,
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_ledger_timestamp: u64,
+    #[serde(with = "crate::bridge::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub sink_timestamp: u64,
 }
 
@@ -858,6 +868,7 @@ mod tests {
             max_recoveries_after_failure: 5,
             healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
+            catch_up_stall_timeout_secs: 600,
         }
     }
 
@@ -867,7 +878,7 @@ mod tests {
             serde_json::from_str(r#"{"url": "https://example.com"}"#).unwrap();
         assert!(cfg.proxy.is_none());
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
-        assert!(!cfg.batch_delivery);
+        assert!(cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
         assert_eq!(cfg.compression, SinkCompression::None);
         assert_eq!(cfg.max_error_body_bytes, 4_096);
@@ -939,11 +950,13 @@ mod tests {
     #[test]
     fn test_http_sink_config_validate_batch_delay_only_when_enabled() {
         let mut cfg = valid_http_config();
+        // Batch delivery defaults on: zero delay is rejected.
         cfg.batch_max_delay_ms = 0;
+        assert!(cfg.validate().is_err());
         // Ignored while batch delivery is disabled.
+        cfg.batch_delivery = false;
         assert!(cfg.validate().is_ok());
         cfg.batch_delivery = true;
-        assert!(cfg.validate().is_err());
         cfg.batch_max_delay_ms = 50;
         assert!(cfg.validate().is_ok());
     }
@@ -1076,6 +1089,22 @@ mod tests {
     }
 
     #[test]
+    fn test_catch_up_stall_timeout_defaults_and_rejects_zero() {
+        let server = valid_sink_server();
+        assert_eq!(server.catch_up_stall_timeout_secs, 600);
+        assert!(server.validate().is_ok());
+        let mut server = valid_sink_server();
+        server.catch_up_stall_timeout_secs = 0;
+        match server.validate() {
+            Err(Error::InvalidConfiguration { component, .. })
+                if component == "SinkServer.catch_up_stall_timeout_secs" => {}
+            other => panic!(
+                "expected InvalidConfiguration for SinkServer.catch_up_stall_timeout_secs, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn test_grpc_sink_config_defaults_are_valid_with_endpoint() {
         let cfg = GrpcSinkConfig {
             endpoint: "http://127.0.0.1:50051".to_string(),
@@ -1088,7 +1117,7 @@ mod tests {
         assert_eq!(cfg.max_retries, 2);
         assert_eq!(cfg.retry_base_delay_ms, 500);
         assert_eq!(cfg.retry_max_delay_ms, 30_000);
-        assert!(!cfg.batch_delivery);
+        assert!(cfg.batch_delivery);
         assert_eq!(cfg.batch_max_delay_ms, 100);
         assert!(matches!(cfg.compression, SinkCompression::None));
         assert_eq!(cfg.max_decoding_message_bytes, 4 * 1024 * 1024);
@@ -1840,7 +1869,7 @@ impl Default for HttpSinkConfig {
             signature_version: 1,
             proxy: None,
             retry_max_delay_ms: 30_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             compression: SinkCompression::None,
             headers: HashMap::new(),
@@ -2335,7 +2364,7 @@ impl Default for KafkaSinkConfig {
             acks: KafkaAcks::default(),
             compression: KafkaCompression::default(),
             request_timeout_ms: 5_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             max_retries: 2,
             retry_base_delay_ms: 500,
@@ -2631,7 +2660,7 @@ impl Default for GrpcSinkConfig {
             max_retries: 2,
             retry_base_delay_ms: 500,
             retry_max_delay_ms: 30_000,
-            batch_delivery: false,
+            batch_delivery: true,
             batch_max_delay_ms: 100,
             compression: SinkCompression::None,
             headers: HashMap::new(),
@@ -2947,6 +2976,10 @@ pub struct SinkServer {
     pub healthcheck_max_failures: u32,
     /// Delay in seconds before the first healthcheck is scheduled after startup.
     pub startup_healthcheck_delay_secs: u64,
+    /// Maximum seconds a catch-up may run without completing before the
+    /// stall watchdog requeues it. Covers dropped internal signals;
+    /// redelivery is idempotent, so a too-short value only repeats work.
+    pub catch_up_stall_timeout_secs: u64,
 }
 
 impl Default for SinkServer {
@@ -2964,6 +2997,7 @@ impl Default for SinkServer {
             max_recoveries_after_failure: 5,
             healthcheck_max_failures: 3,
             startup_healthcheck_delay_secs: 1,
+            catch_up_stall_timeout_secs: 600,
         }
     }
 }
@@ -3043,6 +3077,10 @@ impl SinkServer {
         require_positive_u64(
             "SinkServer.startup_healthcheck_delay_secs",
             self.startup_healthcheck_delay_secs,
+        )?;
+        require_positive_u64(
+            "SinkServer.catch_up_stall_timeout_secs",
+            self.catch_up_stall_timeout_secs,
         )?;
         Ok(())
     }

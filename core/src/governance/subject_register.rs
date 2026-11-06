@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::SchemaType;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -82,6 +82,8 @@ impl SubjectRegister {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubjectRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding.
+    GetMaxVersion,
     Check {
         creator: PublicKey,
         gov_version: u64,
@@ -123,9 +125,9 @@ impl Message for SubjectRegisterMessage {
             | Self::CreateSubject { .. }
             | Self::DeleteSubject { .. }
             | Self::UpdateSubject { .. } => true,
-            Self::Check { .. } | Self::GetSubjectsByOwnerSchemaBatch { .. } => {
-                false
-            }
+            Self::Check { .. }
+            | Self::GetSubjectsByOwnerSchemaBatch { .. }
+            | Self::GetMaxVersion => false,
         }
     }
 }
@@ -134,6 +136,7 @@ impl Message for SubjectRegisterMessage {
 pub enum SubjectRegisterResponse {
     Ok,
     SubjectsBatch(Vec<Vec<DigestIdentifier>>),
+    MaxVersion(u64),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -246,6 +249,21 @@ impl Handler<Self> for SubjectRegister {
 
                 return Ok(SubjectRegisterResponse::SubjectsBatch(results));
             }
+            SubjectRegisterMessage::GetMaxVersion => {
+                // Highest version present across creator maps: a
+                // processed prefix marker (single ordered sender, so
+                // everything below it landed; removals only lower it,
+                // which widens the replay tail — safe direction).
+                let max = self
+                    .register
+                    .values()
+                    .filter_map(|(creations, _)| {
+                        creations.last().map(|(version, _)| *version)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                return Ok(SubjectRegisterResponse::MaxVersion(max));
+            }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();
                 self.on_event(
@@ -270,6 +288,21 @@ impl Handler<Self> for SubjectRegister {
                 schema_id,
                 gov_version,
             } => {
+                // Idempotent replay: boot reconciliation re-sends the
+                // genesis create after the tracker journal already
+                // landed, so a second delivery must not fail the quota
+                // check nor journal a duplicate.
+                if self
+                    .register
+                    .get(&(
+                        creator.clone(),
+                        schema_id.clone(),
+                        namespace.clone(),
+                    ))
+                    .is_some_and(|(_, subjects)| subjects.contains(&subject_id))
+                {
+                    return Ok(SubjectRegisterResponse::Ok);
+                }
                 self.check(&creator, &namespace, &schema_id, gov_version)?;
 
                 self.on_event(
@@ -318,6 +351,22 @@ impl Handler<Self> for SubjectRegister {
                 schema_id,
                 gov_version,
             } => {
+                // Idempotent replay: a resend after the move already
+                // landed must not fail the quota check nor journal a
+                // duplicate. The apply below removes the subject from
+                // every matching owner entry, so converging does not
+                // depend on old_owner being exact.
+                if self
+                    .register
+                    .get(&(
+                        new_owner.clone(),
+                        schema_id.clone(),
+                        namespace.clone(),
+                    ))
+                    .is_some_and(|(_, subjects)| subjects.contains(&subject_id))
+                {
+                    return Ok(SubjectRegisterResponse::Ok);
+                }
                 self.check(&new_owner, &namespace, &schema_id, gov_version)?;
                 self.on_event(
                     SubjectRegisterEvent::UpdateSubject {
@@ -378,9 +427,15 @@ impl Handler<Self> for SubjectRegister {
 
 #[async_trait]
 impl PersistentActor for SubjectRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
@@ -457,6 +512,21 @@ impl PersistentActor for SubjectRegister {
                 namespace,
                 schema_id,
             } => {
+                // Convergent move: drop the subject from every owner
+                // entry sharing schema and namespace, then insert under
+                // the new owner. Replays with a stale old_owner still
+                // converge, and live moves also clear any residual.
+                let _ = old_owner;
+                for ((owner, entry_schema, entry_ns), (_, subjects)) in
+                    inner.register.iter_mut()
+                {
+                    if entry_schema == schema_id
+                        && entry_ns == namespace
+                        && owner != new_owner
+                    {
+                        subjects.remove(subject_id);
+                    }
+                }
                 inner
                     .register
                     .entry((
@@ -467,17 +537,6 @@ impl PersistentActor for SubjectRegister {
                     .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
                     .1
                     .insert(subject_id.to_owned());
-
-                inner
-                    .register
-                    .entry((
-                        old_owner.to_owned(),
-                        schema_id.to_owned(),
-                        namespace.to_owned(),
-                    ))
-                    .or_insert_with(|| (CeilingMap::new(), HashSet::new()))
-                    .1
-                    .remove(subject_id);
 
                 debug!(
                     event_type = "UpdateSubject",

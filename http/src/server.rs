@@ -17,8 +17,9 @@ use crate::{
 
 use ave_bridge::ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalQuery, BridgeSignedEventRequest, EventsQuery,
-        FirstEndEvents, GovQuery, SinkEventsQuery, SinkReplayRequest,
+        AbortsQuery, ActorTreeQuery, ApprovalQuery, BridgeSignedEventRequest,
+        EventsQuery, FirstEndEvents, GovQuery, IncidentsQuery, ListQuery,
+        PatchApproval, SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest,
         SubjectQuery, UpdateSubjectQuery,
     },
     response::{
@@ -28,11 +29,13 @@ use ave_bridge::ave_common::{
 use ave_bridge::{
     Bridge, MonitorNetworkState,
     ave_common::{
-        bridge::request::{ApprovalStateRes, SinksQuery},
+        bridge::request::SinksQuery,
         response::{
-            GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, RequestInfo,
-            RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
+            ActorTreeResponse, GovsData, LedgerDB, PaginatorAborts,
+            PaginatorEvents, RequestInfo, RequestsInManager,
+            RequestsInManagerSubject, SinkDeliveryState, SinkEventsPage,
             SinkInfo, SinkStatusInfo, SubjectDB, SubjsData, TransferSubject,
+            WatchdogIncidentRow,
         },
     },
     http::ProxyConfig,
@@ -102,15 +105,28 @@ async fn public_auth_safe_mode_layer(
     next.run(req).await
 }
 
-async fn server_error_metrics_layer(
+async fn http_metrics_layer(
     req: Request<Body>,
     next: middleware::Next,
 ) -> Response {
+    use std::time::Instant;
+
+    use axum::extract::MatchedPath;
+
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
+    let started = Instant::now();
     let response = next.run(req).await;
-    if response.status().is_server_error()
-        && let Some(metrics) = try_core_metrics()
-    {
-        metrics.observe_http_server_error();
+    if let Some(metrics) = try_core_metrics() {
+        metrics.observe_http_request(
+            &route,
+            response.status().as_u16(),
+            started.elapsed(),
+        );
     }
 
     response
@@ -174,9 +190,10 @@ pub async fn get_public_key(
 )]
 pub async fn get_config(
     _auth: ApiKeyAuthNew,
-    Extension(bridge): Extension<Arc<Bridge>>,
-) -> Json<ConfigHttp> {
-    Json(ConfigHttp::from(bridge.get_config()))
+    Extension(config): Extension<Arc<ConfigHttp>>,
+) -> Json<Arc<ConfigHttp>> {
+    // No clone: axum serializes straight through the Arc.
+    Json(config)
 }
 
 ///////// Network
@@ -334,12 +351,15 @@ pub async fn get_approvals(
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiQuery(parameters): ApiQuery<ApprovalQuery>,
 ) -> Result<Json<Vec<ApprovalEntry>>, HttpError> {
-    Ok(Json(bridge.get_approvals(parameters.state).await?))
+    Ok(Json(bridge.get_approvals(parameters).await?))
 }
 
 /// Update approval state
 ///
 /// Approves or rejects a pending approval for the specified subject.
+/// The vote lands only on the exact request identified by the
+/// expected coordinates returned when consulting: a replaced
+/// request answers 409 instead of receiving a stale vote.
 #[utoipa::path(
     patch,
     path = "/approvals/{subject_id}",
@@ -348,12 +368,12 @@ pub async fn get_approvals(
     params(
         ("subject_id" = String, Path, description = "Subject identifier")
     ),
-    request_body = ApprovalStateRes,
+    request_body = PatchApproval,
     responses(
         (status = 200, description = "Approval state updated", body = String),
         (status = 400, description = "Invalid subject ID", body = ErrorResponse),
         (status = 404, description = "Approval not found", body = ErrorResponse),
-        (status = 409, description = "Invalid approval state transition", body = ErrorResponse),
+        (status = 409, description = "Stale vote: the pending request changed since it was consulted", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
     security(("api_key" = []))
@@ -362,9 +382,9 @@ pub async fn patch_approve(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiPath(subject_id): ApiPath<String>,
-    ApiJson(state): ApiJson<ApprovalStateRes>,
+    ApiJson(approval): ApiJson<PatchApproval>,
 ) -> Result<Json<String>, HttpError> {
-    Ok(Json(bridge.patch_approve(subject_id, state).await?))
+    Ok(Json(bridge.patch_approve(subject_id, approval).await?))
 }
 
 /// Abort a pending request
@@ -432,6 +452,7 @@ pub async fn get_request_state(
     path = "/requests",
     operation_id = "getAllRequestStates",
     tag = "Tracking",
+    params(ListQuery),
     responses(
         (status = 200, description = "All tracked request states", body = Vec<RequestInfoExtend>),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -441,8 +462,9 @@ pub async fn get_request_state(
 pub async fn get_all_request_state(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ListQuery>,
 ) -> Result<Json<Vec<RequestInfoExtend>>, HttpError> {
-    Ok(Json(bridge.get_all_request_state().await?))
+    Ok(Json(bridge.get_all_request_state(parameters).await?))
 }
 ///////// Node
 ////////////////////////////
@@ -455,6 +477,7 @@ pub async fn get_all_request_state(
     path = "/pending-transfers",
     operation_id = "getPendingTransfers",
     tag = "Transfer",
+    params(ListQuery),
     responses(
         (status = 200, description = "List of pending transfers", body = Vec<TransferSubject>),
         (status = 404, description = "No pending transfers", body = ErrorResponse),
@@ -465,8 +488,9 @@ pub async fn get_all_request_state(
 pub async fn get_pending_transfers(
     _auth: ApiKeyAuthNew,
     Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ListQuery>,
 ) -> Result<Json<Vec<TransferSubject>>, HttpError> {
-    Ok(Json(bridge.get_pending_transfers().await?))
+    Ok(Json(bridge.get_pending_transfers(parameters).await?))
 }
 
 ///////// Sink
@@ -545,6 +569,36 @@ pub async fn get_sinks_status(
     Extension(bridge): Extension<Arc<Bridge>>,
 ) -> Result<Json<Vec<SinkStatusInfo>>, HttpError> {
     Ok(Json(bridge.get_sinks_status().await?))
+}
+
+/// Get sink deliveries
+///
+/// Per-subject delivery positions for the ops audit view: which sink
+/// has delivered which subject up to which sn, and whether it lags.
+/// Optional filters by subject and/or sink; unknown sinks report
+/// not found, unknown subjects simply have no rows.
+#[utoipa::path(
+    get,
+    path = "/sinks/deliveries",
+    operation_id = "getSinkDeliveries",
+    tag = "Sink",
+    params(
+        SinkDeliveriesQuery
+    ),
+    responses(
+        (status = 200, description = "Per-subject delivery positions", body = Vec<SinkDeliveryState>),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 404, description = "Sink not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_sink_deliveries(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<SinkDeliveriesQuery>,
+) -> Result<Json<Vec<SinkDeliveryState>>, HttpError> {
+    Ok(Json(bridge.get_sink_deliveries(parameters).await?))
 }
 
 /// Unblock a sink
@@ -1069,6 +1123,36 @@ pub async fn post_manual_distribution(
     Ok(Json(bridge.post_manual_distribution(subject_id).await?))
 }
 
+/// Lift subject for sync
+///
+/// Boots a tracker on demand so its boot healing runs (register
+/// reconcile, projection gap-fill, sink cursor review), then
+/// releases it. The subject only stays resident while syncing;
+/// async catch-ups continue through the sink chain on their own.
+#[utoipa::path(
+    post,
+    path = "/subjects/{subject_id}/sync-lift",
+    operation_id = "postSyncLift",
+    tag = "Node",
+    params(
+        ("subject_id" = String, Path, description = "Subject identifier")
+    ),
+    responses(
+        (status = 200, description = "Subject lifted, synced and released", body = String),
+        (status = 400, description = "Invalid subject ID", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn post_sync_lift(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiPath(subject_id): ApiPath<String>,
+) -> Result<Json<String>, HttpError> {
+    Ok(Json(bridge.lift_subject_for_sync(subject_id).await?))
+}
+
 ///////// Register
 ////////////////////////////
 
@@ -1092,7 +1176,7 @@ pub async fn get_all_govs(
     Extension(bridge): Extension<Arc<Bridge>>,
     ApiQuery(parameters): ApiQuery<GovQuery>,
 ) -> Result<Json<Vec<GovsData>>, HttpError> {
-    Ok(Json(bridge.get_all_govs(parameters.active).await?))
+    Ok(Json(bridge.get_all_govs(parameters).await?))
 }
 
 /// List subjects under a governance
@@ -1122,15 +1206,7 @@ pub async fn get_all_subjs(
     ApiPath(governance_id): ApiPath<String>,
     ApiQuery(parameters): ApiQuery<SubjectQuery>,
 ) -> Result<Json<Vec<SubjsData>>, HttpError> {
-    Ok(Json(
-        bridge
-            .get_all_subjs(
-                governance_id,
-                parameters.active,
-                parameters.schema_id,
-            )
-            .await?,
-    ))
+    Ok(Json(bridge.get_all_subjs(governance_id, parameters).await?))
 }
 
 ///////// Query
@@ -1223,6 +1299,64 @@ pub async fn get_aborts(
     ApiQuery(parameters): ApiQuery<AbortsQuery>,
 ) -> Result<Json<PaginatorAborts>, HttpError> {
     Ok(Json(bridge.get_aborts(subject_id, parameters).await?))
+}
+
+/// Get watchdog incidents
+///
+/// Returns node-monitoring incident records (a request phase that
+/// produced nothing for its whole worst-case budget), newest first.
+/// Empty when the impossible never happened.
+#[utoipa::path(
+    get,
+    path = "/watchdog/incidents",
+    operation_id = "getWatchdogIncidents",
+    tag = "Monitoring",
+    params(
+        IncidentsQuery
+    ),
+    responses(
+        (status = 200, description = "Watchdog incidents, newest first", body = Vec<WatchdogIncidentRow>),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_watchdog_incidents(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<IncidentsQuery>,
+) -> Result<Json<Vec<WatchdogIncidentRow>>, HttpError> {
+    Ok(Json(bridge.get_watchdog_incidents(parameters).await?))
+}
+
+/// Get actor tree
+///
+/// Returns a point-in-time snapshot of the live supervision forest
+/// (path + concrete type per node). `subject` prunes to that
+/// subject's subtrees; `limit` truncates in pre-order and the
+/// response flags it instead of failing.
+#[utoipa::path(
+    get,
+    path = "/actor-tree",
+    operation_id = "getActorTree",
+    tag = "Monitoring",
+    params(
+        ActorTreeQuery
+    ),
+    responses(
+        (status = 200, description = "Live supervision forest", body = ActorTreeResponse),
+        (status = 400, description = "Invalid query filters", body = ErrorResponse),
+        (status = 404, description = "Subject not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_actor_tree(
+    _auth: ApiKeyAuthNew,
+    Extension(bridge): Extension<Arc<Bridge>>,
+    ApiQuery(parameters): ApiQuery<ActorTreeQuery>,
+) -> Result<Json<ActorTreeResponse>, HttpError> {
+    Ok(Json(bridge.get_actor_tree(parameters).await?))
 }
 
 /// Get event by sequence number
@@ -1467,6 +1601,7 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, get, "/pending-transfers", get_pending_transfers, require NodeSubject Get);
         $callback!($($args)*, get, "/sinks", get_sinks, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/status", get_sinks_status, require NodeSink Get);
+        $callback!($($args)*, get, "/sinks/deliveries", get_sink_deliveries, require NodeSink Get);
         $callback!($($args)*, get, "/sinks/{sink_name}", get_sink, require NodeSink Get);
         $callback!($($args)*, post, "/sinks/{sink_name}/unblock", unblock_sink, require NodeSink Post);
         $callback!($($args)*, post, "/sinks/{sink_name}/test", test_sink, require NodeSink Post);
@@ -1487,12 +1622,15 @@ macro_rules! main_route_catalog {
         $callback!($($args)*, post, "/subjects/{subject_id}/update", post_update_subject, require NodeSubject Post);
         $callback!($($args)*, delete, "/maintenance/subjects/{subject_id}", delete_subject, require NodeMaintenance Delete);
         $callback!($($args)*, post, "/subjects/{subject_id}/manual-distribution", post_manual_distribution, require NodeSubject Post);
+        $callback!($($args)*, post, "/subjects/{subject_id}/sync-lift", post_sync_lift, require NodeSubject Post);
         $callback!($($args)*, get, "/governances", get_all_govs, require NodeSubject Get);
         $callback!($($args)*, get, "/governances/{governance_id}/subjects", get_all_subjs, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events", get_events, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/sink-events", get_sink_events, require NodeSink Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events/{sn}", get_event_sn, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/aborts", get_aborts, require NodeSubject Get);
+        $callback!($($args)*, get, "/watchdog/incidents", get_watchdog_incidents, require NodeManagement Get);
+        $callback!($($args)*, get, "/actor-tree", get_actor_tree, require NodeManagement Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/events-first-last", get_first_or_end_events, require NodeSubject Get);
         $callback!($($args)*, get, "/subjects/{subject_id}/state", get_subject_state, require NodeSubject Get);
         $callback!($($args)*, external_get, "/metrics", metrics_endpoint, require NodeManagement Get);
@@ -1693,6 +1831,10 @@ pub fn build_routes(
     >,
 ) -> Router {
     let auth_safe_mode = AuthSafeMode(bridge.get_config().node.safe_mode);
+    // Node Config is immutable after boot: render the public view once
+    // and serve an Arc clone per poll instead of re-cloning + converting
+    // the whole config on every GET /config.
+    let config_snapshot = Arc::new(ConfigHttp::from(bridge.get_config()));
     let bridge = Arc::new(bridge);
     let proxy = Arc::new(proxy_config);
 
@@ -1703,6 +1845,7 @@ pub fn build_routes(
         .layer(
             ServiceBuilder::new()
                 .layer(Extension(bridge))
+                .layer(Extension(config_snapshot))
                 .layer(Extension(proxy.clone())),
         );
 
@@ -1758,7 +1901,7 @@ pub fn build_routes(
 
         app.fallback(route_not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn(server_error_metrics_layer))
+            .layer(middleware::from_fn(http_metrics_layer))
     } else {
         let app = main_routes;
         #[cfg(feature = "prometheus")]
@@ -1769,7 +1912,7 @@ pub fn build_routes(
         }
         app.fallback(route_not_found)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn(server_error_metrics_layer))
+            .layer(middleware::from_fn(http_metrics_layer))
     }
 }
 

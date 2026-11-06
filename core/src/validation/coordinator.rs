@@ -33,6 +33,22 @@ pub struct ValiCoordinator {
     network: Arc<NetworkSender>,
 }
 
+/// Send-retry budget per remote attempt (test/prod profiles
+/// differ like every other timeout here): the watchdog derives its
+/// envelope from this, so retuning the retry strategy moves the
+/// watchdog with it.
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 1;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(any(test, feature = "test"))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 10;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_ATTEMPTS: usize = 3;
+/// See [`SEND_RETRY_ATTEMPTS`].
+#[cfg(not(any(test, feature = "test")))]
+pub(crate) const SEND_RETRY_INTERVAL_SECS: u64 = 30;
+
 impl ValiCoordinator {
     pub const fn new(
         node_key: PublicKey,
@@ -46,6 +62,53 @@ impl ValiCoordinator {
             version,
             network,
         }
+    }
+
+    /// Notifies the parent that this validator timed out and stops the
+    /// coordinator.
+    async fn timeout_and_stop(
+        &self,
+        ctx: &ActorContext<Self>,
+        msg_type: &'static str,
+    ) {
+        match ctx.get_parent::<Validation>().await {
+            Ok(validation_actor) => {
+                if let Err(e) = validation_actor
+                    .tell(ValidationMessage::Response {
+                        validation_res: Box::new(ValidationRes::TimeOut),
+                        signature: None,
+                        sender: self.node_key.clone(),
+                    })
+                    .await
+                {
+                    // The phase was torn down while this timeout
+                    // was in flight: it is moot, drop it.
+                    debug!(
+                        msg_type = msg_type,
+                        error = %e,
+                        "Validation actor gone, dropping timeout response"
+                    );
+                } else {
+                    debug!(
+                        msg_type = msg_type,
+                        request_id = %self.request_id,
+                        version = self.version,
+                        "Timeout response sent to validation actor"
+                    );
+                }
+            }
+            Err(e) => {
+                // Same teardown race: the phase actor is gone.
+                debug!(
+                    msg_type = msg_type,
+                    error = %e,
+                    path = %ctx.path().parent(),
+                    "Validation actor not found, dropping timeout response"
+                );
+            }
+        }
+
+        ctx.stop(None).await;
     }
 }
 
@@ -102,49 +165,20 @@ impl Handler<Self> for ValiCoordinator {
                     "Retry exhausted, notifying parent and stopping"
                 );
 
-                match ctx.get_parent::<Validation>().await {
-                    Ok(validation_actor) => {
-                        if let Err(e) = validation_actor
-                            .tell(ValidationMessage::Response {
-                                validation_res: Box::new(
-                                    ValidationRes::TimeOut,
-                                ),
-                                signature: None,
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            error!(
-                                error = %e,
-                                "Failed to send timeout response to validation actor"
-                            );
-                            crash_system(ctx, e).await;
-                        } else {
-                            debug!(
-                                request_id = %self.request_id,
-                                version = self.version,
-                                "Timeout response sent to validation actor"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
-                            path = %ctx.path().parent(),
-                            "Validation actor not found"
-                        );
-                        crash_system(ctx, e).await;
-                    }
-                }
-
-                ctx.stop(None).await;
+                self.timeout_and_stop(ctx, "EndRetry").await;
             }
             ValiCoordinatorMessage::NetworkValidation {
                 validation_req,
                 node_key,
             } => {
-                let schema_id = validation_req.content().get_schema_id().expect("The build process verified that the event request is valid");
-                let governance_id = validation_req.content().get_governance_id().expect("The build process verified that the event request is valid");
+                let schema_id = validation_req
+                    .content()
+                    .get_schema_id()
+                    .map_err(|e| ActorError::Functional { description: e })?;
+                let governance_id = validation_req
+                    .content()
+                    .get_governance_id()
+                    .map_err(|e| ActorError::Functional { description: e })?;
 
                 let receiver_actor = if schema_id.is_gov() {
                     format!(
@@ -159,29 +193,23 @@ impl Handler<Self> for ValiCoordinator {
                 };
 
                 // Lanzar evento donde lanzar los retrys
-                let message = NetworkMessage {
-                    info: ComunicateInfo {
+                let message = NetworkMessage::new(
+                    ComunicateInfo {
                         request_id: self.request_id.clone(),
                         version: self.version,
                         receiver: node_key.clone(),
                         receiver_actor,
                     },
-                    message: ActorMessage::ValidationReq {
+                    ActorMessage::ValidationReq {
                         req: *validation_req,
                     },
-                };
+                );
 
                 let target = RetryNetwork::new(self.network.clone());
 
-                #[cfg(any(test, feature = "test"))]
                 let strategy = Strategy::Interval(IntervalStrategy::new(
-                    1,
-                    Duration::from_secs(10),
-                ));
-                #[cfg(not(any(test, feature = "test")))]
-                let strategy = Strategy::Interval(IntervalStrategy::new(
-                    3,
-                    Duration::from_secs(30),
+                    SEND_RETRY_ATTEMPTS,
+                    Duration::from_secs(SEND_RETRY_INTERVAL_SECS),
                 ));
 
                 let retry_actor = RetryActor::new_with_parent_message::<Self>(
@@ -278,23 +306,24 @@ impl Handler<Self> for ValiCoordinator {
                                 })
                                 .await
                             {
-                                error!(
+                                // The phase was torn down while this
+                                // response was in flight: it is moot,
+                                // drop it.
+                                debug!(
                                     msg_type = "NetworkResponse",
                                     error = %e,
-                                    "Failed to send response to validation actor"
+                                    "Validation actor gone, dropping response"
                                 );
-                                return Err(crash_system(ctx, e).await);
                             }
                         }
                         Err(e) => {
-                            error!(
+                            // Same teardown race: the phase actor is gone.
+                            debug!(
                                 msg_type = "NetworkResponse",
                                 error = %e,
                                 path = %ctx.path().parent(),
-                                "Validation actor not found"
+                                "Validation actor not found, dropping response"
                             );
-
-                            return Err(crash_system(ctx, e).await);
                         }
                     };
 
@@ -308,7 +337,7 @@ impl Handler<Self> for ValiCoordinator {
                                 sender = %sender,
                                 "Retry actor not found while closing validation coordinator"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
 
@@ -318,7 +347,7 @@ impl Handler<Self> for ValiCoordinator {
                                 error = %e,
                                 "Failed to end retry actor"
                             );
-                            // Aquí me da igual, porque al parar este actor para el hijo
+                            // Stopping this actor stops the child too
                             break 'retry;
                         };
                     }

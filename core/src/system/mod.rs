@@ -1,10 +1,16 @@
 pub use error::SystemError;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+#[cfg(feature = "test")]
+use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use crate::{
     config::{
-        Config, GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry,
-        TrackerSyncConfig, UpdateSyncConfig,
+        ApprovalConfig, Config, GovernanceSyncConfig, RebootSyncConfig,
+        SinkConfigEntry, TrackerSyncConfig, UpdateSyncConfig,
     },
     db::Database,
     external_db::DBManager,
@@ -13,6 +19,7 @@ use crate::{
 use ave_actors::{
     ActorSystem, DbManager, EncryptedKey, MachineSpec, SystemRef,
 };
+use ave_common::identity::DigestIdentifier;
 use ave_common::identity::hash_borsh;
 #[cfg(feature = "prometheus")]
 use ave_contract_sdk::runtime::ContractMetrics;
@@ -39,16 +46,67 @@ pub struct ConfigHelper {
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
     pub sync_reboot: RebootSyncConfig,
+    pub approval: ApprovalConfig,
+    /// The node has statically configured boot nodes: when false and no
+    /// sync peer is ever discovered, the node is verifiably alone on the
+    /// network (not merely partitioned or slow to discover).
+    pub has_boot_nodes: bool,
     /// Sink configuration entries read from the bridge configuration. Each
     /// entry pairs a [`SinkTarget`] with the list of servers that deliver
     /// events for that target.
     pub sinks: Vec<SinkConfigEntry>,
 }
 
+/// Boot governances still to report reconciliation, shared lock-free
+/// so every actor gates per subject without messaging.
+///
+/// A subject is ready when its governance is absent from this set.
+/// `Node` seeds it at boot and removes on each
+/// `GovernanceReconciled`. Missing
+/// helper (tests that never register it) reads as ready — `system()`
+/// always registers it in production.
+#[derive(Debug, Clone, Default)]
+pub struct PendingReconcile {
+    pending: Arc<std::sync::RwLock<HashSet<DigestIdentifier>>>,
+}
+
+impl PendingReconcile {
+    /// Whether this governance still has to report (false when the
+    /// helper is missing). Lock poison reads as pending: fail loud
+    /// instead of letting traffic into unknown state.
+    pub fn is_pending(&self, governance_id: &DigestIdentifier) -> bool {
+        self.pending
+            .read()
+            .map(|pending| pending.contains(governance_id))
+            .unwrap_or(true)
+    }
+
+    /// Whether every boot governance reported.
+    pub fn is_empty(&self) -> bool {
+        self.pending
+            .read()
+            .map(|pending| pending.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub fn insert(&self, governance_id: DigestIdentifier) {
+        if let Ok(mut pending) = self.pending.write() {
+            pending.insert(governance_id);
+        }
+    }
+
+    pub fn remove(&self, governance_id: &DigestIdentifier) {
+        if let Ok(mut pending) = self.pending.write() {
+            pending.remove(governance_id);
+        }
+    }
+}
+
 impl ConfigHelper {
     pub fn from_config(config: Config, sinks: Vec<SinkConfigEntry>) -> Self {
+        let has_boot_nodes = !config.network.boot_nodes.is_empty();
         Self {
-            contracts_path: config.contracts_path,
+            contracts_path: config.contracts_path(),
             always_accept: config.always_accept,
             safe_mode: config.safe_mode,
             tracking_size: config.tracking_size,
@@ -58,6 +116,8 @@ impl ConfigHelper {
             sync_tracker: config.sync.tracker,
             sync_update: config.sync.update,
             sync_reboot: config.sync.reboot,
+            approval: config.approval,
+            has_boot_nodes,
             sinks,
         }
     }
@@ -71,7 +131,40 @@ pub async fn system(
     crash_token: CancellationToken,
     #[cfg(feature = "prometheus")] mut registry: Option<&mut Registry>,
 ) -> Result<(SystemRef, JoinHandle<()>), SystemError> {
+    // The network message cap must fit the artifact wire budget plus the
+    // envelope headroom: a smaller cap would make artifact responses
+    // silently undeliverable (the network worker drops oversized
+    // outbound messages). The default cap is bound at compile time in
+    // `compilation::artifact`; this catches a configured smaller value.
+    let artifact_budget = crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
+        + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
+    if config.network.max_app_message_bytes < artifact_budget {
+        return Err(SystemError::NetworkConfig(format!(
+            "max_app_message_bytes ({}) is below the artifact wire \
+             budget ({artifact_budget})",
+            config.network.max_app_message_bytes
+        )));
+    }
+
+    // Test builds get the embedded test compiler automatically when no
+    // compiler pool is configured, so any crate driving core with the
+    // `test` feature compiles contracts without extra wiring. An
+    // explicitly configured pool always wins: failure-path tests point
+    // at dead endpoints on purpose.
+    #[cfg(feature = "test")]
+    let config = if config.compiler.endpoints.is_empty() {
+        Config {
+            compiler: crate::test_compiler::test_compiler_config().await,
+            ..config
+        }
+    } else {
+        config
+    };
+
     // Create de actor system.
+    // `system` is only mutated when the prometheus feature registers
+    // metrics into it, hence the conditional allow.
+    #[cfg_attr(not(feature = "prometheus"), allow(unused_mut))]
     let (mut system, mut runner) =
         ActorSystem::create(graceful_token.clone(), crash_token.clone());
 
@@ -82,6 +175,26 @@ pub async fn system(
 
     let config_helper = ConfigHelper::from_config(config.clone(), sinks);
     system.add_helper("config", config_helper);
+    system.add_helper("pending_reconcile", PendingReconcile::default());
+
+    // Local build toolchains selected by governance pin (see the
+    // toolchain-pinning plan): verified once here, read by every
+    // compiler actor afterwards. A broken entry is an operator
+    // misconfiguration and fails the boot loud.
+    let toolchains = crate::compilation::support::Toolchains::from_config(
+        &config.toolchains,
+    )
+    .with_cargo_bin(config.cargo_bin());
+    toolchains.verify().await.map_err(|e| {
+        SystemError::CompilerConfig(format!("invalid toolchains: {e}"))
+    })?;
+    // Registry self-integrity: embedded frozen files must match the
+    // registry hashes byte for byte. A swapped file fails the boot
+    // loud instead of silently resolving different dependencies.
+    ave_common::build::verify_registry_integrity().map_err(|e| {
+        SystemError::CompilerConfig(format!("registry integrity: {e}"))
+    })?;
+    system.add_helper("toolchains", Arc::new(toolchains));
 
     #[cfg(feature = "prometheus")]
     let contract_metrics = registry.map(|registry| {
@@ -107,6 +220,54 @@ pub async fn system(
 
     let contracts: HashMap<String, Arc<CompiledModule>> = HashMap::new();
     system.add_helper("contracts", Arc::new(RwLock::new(contracts)));
+
+    // Test-only fetch observability registry (feature `test`): the e2e
+    // suites read fetch state-machine snapshots through the API.
+    #[cfg(feature = "test")]
+    system.add_helper(
+        "test_fetch_obs",
+        crate::compilation::contract_compiler::SharedFetchObs::default(),
+    );
+
+    // The node never compiles contracts remotely in production: the
+    // gRPC compiler client is a TEST-BUILD helper (embedded pool or
+    // explicit endpoints, e.g. dead ones for failure-path tests).
+    // Production nodes compile in-process (`toolchain` feature); a
+    // node built without it answers `CompilersUnavailable`.
+    #[cfg(feature = "test")]
+    if !config.compiler.endpoints.is_empty() {
+        let expected_toolchain = config
+            .compiler
+            .expected_toolchain
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                SystemError::CompilerConfig(format!(
+                    "invalid expected_toolchain: {e}"
+                ))
+            })?;
+        let compiler_public_key = config
+            .compiler
+            .compiler_public_key
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                SystemError::CompilerConfig(format!(
+                    "invalid compiler_public_key: {e}"
+                ))
+            })?;
+        let compiler_client = crate::compilation::client::CompilerClient::new(
+            config.compiler.endpoints.clone(),
+            config.compiler.api_key.clone().unwrap_or_default(),
+            expected_toolchain,
+            compiler_public_key,
+            Some(Duration::from_secs(config.compiler.request_timeout_secs)),
+            config.compiler.pinned_cert_pem.clone(),
+        );
+        system.add_helper("compiler_client", Arc::new(compiler_client));
+    }
 
     let actor_spec = config.spec.clone().map(MachineSpec::from);
 
@@ -286,7 +447,22 @@ pub mod tests {
                 reboot: RebootSyncConfig::default(),
                 ledger_batch_size: 100,
             },
+            approval: Default::default(),
             spec: None,
+            #[cfg(feature = "test")]
+            compiler: Default::default(),
+            // Unit tests vote and validate exactly like production:
+            // the pin resolves to the real installed toolchain it
+            // names (never system cargo).
+            toolchains: std::collections::BTreeMap::from([(
+                ave_common::governance::DEFAULT_PIN.to_owned(),
+                ave_common::governance::toolchain_info(
+                    ave_common::governance::DEFAULT_PIN,
+                )
+                .map(|entry| entry.rustc_version.to_owned())
+                .unwrap_or_else(|| "1.95.0".to_owned()),
+            )]),
+            cargo_bin: None,
         };
 
         #[cfg(feature = "prometheus")]
@@ -305,5 +481,132 @@ pub mod tests {
         .unwrap();
 
         (sys, handlers, vec_dirs)
+    }
+
+    /// A network message cap below the artifact wire budget (artifact
+    /// payload plus envelope headroom) would make artifact responses
+    /// silently undeliverable, so `system()` must reject it up front,
+    /// before touching any database.
+    #[test(tokio::test)]
+    async fn test_system_rejects_message_cap_below_artifact_budget() {
+        let artifact_budget =
+            crate::compilation::artifact::MAX_ARTIFACT_WIRE_BYTES
+                + crate::compilation::artifact::ARTIFACT_ENVELOPE_HEADROOM_BYTES;
+
+        let dir_ave_db =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_ext_db =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let dir_contracts = create_contracts_temp_dir();
+
+        let mut newtork_config = NetworkConfig::new(
+            ave_network::NodeType::Bootstrap,
+            vec![],
+            vec![],
+            vec![],
+        );
+        newtork_config.max_app_message_bytes = artifact_budget - 1;
+
+        let config = Config {
+            keypair_algorithm: KeyPairAlgorithm::Ed25519,
+            hash_algorithm: HashAlgorithm::Blake3,
+            internal_db: AveInternalDBConfig {
+                db: AveInternalDBFeatureConfig::build(
+                    &dir_ave_db.path().to_path_buf(),
+                ),
+                ..Default::default()
+            },
+            external_db: AveExternalDBConfig {
+                db: AveExternalDBFeatureConfig::build(
+                    &dir_ext_db.path().to_path_buf(),
+                ),
+                ..Default::default()
+            },
+            network: newtork_config,
+            contracts_path: dir_contracts.path().to_path_buf(),
+            always_accept: false,
+            tracking_size: 100,
+            safe_mode: false,
+            is_service: true,
+            only_clear_events: false,
+            sync: SyncConfig {
+                governance: GovernanceSyncConfig {
+                    interval_secs: 60,
+                    sample_size: 3,
+                    response_timeout_secs: 30,
+                },
+                tracker: TrackerSyncConfig {
+                    interval_secs: 60,
+                    page_size: 200,
+                    response_timeout_secs: 10,
+                    update_batch_size: 2,
+                    update_timeout_secs: 10,
+                },
+                update: UpdateSyncConfig::default(),
+                reboot: RebootSyncConfig::default(),
+                ledger_batch_size: 100,
+            },
+            approval: Default::default(),
+            spec: None,
+            #[cfg(feature = "test")]
+            compiler: Default::default(),
+            // Same pinned map as above: unit tests attest like
+            // production.
+            toolchains: std::collections::BTreeMap::from([(
+                ave_common::governance::DEFAULT_PIN.to_owned(),
+                ave_common::governance::toolchain_info(
+                    ave_common::governance::DEFAULT_PIN,
+                )
+                .map(|entry| entry.rustc_version.to_owned())
+                .unwrap_or_else(|| "1.95.0".to_owned()),
+            )]),
+            cargo_bin: None,
+        };
+
+        let result = system(
+            config,
+            Vec::new(),
+            "password",
+            CancellationToken::new(),
+            CancellationToken::new(),
+            #[cfg(feature = "prometheus")]
+            None,
+        )
+        .await;
+
+        match result {
+            Err(SystemError::NetworkConfig(message)) => {
+                assert!(
+                    message.contains("below the artifact wire budget"),
+                    "unexpected NetworkConfig message: {message}"
+                );
+            }
+            Err(err) => {
+                panic!("expected SystemError::NetworkConfig, got {err}")
+            }
+            Ok(_) => {
+                panic!("a message cap below the artifact budget must not start")
+            }
+        }
+    }
+
+    #[test]
+    fn pending_reconcile_gates_per_subject() {
+        use ave_common::identity::DigestIdentifier;
+        let pending = PendingReconcile::default();
+        assert!(pending.is_empty());
+        let gov_a = DigestIdentifier::default();
+        let gov_b =
+            DigestIdentifier::new(HashAlgorithm::Blake3, vec![7; 32]).unwrap();
+        pending.insert(gov_a.clone());
+        pending.insert(gov_b.clone());
+        assert!(!pending.is_empty());
+        assert!(pending.is_pending(&gov_a));
+        assert!(pending.is_pending(&gov_b));
+        pending.remove(&gov_a);
+        assert!(!pending.is_pending(&gov_a));
+        assert!(pending.is_pending(&gov_b));
+        pending.remove(&gov_b);
+        assert!(pending.is_empty());
     }
 }

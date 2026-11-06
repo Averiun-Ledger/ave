@@ -14,6 +14,7 @@ use ave_network::ComunicateInfo;
 use rand::seq::IteratorRandom;
 use tracing::{Span, debug, info_span, warn};
 
+use super::version_sync::SyncPeerBackoff;
 use crate::auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse};
 use crate::governance::witnesses_register::{
     CurrentWitnessSubject, WitnessesRegister, WitnessesRegisterMessage,
@@ -23,11 +24,11 @@ use crate::governance::{
     Governance, GovernanceMessage, GovernanceResponse, model::WitnessesData,
 };
 use crate::helpers::network::{
-    ActorMessage, NetworkMessage, service::NetworkSender,
+    ActorMessage, NetworkMessage, delivery_of, service::NetworkSender,
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
-    get_verified_transfer_sn, node::get_subject_data,
+    crash_system, get_verified_transfer_sn, node::get_subject_data,
     subject::get_tracker_sn_owner,
 };
 use crate::node::SubjectData;
@@ -35,10 +36,22 @@ use crate::node::SubjectData;
 #[derive(Debug, Clone)]
 pub enum TrackerSyncMessage {
     Tick,
-    FetchTimeout { request_nonce: u64 },
-    UpdateTimeout { batch_nonce: u64 },
+    FetchTimeout {
+        request_nonce: u64,
+    },
+    UpdateTimeout {
+        batch_nonce: u64,
+    },
     NetworkRequest(TrackerSyncNetworkRequest),
     NetworkResponse(TrackerSyncNetworkResponse),
+    /// Pushed by the parent governance every time it updates (same
+    /// pattern as `RefreshGovernance` on the version sync): who may
+    /// ask for our witness subject lists. No lazy fetching, no TTL —
+    /// the data is always current because the parent keeps it so.
+    RefreshPeers {
+        members: HashSet<PublicKey>,
+        witnesses: HashSet<PublicKey>,
+    },
 }
 
 impl Message for TrackerSyncMessage {}
@@ -61,7 +74,11 @@ struct FetchState {
 struct UpdateState {
     peer: PublicKey,
     governance_version: u64,
-    pending_items: VecDeque<CurrentWitnessSubject>,
+    /// Pending items with the local sn read while planning:
+    /// launching reuses it instead of re-asking per item (a
+    /// concurrent local advance only overlaps already-have events,
+    /// skipped by sn).
+    pending_items: VecDeque<(CurrentWitnessSubject, Option<u64>)>,
     next_cursor: Option<DigestIdentifier>,
     active_batch: Vec<ActiveUpdate>,
     batch_nonce: u64,
@@ -123,12 +140,36 @@ pub struct TrackerSync {
     update_batch_size: usize,
     update_timeout: Duration,
     next_nonce: u64,
+    round: u64,
+    peer_backoff: SyncPeerBackoff,
     state: SyncState,
     pending_fetch_timeout: Option<TimerKey>,
     pending_update_timeout: Option<TimerKey>,
+    /// Members + gov witnesses allowed to ask for our lists, pushed
+    /// by the parent on every governance update. Zero asks on serve.
+    peers: PeerSet,
+    /// Pages served this cycle. Pagination without a bound lets one
+    /// lying or broken peer hold the cycle (and the tick loop) forever
+    /// by repeating `next_cursor` (SYNC-06).
+    pages_this_cycle: u32,
+    /// Cursor to resume from on the next cycle when the page cap cut
+    /// this one short. Cleared on every full pass so new heads are
+    /// still discovered.
+    resume_cursor: Option<DigestIdentifier>,
 }
 
 const MAX_STALLED_UPDATE_CHECKS: u8 = 3;
+
+/// Pages fetched per cycle before yielding to the next tick. With the
+/// default page size this still covers thousands of subjects per
+/// minute; a peer demanding more is either broken or stalling us.
+const MAX_PAGES_PER_CYCLE: u32 = 100;
+
+#[derive(Debug, Clone, Default)]
+struct PeerSet {
+    members: HashSet<PublicKey>,
+    witnesses: HashSet<PublicKey>,
+}
 
 impl TrackerSync {
     fn observe_round(result: &'static str) {
@@ -160,9 +201,14 @@ impl TrackerSync {
             update_batch_size: config.update_batch_size.max(1),
             update_timeout: config.update_timeout,
             next_nonce: 0,
+            round: 0,
+            peer_backoff: SyncPeerBackoff::default(),
+            peers: PeerSet::default(),
             state: SyncState::Idle,
             pending_fetch_timeout: None,
             pending_update_timeout: None,
+            pages_this_cycle: 0,
+            resume_cursor: None,
         }
     }
 
@@ -297,7 +343,7 @@ impl TrackerSync {
     }
 
     async fn select_peer(
-        &self,
+        &mut self,
         ctx: &ActorContext<Self>,
     ) -> Result<Option<PublicKey>, ActorError> {
         let (gov_peers, sync_peers) = tokio::try_join!(
@@ -307,6 +353,10 @@ impl TrackerSync {
         let mut peers = gov_peers;
         peers.extend(sync_peers);
         peers.remove(&*self.our_key);
+        // Forget gone peers; skip the ones sitting out a silence
+        // backoff — one quiet cycle must not eat every round.
+        self.peer_backoff.prune(&peers);
+        peers.retain(|peer| !self.peer_backoff.is_backed_off(peer, self.round));
 
         let mut rng = rand::rng();
         Ok(peers.into_iter().choose(&mut rng))
@@ -320,12 +370,29 @@ impl TrackerSync {
         after_subject_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         self.cancel_update_timeout(ctx);
+        if after_subject_id.is_none() {
+            // Fresh cycle (tick, gov change, completion): the page
+            // budget restarts and any saved resume point is spent.
+            // Paginated continuations keep counting.
+            self.pages_this_cycle = 0;
+            self.resume_cursor = None;
+        }
+        self.pages_this_cycle += 1;
         let request_nonce = self.allocate_nonce();
 
+        let message = ActorMessage::TrackerSyncReq {
+            subject_id: self.governance_id.clone(),
+            request_nonce,
+            governance_version,
+            after_subject_id,
+            limit: self.page_size,
+            receiver_actor: ctx.path().to_string(),
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: peer.clone(),
                         request_id: String::default(),
                         version: 0,
@@ -334,15 +401,8 @@ impl TrackerSync {
                             self.governance_id
                         ),
                     },
-                    message: ActorMessage::TrackerSyncReq {
-                        subject_id: self.governance_id.clone(),
-                        request_nonce,
-                        governance_version,
-                        after_subject_id,
-                        limit: self.page_size,
-                        receiver_actor: ctx.path().to_string(),
-                    },
-                },
+                    message,
+                ),
             })
             .await?;
 
@@ -387,10 +447,17 @@ impl TrackerSync {
                 .flatten()
                 .map(|(sn, _)| sn);
 
+        let message = ActorMessage::DistributionLedgerReq {
+            actual_sn,
+            target_sn: None,
+            subject_id: subject_id.clone(),
+            already_verified_transfer_sn,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: peer.clone(),
                         request_id: String::default(),
                         version: 0,
@@ -399,13 +466,8 @@ impl TrackerSync {
                             subject_id
                         ),
                     },
-                    message: ActorMessage::DistributionLedgerReq {
-                        actual_sn,
-                        target_sn: None,
-                        subject_id: subject_id.clone(),
-                        already_verified_transfer_sn,
-                    },
-                },
+                    message,
+                ),
             })
             .await
     }
@@ -414,7 +476,8 @@ impl TrackerSync {
         &self,
         ctx: &mut ActorContext<Self>,
         items: Vec<CurrentWitnessSubject>,
-    ) -> Result<VecDeque<CurrentWitnessSubject>, ActorError> {
+    ) -> Result<VecDeque<(CurrentWitnessSubject, Option<u64>)>, ActorError>
+    {
         let banned_set: HashSet<DigestIdentifier> = {
             let access_path = ActorPath::from("/user/node/auth");
             let access = ctx
@@ -425,7 +488,16 @@ impl TrackerSync {
                 Ok(SubjectAccessResponse::Subjects(list)) => {
                     list.into_iter().collect()
                 }
-                _ => HashSet::new(),
+                // Fail closed: an error here must end the cycle loudly
+                // (and retry on the next tick), never sync banned
+                // trackers behind an empty set.
+                Ok(_) => {
+                    return Err(ActorError::UnexpectedResponse {
+                        path: access_path.clone(),
+                        expected: "SubjectAccessResponse::Subjects".to_owned(),
+                    });
+                }
+                Err(e) => return Err(e),
             }
         };
 
@@ -444,7 +516,7 @@ impl TrackerSync {
             let local_sn =
                 self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             if local_sn.is_none_or(|local_sn| local_sn < item.target_sn) {
-                pending_items.push_back(item);
+                pending_items.push_back((item, local_sn));
             }
         }
 
@@ -456,7 +528,7 @@ impl TrackerSync {
         ctx: &mut ActorContext<Self>,
         peer: PublicKey,
         governance_version: u64,
-        pending_items: VecDeque<CurrentWitnessSubject>,
+        pending_items: VecDeque<(CurrentWitnessSubject, Option<u64>)>,
         next_cursor: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         self.cancel_fetch_timeout(ctx);
@@ -477,9 +549,20 @@ impl TrackerSync {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let current_local_version = self.get_governance_version(ctx).await?;
+        if !matches!(self.state, SyncState::Updating(_)) {
+            // Unreachable through the nonce-guarded timeout path, but
+            // `take` below would silently wipe the state if it ever
+            // fired off-state: scream instead of vanishing (SYNC-07).
+            warn!(
+                governance_id = %self.governance_id,
+                state = ?std::mem::discriminant(&self.state),
+                "advance_update_phase called outside Updating state"
+            );
+            return Ok(());
+        }
         let SyncState::Updating(mut state) = std::mem::take(&mut self.state)
         else {
-            return Ok(());
+            unreachable!("checked Updating above");
         };
 
         if current_local_version != state.governance_version {
@@ -548,6 +631,7 @@ impl TrackerSync {
             }
 
             Self::observe_round("completed");
+            self.resume_cursor = None;
             return self.finish_cycle(ctx).await;
         }
 
@@ -555,11 +639,10 @@ impl TrackerSync {
         let peer = state.peer.clone();
         let mut active_batch = Vec::with_capacity(self.update_batch_size);
         for _ in 0..self.update_batch_size {
-            let Some(item) = state.pending_items.pop_front() else {
+            let Some((item, last_seen_sn)) = state.pending_items.pop_front()
+            else {
                 break;
             };
-            let last_seen_sn =
-                self.get_local_tracker_sn(ctx, &item.subject_id).await?;
             self.request_tracker_update(
                 ctx,
                 &peer,
@@ -596,10 +679,26 @@ impl TrackerSync {
             self.schedule_tick(ctx)?;
             return Ok(());
         };
+        self.round += 1;
 
         let governance_version = self.get_governance_version(ctx).await?;
         Self::observe_round("started");
-        self.start_fetch(ctx, peer, governance_version, None).await
+        // Resume where the page cap cut the previous cycle, if
+        // anywhere: a huge fleet is covered over successive cycles
+        // instead of rescanning the head forever.
+        let resume = self.resume_cursor.clone();
+        self.start_fetch(ctx, peer, governance_version, resume)
+            .await
+    }
+
+    /// Whether `sender` may ask for our witness subject list: a
+    /// fellow governance member or governance witness, from the set
+    /// the parent pushes on every update. Strangers get silence, not
+    /// data — the list enumerates what we follow and each answer
+    /// costs a register scan (SYNC-08).
+    fn is_sync_peer(&self, sender: &PublicKey) -> bool {
+        self.peers.members.contains(sender)
+            || self.peers.witnesses.contains(sender)
     }
 
     async fn handle_network_request(
@@ -607,6 +706,14 @@ impl TrackerSync {
         ctx: &ActorContext<Self>,
         request: TrackerSyncNetworkRequest,
     ) -> Result<(), ActorError> {
+        if !self.is_sync_peer(&request.sender) {
+            warn!(
+                governance_id = %self.governance_id,
+                sender = %request.sender,
+                "Ignoring tracker sync request from non-member"
+            );
+            return Ok(());
+        }
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}/witnesses_register",
             self.governance_id
@@ -634,22 +741,24 @@ impl TrackerSync {
             });
         };
 
+        let message = ActorMessage::TrackerSyncRes {
+            request_nonce: request.request_nonce,
+            governance_version,
+            items,
+            next_cursor,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info: ComunicateInfo {
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(
+                    ComunicateInfo {
                         receiver: request.sender,
                         request_id: request.info.request_id,
                         version: request.info.version,
                         receiver_actor: request.receiver_actor,
                     },
-                    message: ActorMessage::TrackerSyncRes {
-                        request_nonce: request.request_nonce,
-                        governance_version,
-                        items,
-                        next_cursor,
-                    },
-                },
+                    message,
+                ),
             })
             .await
     }
@@ -663,6 +772,31 @@ impl TrackerSync {
         self.cancel_update_timeout(ctx);
         self.schedule_tick(ctx)?;
         Ok(())
+    }
+
+    /// A timer or response failure must never stall the sync in a dead
+    /// state with its queue silently dropped: local fatal errors crash,
+    /// anything else ends the cycle loudly (the next tick retries).
+    async fn fail_cycle(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        context: &'static str,
+        error: ActorError,
+    ) -> Result<TrackerSyncResponse, ActorError> {
+        match error {
+            ActorError::FunctionalCritical { .. }
+            | ActorError::Helper { .. } => Err(crash_system(ctx, error).await),
+            error => {
+                warn!(
+                    governance_id = %self.governance_id,
+                    context = context,
+                    error = %error,
+                    "Tracker sync cycle failed, ending cycle"
+                );
+                self.finish_cycle(ctx).await?;
+                Ok(TrackerSyncResponse::None)
+            }
+        }
     }
 }
 
@@ -702,6 +836,9 @@ impl Handler<Self> for TrackerSync {
         ctx: &mut ActorContext<Self>,
     ) -> Result<TrackerSyncResponse, ActorError> {
         match msg {
+            TrackerSyncMessage::RefreshPeers { members, witnesses } => {
+                self.peers = PeerSet { members, witnesses };
+            }
             TrackerSyncMessage::Tick => {
                 if let Err(error) = self.handle_tick(ctx).await {
                     Self::observe_round("error");
@@ -728,7 +865,16 @@ impl Handler<Self> for TrackerSync {
                         request_nonce = request_nonce,
                         "Tracker sync fetch timed out"
                     );
-                    self.finish_cycle(ctx).await?;
+                    // The peer stayed silent the whole round: back it
+                    // off so the next cycles ask someone else. Any
+                    // future answer forgives it at once.
+                    if let SyncState::Fetching(state) = &self.state {
+                        let peer = state.peer.clone();
+                        self.peer_backoff.note_failure(&peer, self.round);
+                    }
+                    if let Err(e) = self.finish_cycle(ctx).await {
+                        return self.fail_cycle(ctx, "fetch timeout", e).await;
+                    }
                 }
             }
             TrackerSyncMessage::UpdateTimeout { batch_nonce } => {
@@ -739,8 +885,10 @@ impl Handler<Self> for TrackerSync {
                         if state.batch_nonce == batch_nonce
                 );
 
-                if timed_out {
-                    self.advance_update_phase(ctx).await?;
+                if timed_out
+                    && let Err(e) = self.advance_update_phase(ctx).await
+                {
+                    return self.fail_cycle(ctx, "update timeout", e).await;
                 }
             }
             TrackerSyncMessage::NetworkRequest(request) => {
@@ -766,7 +914,44 @@ impl Handler<Self> for TrackerSync {
                     _ => return Ok(TrackerSyncResponse::None),
                 };
 
+                // Bound inbound page size before per-item DB work: the
+                // server clamps its scan to 1024 entries, so anything
+                // larger is abusive. Truncate to keep cycle progress.
+                let mut items = items;
+                if items.len() > 1024 {
+                    warn!(
+                        governance_id = %self.governance_id,
+                        peer = %peer,
+                        item_count = items.len(),
+                        "Oversized sync page truncated"
+                    );
+                    items.truncate(1024);
+                }
+
+                // Page budget spent but the peer keeps paging: save where
+                // to resume next tick and yield instead of letting one
+                // peer hold the cycle (and the tick loop) forever
+                // (SYNC-06). A finished list (`next_cursor: None`)
+                // completes normally below.
+                if next_cursor.is_some()
+                    && self.pages_this_cycle >= MAX_PAGES_PER_CYCLE
+                {
+                    warn!(
+                        governance_id = %self.governance_id,
+                        peer = %peer,
+                        pages = self.pages_this_cycle,
+                        "Sync page budget spent, resuming next cycle"
+                    );
+                    Self::observe_round("page_capped");
+                    self.resume_cursor = next_cursor;
+                    self.finish_cycle(ctx).await?;
+                    return Ok(TrackerSyncResponse::None);
+                }
+
                 self.cancel_fetch_timeout(ctx);
+                // It answered: alive, whatever the page says — forgive
+                // any silence backoff on the spot.
+                self.peer_backoff.note_success(&peer);
 
                 debug!(
                     governance_id = %self.governance_id,
@@ -778,49 +963,66 @@ impl Handler<Self> for TrackerSync {
                     "Received tracker sync page"
                 );
 
-                let local_governance_version =
-                    self.get_governance_version(ctx).await?;
-                let effective_governance_version =
-                    local_governance_version.max(governance_version);
+                // The fetch timeout is already cancelled above: any
+                // failure from here must end the cycle loudly instead
+                // of stalling without a timeout.
+                let page_result: Result<TrackerSyncResponse, ActorError> =
+                    async {
+                        let local_governance_version =
+                            self.get_governance_version(ctx).await?;
+                        let effective_governance_version =
+                            local_governance_version.max(governance_version);
 
-                if effective_governance_version != active_governance_version {
-                    Self::observe_round("gov_changed");
-                    self.start_fetch(
-                        ctx,
-                        active_peer,
-                        effective_governance_version,
-                        None,
-                    )
-                    .await?;
-                    return Ok(TrackerSyncResponse::None);
-                }
+                        if effective_governance_version
+                            != active_governance_version
+                        {
+                            Self::observe_round("gov_changed");
+                            self.start_fetch(
+                                ctx,
+                                active_peer,
+                                effective_governance_version,
+                                None,
+                            )
+                            .await?;
+                            return Ok(TrackerSyncResponse::None);
+                        }
 
-                let pending_items =
-                    self.build_pending_updates(ctx, items).await?;
-                if pending_items.is_empty() {
-                    if let Some(after_subject_id) = next_cursor {
-                        self.start_fetch(
+                        let pending_items =
+                            self.build_pending_updates(ctx, items).await?;
+                        if pending_items.is_empty() {
+                            if let Some(after_subject_id) = next_cursor {
+                                self.start_fetch(
+                                    ctx,
+                                    active_peer,
+                                    governance_version,
+                                    Some(after_subject_id),
+                                )
+                                .await?;
+                            } else {
+                                Self::observe_round("completed");
+                                // Full pass done: drop any saved resume
+                                // point so the next cycle scans from the
+                                // head and discovers new subjects.
+                                self.resume_cursor = None;
+                                self.finish_cycle(ctx).await?;
+                            }
+                            return Ok(TrackerSyncResponse::None);
+                        }
+
+                        self.start_update_phase(
                             ctx,
                             active_peer,
                             governance_version,
-                            Some(after_subject_id),
+                            pending_items,
+                            next_cursor,
                         )
                         .await?;
-                    } else {
-                        Self::observe_round("completed");
-                        self.finish_cycle(ctx).await?;
+                        Ok(TrackerSyncResponse::None)
                     }
-                    return Ok(TrackerSyncResponse::None);
+                    .await;
+                if let Err(e) = page_result {
+                    return self.fail_cycle(ctx, "network response", e).await;
                 }
-
-                self.start_update_phase(
-                    ctx,
-                    active_peer,
-                    governance_version,
-                    pending_items,
-                    next_cursor,
-                )
-                .await?;
             }
         }
 

@@ -1,6 +1,6 @@
 [package]
 name = "ave-http"
-version = "0.12.0"
+version = "0.13.0"
 edition.workspace = true
 authors.workspace = true
 description = "HTTP API server for the Ave runtime, auth system, and admin surface"
@@ -32,14 +32,14 @@ axum-server = { workspace = true }
 axum = { workspace = true }
 ip_network = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.7.1", features = ["trace", "cors", "set-header"] }
 utoipa = { workspace = true, features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 tokio-util = { workspace = true }
 
 # Auth system dependencies
 ave-actors = { workspace = true, default-features = false, features = ["export-sqlite"] }
-argon2 = { version = "0.5.3", features = ["std"] }
+argon2 = { version = "0.6.0" }
 sha2 = { workspace = true }
 hex = "0.4.3"
 rand = { workspace = true }
@@ -51,6 +51,10 @@ rcgen = "0.14"
 x509-parser = "0.18"
 
 [dev-dependencies]
+# Self dev-dependency: enables the `test` feature whenever test targets
+# are built, so plain `cargo test` keeps custom config paths without
+# needing `--features test` (same pattern as ave-core).
+ave-http = { path = ".", features = ["test"] }
 test-log = { workspace = true }
 tempfile = { workspace = true }
 chrono = "0.4.45"
@@ -63,3 +67,6 @@ sqlite = ["ave-bridge/sqlite"]
 ext-sqlite = ["ave-bridge/ext-sqlite"]
 prometheus = ["ave-bridge/prometheus", "ave-core/prometheus", "dep:prometheus-client"]
 test = ["ave-bridge/test"]
+# In-process contract toolchain (cargo + rustc): only images built
+# with this feature can take the compiler role (light images omit it).
+toolchain = ["ave-core/toolchain"]

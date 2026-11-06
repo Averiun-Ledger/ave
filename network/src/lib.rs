@@ -30,7 +30,7 @@ pub use libp2p::{
 pub use monitor::*;
 pub use routing::{Config as RoutingConfig, RoutingNode};
 pub use service::NetworkService;
-pub use utils::NetworkState;
+pub use utils::{MAX_APP_MESSAGE_BYTES, NetworkState};
 pub use worker::{NetworkWorker, NetworkWorkerRuntime};
 
 use bytes::Bytes;
@@ -236,7 +236,7 @@ impl MemoryLimitsConfig {
     pub fn validate(&self) -> Result<(), CommonError> {
         match self {
             Self::Percentage { value } => {
-                if *value <= 0.0 || *value > 1.0 {
+                if !value.is_finite() || *value <= 0.0 || *value > 1.0 {
                     return Err(CommonError::InvalidConfiguration {
                         component: "network.memory_limits".to_string(),
                         reason: format!(
@@ -322,6 +322,25 @@ pub struct Config {
     /// `0` disables the global bytes limit.
     #[serde(default = "default_max_pending_inbound_bytes_total")]
     pub max_pending_inbound_bytes_total: usize,
+
+    /// Maximum queued messages per peer (count, not bytes).
+    /// Must be at least 1.
+    #[serde(default = "default_max_pending_messages_per_peer")]
+    pub max_pending_messages_per_peer: usize,
+
+    /// Maximum age in seconds of a queued outbound message before it is
+    /// purged. `0` disables the TTL. The TTL is enforced lazily (on
+    /// insert and on flush, no periodic sweep): with the default
+    /// disconnect-retry cap (~8 attempts, tens of seconds) the retry
+    /// cap, not the TTL, normally decides how long a message waits.
+    #[serde(default = "default_pending_outbound_ttl_secs")]
+    pub pending_outbound_ttl_secs: u64,
+
+    /// Maximum age in seconds of a buffered inbound message before it is
+    /// purged. `0` disables the TTL. Enforced on insert and on the
+    /// identify flush, mirroring the outbound side.
+    #[serde(default = "default_pending_inbound_ttl_secs")]
+    pub pending_inbound_ttl_secs: u64,
 }
 
 impl Config {
@@ -349,6 +368,10 @@ impl Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            max_pending_messages_per_peer:
+                default_max_pending_messages_per_peer(),
+            pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
+            pending_inbound_ttl_secs: default_pending_inbound_ttl_secs(),
         }
     }
 }
@@ -373,6 +396,18 @@ const fn default_max_pending_inbound_bytes_total() -> usize {
     crate::utils::DEFAULT_MAX_PENDING_INBOUND_BYTES_TOTAL
 }
 
+const fn default_max_pending_messages_per_peer() -> usize {
+    crate::utils::DEFAULT_MAX_PENDING_MESSAGES_PER_PEER
+}
+
+const fn default_pending_outbound_ttl_secs() -> u64 {
+    180
+}
+
+const fn default_pending_inbound_ttl_secs() -> u64 {
+    180
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -392,6 +427,10 @@ impl Default for Config {
                 default_max_pending_outbound_bytes_total(),
             max_pending_inbound_bytes_total:
                 default_max_pending_inbound_bytes_total(),
+            max_pending_messages_per_peer:
+                default_max_pending_messages_per_peer(),
+            pending_outbound_ttl_secs: default_pending_outbound_ttl_secs(),
+            pending_inbound_ttl_secs: default_pending_inbound_ttl_secs(),
         }
     }
 }
@@ -524,6 +563,13 @@ impl Config {
             "max_pending_inbound_bytes_total",
         )?;
 
+        if self.max_pending_messages_per_peer == 0 {
+            return Err(CommonError::InvalidConfiguration {
+                component: "network.max_pending_messages_per_peer".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+
         if self.control_list.get_enable()
             && self.control_list.get_allow_list().is_empty()
             && self.control_list.get_service_allow_list().is_empty()
@@ -562,6 +608,27 @@ impl fmt::Display for NodeType {
     }
 }
 
+/// Delivery policy for an outbound message that can not be sent
+/// immediately.
+///
+/// `Queued` is deliberately the default: without an explicit policy
+/// the message is buffered (bounded, with TTL) instead of silently
+/// dropped. Every production sender sets this explicitly via
+/// `delivery_of`; the default only covers deserialized messages
+/// missing the field.
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default,
+)]
+pub enum Delivery {
+    /// Buffer the message in the per-peer pending queue until the peer
+    /// is reachable again.
+    #[default]
+    Queued,
+    /// Drop the message: the sender has its own retry machine and will
+    /// retransmit by design.
+    Direct,
+}
+
 /// Command enumeration for the network service.
 #[derive(Debug)]
 pub enum Command {
@@ -571,6 +638,8 @@ pub enum Command {
         peer: PeerId,
         /// The message to send.
         message: Bytes,
+        /// What to do when the message can not be sent immediately.
+        delivery: Delivery,
     },
 }
 
@@ -594,6 +663,9 @@ where
     SendMessage {
         /// The message to send.
         message: T,
+        /// What to do when the message can not be sent immediately.
+        #[serde(default)]
+        delivery: Delivery,
     },
     /// Received a message.
     ReceivedMessage {
@@ -665,6 +737,20 @@ mod tests {
             MemoryLimitsConfig::Percentage { value: 1.5 }
                 .validate()
                 .is_err()
+        );
+        // Non-finite percentages must not slip through into a zero
+        // threshold that blocks all new connections.
+        assert!(
+            MemoryLimitsConfig::Percentage { value: f64::NAN }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            MemoryLimitsConfig::Percentage {
+                value: f64::INFINITY
+            }
+            .validate()
+            .is_err()
         );
     }
 

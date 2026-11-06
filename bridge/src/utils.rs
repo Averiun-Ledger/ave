@@ -41,8 +41,15 @@ pub fn validate_keys_path(path: &std::path::Path) -> Result<(), String> {
         ancestor
     };
 
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
+    let test_file =
+        target.join(format!(".ave_write_test.{}", std::process::id()));
+    // Exclusive create: never truncate a pre-existing file or follow a
+    // pre-existing symlink at the probe path.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_file)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&test_file);
         }
@@ -58,12 +65,12 @@ pub fn key_pair(
     config: &Config,
     password: &str,
 ) -> Result<KeyPair, BridgeError> {
-    if fs::metadata(&config.keys_path).is_err() {
-        fs::create_dir_all(&config.keys_path)
+    if fs::metadata(config.keys_path()).is_err() {
+        fs::create_dir_all(config.keys_path())
             .map_err(|e| BridgeError::KeyDirectoryCreation(e.to_string()))?;
     }
 
-    let path = config.keys_path.join("node_private.der");
+    let path = config.keys_path().join("node_private.der");
     match fs::metadata(&path) {
         Ok(metadata) => {
             // Self-heal permissions of keys written before the owner-only
@@ -135,8 +142,25 @@ pub fn key_pair(
             // policy as the HTTP auth key files). A leftover `.tmp` after a
             // crash is harmless: the next start regenerates and renames.
             let tmp_path = path.with_extension("der.tmp");
-            fs::write(&tmp_path, enc_pk.as_bytes())
-                .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+            // Drop any stale probe/output first so a pre-existing symlink
+            // can never divert the private key bytes elsewhere.
+            let _ = fs::remove_file(&tmp_path);
+            {
+                use std::io::Write;
+                #[cfg(unix)]
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                opts.mode(0o600);
+                let mut f = opts
+                    .open(&tmp_path)
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+                f.write_all(enc_pk.as_bytes())
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+                f.sync_all()
+                    .map_err(|e| BridgeError::KeyWrite(e.to_string()))?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -219,8 +243,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let config = test_config(dir.path());
 
-        let first =
-            key_pair(&config, "test-password").expect("key pair should generate");
+        let first = key_pair(&config, "test-password")
+            .expect("key pair should generate");
         let key_path = dir.path().join("node_private.der");
 
         // Simulate a key written before the owner-only policy (0644).
@@ -238,10 +262,7 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "loose permissions must be tightened on read"
-        );
+        assert_eq!(mode, 0o600, "loose permissions must be tightened on read");
         assert_eq!(
             first.public_key().to_string(),
             second.public_key().to_string(),
@@ -267,11 +288,17 @@ mod tests {
         // Make the key file un-statable (no search permission on the
         // directory): a transient IO error must surface as KeyRead, not as
         // a silent identity regeneration.
-        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod should succeed");
+        std::fs::set_permissions(
+            &keys_dir,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod should succeed");
         let result = key_pair(&config, "test-password");
-        std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod restore should succeed");
+        std::fs::set_permissions(
+            &keys_dir,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod restore should succeed");
 
         assert!(
             matches!(result, Err(BridgeError::KeyRead(_))),

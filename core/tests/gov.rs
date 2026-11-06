@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    error::Error,
     str::FromStr,
     sync::atomic::Ordering,
     time::Duration,
@@ -11,7 +10,7 @@ mod common;
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
     bridge::{
-        request::{ApprovalStateRes, SinkEventsQuery},
+        request::ApprovalStateRes,
         response::{EvalResDB, RequestEventDB},
     },
     identity::{
@@ -19,8 +18,9 @@ use ave_common::{
         keys::{Ed25519Signer, KeyPair},
     },
     response::RequestState,
-    sink::{DataToSink, DataToSinkEvent},
+    sink::DataToSinkEvent,
 };
+use ave_core::Api;
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
 use ave_core::governance::model::{
@@ -30,71 +30,21 @@ use ave_core::governance::model::{
 
 use ave_network::{NodeType, RoutingNode};
 use common::{
-    CreateNodeConfig, CreateNodesAndConnectionsConfig,
-    create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_approve, emit_confirm, emit_eol, emit_fact,
-    emit_reject, emit_transfer, get_events, get_subject,
+    CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
+    EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
+    assert_governance_properties_eq, create_and_authorize_governance,
+    create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
+    emit_eol, emit_fact, emit_reject, emit_transfer, get_events, get_subject,
+    governance_properties, wait_sink_events,
 };
 use futures::future::join_all;
-use serde_json::{Value, from_value, json};
+use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, get_abort_request, node_running,
+    PORT_COUNTER, create_node, get_abort_request, node_running, wait_request,
     wait_request_state,
 };
-
-const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
-const INVALID_EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXp";
-const CHANGED_SCHEMA_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgZGF0YTogU3RyaW5nCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0KZW51bSBTdGF0ZUV2ZW50IHsKICBDaGFuZ2VEYXRhIHsgZGF0YTogU3RyaW5nIH0sCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gbWFpbl9mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMiwgaW5pdF9zdGF0ZV9wdHI6IGkzMiwgZXZlbnRfcHRyOiBpMzIsIGlzX293bmVyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpleGVjdXRlX2NvbnRyYWN0KHN0YXRlX3B0ciwgaW5pdF9zdGF0ZV9wdHIsIGV2ZW50X3B0ciwgaXNfb3duZXIsIGNvbnRyYWN0X2xvZ2ljKQp9CgojW3Vuc2FmZShub19tYW5nbGUpXQpwdWIgdW5zYWZlIGZuIGluaXRfY2hlY2tfZnVuY3Rpb24oc3RhdGVfcHRyOiBpMzIpIC0+IHUzMiB7CiAgc2RrOjpjaGVja19pbml0X2RhdGEoc3RhdGVfcHRyLCBpbml0X2xvZ2ljKQp9CgpmbiBpbml0X2xvZ2ljKAogIF9zdGF0ZTogJlN0YXRlLAogIGNvbnRyYWN0X3Jlc3VsdDogJm11dCBzZGs6OkNvbnRyYWN0SW5pdENoZWNrLAopIHsKICBjb250cmFjdF9yZXN1bHQuc3VjY2VzcyA9IHRydWU7Cn0KCmZuIGNvbnRyYWN0X2xvZ2ljKAogIGNvbnRleHQ6ICZzZGs6OkNvbnRleHQ8U3RhdGVFdmVudD4sCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RSZXN1bHQ8U3RhdGU+LAopIHsKICBsZXQgc3RhdGUgPSAmbXV0IGNvbnRyYWN0X3Jlc3VsdC5zdGF0ZTsKICBtYXRjaCBjb250ZXh0LmV2ZW50LmNsb25lKCkgewogICAgICBTdGF0ZUV2ZW50OjpDaGFuZ2VEYXRhIHsgZGF0YSB9ID0+IHsKICAgICAgICBzdGF0ZS5kYXRhID0gZGF0YS5jbG9uZSgpOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQo=";
-
-#[track_caller]
-fn assert_governance_properties_eq(actual: Value, expected: GovernanceData) {
-    let actual: GovernanceData = from_value(actual).unwrap();
-    assert_eq!(actual, expected);
-}
-
-#[track_caller]
-fn governance_properties(actual: Value) -> GovernanceData {
-    from_value(actual).unwrap()
-}
-
-async fn wait_sink_events(
-    node: &ave_core::Api,
-    subject_id: DigestIdentifier,
-    expected_len: usize,
-) -> Result<Vec<DataToSink>, Box<dyn Error>> {
-    let mut attempts = 0;
-    loop {
-        let page = node
-            .get_sink_events(
-                subject_id.clone(),
-                SinkEventsQuery {
-                    from_sn: Some(0),
-                    to_sn: None,
-                    limit: Some(100),
-                },
-            )
-            .await?;
-
-        if page.events.len() == expected_len {
-            return Ok(page.events);
-        }
-
-        if attempts > 100 {
-            return Err(format!(
-                "timeout waiting for sink events for subject {} at len {}, actual len {}",
-                subject_id,
-                expected_len,
-                page.events.len()
-            )
-            .into());
-        }
-
-        attempts += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
 
 #[test(tokio::test)]
 //  Verificar que update protocol actualiza pasivamente la gobernanza, a un testigo.
@@ -230,7 +180,6 @@ async fn test_update_protocol() {
         .await
         .unwrap();
 }
-
 #[test(tokio::test)]
 //  El owner perdió el ledger, se lo pidió a un testigo que no tenía la última versión
 // la siguiente request se aborta.
@@ -524,7 +473,6 @@ async fn test_approve_invalid_gov_version() {
         .await
         .unwrap();
 }
-
 #[test(tokio::test)]
 // El el init state es invalido, se aborata la request
 async fn test_invalid_init_state() {
@@ -591,101 +539,22 @@ async fn test_invalid_init_state() {
                     signers: BTreeSet::from(["Owner".to_owned()]),
                     any: false,
                 },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
             },
             policies_gov: PolicyGov {
                 approve: Quorum::Majority,
                 evaluate: Quorum::Majority,
                 validate: Quorum::Majority,
+                compile: Quorum::Majority,
             },
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
             policies_schema: BTreeMap::new(),
         },
     );
 }
-
-#[test(tokio::test)]
-// El contrato es invalido, se aborata la request
-async fn test_invalid_contract() {
-    //  Ephemeral -> Bootstrap ≤- Addressable
-    let (nodes, _dirs) =
-        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-            bootstrap: vec![vec![]],
-            always_accept: true,
-            ..Default::default()
-        })
-        .await;
-    let node = &nodes[0].api;
-
-    let governance_id = create_and_authorize_governance(node, vec![]).await;
-
-    // add node bootstrap and ephemeral to governance
-    let json = json!({
-        "schemas": {
-            "add": [
-                {
-                    "id": "Example",
-                    "contract": INVALID_EXAMPLE_CONTRACT,
-                    "initial_value": {
-                        "one": 0,
-                        "two": 0,
-                        "three": 0
-                    }
-                }
-            ]
-        },
-    });
-
-    emit_fact(node, governance_id.clone(), json, true)
-        .await
-        .unwrap();
-
-    let state = get_subject(node, governance_id.clone(), None, true)
-        .await
-        .unwrap();
-
-    assert_eq!(state.subject_id, governance_id.to_string());
-    assert_eq!(state.governance_id, governance_id.to_string());
-    assert_eq!(state.genesis_gov_version, 0);
-    assert_eq!(state.namespace, "");
-    assert_eq!(state.schema_id, "governance");
-    assert_eq!(state.owner, node.public_key());
-    assert_eq!(state.new_owner, None);
-    assert_eq!(state.creator, node.public_key());
-    assert!(state.active);
-    assert_eq!(state.sn, 0);
-    assert_governance_properties_eq(
-        state.properties,
-        GovernanceData {
-            version: 0,
-            members: BTreeMap::from([(
-                "Owner".to_owned(),
-                PublicKey::from_str(node.public_key()).unwrap(),
-            )]),
-            roles_gov: RolesGov {
-                approver: BTreeSet::from(["Owner".to_owned()]),
-                evaluator: BTreeSet::from(["Owner".to_owned()]),
-                validator: BTreeSet::from(["Owner".to_owned()]),
-                witness: BTreeSet::from(["Owner".to_owned()]),
-                issuer: RoleGovIssuer {
-                    signers: BTreeSet::from(["Owner".to_owned()]),
-                    any: false,
-                },
-            },
-            policies_gov: PolicyGov {
-                approve: Quorum::Majority,
-                evaluate: Quorum::Majority,
-                validate: Quorum::Majority,
-            },
-            schemas: BTreeMap::new(),
-            roles_schema: BTreeMap::new(),
-            roles_tracker_schemas: RolesTrackerSchemas::default(),
-            policies_schema: BTreeMap::new(),
-        },
-    );
-}
-
 #[test(tokio::test)]
 //  Verificar que se puede crear una gobernanza, sujeto y emitir un evento además de recibir la copia
 async fn test_governance_and_subject_copy_with_approve() {
@@ -879,7 +748,6 @@ async fn test_governance_and_subject_copy_with_approve() {
         })
     );
 }
-
 #[test(tokio::test)]
 // Caso de uso básico 1 bootstrap (intermediario), 1 ephemeral(issuer de subject),
 // 1 addressable(owner de la gobernanza)
@@ -974,15 +842,18 @@ async fn test_basic_use_case_1b_1e_1a() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected.clone());
@@ -1023,7 +894,6 @@ async fn test_basic_use_case_1b_1e_1a() {
     assert_eq!(state.sn, 1);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 async fn test_many_schema_in_one_governance() {
     let (nodes, _dirs) =
@@ -1105,11 +975,13 @@ async fn test_many_schema_in_one_governance() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::from([
             (
@@ -1158,6 +1030,7 @@ async fn test_many_schema_in_one_governance() {
             ),
         ]),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::from([
             (
                 SchemaType::Type("Example1".to_owned()),
@@ -1184,7 +1057,6 @@ async fn test_many_schema_in_one_governance() {
     };
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza
 async fn test_transfer_event_governance_1() {
@@ -1216,6 +1088,7 @@ async fn test_transfer_event_governance_1() {
                 "governance": {
                     "add": {
                         "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
                     }
                 }
             }
@@ -1290,15 +1163,18 @@ async fn test_transfer_event_governance_1() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected);
@@ -1341,20 +1217,124 @@ async fn test_transfer_event_governance_1() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected);
 }
+/// Bounded poll for a governance owner change: an unreachable confirm
+/// must fail the test instead of hanging it forever.
+async fn wait_gov_owner(
+    node: &Api,
+    governance_id: DigestIdentifier,
+    expected_owner: String,
+    max_secs: u64,
+) {
+    for _ in 0..(max_secs * 10 / 3) {
+        if let Ok(state) = node.get_subject_state(governance_id.clone()).await
+            && state.owner == expected_owner
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!(
+        "timeout waiting for governance {governance_id} owner {expected_owner}"
+    );
+}
+#[test(tokio::test)]
+// Transferencia donde un tercer nodo es el único validador continuo:
+// tras el transfer el tercer nodo sigue validando pero la clave del
+// owner cambió, así que su worker tiene que aprender la nueva clave
+// para aceptar el confirm. El confirm solo commitea si el tercer nodo
+// lo valida (quórum 2 de 2 junto al nuevo owner).
+async fn test_transfer_confirm_with_third_party_validator() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let old_owner = &nodes[0].api;
+    let new_owner = &nodes[1].api;
+    let third = &nodes[2].api;
 
+    let governance_id =
+        create_and_authorize_governance(old_owner, vec![new_owner, third])
+            .await;
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "NewOwner",
+                    "key": new_owner.public_key()
+                },
+                {
+                    "name": "Third",
+                    "key": third.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": ["NewOwner", "Third"],
+                    "validator": ["Third"]
+                }
+            }
+        }
+    });
+    emit_fact(old_owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The third node validates the transfer together with the old
+    // owner: its worker still expects the old owner key here.
+    emit_transfer(
+        old_owner,
+        governance_id.clone(),
+        PublicKey::from_str(new_owner.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The confirm is signed by the new owner: without the key update
+    // the third node drops it and the ownership never changes.
+    emit_confirm(new_owner, governance_id.clone(), None, false)
+        .await
+        .unwrap();
+    wait_gov_owner(
+        new_owner,
+        governance_id.clone(),
+        new_owner.public_key().to_string(),
+        60,
+    )
+    .await;
+
+    let state = get_subject(new_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, new_owner.public_key());
+    assert_eq!(state.new_owner, None);
+    assert!(state.active);
+}
 #[test(tokio::test)]
 // Testear la transferencia de gobernanza, pero el owner se queda como miembro
 async fn test_transfer_event_governance_2() {
@@ -1392,6 +1372,7 @@ async fn test_transfer_event_governance_2() {
                 "governance": {
                     "add": {
                         "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
                     }
                 }
             }
@@ -1410,7 +1391,10 @@ async fn test_transfer_event_governance_2() {
     .await
     .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1421,7 +1405,8 @@ async fn test_transfer_event_governance_2() {
     );
     assert_eq!(transfer_data[0].subject_id, governance_id);
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1442,10 +1427,14 @@ async fn test_transfer_event_governance_2() {
     .await
     .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     let fake_node = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
@@ -1508,15 +1497,18 @@ async fn test_transfer_event_governance_2() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
     assert_governance_properties_eq(state.properties, expected.clone());
@@ -1537,7 +1529,6 @@ async fn test_transfer_event_governance_2() {
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 async fn test_governance_fail_approve() {
     // Bootstrap ≤- Addressable
@@ -1587,7 +1578,7 @@ async fn test_governance_fail_approve() {
     .await
     .unwrap();
 
-    let state = get_subject(node1, governance_id.clone(), None, true)
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(state.subject_id, governance_id.to_string());
@@ -1617,20 +1608,172 @@ async fn test_governance_fail_approve() {
                     signers: BTreeSet::from(["Owner".to_owned()]),
                     any: false,
                 },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
             },
             policies_gov: PolicyGov {
                 approve: Quorum::Majority,
                 evaluate: Quorum::Majority,
                 validate: Quorum::Majority,
+                compile: Quorum::Majority,
             },
             schemas: BTreeMap::new(),
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
             policies_schema: BTreeMap::new(),
         },
     );
 }
+#[test(tokio::test)]
+// A rejected governance fact commits to the ledger but must not touch
+// properties or registers: what failed only leaves its ledger record.
+// A later approved fact proves the apply path still advances.
+async fn test_failed_fact_writes_no_registers() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = &nodes[0].api;
 
+    let governance_id = create_and_authorize_governance(node1, vec![]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(evaluators, vec![owner_key.clone()]);
+
+    let fake_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": fake_key.clone()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["AveNode1"],
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Rejected,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Ledger record exists, properties untouched.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(state.owner, node1.public_key());
+    assert_governance_properties_eq(
+        state.properties,
+        GovernanceData {
+            version: 0,
+            members: BTreeMap::from([("Owner".to_owned(), owner_key.clone())]),
+            roles_gov: RolesGov {
+                approver: BTreeSet::from(["Owner".to_owned()]),
+                evaluator: BTreeSet::from(["Owner".to_owned()]),
+                validator: BTreeSet::from(["Owner".to_owned()]),
+                witness: BTreeSet::from(["Owner".to_owned()]),
+                issuer: RoleGovIssuer {
+                    signers: BTreeSet::from(["Owner".to_owned()]),
+                    any: false,
+                },
+                compiler: BTreeSet::from(["Owner".to_owned()]),
+            },
+            policies_gov: PolicyGov {
+                approve: Quorum::Majority,
+                evaluate: Quorum::Majority,
+                validate: Quorum::Majority,
+                compile: Quorum::Majority,
+            },
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            toolchain: GovernanceData::default().toolchain,
+            policies_schema: BTreeMap::new(),
+        },
+    );
+
+    // Registers untouched: the rejected grant never landed.
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(evaluators, vec![owner_key.clone()]);
+
+    // An approved follow-up still applies and advances markers.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": fake_key
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["AveNode1"],
+                }
+            }
+        }
+    });
+
+    let request_id_followup =
+        emit_fact(node1, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_followup,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(node1, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(governance_properties(state.properties).version, 1);
+
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(evaluators.contains(&PublicKey::from_str(&fake_key).unwrap()));
+
+    node_running(node1).await.unwrap();
+}
 #[test(tokio::test)]
 // Varios approvers y todos dicen que sí, se cumple el quorum.
 async fn test_governance_manual_many_approvers() {
@@ -1782,15 +1925,18 @@ async fn test_governance_manual_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -1837,7 +1983,6 @@ async fn test_governance_manual_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Varios approvers y todos dicen que sí, se cumple el quorum. de forma automática.
 async fn test_governance_auto_many_approvers() {
@@ -1960,15 +2105,18 @@ async fn test_governance_auto_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2015,7 +2163,6 @@ async fn test_governance_auto_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Varios approvers pero uno dice que no y el quorum no se cumple.
 async fn test_governance_not_quorum_many_approvers() {
@@ -2163,15 +2310,18 @@ async fn test_governance_not_quorum_many_approvers() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Fixed(100),
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2218,7 +2368,6 @@ async fn test_governance_not_quorum_many_approvers() {
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Se añade un evaluador, se evalua, se le elimina y se vuelve a evaluar.
 async fn test_change_roles_gov() {
@@ -2243,7 +2392,8 @@ async fn test_change_roles_gov() {
             "add": {
                 "witness": ["AveNode1"],
                 "evaluator": ["AveNode1"],
-                "validator": ["AveNode1"]
+                "validator": ["AveNode1"],
+                "compiler": ["AveNode1"]
             }
         }
     },
@@ -2272,6 +2422,13 @@ async fn test_change_roles_gov() {
                 "key": fake_node_1
             }
         ]
+    },
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode2"]
+            }
+        }
     }});
 
     emit_fact(owner_governance, governance_id.clone(), json, true)
@@ -2312,15 +2469,22 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode1".to_owned(),
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2359,7 +2523,8 @@ async fn test_change_roles_gov() {
         "governance": {
             "remove": {
                 "evaluator": ["AveNode1"],
-                "validator": ["AveNode1"]
+                "validator": ["AveNode1"],
+                "compiler": ["AveNode1"]
             }
         }
     }});
@@ -2396,15 +2561,21 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2488,15 +2659,21 @@ async fn test_change_roles_gov() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from([
+                "AveNode2".to_owned(),
+                "Owner".to_owned(),
+            ]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2529,8 +2706,592 @@ async fn test_change_roles_gov() {
     assert!(state.active);
     assert_eq!(state.sn, 4);
     assert_governance_properties_eq(state.properties, expected);
-}
 
+    // SN 5 (fallido): quitar el rol compiler al Owner está protegido por
+    // check_basic_gov, como el resto de roles básicos.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "remove": {
+                "compiler": ["Owner"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 6 (fallido): dar el rol compiler a un miembro que no existe.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["NotAMember"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 7 (fallido): dar el rol compiler a AveNode2, que ya lo tiene.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode2"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // SN 8 (fallido): quitar el rol compiler a AveNode1, que ya no lo
+    // tiene (se le quitó en el SN 3).
+    let json = json!({
+    "roles": {
+        "governance": {
+            "remove": {
+                "compiler": ["AveNode1"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Los cuatro eventos commitean como fallidos: el sn avanza pero las
+    // propiedades no cambian (compiler sigue siendo {AveNode2, Owner}).
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(8), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 4);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode2".to_owned(), "Owner".to_owned()])
+    );
+
+    // SN 9: se elimina al MIEMBRO AveNode2 (sin evento de roles). La
+    // cascada de borrado (remove_member_role) debe quitarlo también del
+    // rol compiler.
+    let json = json!({
+    "members": {
+        "remove": ["AveNode2"]
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(9), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 5);
+    assert!(!properties.members.contains_key("AveNode2"));
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["Owner".to_owned()])
+    );
+
+    // SN 10: se devuelve el rol compiler a AveNode1 (nodo real). A partir
+    // de aquí el quórum de compile Majority exige el 2/2: Owner compila
+    // en local y AveNode1 por red.
+    let json = json!({
+    "roles": {
+        "governance": {
+            "add": {
+                "compiler": ["AveNode1"]
+            }
+        }
+    }});
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(10), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 6);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode1".to_owned(), "Owner".to_owned()])
+    );
+
+    // Se sincroniza a AveNode1 antes de emitir: los siguientes facts
+    // exigen su compile remoto contra la gov_version actual, y la
+    // distribución a testigos no forma parte del ciclo de la request.
+    get_subject(eval_node, governance_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+
+    // SN 11: se añade un schema con contrato. La fase compile exige el
+    // 2/2, así que AveNode1 compila por red; el commit también en
+    // AveNode1 (testigo de la gov) prueba que aplica el evento con la
+    // evidencia de compilación remota.
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(11), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 7);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(11), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 7);
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example".to_owned()))
+    );
+
+    // SN 12: cambio solo de initial_value. Los compilers resuelven el
+    // contrato actual contra su estado local (misma gov_version que la
+    // request), sin que el contrato viaje por red.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_initial_value": {
+                    "one": 10,
+                    "two": 20,
+                    "three": 30
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(12), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 10, "two": 20, "three": 30})
+    );
+
+    // AveNode1 tiene que estar al día antes del siguiente compile remoto.
+    get_subject(eval_node, governance_id.clone(), Some(12), true)
+        .await
+        .unwrap();
+
+    // SN 13 (fallido): cambiar el initial_value de un schema que no
+    // existe. Los compilers votan InvalidEvent y el evento commitea
+    // fallido sin pasar por evaluación: el sn avanza pero la versión y
+    // los schemas no cambian, también en el testigo.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "NotASchema",
+                "new_initial_value": {
+                    "one": 1,
+                    "two": 2,
+                    "three": 3
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(13), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    assert_eq!(properties.schemas.len(), 1);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["AveNode1".to_owned(), "Owner".to_owned()])
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(13), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 8);
+    assert_eq!(properties.schemas.len(), 1);
+
+    // SN 14: cambio solo de contrato. El source viaja en el propio
+    // evento (la rama que faltaba de resolve_compile_targets) y el
+    // initial_value commiteado se mantiene intacto, como exige la
+    // aplicación del evento. Cambiar al mismo valor sería un evento
+    // inválido, así que se usa la otra versión del contrato de ejemplo
+    // (misma forma de estado, distinto hash).
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(14), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 9);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT_V2);
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 10, "two": 20, "three": 30})
+    );
+
+    // AveNode1 tiene que estar al día antes del siguiente compile remoto.
+    get_subject(eval_node, governance_id.clone(), Some(14), true)
+        .await
+        .unwrap();
+
+    // SN 15: un solo evento añade dos schemas. La evidencia de compile
+    // cubre varios contratos a la vez (mapa ordenado: si no fuese
+    // determinista, los compilers firmarían resultados distintos y el
+    // quórum no cerraría).
+    let json = json!({
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example2",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                },
+                {
+                    "id": "Example3",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(15), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 10);
+    assert_eq!(properties.schemas.len(), 3);
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example2".to_owned()))
+    );
+    assert!(
+        properties
+            .schemas
+            .contains_key(&SchemaType::Type("Example3".to_owned()))
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(15), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 10);
+    assert_eq!(properties.schemas.len(), 3);
+
+    // SN 16: un mismo evento cambia un contrato y quita el rol compiler
+    // a AveNode1. La fase compile se evalúa contra los roles ANTERIORES
+    // al evento (quórum 2/2 con AveNode1 por red); tras el commit el set
+    // de compilers queda reducido a {Owner}. El contrato vuelve a la
+    // versión original (rollback).
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT
+            }]
+        },
+        "roles": {
+            "governance": {
+                "remove": {
+                    "compiler": ["AveNode1"]
+                }
+            }
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(16), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 11);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(schema.contract, EXAMPLE_CONTRACT);
+    assert_eq!(
+        properties.roles_gov.compiler,
+        BTreeSet::from(["Owner".to_owned()])
+    );
+
+    // SN 17: con el set reducido a {Owner} la fase compile sigue
+    // funcionando 1/1 (cambio solo de initial_value), también aplicado
+    // en AveNode1 como testigo.
+    let json = json!({
+        "schemas": {
+            "change": [{
+                "actual_id": "Example",
+                "new_initial_value": {
+                    "one": 100,
+                    "two": 200,
+                    "three": 300
+                }
+            }]
+        }
+    });
+
+    emit_fact(owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state =
+        get_subject(owner_governance, governance_id.clone(), Some(17), true)
+            .await
+            .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 12);
+    let schema = properties
+        .schemas
+        .get(&SchemaType::Type("Example".to_owned()))
+        .expect("el schema Example debe existir");
+    assert_eq!(
+        schema.initial_value.0,
+        json!({"one": 100, "two": 200, "three": 300})
+    );
+
+    let state = get_subject(eval_node, governance_id.clone(), Some(17), true)
+        .await
+        .unwrap();
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 12);
+}
+#[test(tokio::test)]
+// Una request atascada en la fase de aprobación (aprobador caído, sin
+// quórum) se puede abortar manualmente con limpieza: el manager para
+// los hijos de la fase con reintentos de red en vuelo, registra el
+// abort y la gobernanza no avanza.
+async fn test_gov_approval_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser aprobador y todo cambio de gobernanza
+    // exige la aprobación de todos los aprobadores (fixed 100).
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "approve": {
+                        "fixed": 100
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "approver": ["AveNode2"]
+                }
+            }
+        }
+    });
+
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id,
+        true,
+    )
+    .await
+    .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Con AveNode2 caído la aprobación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode3",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+
+    // El helper espera al estado Approval: la fase está en vuelo.
+    let request_id = emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // El owner aprueba; solo falta AveNode2, que está caído.
+    emit_approve(
+        node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de aprobación en vuelo.
+    node1
+        .manual_request_abort(governance_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, governance_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // La gobernanza no ha avanzado: sigue en el SN 1.
+    let state = get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+}
 #[test(tokio::test)]
 async fn test_delete_schema() {
     let (nodes, _dirs) =
@@ -2685,7 +3446,6 @@ async fn test_delete_schema() {
         })
     );
 }
-
 #[test(tokio::test)]
 async fn test_change_schema() {
     let (nodes, _dirs) =
@@ -2842,7 +3602,6 @@ async fn test_change_schema() {
         })
     );
 }
-
 #[test(tokio::test)]
 // Definimos 2 validadores con Quorum 1, pero solo funciona uno.
 // Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
@@ -2892,6 +3651,9 @@ async fn test_gov_no_all_validators() {
                         "fixed": 1
                     },
                     "validate": {
+                        "fixed": 1
+                    },
+                    "compile": {
                         "fixed": 1
                     }
                }
@@ -2948,15 +3710,18 @@ async fn test_gov_no_all_validators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Fixed(1),
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -2977,7 +3742,6 @@ async fn test_gov_no_all_validators() {
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Definimos 2 evaluadores con Quorum 1, pero solo funciona uno.
 // Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
@@ -3083,15 +3847,18 @@ async fn test_gov_no_all_evaluators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -3112,7 +3879,6 @@ async fn test_gov_no_all_evaluators() {
     assert_eq!(state.sn, 2);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 // Definimos 2 validadores con Quorum 1, pero solo funciona uno.
 // Hay que tener en cuenta que seleccionar uno es rng, puede seleccionar
@@ -3230,15 +3996,18 @@ async fn test_gov_fail_no_all_evaluators() {
                 signers: BTreeSet::from(["Owner".to_owned()]),
                 any: false,
             },
+            compiler: BTreeSet::from(["Owner".to_owned()]),
         },
         policies_gov: PolicyGov {
             approve: Quorum::Majority,
             evaluate: Quorum::Fixed(1),
             validate: Quorum::Fixed(1),
+            compile: Quorum::Majority,
         },
         schemas: BTreeMap::new(),
         roles_schema: BTreeMap::new(),
         roles_tracker_schemas: RolesTrackerSchemas::default(),
+        toolchain: GovernanceData::default().toolchain,
         policies_schema: BTreeMap::new(),
     };
 
@@ -3259,7 +4028,6 @@ async fn test_gov_fail_no_all_evaluators() {
     assert_eq!(state.sn, 3);
     assert_governance_properties_eq(state.properties, expected);
 }
-
 #[test(tokio::test)]
 async fn test_governance_schema_and_creator_viewpoints_state() {
     let (nodes, _dirs) =
@@ -3495,7 +4263,6 @@ async fn test_governance_schema_and_creator_viewpoints_state() {
         ])
     );
 }
-
 #[test(tokio::test)]
 async fn test_governance_invalid_viewpoints_validation() {
     let (nodes, _dirs) =
@@ -3824,7 +4591,6 @@ async fn test_governance_invalid_viewpoints_validation() {
         }])
     );
 }
-
 #[test(tokio::test)]
 async fn test_sink_replay_and_external_db_battery() {
     let (nodes, _dirs) =
@@ -3975,6 +4741,7 @@ async fn test_sink_replay_and_external_db_battery() {
             payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } => {
             assert_eq!(payload, &governance_setup_payload);
             match evaluation_response {
@@ -3984,6 +4751,10 @@ async fn test_sink_replay_and_external_db_battery() {
                 }
             }
             assert_eq!(*approval_success, Some(true));
+            assert!(
+                compilation_response.is_none(),
+                "members/roles fact runs no compilation: {compilation_response:?}"
+            );
         }
         other => panic!("unexpected governance fact event: {other:?}"),
     }
@@ -3993,6 +4764,7 @@ async fn test_sink_replay_and_external_db_battery() {
             payload,
             evaluation_response,
             approval_success,
+            compilation_response,
         } => {
             assert_eq!(payload, &governance_setup_payload);
             match evaluation_response {
@@ -4006,6 +4778,10 @@ async fn test_sink_replay_and_external_db_battery() {
                 }
             }
             assert!(approval_success.is_none());
+            assert!(
+                compilation_response.is_none(),
+                "members/roles fact runs no compilation: {compilation_response:?}"
+            );
         }
         other => panic!("unexpected failed governance fact event: {other:?}"),
     }
@@ -4259,7 +5035,6 @@ async fn test_sink_replay_and_external_db_battery() {
     }
     assert_eq!(sink_events[7].public_key, owner.public_key());
 }
-
 #[test(tokio::test)]
 // test_build_batch_gov: Emisor construye batch de governance
 //
@@ -4349,7 +5124,6 @@ async fn test_build_batch_gov() {
         .await
         .unwrap();
 }
-
 #[test(tokio::test)]
 // test_update_offer_gov: Receptor responde a GetLastSn con governance
 //
@@ -4436,4 +5210,1548 @@ async fn test_update_offer_gov() {
     get_subject(witness, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
+}
+#[test(tokio::test)]
+// Wiping derived state is strictly worse than any crash window: if
+// the boot replay heals a purged register back to the ledger tip, it
+// heals any crash loss too.
+async fn test_reconcile_heals_role_wipe() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+    let node2 = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&node1, vec![&node2]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let node2_key = PublicKey::from_str(node2.public_key()).unwrap();
+
+    // v1: add N2 as evaluator (both nodes live, so quorum votes arrive).
+    // Fixed evaluation quorum: N2 must never be on the critical path
+    // of later votes.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "N2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "policies": {
+            "governance": {
+                "change": {
+                    "evaluate": {
+                        "fixed": 1
+                    }
+                }
+            }
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["N2"],
+                }
+            }
+        }
+    });
+    let request_id_v1 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v1,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // v2: remove N2 (cascade drops its evaluator grant).
+    let json = json!({
+        "members": {
+            "remove": ["N2"]
+        }
+    });
+    let request_id_v2 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v2,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // v3: re-add N2 as evaluator.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "N2",
+                    "key": node2.public_key()
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "evaluator": ["N2"],
+                }
+            }
+        }
+    });
+    let request_id_v3 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_v3,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 3);
+    assert!(properties.members.contains_key("N2"));
+
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(evaluators.contains(&node2_key));
+
+    // Wipe derived state and reboot: the replay must converge back.
+    node1
+        .test_purge_register(governance_id.clone(), "role")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 3);
+    assert!(properties.members.contains_key("N2"));
+
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+    assert!(evaluators.contains(&node2_key));
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// Ownership rotation must survive derived-state loss: after wiping
+// the registers and rebooting, the new owner is in charge and the
+// old owner key holds no roles.
+async fn test_reconcile_heals_rotation() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let future_owner = nodes[0].api.clone();
+    let owner_governance = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&future_owner])
+            .await;
+
+    let old_key = PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let new_key = PublicKey::from_str(future_owner.public_key()).unwrap();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": future_owner.public_key()
+                }
+            ]
+        },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": ["AveNode1"],
+                        "compiler": ["AveNode1"],
+                    }
+                }
+            }
+    });
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &owner_governance,
+        governance_id.clone(),
+        new_key.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    emit_confirm(&future_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&future_owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    let evaluators = future_owner
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&new_key));
+    assert!(!evaluators.contains(&old_key));
+
+    // Wipe rotation state and reboot the new owner.
+    future_owner
+        .test_purge_register(governance_id.clone(), "role")
+        .await
+        .unwrap();
+    future_owner
+        .test_purge_register(governance_id.clone(), "subject")
+        .await
+        .unwrap();
+    future_owner
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&new_key));
+    assert!(!evaluators.contains(&old_key));
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// A graceful shutdown marks the boot clean, so the reboot skips the
+// replay and still converges: same ledger, same properties, same
+// register state.
+async fn test_clean_boot_skips_replay() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+
+    let governance_id = create_and_authorize_governance(&node1, vec![]).await;
+
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M1",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+    let request_id_f1 = emit_fact(&node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_f1,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let evaluators = node1
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // Graceful-shutdown handshake, then reboot on the same stores.
+    node1.prepare_clean_shutdown().await;
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    assert_eq!(governance_properties(state.properties).version, 1);
+
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // The rebooted node accepts traffic: readiness flipped, so the
+    // skip path reported instead of wedging the gate.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M2",
+                    "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                        .public_key()
+                        .to_string()
+                }
+            ]
+        }
+    });
+    let request_id_f2 = emit_fact(&api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_approve(
+        &api,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id_f2,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let state = get_subject(&api, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_eq!(governance_properties(state.properties).version, 2);
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// An in-flight request at shutdown completes after reboot, either
+// way: applied before death (replay heals registers, resume finds
+// nothing) or re-driven by resume (dirty replay plus deferred Run).
+// Both branches converge on the same assertions.
+async fn test_inflight_resume_after_reboot() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            ..Default::default()
+        })
+        .await;
+    let node1 = nodes[0].api.clone();
+
+    let governance_id = create_and_authorize_governance(&node1, vec![]).await;
+
+    let fake_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "M1",
+                    "key": fake_key.to_string()
+                }
+            ]
+        }
+    });
+    let request_id = emit_fact(&node1, governance_id.clone(), json, false)
+        .await
+        .unwrap();
+
+    // Wait until the handler registered the request: killing before
+    // registration would leave nothing to resume or replay anywhere.
+    for _ in 0..100 {
+        if node1.get_request_state(request_id.clone()).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Vote without waiting, then wait until the vote lands (the
+    // request leaves Approval): either the event applies before
+    // death or resume plus replay complete it after reboot. Both
+    // branches converge on the same assertions.
+    emit_approve(
+        &node1,
+        governance_id.clone(),
+        ApprovalStateRes::Accepted,
+        request_id.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        let voted = node1
+            .get_request_state(request_id.clone())
+            .await
+            .is_ok_and(|state| {
+                !matches!(
+                    state.state,
+                    RequestState::InQueue
+                        | RequestState::Handling
+                        | RequestState::Approval
+                )
+            });
+        if voted {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so the assertions below observe post-boot state
+    // instead of pre-reboot ext_db rows.
+    let owner_key = PublicKey::from_str(node1.public_key()).unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    let state = get_subject(&api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let properties = governance_properties(state.properties);
+    assert_eq!(properties.version, 1);
+    assert!(properties.members.contains_key("M1"));
+
+    node_running(&api).await.unwrap();
+}
+
+#[test(tokio::test)]
+// Change de contrato (Example A -> V2) como tercer fact de una
+// gobernanza nueva con tracker y testigos: compila de verdad y
+// commitea sn3. Presupuesto de 60s: si algo se atasca, el test
+// falla en vez de colgar la suite.
+async fn test_gov_change_contract_with_tracker_and_witnesses() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = &node1.api;
+        let witness = &node2.api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema (owner evalua y valida, testigo observa).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker del owner con un fact: hay ledger vivo bajo la gov.
+        let (tracker_id, ..) =
+            create_subject(owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2, commitea sn3.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 3);
+
+        // El contrato que corre es V2: acepta three = 50.
+        emit_fact(owner, tracker_id.clone(), json!({"ModThree": {"data": 50}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 10, "two": 0, "three": 50}));
+
+        // El testigo tambien ve sn3: la distribucion no depende
+        // de su voto.
+        let state = get_subject(witness, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+
+        node_running(owner).await.unwrap();
+        node_running(witness).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change con dos approvers (Owner + AveNode2, votan los dos):
+// el change compila V2 y commitea sn3. Presupuesto de 60s: si
+// algo se atasca, el test falla en vez de colgar la suite.
+async fn test_gov_change_with_two_approvers() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = &node1.api;
+        let witness = &node2.api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema + AveNode2 como approver de gobernanza.
+        let json = json!({
+            "roles": {
+                "governance": {"add": {"approver": ["AveNode2"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                            {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "AveNode2", "namespace": []}],
+                    },
+                }],
+            },
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker del owner con un fact.
+        let (tracker_id, ..) =
+            create_subject(owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2. Votan los dos approvers
+        // (aceptacion automatica) y commitea sn3.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+
+        node_running(owner).await.unwrap();
+        node_running(witness).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change con restart del owner en mitad del vuelo: el change
+// debe recuperarse y commitear sn3. Presupuesto de 60s: si la
+// recuperacion se atasca, el test falla en vez de colgar.
+async fn test_gov_change_with_owner_restart_midflight() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let contracts_dir = tempfile::tempdir().unwrap();
+        let (mut node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            contracts_path: Some(contracts_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let peer2 = RoutingNode {
+            peer_id: node2.api.peer_id().to_string(),
+            address: vec![node2.listen_address.clone()],
+        };
+
+        let owner_key = node1.keys.clone();
+        let owner_api = node1.api.clone();
+        let witness_api = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner_api, vec![&witness_api])
+                .await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness_api.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner_api, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner_api, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // sn3: change Example A -> V2 sin espera y restart
+        // inmediato del owner: la request sigue en vuelo seguro.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(&owner_api, governance_id.clone(), json, false)
+            .await
+            .unwrap();
+
+        node1.token.cancel();
+        join_all(node1.handler.iter_mut()).await;
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![peer2],
+            always_accept: true,
+            keys: Some(owner_key),
+            local_db: Some(dirs[0].path().to_path_buf()),
+            ext_db: Some(dirs[1].path().to_path_buf()),
+            contracts_path: Some(contracts_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+
+        let api = new_node.api.clone();
+        node_running(&api).await.unwrap();
+
+        // La request se recupera y el change commitea sn3.
+        let state = get_subject(&api, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 3);
+
+        node_running(&api).await.unwrap();
+        node_running(&witness_api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Change a contrato invalido (base64 truncado): aborta sin
+// dejar evento y el siguiente schema-add commitea. Presupuesto
+// de 60s: si el add posterior se atasca tras el abort, el test
+// falla en vez de colgar.
+async fn test_gov_invalid_change_aborts_and_next_add_commits() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: false,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo de gobernanza.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Change a contrato invalido: aborta, no deja sn.
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": INVALID_EXAMPLE_CONTRACT,
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+        // El siguiente add (Third) commitea como sn3: el abort
+        // no atasca la gobernanza.
+        let json = json!({
+            "schemas": {"add": [{
+                "id": "Third",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state = get_subject(&owner, governance_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3);
+        let gov = governance_properties(state.properties);
+        assert!(gov.schemas.contains_key(&SchemaType::Type("Third".to_owned())));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Salto de gov_version con fallidas en medio: el tracker emite,
+// la gov avanza (change ok, dos fallidas que congelan version,
+// dos miembros) y el tracker vuelve a emitir bajo la version
+// nueva. Presupuesto de 60s.
+async fn test_gov_version_skip_with_failures_in_between() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example (A) + testigo.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 1);
+
+        // sn2: roles del schema.
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(2), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 2);
+
+        // Tracker + fact bajo v2.
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 10}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn3: change A -> V2 (v2 -> v3).
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "Example",
+                "new_contract": EXAMPLE_CONTRACT_V2,
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 3);
+
+        // sn4: change a schema inexistente (falla, congela v3).
+        let json = json!({
+            "schemas": {"change": [{
+                "actual_id": "NotASchema",
+                "new_initial_value": {"one": 1},
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(4), true)
+                .await
+                .unwrap();
+        assert_eq!(
+            governance_properties(state.properties).version,
+            3,
+            "failed event must freeze the version"
+        );
+
+        // sn5: add duplicado (falla, congela v3).
+        let json = json!({
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(5), true)
+                .await
+                .unwrap();
+        assert_eq!(
+            governance_properties(state.properties).version,
+            3,
+            "failed event must freeze the version"
+        );
+
+        // Dos miembros (v3 -> v4 -> v5).
+        for name in ["Charlie", "Dave"] {
+            let member_key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                .public_key()
+                .to_string();
+            let json = json!({
+                "members": {"add": [{"name": name, "key": member_key}]},
+            });
+            emit_fact(&owner, governance_id.clone(), json, true)
+                .await
+                .unwrap();
+        }
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(7), true)
+                .await
+                .unwrap();
+        assert_eq!(governance_properties(state.properties).version, 5);
+
+        // El tracker vuelve a emitir: corre V2 bajo v5 (salto
+        // v2 -> v5 con dos fallidas en medio).
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 11}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 11, "two": 0, "three": 0}));
+        // V2 acepta three = 50 (A lo rechaza).
+        emit_fact(&owner, tracker_id.clone(), json!({"ModThree": {"data": 50}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 11, "two": 0, "three": 50}));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+/// End-to-end for report item 45: a schema id with path separators
+/// must change nothing. The event itself is recorded like any failed
+/// event (sn advances), but the hostile id never lands in state, so
+/// it can never reach staging/artifact paths. The compiler refuses
+/// it before building (`resolve_compile_targets` votes `Error`, no
+/// cargo runs) and a refused compilation skips evaluation straight
+/// to validation; the join sites fail closed on top. This suite runs
+/// `always_accept` (auto-approval ignores verdicts), so what the
+/// test asserts is the state after commit — no schema added —
+/// while a valid schema still lands (rejection poisons nothing).
+/// Walks this process' test contracts roots and fails on any path
+/// carrying the hostile marker: with the fix, a refused schema never
+/// reaches staging or artifact directories.
+fn assert_no_hostile_artifacts() {
+    let prefix = format!("ave-test-contracts-{}-", std::process::id());
+    let mut roots = vec![];
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                roots.push(entry.path());
+            }
+        }
+    }
+    assert!(
+        !roots.is_empty(),
+        "expected test contracts roots under the temp dir"
+    );
+    let mut stack = roots;
+    while let Some(path) = stack.pop() {
+        let name = path.to_string_lossy().into_owned();
+        assert!(
+            !name.contains("outside"),
+            "hostile artifact escaped contracts root: {name}"
+        );
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                stack.extend(entries.flatten().map(|e| e.path()));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_schema_id_fails_without_state_change() {
+    tokio::time::timeout(Duration::from_secs(300), async {
+        let (nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = &nodes[0].api;
+
+        let governance_id =
+            create_and_authorize_governance(owner, vec![]).await;
+
+        // Would escape `contracts_path` if ever joined into a
+        // staging/artifact name.
+        let hostile = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "x/../../outside",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id =
+            emit_fact(owner, governance_id.clone(), hostile, false)
+                .await
+                .unwrap();
+        wait_request(owner, request_id).await.unwrap();
+
+        // The event is recorded like any failed event (sn advances),
+        // but the state must not change: no schema added.
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 1, "the failed event is still recorded");
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas.is_empty(),
+            "hostile schema id must change nothing, got {:?}",
+            gov.schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // The compiler refused it before touching the filesystem: no
+        // staging or artifact directory for the hostile id may exist
+        // anywhere under this process' contracts roots (a full
+        // pre-fix run left `/tmp/outside_<hash>/` with compiled wasm
+        // behind — that is the escape this test guards).
+        assert_no_hostile_artifacts();
+
+        // Never usable: no tracker can be created under it.
+        create_subject(
+            owner,
+            governance_id.clone(),
+            "x/../../outside",
+            "",
+            false,
+        )
+        .await
+        .expect_err("tracker under a rejected schema id must fail");
+
+        // Item 42: a dot is path-safe but not actor-safe. The schema
+        // id is valid for governance and passes the filesystem gate,
+        // yet no `{id}_contract_compiler` / `{id}_evaluation` /
+        // `{id}_validation` actor can ever be created for it, so the
+        // compiler refuses it the same way: recorded, no state
+        // change, no tracker, node stays healthy.
+        let dotted = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "orders.v1",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id = emit_fact(owner, governance_id.clone(), dotted, false)
+            .await
+            .unwrap();
+        wait_request(owner, request_id).await.unwrap();
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 2, "the refused event is still recorded");
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas.is_empty(),
+            "dotted schema id must change nothing, got {:?}",
+            gov.schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        create_subject(owner, governance_id.clone(), "orders.v1", "", false)
+            .await
+            .expect_err("tracker under a dotted schema id must fail");
+
+        // The node stays healthy: a valid schema still lands.
+        let valid = json!({
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+        });
+        let request_id = emit_fact(owner, governance_id.clone(), valid, false)
+            .await
+            .unwrap();
+        wait_request(owner, request_id.clone()).await.unwrap();
+        let terminal = owner.get_request_state(request_id).await.unwrap().state;
+        assert!(
+            matches!(terminal, RequestState::Finish),
+            "valid schema must still apply, got {terminal:?}"
+        );
+        let state = get_subject(owner, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        let gov = governance_properties(state.properties.clone());
+        assert!(
+            gov.schemas
+                .contains_key(&SchemaType::Type("Example".to_owned())),
+            "valid schema must persist after hostile refusal"
+        );
+    })
+    .await
+    .expect("test overran its 300s budget");
+}
+
+/// Approvals listing covers every governance with stable paging
+/// (BR22-01): the per-governance fan-out runs in parallel instead of
+/// holding the central handler for the whole sweep, but the collected
+/// set is identical and pages follow the same order. Bounded by
+/// timeout: the listing must answer even with a slow approver.
+#[test(tokio::test)]
+async fn approvals_listing_covers_all_governances_paged() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let (mut nodes, dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0]],
+                always_accept: true,
+                ..Default::default()
+            })
+            .await;
+        let owner = nodes[0].api.clone();
+        let alice = nodes[1].api.clone();
+
+        for _ in 0..2 {
+            let governance_id =
+                create_and_authorize_governance(&owner, vec![&alice]).await;
+            let config = json!({
+                "members": {"add": [{
+                    "name": "Alice",
+                    "key": alice.public_key(),
+                }]},
+                "schemas": {"add": [{
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                }]},
+                "roles": {
+                    "governance": {
+                        "add": {"witness": ["Alice"]},
+                    },
+                    "schema": [{
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {"name": "Owner", "namespace": []}
+                            ],
+                            "validator": [
+                                {"name": "Owner", "namespace": []}
+                            ],
+                            "creator": [{
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                            }],
+                            "issuer": [{
+                                "name": "Alice",
+                                "namespace": [],
+                            }],
+                        },
+                    }],
+                },
+            });
+            emit_fact(&owner, governance_id.clone(), config, true)
+                .await
+                .unwrap();
+            let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+            alice.update_subject(governance_id.clone()).await.unwrap();
+            get_subject(&alice, governance_id.clone(), Some(gov_sn), true)
+                .await
+                .unwrap();
+            create_subject(&alice, governance_id, "Example", "", true)
+                .await
+                .unwrap();
+        }
+
+        // One stored approval per governance, same set on repeat
+        // calls, pages split it without loss or reorder.
+        let full = owner.get_approvals(None, 10, 0).await.unwrap();
+        assert_eq!(full.len(), 2);
+        let again = owner.get_approvals(None, 10, 0).await.unwrap();
+        assert_eq!(
+            full.iter()
+                .map(|item| item.request_id.clone())
+                .collect::<Vec<_>>(),
+            again
+                .iter()
+                .map(|item| item.request_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        let first = owner.get_approvals(None, 1, 0).await.unwrap();
+        let second = owner.get_approvals(None, 1, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].request_id, full[0].request_id);
+        assert_eq!(second[0].request_id, full[1].request_id);
+
+        for node in nodes.iter_mut() {
+            node.token.cancel();
+        }
+        join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut()))
+            .await;
+        drop(nodes);
+        drop(dirs);
+    })
+    .await
+    .expect("approvals listing hung");
 }

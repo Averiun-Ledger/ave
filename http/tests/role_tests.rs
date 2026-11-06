@@ -394,6 +394,30 @@ async fn test_deleted_roles_removed_from_users() {
     assert!(!roles_after.contains(&"temp_role".to_string()));
 }
 
+#[test(tokio::test)]
+async fn test_deleted_role_name_is_reusable_without_resurrection() {
+    let (db, _dirs) = common::create_test_db();
+
+    let user = db
+        .create_user("testuser", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let role = db.create_role("temp_role", None).unwrap();
+    db.assign_role_to_user(user.id, role.id, None).unwrap();
+
+    db.delete_role(role.id).unwrap();
+
+    // Active duplicate still conflicts.
+    let _other = db.create_role("other_role", None).unwrap();
+    let dup = db.create_role("other_role", None);
+    assert!(matches!(dup.unwrap_err(), DatabaseError::Duplicate(_)));
+
+    // The deleted name is reusable as a brand-new empty role.
+    let revived = db.create_role("temp_role", None).unwrap();
+    assert_ne!(revived.id, role.id);
+    let roles = db.get_user_roles(user.id).unwrap();
+    assert!(!roles.contains(&"temp_role".to_string()));
+}
+
 // =============================================================================
 // ENDPOINT ACCESS TESTS BY ROLE
 // =============================================================================
@@ -1191,6 +1215,7 @@ async fn test_manager_role_endpoints_access() {
     let manager_overrides: &[(&str, &str, bool)] = &[
         ("get", "/sinks", false),
         ("get", "/sinks/status", false),
+        ("get", "/sinks/deliveries", false),
         ("get", "/sinks/{sink_name}", false),
         ("get", "/subjects/{subject_id}/sink-events", false),
         ("post", "/sinks/{sink_name}/unblock", false),
@@ -1533,4 +1558,50 @@ async fn test_every_endpoint_is_covered_by_a_role() {
             action.as_str()
         );
     }
+}
+
+#[test(tokio::test)]
+async fn test_provisioning_policy_admin_may_provision_manager_but_not_superadmin()
+ {
+    use ave_http::auth::database::UpdateUserParams;
+    let (db, _dirs) = common::create_test_db();
+
+    let superadmin_role = db.get_role_by_name("superadmin").unwrap();
+    let manager_role = db.get_role_by_name("manager").unwrap();
+
+    // Admin provisions a manager: a non-superadmin actor updating a
+    // regular user (password reset + manager role) must succeed — that
+    // is the admin's job, not an escalation.
+    let clerk = db
+        .create_user("clerk", "TestPass123!", None, None, Some(false))
+        .unwrap();
+    let updated = db
+        .update_user_validated_transactional(UpdateUserParams {
+            user_id: clerk.id,
+            password: Some("NewPass123!"),
+            is_active: None,
+            role_ids: Some(&[manager_role.id]),
+            actor_is_superadmin: false,
+            assigned_by: None,
+            audit: None,
+        })
+        .expect("admin must be able to provision/reset a manager account");
+    assert_eq!(updated.id, clerk.id);
+
+    // The same non-superadmin actor must not grant the superadmin role.
+    let err = db
+        .update_user_validated_transactional(UpdateUserParams {
+            user_id: clerk.id,
+            password: None,
+            is_active: None,
+            role_ids: Some(&[superadmin_role.id]),
+            actor_is_superadmin: false,
+            assigned_by: None,
+            audit: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, DatabaseError::PermissionDenied(_)),
+        "granting superadmin requires superadmin, got {err:?}"
+    );
 }

@@ -11,14 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ave_common::{
-    LightEvent, SchemaType, SinkTarget, SinkTypes,
+    SinkTarget, SinkTypes,
     bridge::request::{SinkReplayItem, SinkReplayRequest},
     bridge::response::{SinkServerView, SinkTransportView},
     identity::{
         BLAKE3_HASHER, DigestIdentifier, Hash as _, PublicKey,
         SignatureIdentifier, TimeStamp, keys::KeyPair,
     },
-    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent, SinkAuthConfig},
+    sink::{IncomingSinkEvent, SinkAuthConfig},
 };
 use ave_core::config::{
     GrpcSinkConfig, GrpcTlsConfig, SinkAuthMethod, SinkCompression,
@@ -37,6 +37,7 @@ use common::{
     create_and_authorize_governance, create_node, create_subject, emit_fact,
     node_running,
     sink_setup::{
+        SCHEMA_ID, example_data_to_sink, example_light_event,
         example_schema_governance_fact, wait_for_sink_blocked,
         wait_for_sink_caught_up, wait_for_sink_lagging_subjects,
     },
@@ -47,41 +48,13 @@ use test_log::test;
 use tonic::Code;
 
 const SUBJECT_ID: &str = "GRPC-SUBJECT-ID";
-const SCHEMA_ID: &str = "Example";
-
-fn example_data_to_sink(subject_id: &str, schema_id: &str) -> DataToSink {
-    DataToSink {
-        payload: DataToSinkEvent::Create {
-            governance_id: None,
-            subject_id: subject_id.to_string(),
-            owner: "owner".to_string(),
-            schema_id: SchemaType::Type(schema_id.to_string()),
-            namespace: "".to_string(),
-            sn: 0,
-            gov_version: 1,
-            state: serde_json::json!({ "one": 1 }),
-        },
-        public_key: "pk".to_string(),
-        event_request_timestamp: 1,
-        event_ledger_timestamp: 2,
-        sink_timestamp: 3,
-    }
-}
-
-fn example_light_event(subject_id: &str, schema_id: &str) -> LightEvent {
-    LightEvent {
-        subject_id: subject_id.to_string(),
-        schema_id: schema_id.to_string(),
-        governance_id: None,
-        sn: 1,
-        event_type: SinkTypes::Fact,
-        success: true,
-    }
-}
 
 fn grpc_config(endpoint: &str) -> GrpcSinkConfig {
     GrpcSinkConfig {
         endpoint: endpoint.to_owned(),
+        // These suites assert per-event delivery (meta per delivery);
+        // batching has its own dedicated tests with explicit opt-in.
+        batch_delivery: false,
         ..GrpcSinkConfig::default()
     }
 }
@@ -719,6 +692,44 @@ async fn grpc_transport_warm_up_opens_stream_eagerly() {
     );
 }
 
+/// A terminal stream status classifies every pending delivery instead of
+/// failing them all as retryable: a permanent rejection surfaces at once
+/// with no reconnect.
+#[test(tokio::test)]
+async fn grpc_stream_terminal_status_is_classified() {
+    let sink = GrpcTestSink::start().await;
+    let transport = Arc::new(
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await,
+    );
+
+    transport.warm_up().await.unwrap();
+    sink.wait_for_active_streams(1).await;
+
+    // Stalled consumer: the delivery stays pending with no ack possible.
+    sink.pause_streams();
+    let pending = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move {
+            transport
+                .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    sink.cut_streams_with(Code::InvalidArgument);
+
+    let result = pending.await.unwrap();
+    assert!(
+        matches!(result, Err(SinkError::Rejected { .. })),
+        "terminal InvalidArgument must reject at once, got {result:?}"
+    );
+    assert_eq!(
+        sink.stream_opens(),
+        1,
+        "a permanent rejection must not reopen the stream"
+    );
+}
+
 /// Best-effort batch delivery (Pause/Stop teardown): a single attempt, no
 /// retries — the cursor guarantees re-delivery via catch-up.
 #[test(tokio::test)]
@@ -1121,6 +1132,97 @@ async fn grpc_transport_stream_backpressure_on_stalled_consumer() {
     assert_eq!(sink.accepted_deliveries().len(), 3);
 }
 
+/// Dropping the transport must close its server stream (BR22-09): the
+/// reader must not keep the slot (and the request sender) alive, or
+/// the server never sees EOF and a replacement stream stacks on top
+/// of the ghost. Bounded by timeout: a retained sender would hang
+/// instead of failing.
+#[test(tokio::test)]
+async fn grpc_transport_drop_closes_server_stream() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let sink = GrpcTestSink::start().await;
+        let transport =
+            build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+                .await;
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .expect("first delivery opens the stream");
+        sink.wait_for_active_streams(1).await;
+
+        drop(transport);
+        // The server must observe EOF and close: no ghost stream stays
+        // open behind the replacement.
+        sink.wait_for_no_active_streams().await;
+
+        let transport =
+            build_transport(&sink.endpoint(), grpc_config(&sink.endpoint()))
+                .await;
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .expect("a fresh transport must deliver");
+        sink.wait_for_accepted(2).await;
+        sink.wait_for_active_streams(1).await;
+    })
+    .await
+    .expect("dropping the transport must close its stream");
+}
+
+/// A revoked token must not wedge healthchecks on the cached copy
+/// (BR22-11): when the Test RPC rejects the bearer with UNAUTHENTICATED,
+/// the transport drops the cached token, so the next healthcheck
+/// re-fetches instead of replaying the revoked one. Bounded by
+/// timeout: a retained token would hang the recovery, not fail it.
+#[test(tokio::test)]
+async fn grpc_transport_healthcheck_unauthenticated_refreshes_token() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let idp = TestSink::start().await;
+        let sink = GrpcTestSink::start_without_health_service().await;
+        let _guard = TempEnvVar::set(
+            "AVE_SINK_PASSWORD_GRPC_TEST_UNAUTH",
+            "oauth-secret",
+        );
+        let config = GrpcSinkConfig {
+            auth: Some(SinkAuthMethod::OAuth2(SinkAuthConfig {
+                auth_url: idp.auth_url(),
+                username: "test-user".to_owned(),
+                ..SinkAuthConfig::default()
+            })),
+            ..grpc_config(&sink.endpoint())
+        };
+        let transport =
+            build_transport_named("grpc-test-unauth", &sink.endpoint(), config)
+                .await;
+
+        // First healthcheck fetches and caches the token.
+        transport.health_check().await.expect("test rpc works");
+        assert_eq!(idp.auth_requests().await.len(), 1);
+
+        // The server revokes the token: every Test RPC now fails.
+        sink.set_test_unauthenticated(true);
+        assert!(transport.health_check().await.is_err());
+
+        // The rejected token must not be reused: the next healthcheck
+        // re-fetches instead of replaying the revoked one.
+        assert!(transport.health_check().await.is_err());
+        assert_eq!(
+            idp.auth_requests().await.len(),
+            2,
+            "an UNAUTHENTICATED healthcheck must force a token refresh"
+        );
+
+        // Recovery works: once the server accepts again, healthchecks pass.
+        sink.set_test_unauthenticated(false);
+        transport
+            .health_check()
+            .await
+            .expect("test rpc works again");
+    })
+    .await
+    .expect("revoked-token healthchecks must terminate");
+}
+
 /// Unary fallback: a server without `DeliverStream` (v1-unary contract) is
 /// delivered through the unary RPC, and the transport remembers it.
 #[test(tokio::test)]
@@ -1164,6 +1266,8 @@ fn make_grpc_sink_entry(
             transport: SinkTransportConfig::Grpc(Box::new(GrpcSinkConfig {
                 endpoint: endpoint.to_owned(),
                 signature,
+                // Per-event suites; batching is opt-in per test.
+                batch_delivery: false,
                 ..GrpcSinkConfig::default()
             })),
             healthcheck_intervals_secs: vec![1],
@@ -3164,6 +3268,9 @@ async fn grpc_node_slow_live_delivery_no_idle_kill() {
                     GrpcSinkConfig {
                         endpoint: sink.endpoint(),
                         request_timeout_ms: 15_000,
+                        // Per-event assertions below; batching would
+                        // hold the slow delivery past the ack window.
+                        batch_delivery: false,
                         ..GrpcSinkConfig::default()
                     },
                 )),

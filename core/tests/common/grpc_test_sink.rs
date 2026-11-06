@@ -113,12 +113,19 @@ struct GrpcSinkState {
     /// Artificial delay before acking each stream message.
     stream_ack_delay_ms: u64,
     /// One-shot: the next read of an open stream tears it down with
-    /// UNAVAILABLE (simulates a connection cut mid-stream).
-    stream_cut: bool,
+    /// the configured status (simulates a connection cut mid-stream).
+    stream_cut: Option<Code>,
     /// While set, open streams stop reading (simulates a stalled consumer).
     stream_paused: bool,
+    /// While set, the `Test` RPC answers UNAUTHENTICATED (simulates a
+    /// server that revoked the client's token after issuing it).
+    test_unauthenticated: bool,
     /// Number of `DeliverStream` invocations (streams opened by clients).
     stream_opens: usize,
+    /// Streams currently held open by the server: incremented on accept,
+    /// decremented when the handler task ends, so tests can observe a
+    /// client-side close (half-close) instead of guessing with sleeps.
+    active_streams: usize,
 }
 
 /// In-process gRPC receiver. The server task ends when the instance is
@@ -331,7 +338,13 @@ impl GrpcTestSink {
     /// Tear down the currently open delivery stream(s) with UNAVAILABLE,
     /// like a connection cut; new streams work again afterwards.
     pub fn cut_streams(&self) {
-        self.state.lock().expect("state lock").stream_cut = true;
+        self.cut_streams_with(Code::Unavailable);
+    }
+
+    /// Tear down the currently open delivery stream(s) with the given
+    /// terminal status; new streams work again afterwards.
+    pub fn cut_streams_with(&self, code: Code) {
+        self.state.lock().expect("state lock").stream_cut = Some(code);
         self.control_notify.notify_waiters();
     }
 
@@ -347,9 +360,54 @@ impl GrpcTestSink {
         self.control_notify.notify_waiters();
     }
 
+    /// Make the `Test` RPC answer UNAUTHENTICATED until cleared (a
+    /// server that revoked the client's token after issuing it).
+    pub fn set_test_unauthenticated(&self, value: bool) {
+        self.state.lock().expect("state lock").test_unauthenticated = value;
+        self.control_notify.notify_waiters();
+    }
+
     /// How many delivery streams clients have opened.
     pub fn stream_opens(&self) -> usize {
         self.state.lock().expect("state lock").stream_opens
+    }
+
+    /// Streams the server currently holds open: incremented on accept,
+    /// decremented when the handler task ends, so tests can observe a
+    /// client-side close (half-close) instead of guessing with sleeps.
+    pub fn active_streams(&self) -> usize {
+        self.state.lock().expect("state lock").active_streams
+    }
+
+    /// Wait until the server holds `expected` open streams, polling
+    /// like the rest of the test helpers (no fixed sleeps).
+    pub async fn wait_for_active_streams(&self, expected: usize) {
+        for _ in 0..100 {
+            if self.active_streams() >= expected {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "grpc test sink holds {} open streams, expected at least {}",
+            self.active_streams(),
+            expected
+        );
+    }
+
+    /// Wait until the server holds no open streams, polling like the
+    /// rest of the test helpers (no fixed sleeps).
+    pub async fn wait_for_no_active_streams(&self) {
+        for _ in 0..100 {
+            if self.active_streams() == 0 {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "grpc test sink still holds {} open streams",
+            self.active_streams()
+        );
     }
 
     /// Recorded `Deliver` RPCs, in arrival order.
@@ -487,6 +545,11 @@ impl EventSink for TestEventSink {
     ) -> Result<Response<TestResponse>, Status> {
         let message = request.into_inner();
         let mut state = self.state.lock().expect("state lock");
+        if state.test_unauthenticated {
+            return Err(Status::unauthenticated(
+                "test server rejects revoked test token",
+            ));
+        }
         state.tests.push(RecordedTest {
             request_id: message.request_id,
             body: message.body,
@@ -513,6 +576,7 @@ impl EventSink for TestEventSink {
                 ));
             }
             state.stream_opens += 1;
+            state.active_streams += 1;
         }
 
         let state = Arc::clone(&self.state);
@@ -525,19 +589,16 @@ impl EventSink for TestEventSink {
                 // this task is parked waiting for messages.
                 let (cut, paused) = {
                     let mut state = state.lock().expect("state lock");
-                    let cut = state.stream_cut;
-                    if cut {
-                        state.stream_cut = false;
-                    }
-                    (cut, state.stream_paused)
+                    (state.stream_cut.take(), state.stream_paused)
                 };
-                if cut {
+                if let Some(code) = cut {
                     let _ = tx
-                        .send(Err(Status::unavailable(
+                        .send(Err(Status::new(
+                            code,
                             "test server cut the stream",
                         )))
                         .await;
-                    return;
+                    break;
                 }
                 if paused {
                     // Stalled consumer: do not read until resumed.
@@ -549,7 +610,7 @@ impl EventSink for TestEventSink {
                 let message = tokio::select! {
                     message = streaming.message() => match message {
                         Ok(Some(message)) => message,
-                        Ok(None) | Err(_) => return,
+                        Ok(None) | Err(_) => break,
                     },
                     () = control_notify.notified() => continue,
                 };
@@ -617,9 +678,10 @@ impl EventSink for TestEventSink {
                     retry_after_ms: ack_retry_after_ms,
                 };
                 if tx.send(Ok(ack)).await.is_err() {
-                    return;
+                    break;
                 }
             }
+            state.lock().expect("state lock").active_streams -= 1;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

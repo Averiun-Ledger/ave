@@ -35,6 +35,12 @@
 pub mod governance;
 
 #[cfg(feature = "common")]
+pub mod registry;
+
+#[cfg(feature = "common")]
+pub mod build;
+
+#[cfg(feature = "common")]
 pub mod error;
 
 #[cfg(feature = "common")]
@@ -54,6 +60,9 @@ pub mod sink;
 
 #[cfg(feature = "value-wrapper")]
 pub mod wrapper;
+
+#[cfg(feature = "compiler-grpc")]
+pub mod compiler;
 
 // Re-exports
 #[cfg(feature = "common")]
@@ -76,5 +85,6 @@ pub use sink::*;
 
 #[cfg(feature = "value-wrapper")]
 pub use wrapper::{
-    ContractData, ContractInitCheckData, ContractResultData, ValueWrapper,
+    ContractData, ContractInitCheckData, ContractResultData,
+    MAX_COLLECTION_SIZE, MAX_RECURSION_DEPTH, ValueWrapper,
 };

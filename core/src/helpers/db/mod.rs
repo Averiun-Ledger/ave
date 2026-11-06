@@ -1,8 +1,9 @@
 mod error;
 
 use crate::{
-    external_db::DBManager, model::sink::SubjectSinkEvent,
-    node::register::RegisterEvent, request::tracking::RequestTrackingEvent,
+    db::check_dir_writable, external_db::DBManager, model::event::Ledger,
+    model::sink::SubjectSinkEvent, node::register::RegisterEvent,
+    request::tracking::RequestTrackingEvent,
 };
 
 use crate::config::{AveExternalDBFeatureConfig, MachineSpec};
@@ -12,10 +13,12 @@ use ave_actors::{ActorRef, Subscriber};
 use prometheus_client::registry::Registry;
 
 use ave_common::{
-    bridge::request::{AbortsQuery, EventRequestType, EventsQuery},
+    bridge::request::{
+        AbortsQuery, EventRequestType, EventsQuery, IncidentsQuery,
+    },
     response::{
         GovsData, LedgerDB, PaginatorAborts, PaginatorEvents, SubjectDB,
-        SubjsData,
+        SubjsData, WatchdogIncidentRow,
     },
 };
 pub use error::DatabaseError;
@@ -43,12 +46,26 @@ pub trait ReadStore {
         query: AbortsQuery,
     ) -> Result<PaginatorAborts, DatabaseError>;
 
+    /// Newest watchdog incidents first (system monitoring, not
+    /// request verdicts). Empty when the impossible never happened.
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError>;
+
     // events sn
     async fn get_event_sn(
         &self,
         subject_id: &str,
         sn: u64,
     ) -> Result<LedgerDB, DatabaseError>;
+
+    /// Highest event sn projected for this subject, if any. Crash
+    /// backstop: boot gap-fill replays the ledger above it.
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError>;
 
     // n first or last events
     async fn get_first_or_end_events(
@@ -68,6 +85,8 @@ pub trait ReadStore {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError>;
 
     async fn get_subjects(
@@ -75,6 +94,8 @@ pub trait ReadStore {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError>;
 }
 
@@ -116,7 +137,8 @@ impl ExternalDB {
     ) -> Result<Self, DatabaseError> {
         match ext_db {
             #[cfg(feature = "ext-sqlite")]
-            AveExternalDBFeatureConfig::Sqlite { path } => {
+            AveExternalDBFeatureConfig::Sqlite { .. } => {
+                let path = ext_db.path();
                 // Passive permission check before creating anything
                 check_dir_writable(&path)
                     .map_err(DatabaseError::PermissionDenied)?;
@@ -199,6 +221,37 @@ impl ExternalDB {
         }
     }
 
+    /// Replays ledger events missed by the live projection (crash
+    /// between ledger persist and projection write). Exact-range
+    /// only: callers replay above `max_event_sn`, so the plain
+    /// `INSERT` never collides. Returns events written.
+    pub(crate) async fn fill_event_gap(
+        &self,
+        events: Vec<Ledger>,
+    ) -> Result<u64, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.fill_event_gap(events).await
+            }
+        }
+    }
+
+    /// Refreshes the subject state row (upsert, idempotent). Crash
+    /// backstop together with [`ExternalDB::fill_event_gap`]: the
+    /// state snapshot publish may have been lost with the same cut.
+    pub(crate) async fn upsert_subject_state(
+        &self,
+        state: SubjectDB,
+    ) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.upsert_subject_state(state).await
+            }
+        }
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
@@ -218,6 +271,18 @@ impl ReadStore for ExternalDB {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local.get_aborts(subject_id, query).await
+            }
+        }
+    }
+
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.get_recent_incidents(query).await
             }
         }
     }
@@ -260,6 +325,18 @@ impl ReadStore for ExternalDB {
         }
     }
 
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::SqliteLocal(sqlite_local) => {
+                sqlite_local.max_event_sn(subject_id).await
+            }
+        }
+    }
+
     async fn get_first_or_end_events(
         &self,
         subject_id: &str,
@@ -282,11 +359,13 @@ impl ReadStore for ExternalDB {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
-                sqlite_local.get_governances(active).await
+                sqlite_local.get_governances(active, limit, offset).await
             }
         }
     }
@@ -296,60 +375,22 @@ impl ReadStore for ExternalDB {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         match self {
             #[cfg(feature = "ext-sqlite")]
             Self::SqliteLocal(sqlite_local) => {
                 sqlite_local
-                    .get_subjects(governance_id, active, schema_id)
+                    .get_subjects(
+                        governance_id,
+                        active,
+                        schema_id,
+                        limit,
+                        offset,
+                    )
                     .await
             }
         }
     }
-}
-
-/// Check that a directory exists and is writable.
-/// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
-    let target = if path.exists() {
-        if !path.is_dir() {
-            return Err(format!(
-                "'{}' exists but is not a directory",
-                path.display()
-            ));
-        }
-        path
-    } else {
-        let mut ancestor = path;
-        while !ancestor.exists() {
-            match ancestor.parent() {
-                Some(p) => ancestor = p,
-                None => {
-                    return Err(format!(
-                        "'{}' does not exist and has no existing parent",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        if !ancestor.is_dir() {
-            return Err(format!(
-                "ancestor '{}' exists but is not a directory",
-                ancestor.display()
-            ));
-        }
-        ancestor
-    };
-
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-        }
-        Err(e) => {
-            return Err(format!("'{}' is not writable: {e}", target.display()));
-        }
-    }
-
-    Ok(())
 }

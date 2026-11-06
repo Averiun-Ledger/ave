@@ -2,8 +2,8 @@
 //!
 
 use crate::{
-    Command, CommandHelper, Config, Error, Event as NetworkEvent, MachineSpec,
-    Monitor, MonitorMessage, NodeType, ResolvedSpec,
+    Command, CommandHelper, Config, Delivery, Error, Event as NetworkEvent,
+    MachineSpec, Monitor, MonitorMessage, NodeType, ResolvedSpec,
     behaviour::{Behaviour, Event as BehaviourEvent, ReqResMessage},
     metrics::NetworkMetrics,
     resolve_spec,
@@ -47,49 +47,67 @@ use tracing::{debug, error, info, trace, warn};
 
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 const TARGET: &str = "ave::network::worker";
 
-/// Maximum number of outbound messages queued per peer while disconnected.
-/// When this limit is reached the oldest message is evicted to make room.
-const MAX_PENDING_MESSAGES_PER_PEER: usize = 100;
-
 /// Bounded queue of outbound messages for a single peer.
 ///
-/// Keeps the 100 most recent messages; when full the oldest is evicted.
+/// Keeps the most recent messages up to the configured per-peer count
+/// limit; when full the oldest is evicted.
 #[derive(Default)]
 struct PendingQueue {
     messages: VecDeque<PendingMessage>,
     pending_bytes: usize,
+    /// Hashes of queued payloads: dedup without comparing up to 100
+    /// megabyte-sized payloads byte by byte on every insert.
+    hashes: HashSet<u64>,
 }
 
 struct PendingMessage {
     payload: Bytes,
+    payload_hash: u64,
     enqueued_at: Instant,
 }
 
+fn payload_hash(message: &Bytes) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    message.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl PendingQueue {
-    fn contains(&self, message: &Bytes) -> bool {
-        self.messages.iter().any(|x| x.payload == *message)
+    fn contains(&self, hash: u64, message: &Bytes) -> bool {
+        // Empty queue is the common case for an idle peer: answer
+        // without hashing the payload at all.
+        if self.messages.is_empty() {
+            return false;
+        }
+        self.hashes.contains(&hash)
+            && self.messages.iter().any(|x| x.payload == *message)
     }
 
     fn pop_front(&mut self) -> Option<PendingMessage> {
         let popped = self.messages.pop_front()?;
         self.pending_bytes =
             self.pending_bytes.saturating_sub(popped.payload.len());
+        self.hashes.remove(&popped.payload_hash);
         Some(popped)
     }
 
-    fn push_back(&mut self, message: Bytes) {
+    fn push_back(&mut self, message: Bytes, payload_hash: u64) {
         self.pending_bytes += message.len();
+        self.hashes.insert(payload_hash);
         self.messages.push_back(PendingMessage {
             payload: message,
+            payload_hash,
             enqueued_at: Instant::now(),
         });
     }
 
     fn drain(&mut self) -> impl Iterator<Item = PendingMessage> + '_ {
         self.pending_bytes = 0;
+        self.hashes.clear();
         self.messages.drain(..)
     }
 
@@ -117,7 +135,8 @@ struct PendingEnqueueReport {
     /// Messages evicted by the per-peer bytes limit, plus one when the
     /// incoming message itself did not fit and was rejected.
     dropped_bytes_limit_peer: u64,
-    /// Messages rejected by the global bytes limit.
+    /// Messages evicted or rejected under global bytes pressure
+    /// (oldest-first across peers).
     dropped_bytes_limit_global: u64,
     /// Evicted messages (for age observation), in eviction order.
     evicted: Vec<PendingMessage>,
@@ -125,11 +144,14 @@ struct PendingEnqueueReport {
 
 /// Insert `message` into the peer's queue applying the shared bounded
 /// policy: dedup, per-peer count limit, per-peer bytes limit and global
-/// bytes limit (oldest evicted first). A `0` bytes limit disables it.
+/// bytes limit with oldest-first eviction across peers. A `0` bytes
+/// limit disables it. Queues left empty are removed so the peer count
+/// stays bounded by buffered content.
 fn enqueue_pending(
     queues: &mut HashMap<PeerId, PendingQueue>,
     per_peer_limit: usize,
     global_limit: usize,
+    max_messages_per_peer: usize,
     peer: PeerId,
     message: Bytes,
 ) -> PendingEnqueueReport {
@@ -144,45 +166,117 @@ fn enqueue_pending(
     let mut total_pending_bytes =
         queues.values().map(PendingQueue::bytes_len).sum::<usize>();
 
-    let queue = queues.entry(peer).or_default();
-    if queue.contains(&message) {
-        report.duplicate = true;
-        return report;
+    enum PeerVerdict {
+        Duplicate,
+        RejectPeer,
+        Tentative,
     }
 
-    while queue.len() >= MAX_PENDING_MESSAGES_PER_PEER {
-        if let Some(evicted) = queue.pop_front() {
-            report.dropped_count += 1;
-            total_pending_bytes =
-                total_pending_bytes.saturating_sub(evicted.payload.len());
-            report.evicted.push(evicted);
+    // One hash per insert: shared by the dedup check and the push.
+    let message_hash = payload_hash(&message);
+    let verdict = {
+        let queue = queues.entry(peer).or_default();
+        if queue.contains(message_hash, &message) {
+            PeerVerdict::Duplicate
         } else {
-            break;
-        }
-    }
+            while queue.len() >= max_messages_per_peer {
+                if let Some(evicted) = queue.pop_front() {
+                    report.dropped_count += 1;
+                    total_pending_bytes = total_pending_bytes
+                        .saturating_sub(evicted.payload.len());
+                    report.evicted.push(evicted);
+                } else {
+                    break;
+                }
+            }
 
-    if per_peer_limit > 0 {
-        while queue.bytes_len() + message_len > per_peer_limit {
-            if let Some(evicted) = queue.pop_front() {
+            if per_peer_limit > 0 {
+                while queue.bytes_len() + message_len > per_peer_limit {
+                    if let Some(evicted) = queue.pop_front() {
+                        report.dropped_bytes_limit_peer += 1;
+                        total_pending_bytes = total_pending_bytes
+                            .saturating_sub(evicted.payload.len());
+                        report.evicted.push(evicted);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if per_peer_limit > 0
+                && queue.bytes_len() + message_len > per_peer_limit
+            {
                 report.dropped_bytes_limit_peer += 1;
-                total_pending_bytes =
-                    total_pending_bytes.saturating_sub(evicted.payload.len());
-                report.evicted.push(evicted);
+                PeerVerdict::RejectPeer
             } else {
-                break;
+                PeerVerdict::Tentative
+            }
+        }
+    };
+
+    match verdict {
+        PeerVerdict::Duplicate => {
+            report.duplicate = true;
+        }
+        PeerVerdict::RejectPeer => {}
+        PeerVerdict::Tentative => {
+            if global_limit > 0
+                && total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+            {
+                while total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+                {
+                    let oldest = queues
+                        .iter()
+                        .filter_map(|(id, queue)| {
+                            queue
+                                .messages
+                                .front()
+                                .map(|front| (*id, front.enqueued_at))
+                        })
+                        .min_by_key(|&(_, at)| at)
+                        .map(|(id, _)| id);
+                    let Some(victim) = oldest else {
+                        break;
+                    };
+                    let evicted = queues
+                        .get_mut(&victim)
+                        .and_then(PendingQueue::pop_front);
+                    match evicted {
+                        Some(message) => {
+                            total_pending_bytes = total_pending_bytes
+                                .saturating_sub(message.payload.len());
+                            report.dropped_bytes_limit_global += 1;
+                            report.evicted.push(message);
+                        }
+                        None => break,
+                    }
+                    if queues.get(&victim).is_some_and(PendingQueue::is_empty) {
+                        queues.remove(&victim);
+                    }
+                }
+                if total_pending_bytes.saturating_add(message_len)
+                    > global_limit
+                {
+                    report.dropped_bytes_limit_global += 1;
+                } else {
+                    queues
+                        .entry(peer)
+                        .or_default()
+                        .push_back(message, message_hash);
+                }
+            } else {
+                queues
+                    .entry(peer)
+                    .or_default()
+                    .push_back(message, message_hash);
             }
         }
     }
 
-    if per_peer_limit > 0 && queue.bytes_len() + message_len > per_peer_limit
-    {
-        report.dropped_bytes_limit_peer += 1;
-    } else if global_limit > 0
-        && total_pending_bytes.saturating_add(message_len) > global_limit
-    {
-        report.dropped_bytes_limit_global += 1;
-    } else {
-        queue.push_back(message);
+    if queues.get(&peer).is_some_and(PendingQueue::is_empty) {
+        queues.remove(&peer);
     }
 
     report
@@ -260,6 +354,15 @@ where
     max_pending_inbound_bytes_per_peer: usize,
     max_pending_outbound_bytes_total: usize,
     max_pending_inbound_bytes_total: usize,
+    max_pending_messages_per_peer: usize,
+
+    /// Maximum age of a queued outbound message before it is purged.
+    /// Zero disables the TTL.
+    pending_outbound_ttl: Duration,
+
+    /// Maximum age of a buffered inbound message before it is purged.
+    /// Zero disables the TTL.
+    pending_inbound_ttl: Duration,
 
     metrics: Option<Arc<NetworkMetrics>>,
 }
@@ -330,7 +433,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         let ResolvedSpec { ram_mb, cpu_cores } =
             resolve_spec(runtime.machine_spec);
 
-        let limits = LimitsConfig::build(ram_mb, cpu_cores);
+        let limits = LimitsConfig::build(
+            ram_mb,
+            cpu_cores,
+            config.max_app_message_bytes,
+            &node_type,
+        );
         let max_app_message_bytes = config.max_app_message_bytes;
         let max_pending_outbound_bytes_per_peer =
             config.max_pending_outbound_bytes_per_peer;
@@ -340,6 +448,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             config.max_pending_outbound_bytes_total;
         let max_pending_inbound_bytes_total =
             config.max_pending_inbound_bytes_total;
+        let max_pending_messages_per_peer =
+            config.max_pending_messages_per_peer;
+        let pending_outbound_ttl =
+            Duration::from_secs(config.pending_outbound_ttl_secs);
+        let pending_inbound_ttl =
+            Duration::from_secs(config.pending_inbound_ttl_secs);
 
         // Build transport.
         let transport = build_transport(&key, limits.clone())?;
@@ -429,6 +543,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             max_pending_inbound_bytes_per_peer,
             max_pending_outbound_bytes_total,
             max_pending_inbound_bytes_total,
+            max_pending_messages_per_peer,
+            pending_outbound_ttl,
+            pending_inbound_ttl,
             metrics: runtime.metrics,
         };
 
@@ -448,6 +565,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         self.safe_mode
     }
 
+    #[cfg(test)]
     fn pending_outbound_messages_len(&self) -> usize {
         self.pending_outbound_messages
             .values()
@@ -462,6 +580,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             .sum()
     }
 
+    #[cfg(test)]
     fn pending_inbound_messages_len(&self) -> usize {
         self.pending_inbound_messages
             .values()
@@ -486,20 +605,8 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         };
 
         metrics.set_retry_queue_len(self.retry_queue.len() as i64);
-        metrics.set_pending_outbound_peers(
-            self.pending_outbound_messages.len() as i64,
-        );
-        metrics.set_pending_outbound_messages(
-            self.pending_outbound_messages_len() as i64,
-        );
         metrics.set_pending_outbound_bytes(
             self.pending_outbound_bytes_len() as i64
-        );
-        metrics.set_pending_inbound_peers(
-            self.pending_inbound_messages.len() as i64
-        );
-        metrics.set_pending_inbound_messages(
-            self.pending_inbound_messages_len() as i64,
         );
         metrics
             .set_pending_inbound_bytes(self.pending_inbound_bytes_len() as i64);
@@ -509,14 +616,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         );
     }
 
-    fn observe_pending_message_age(&self, enqueued_at: Instant) {
-        if let Some(metrics) = self.metric_handle() {
-            metrics.observe_pending_message_age_seconds(
-                enqueued_at.elapsed().as_secs_f64(),
-            );
-        }
-    }
-
     fn drop_pending_outbound_messages(&mut self, peer_id: &PeerId) -> usize {
         let Some(mut queue) = self.pending_outbound_messages.remove(peer_id)
         else {
@@ -524,19 +623,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         };
 
         let mut dropped = 0usize;
-        for message in queue.drain() {
+        for _ in queue.drain() {
             dropped += 1;
-            self.observe_pending_message_age(message.enqueued_at);
         }
         dropped
     }
 
     fn drop_pending_inbound_messages(&mut self, peer_id: &PeerId) {
-        if let Some(mut queue) = self.pending_inbound_messages.remove(peer_id) {
-            for message in queue.drain() {
-                self.observe_pending_message_age(message.enqueued_at);
-            }
-        }
+        self.pending_inbound_messages.remove(peer_id);
     }
 
     fn observe_identify_error(
@@ -612,10 +706,18 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         entry.when = when;
         entry.kind = kind;
         entry.addrs = addrs;
+        let due = Due(peer, entry.when);
+        let kind_label = match kind {
+            RetryKind::Discover => "discover",
+            RetryKind::Dial => "dial",
+        };
 
         self.peer_action.insert(peer, Action::from(kind));
 
-        self.retry_queue.push(Due(peer, entry.when));
+        self.retry_queue.push(due);
+        if let Some(metrics) = self.metric_handle() {
+            metrics.observe_retry_scheduled(kind_label);
+        }
         self.arm_retry_timer();
         self.refresh_runtime_metrics();
     }
@@ -682,10 +784,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         &mut self,
         peer: PeerId,
         message: Bytes,
+        delivery: Delivery,
     ) -> Result<(), Error> {
         if self.is_safe_mode() {
-            debug!(
+            trace!(
                 target: TARGET,
+                msg_type = "Send",
                 peer_id = %peer,
                 size = message.len(),
                 "safe mode active; dropping outbound message"
@@ -732,9 +836,58 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
         }
 
+        // A direct message is never buffered for later delivery: to an
+        // identified peer it goes out immediately (the queue + flush
+        // fast path without the buffering); otherwise it is dropped —
+        // the sender has its own retry machine and will retransmit —
+        // and the connection is kicked so the retransmission finds it
+        // open.
+        // A freshly identified peer is sendable even before the DHT
+        // lists it: dropping its first messages would burn a retry
+        // cycle for a connection that is already open.
+        let sendable =
+            matches!(self.peer_action.get(&peer), Some(Action::Identified(..)))
+                || self.swarm.behaviour_mut().is_known_peer(&peer);
+
+        if delivery == Delivery::Direct {
+            if sendable {
+                if let Some(Action::Identified(..)) =
+                    self.peer_action.get(&peer)
+                {
+                    self.swarm.behaviour_mut().send_message(&peer, message);
+                    self.refresh_runtime_metrics();
+                    return Ok(());
+                }
+
+                trace!(
+                    target: TARGET,
+                    peer_id = %peer,
+                    size = message.len(),
+                    "peer not identified; dropping direct outbound message"
+                );
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.inc_direct_outbound_drop();
+                }
+                self.schedule_retry(peer, ScheduleType::Dial(vec![]));
+            } else {
+                trace!(
+                    target: TARGET,
+                    peer_id = %peer,
+                    size = message.len(),
+                    "unknown peer; dropping direct outbound message"
+                );
+                if let Some(metrics) = self.metric_handle() {
+                    metrics.inc_direct_outbound_drop();
+                }
+                self.schedule_retry(peer, ScheduleType::Discover);
+            }
+            self.refresh_runtime_metrics();
+            return Ok(());
+        }
+
         self.add_pending_outbound_message(peer, message);
 
-        if self.swarm.behaviour_mut().is_known_peer(&peer) {
+        if sendable {
             if let Some(Action::Identified(..)) = self.peer_action.get(&peer) {
                 self.send_pending_outbound_messages(peer);
             } else {
@@ -747,17 +900,44 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         Ok(())
     }
 
+    /// Purges expired messages from the front of the peer's outbound
+    /// queue (FIFO, so sweeping front-expired entries is enough).
+    /// Returns how many were purged. A zero TTL disables the purge.
+    fn sweep_expired_outbound(&mut self, peer: &PeerId) -> u64 {
+        if self.pending_outbound_ttl.is_zero() {
+            return 0;
+        }
+        let ttl = self.pending_outbound_ttl;
+        let mut expired = Vec::new();
+        if let Some(queue) = self.pending_outbound_messages.get_mut(peer) {
+            while queue
+                .messages
+                .front()
+                .is_some_and(|front| front.enqueued_at.elapsed() >= ttl)
+            {
+                let Some(message) = queue.pop_front() else {
+                    break;
+                };
+                expired.push(message);
+            }
+        }
+        expired.len() as u64
+    }
+
     /// Add pending message to peer.
     ///
     /// If count/bytes limits are reached, oldest messages are evicted first.
     fn add_pending_outbound_message(&mut self, peer: PeerId, message: Bytes) {
+        let expired = self.sweep_expired_outbound(&peer);
         let message_len = message.len();
         let per_peer_limit = self.max_pending_outbound_bytes_per_peer;
         let global_limit = self.max_pending_outbound_bytes_total;
+        let max_messages = self.max_pending_messages_per_peer;
         let report = enqueue_pending(
             &mut self.pending_outbound_messages,
             per_peer_limit,
             global_limit,
+            max_messages,
             peer,
             message,
         );
@@ -767,16 +947,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             return;
         }
 
-        for evicted in &report.evicted {
-            self.observe_pending_message_age(evicted.enqueued_at);
-        }
-
         if report.dropped_count > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
                 dropped = report.dropped_count,
-                max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                max_messages = max_messages,
                 "outbound queue count limit reached; oldest messages evicted",
             );
         }
@@ -799,11 +975,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
-                "outbound global queue bytes limit reached; messages dropped",
+                "outbound global queue bytes limit reached; oldest evicted across peers",
             );
         }
 
         if let Some(metrics) = self.metric_handle() {
+            metrics.inc_outbound_queue_ttl_drop_by(expired);
             metrics.inc_outbound_queue_drop_by(report.dropped_count);
             metrics.inc_outbound_queue_bytes_drop_per_peer_by(
                 report.dropped_bytes_limit_peer,
@@ -817,13 +994,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
     }
 
     fn add_pending_inbound_message(&mut self, peer: PeerId, message: Bytes) {
+        let expired = self.sweep_expired_inbound(&peer);
         let message_len = message.len();
         let per_peer_limit = self.max_pending_inbound_bytes_per_peer;
         let global_limit = self.max_pending_inbound_bytes_total;
+        let max_messages = self.max_pending_messages_per_peer;
         let report = enqueue_pending(
             &mut self.pending_inbound_messages,
             per_peer_limit,
             global_limit,
+            max_messages,
             peer,
             message,
         );
@@ -833,16 +1013,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             return;
         }
 
-        for evicted in &report.evicted {
-            self.observe_pending_message_age(evicted.enqueued_at);
-        }
-
         if report.dropped_count > 0 {
             warn!(
                 target: TARGET,
                 peer_id = %peer,
                 dropped = report.dropped_count,
-                max_messages = MAX_PENDING_MESSAGES_PER_PEER,
+                max_messages = max_messages,
                 "inbound queue count limit reached; oldest messages evicted",
             );
         }
@@ -865,11 +1041,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 dropped = report.dropped_bytes_limit_global,
                 message_bytes = message_len,
                 max_queue_bytes_total = global_limit,
-                "inbound global queue bytes limit reached; messages dropped",
+                "inbound global queue bytes limit reached; oldest evicted across peers",
             );
         }
 
         if let Some(metrics) = self.metric_handle() {
+            metrics.inc_inbound_queue_ttl_drop_by(expired);
             metrics.inc_inbound_queue_drop_by(report.dropped_count);
             metrics.inc_inbound_queue_bytes_drop_per_peer_by(
                 report.dropped_bytes_limit_peer,
@@ -882,27 +1059,102 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         self.refresh_runtime_metrics();
     }
 
-    /// Add ephemeral response.
+    /// Purges expired messages from the front of the peer's inbound
+    /// queue (FIFO, so sweeping front-expired entries is enough).
+    /// Returns how many were purged. A zero TTL disables the purge.
+    /// Queues left empty are removed so the peer count stays bounded.
+    fn sweep_expired_inbound(&mut self, peer: &PeerId) -> u64 {
+        if self.pending_inbound_ttl.is_zero() {
+            return 0;
+        }
+        let ttl = self.pending_inbound_ttl;
+        let mut expired = Vec::new();
+        if let Some(queue) = self.pending_inbound_messages.get_mut(peer) {
+            while queue
+                .messages
+                .front()
+                .is_some_and(|front| front.enqueued_at.elapsed() >= ttl)
+            {
+                let Some(message) = queue.pop_front() else {
+                    break;
+                };
+                expired.push(message);
+            }
+        }
+        if self
+            .pending_inbound_messages
+            .get(peer)
+            .is_some_and(PendingQueue::is_empty)
+        {
+            self.pending_inbound_messages.remove(peer);
+        }
+        expired.len() as u64
+    }
+
+    /// Maximum response channels buffered per peer. A channel answers
+    /// one inbound request; beyond the cap the oldest is dropped (its
+    /// requester times out on its own reqres deadline).
+    const MAX_RESPONSE_CHANNELS_PER_PEER: usize = 16;
+
+    /// Buffer a response channel for an inbound request. Stashing is
+    /// keyed by the authenticated PeerId, so it is safe before
+    /// identify completes; the payload itself is only delivered to the
+    /// helper after identify.
     fn add_ephemeral_response(
         &mut self,
         peer: PeerId,
         response_channel: ResponseChannel<ReqResMessage>,
     ) {
-        self.response_channels
-            .entry(peer)
-            .or_default()
-            .push_back(response_channel);
+        let mut evicted = 0u64;
+        {
+            let queue = self.response_channels.entry(peer).or_default();
+            // Drop channels the requester already abandoned: they can
+            // never be answered and only pin memory.
+            let before = queue.len();
+            queue.retain(|channel| channel.is_open());
+            evicted += (before - queue.len()) as u64;
+            while queue.len() >= Self::MAX_RESPONSE_CHANNELS_PER_PEER {
+                queue.pop_front();
+                evicted += 1;
+            }
+            queue.push_back(response_channel);
+        }
+        for _ in 0..evicted {
+            if let Some(metrics) = self.metric_handle() {
+                metrics.inc_response_channel_drop();
+            }
+        }
+        if evicted > 0 {
+            warn!(
+                target: TARGET,
+                peer_id = %peer,
+                dropped = evicted,
+                max_channels = Self::MAX_RESPONSE_CHANNELS_PER_PEER,
+                "response channel limit reached; oldest dropped",
+            );
+        }
         self.refresh_runtime_metrics();
     }
 
     /// Send pending messages to peer.
     fn send_pending_outbound_messages(&mut self, peer: PeerId) {
         if let Some(mut queue) = self.pending_outbound_messages.remove(&peer) {
+            let ttl = self.pending_outbound_ttl;
+            let mut expired = 0u64;
             for message in queue.drain() {
-                self.observe_pending_message_age(message.enqueued_at);
+                // Expired messages are purged instead of delivered: a
+                // stale copy is worse than a lost one for senders with
+                // their own retry machine.
+                if !ttl.is_zero() && message.enqueued_at.elapsed() >= ttl {
+                    expired += 1;
+                    continue;
+                }
                 self.swarm
                     .behaviour_mut()
                     .send_message(&peer, message.payload);
+            }
+            if let Some(metrics) = self.metric_handle() {
+                metrics.inc_outbound_queue_ttl_drop_by(expired);
             }
         }
 
@@ -930,7 +1182,12 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         if let Some(monitor) = self.monitor.as_mut()
             && let Err(e) = monitor.tell(MonitorMessage::Network(event)).await
         {
-            error!(target: TARGET, error = %e, "failed to forward event to monitor");
+            error!(
+                target: TARGET,
+                msg_type = "Monitor",
+                error = %e,
+                "failed to forward event to monitor"
+            );
             self.crash_token.cancel();
         }
     }
@@ -1034,7 +1291,9 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                                     }
                                 }
                             }
-                            if !self.boot_nodes.is_empty() {
+                            if !self.boot_nodes.is_empty()
+                                || !self.retry_boot_nodes.is_empty()
+                            {
                                 self.change_state(NetworkState::Dialing).await;
                                 dialing_round_timeout.as_mut().reset(
                                     Instant::now() + Duration::from_secs(15),
@@ -1079,11 +1338,17 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             self.boot_nodes.clone_from(&self.retry_boot_nodes);
                             self.retry_boot_nodes.clear();
                             self.change_state(NetworkState::Dial).await;
+                            // Backoff done: redial NOW. Falling through to
+                            // the event wait below would park until an
+                            // unrelated event (or never, with all timers
+                            // disarmed).
+                            continue;
                         }
                         // No more bootnodes to send dial and none was successful
                         else if self.boot_nodes.is_empty()
                             && self.successful_dials == 0
                         {
+                            warn!(target: TARGET, retry_queued = self.retry_boot_nodes.len(), rounds_used = retrys, "bootstrap exhausted: no reachable boot node");
                             self.change_state(NetworkState::Disconnected).await;
                         // No more bootnodes to send dial and one or more was successful
                         } else if self.boot_nodes.is_empty() {
@@ -1204,8 +1469,14 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     metrics.observe_dial_failure(phase, "peer_condition");
                 }
                 if bootstrap_flow {
-                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met");
-                    return Some((false, vec![]));
+                    // Already connected or dialing: not a failure, the
+                    // in-flight connection resolves it (Identify counts
+                    // from any state). Park for a retry round instead of
+                    // dropping the peer: with fresh peers on both ends
+                    // racing dials at once, failing fast here crashes
+                    // bootstraps that are milliseconds from succeeding.
+                    debug!(target: TARGET, peer_id = %peer_id, "dial skipped: peer condition not met; waiting for in-flight connection");
+                    return Some((true, vec![]));
                 }
 
                 None
@@ -1216,8 +1487,19 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 }
                 if bootstrap_flow {
                     debug!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour");
+                    return Some((false, vec![]));
                 }
-                Some((false, vec![]))
+
+                // Terminal: an allow-list denial never heals by
+                // redialing. Evict at once instead of burning three
+                // discovery strikes.
+                warn!(target: TARGET, peer_id = %peer_id, cause = %cause, "dial denied by behaviour; evicting peer");
+                self.retry_by_peer.remove(peer_id);
+                self.clear_pending_messages(peer_id);
+                self.swarm
+                    .behaviour_mut()
+                    .clean_hard_peer_to_remove(peer_id);
+                None
             }
             DialError::Aborted => {
                 if let Some(metrics) = self.metric_handle() {
@@ -1271,25 +1553,54 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
         event: SwarmEvent<BehaviourEvent>,
     ) {
         match event {
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                self.boot_nodes.remove(&peer_id);
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                // A duplicate-connection close (simultaneous dials,
+                // discovery redial) must not drop a bootstrap peer while
+                // another connection to it survives: Identify on the
+                // survivor still completes the bootstrap.
+                debug!(target: TARGET, peer_id = %peer_id, num_established, "bootstrap connection closed");
+                if num_established == 0
+                    && let Some(addresses) = self.boot_nodes.remove(&peer_id)
+                {
+                    // Last connection gone, but the peer may still be
+                    // reachable (a redial is already in flight, or the
+                    // far side is dialing us back right now): park it
+                    // for the bounded retry rounds instead of crashing
+                    // the bootstrap.
+                    self.retry_boot_nodes.insert(peer_id, addresses);
+                }
             }
             SwarmEvent::OutgoingConnectionError {
                 peer_id: Some(peer_id),
                 error,
                 ..
             } => {
+                debug!(target: TARGET, peer_id = %peer_id, error = ?error, "bootstrap outgoing connection error");
+                // Transport failures are transient by nature (DNS race,
+                // warming listener, handshake garbage from a restarting
+                // peer): park for the bounded retry rounds even when no
+                // address looks retryable, instead of crashing the
+                // bootstrap on the first attempt. Deterministic config
+                // errors (wrong id, denied, self-dial) keep failing fast.
+                let park_transient = matches!(error, DialError::Transport(_));
                 let (add_to_retry, new_addresses) = self
                     .handle_dial_error(error, &peer_id, true)
                     .unwrap_or((false, vec![]));
 
-                if let Some(addresses) = self.boot_nodes.remove(&peer_id)
-                    && add_to_retry
-                {
-                    if new_addresses.is_empty() {
+                if let Some(addresses) = self.boot_nodes.remove(&peer_id) {
+                    if add_to_retry {
+                        if new_addresses.is_empty() {
+                            self.retry_boot_nodes.insert(peer_id, addresses);
+                        } else {
+                            self.retry_boot_nodes
+                                .insert(peer_id, new_addresses);
+                        }
+                    } else if park_transient {
                         self.retry_boot_nodes.insert(peer_id, addresses);
-                    } else {
-                        self.retry_boot_nodes.insert(peer_id, new_addresses);
                     }
                 }
             }
@@ -1323,6 +1634,16 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
                     if any_address_is_valid {
                         if self.boot_nodes.remove(&peer_id).is_some() {
+                            self.successful_dials += 1;
+                        } else if self
+                            .retry_boot_nodes
+                            .remove(&peer_id)
+                            .is_some()
+                        {
+                            // Identify arrived over a connection that
+                            // outlived its bootstrap round (duplicate
+                            // close parked the peer for retry): the peer
+                            // proved reachable, count it.
                             self.successful_dials += 1;
                         }
                         self.peer_identify.insert(peer_id);
@@ -1464,7 +1785,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
 
     async fn handle_command(&mut self, command: Command) {
         match command {
-            Command::SendMessage { peer, message } => {
+            Command::SendMessage {
+                peer,
+                message,
+                delivery,
+            } => {
                 if self.is_safe_mode() {
                     debug!(
                         target: TARGET,
@@ -1474,7 +1799,7 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     );
                     return;
                 }
-                if let Err(error) = self.send_message(peer, message) {
+                if let Err(error) = self.send_message(peer, message, delivery) {
                     error!(target: TARGET, error = %error, "failed to deliver message");
                     self.send_event(NetworkEvent::Error(error)).await;
                 }
@@ -1530,7 +1855,11 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
             }
         }
 
-        error!(target: TARGET, "helper channel closed; shutting down");
+        error!(
+            target: TARGET,
+            msg_type = "Helper",
+            "helper channel closed; shutting down"
+        );
         self.crash_token.cancel();
     }
 
@@ -1662,12 +1991,24 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                             if let Some(mut queue) =
                                 self.pending_inbound_messages.remove(&peer_id)
                             {
+                                let ttl = self.pending_inbound_ttl;
                                 let mut buffered = VecDeque::new();
+                                let mut expired = 0u64;
                                 for message in queue.drain() {
-                                    self.observe_pending_message_age(
-                                        message.enqueued_at,
-                                    );
+                                    // Stale buffered copies are worse than
+                                    // lost ones: receivers re-request what
+                                    // they still miss.
+                                    if !ttl.is_zero()
+                                        && message.enqueued_at.elapsed() >= ttl
+                                    {
+                                        expired += 1;
+                                        continue;
+                                    }
                                     buffered.push_back(message.payload);
+                                }
+                                if let Some(metrics) = self.metric_handle() {
+                                    metrics
+                                        .inc_inbound_queue_ttl_drop_by(expired);
                                 }
                                 self.message_to_helper(
                                     MessagesHelper::Vec(buffered),
@@ -1739,18 +2080,22 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                         }
 
                         if is_request {
-                            if let Some(metrics) = self.metric_handle() {
-                                metrics.inc_reqres_request_received();
-                            }
-                            trace!(target: TARGET, peer_id = %peer_id, "request received");
+                            trace!(
+                                target: TARGET,
+                                msg_type = "ReqRes",
+                                peer_id = %peer_id,
+                                "request received"
+                            );
                             if let Some(channel) = response_channel {
                                 self.add_ephemeral_response(peer_id, channel);
                             }
                         } else {
-                            if let Some(metrics) = self.metric_handle() {
-                                metrics.inc_reqres_response_received();
-                            }
-                            trace!(target: TARGET, peer_id = %peer_id, "response received");
+                            trace!(
+                                target: TARGET,
+                                msg_type = "ReqRes",
+                                peer_id = %peer_id,
+                                "response received"
+                            );
                         }
 
                         if self.peer_identify.contains(&peer_id) {
@@ -1880,17 +2225,21 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                 num_established: 0,
                 ..
             } => {
+                // Per-peer ephemeral state always goes with the last
+                // connection: buffered inbound, stashed response
+                // channels, identify mark and retry state. Buffered
+                // outbound survives (the peer may still be reachable
+                // through another address) and drives the redial below.
+                self.drop_pending_inbound_messages(&peer_id);
+                self.response_channels.remove(&peer_id);
+                self.peer_identify.remove(&peer_id);
+                self.retry_by_peer.remove(&peer_id);
+
                 if let Some(Action::Identified(id)) =
                     self.peer_action.get(&peer_id)
                     && connection_id == *id
                 {
                     self.peer_action.remove(&peer_id);
-
-                    self.peer_identify.remove(&peer_id);
-                    self.drop_pending_inbound_messages(&peer_id);
-                    self.response_channels.remove(&peer_id);
-
-                    self.retry_by_peer.remove(&peer_id);
 
                     if self
                         .pending_outbound_messages
@@ -1906,10 +2255,6 @@ impl<T: Debug + Serialize> NetworkWorker<T> {
                     self.peer_action.get(&peer_id)
                 {
                     self.peer_action.remove(&peer_id);
-                    self.retry_by_peer.remove(&peer_id);
-                    self.drop_pending_inbound_messages(&peer_id);
-                    self.response_channels.remove(&peer_id);
-                    self.peer_identify.remove(&peer_id);
 
                     if self
                         .pending_outbound_messages
@@ -1979,6 +2324,29 @@ mod tests {
 
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Dummy;
+
+    #[test]
+    fn pending_queue_dedups_and_evicts_oldest_first() {
+        use libp2p::PeerId;
+
+        let peer = PeerId::random();
+        let mut queues: HashMap<PeerId, PendingQueue> = HashMap::new();
+        let msg = Bytes::from_static(b"hello");
+
+        // First insert lands; an identical retry is a duplicate.
+        let report = enqueue_pending(&mut queues, 0, 0, 10, peer, msg.clone());
+        assert!(!report.duplicate);
+        let report = enqueue_pending(&mut queues, 0, 0, 10, peer, msg.clone());
+        assert!(report.duplicate);
+        assert_eq!(queues[&peer].len(), 1);
+
+        // Count limit evicts oldest first.
+        for i in 0..10u8 {
+            enqueue_pending(&mut queues, 0, 0, 10, peer, Bytes::from(vec![i]));
+        }
+        assert_eq!(queues[&peer].len(), 10);
+        assert_eq!(queues[&peer].messages.front().unwrap().payload[0], 0);
+    }
 
     fn metric_value(metrics: &str, name: &str) -> f64 {
         metrics
@@ -2141,10 +2509,6 @@ mod tests {
             0.0
         );
         assert_eq!(metric_value(&text, "network_pending_outbound_bytes"), 16.0);
-        assert!(
-            metric_value(&text, "network_pending_message_age_seconds_count")
-                >= 1.0
-        );
     }
 
     #[test]
@@ -2270,7 +2634,7 @@ mod tests {
         );
         worker.add_pending_outbound_message(
             peer_b,
-            Bytes::from_static(b"bbbbbbbbbbbb"), // rejected by global limit
+            Bytes::from_static(b"bbbbbbbbbbbb"), // evicts peer_a by global LRU
         );
 
         assert_eq!(worker.pending_outbound_bytes_len(), 12);
@@ -2278,16 +2642,16 @@ mod tests {
             worker
                 .pending_outbound_messages
                 .get(&peer_a)
-                .expect("peer_a queue")
-                .len(),
-            1
+                .map_or(0, PendingQueue::len),
+            0
         );
         assert_eq!(
             worker
                 .pending_outbound_messages
                 .get(&peer_b)
-                .map_or(0, PendingQueue::len),
-            0
+                .expect("peer_b queue")
+                .len(),
+            1
         );
 
         let mut text = String::new();
@@ -2303,6 +2667,152 @@ mod tests {
             metric_value(
                 &text,
                 "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_bytes_limit_global\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn rejected_messages_leave_no_empty_peer_entry() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3103".to_owned()],
+        );
+        // Per-peer rejection (a single message larger than the peer
+        // budget is dropped, never queued); the global total is
+        // disabled to isolate it. Must stay >= max_app_message_bytes
+        // (1 MiB) per config validation.
+        config.max_pending_outbound_bytes_per_peer = 1024 * 1024;
+        config.max_pending_outbound_bytes_total = 0;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        // Nothing is evictable and the 2 MiB message exceeds the 1 MiB
+        // peer budget: rejected without leaving an empty queue behind.
+        worker.add_pending_outbound_message(
+            PeerId::random(),
+            Bytes::from(vec![0u8; 2 * 1024 * 1024]),
+        );
+        assert!(worker.pending_outbound_messages.is_empty());
+    }
+
+    #[test]
+    fn pending_message_count_limit_is_configurable() {
+        let mut config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3104".to_owned()],
+        );
+        config.max_pending_outbound_bytes_per_peer = 0;
+        config.max_pending_outbound_bytes_total = 0;
+        config.max_pending_messages_per_peer = 2;
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        let peer = PeerId::random();
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"aa"));
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"bb"));
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"cc"));
+
+        let queue = worker
+            .pending_outbound_messages
+            .get(&peer)
+            .expect("queue exists");
+        assert_eq!(queue.len(), 2);
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"queue_limit\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn inbound_ttl_sweep_purges_expired_on_insert() {
+        let config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3105".to_owned()],
+        );
+
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+        worker.pending_inbound_ttl = Duration::from_millis(100);
+
+        let peer = PeerId::random();
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"old"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // The next enqueue sweeps the expired message from the front.
+        worker.add_pending_inbound_message(peer, Bytes::from_static(b"new"));
+        let queue = worker
+            .pending_inbound_messages
+            .get(&peer)
+            .expect("queue exists");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.messages.front().expect("front").payload,
+            Bytes::from_static(b"new")
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"inbound\",reason=\"ttl_expired\"}"
             ),
             1.0
         );
@@ -2714,7 +3224,8 @@ mod tests {
             worker.handle_dial_error(DialError::NoAddresses, &peer, true);
         assert_eq!(result, Some((false, vec![])));
 
-        // DialPeerConditionFalse
+        // DialPeerConditionFalse: already connected/dialing, the
+        // in-flight connection resolves it (parked, not dropped).
         let result = worker.handle_dial_error(
             DialError::DialPeerConditionFalse(
                 libp2p::swarm::dial_opts::PeerCondition::Disconnected,
@@ -2722,7 +3233,7 @@ mod tests {
             &peer,
             true,
         );
-        assert_eq!(result, Some((false, vec![])));
+        assert_eq!(result, Some((true, vec![])));
 
         // Denied
         let result = worker.handle_dial_error(
@@ -2814,7 +3325,7 @@ mod tests {
         let result = worker.handle_dial_error(
             DialError::WrongPeerId {
                 obtained: PeerId::random(),
-                address: addr,
+                address: addr.clone(),
             },
             &peer,
             false,
@@ -2822,7 +3333,18 @@ mod tests {
         assert_eq!(result, None);
         assert!(!worker.retry_by_peer.contains_key(&peer));
 
-        // Denied in runtime returns Some((false, vec![]))
+        // Denied in runtime is terminal: the peer is evicted at
+        // once (an allow-list denial never heals by redialing), so
+        // no retry comes back.
+        worker.retry_by_peer.insert(
+            peer,
+            RetryState {
+                attempts: 1,
+                when: Instant::now(),
+                kind: RetryKind::Dial,
+                addrs: vec![addr.clone()],
+            },
+        );
         let result = worker.handle_dial_error(
             DialError::Denied {
                 cause: libp2p::swarm::ConnectionDenied::new(
@@ -2832,7 +3354,8 @@ mod tests {
             &peer,
             false,
         );
-        assert_eq!(result, Some((false, vec![])));
+        assert_eq!(result, None);
+        assert!(!worker.retry_by_peer.contains_key(&peer));
 
         // Aborted in runtime returns Some((true, vec![]))
         let result = worker.handle_dial_error(DialError::Aborted, &peer, false);
@@ -2883,13 +3406,17 @@ mod tests {
 
         // safe_mode: should return Ok without sending
         worker.safe_mode = true;
-        let result = worker.send_message(peer, Bytes::from_static(b"hello"));
+        let result = worker.send_message(
+            peer,
+            Bytes::from_static(b"hello"),
+            Delivery::Queued,
+        );
         assert!(result.is_ok());
 
         // too large
         worker.safe_mode = false;
         let big_msg = Bytes::from(vec![0u8; worker.max_app_message_bytes + 1]);
-        let result = worker.send_message(peer, big_msg);
+        let result = worker.send_message(peer, big_msg, Delivery::Queued);
         assert!(matches!(result, Err(Error::MessageTooLarge { .. })));
     }
 
@@ -2904,11 +3431,43 @@ mod tests {
             "/memory/3403".to_owned(),
         );
         let peer = PeerId::random();
-        let result = worker.send_message(peer, Bytes::from_static(b"hello"));
+        let result = worker.send_message(
+            peer,
+            Bytes::from_static(b"hello"),
+            Delivery::Queued,
+        );
         assert!(result.is_ok());
         assert!(matches!(
             worker.peer_action.get(&peer),
             Some(Action::Discover)
+        ));
+    }
+
+    #[test]
+    fn send_message_to_identified_peer_skips_discovery() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3412".to_owned(),
+        );
+        let peer = PeerId::random();
+        // Identified but not yet in the DHT k-buckets: the open
+        // connection must be used instead of dropping to discovery.
+        worker
+            .peer_action
+            .insert(peer, Action::Identified(ConnectionId::new_unchecked(41)));
+        let result = worker.send_message(
+            peer,
+            Bytes::from_static(b"hello"),
+            Delivery::Direct,
+        );
+        assert!(result.is_ok());
+        assert!(matches!(
+            worker.peer_action.get(&peer),
+            Some(Action::Identified(_))
         ));
     }
 
@@ -2950,7 +3509,7 @@ mod tests {
             "/memory/3405".to_owned(),
         );
         let peer = PeerId::random();
-        // MAX_PENDING_MESSAGES_PER_PEER is typically 1024
+        // Default max_pending_messages_per_peer is 100.
         for i in 0..1030u16 {
             worker.add_pending_inbound_message(
                 peer,
@@ -2958,7 +3517,7 @@ mod tests {
             );
         }
         let queue = worker.pending_inbound_messages.get(&peer).unwrap();
-        assert!(queue.len() <= 1024, "queue len was {}", queue.len());
+        assert_eq!(queue.len(), 100, "queue len was {}", queue.len());
     }
 
     #[test]
@@ -3036,6 +3595,140 @@ mod tests {
             })
             .await;
         assert!(!worker.boot_nodes.contains_key(&peer));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_duplicate_close_with_survivor_keeps_peer() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3515".to_owned(),
+        );
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let peer = remote_keys.public().to_peer_id();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // One of two connections to the bootstrap peer closes
+        // (duplicate tie-break after simultaneous dials): the peer
+        // must stay queued so Identify on the survivor still counts.
+        worker
+            .handle_connection_events(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(1),
+                endpoint: test_endpoint(),
+                num_established: 1,
+                cause: None,
+            })
+            .await;
+        assert!(worker.boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 0);
+        // The last connection closes too (survivor not registered
+        // yet): the peer is parked for the bounded retry rounds,
+        // never dropped on the floor.
+        worker
+            .handle_connection_events(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: ConnectionId::new_unchecked(2),
+                endpoint: test_endpoint(),
+                num_established: 0,
+                cause: None,
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 0);
+        // Late Identify over the redial (or the far side dialling
+        // back) still completes the bootstrap instead of crashing it.
+        worker
+            .handle_connection_events(build_identified_event(
+                peer,
+                remote_keys.public(),
+                ConnectionId::new_unchecked(3),
+            ))
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(!worker.retry_boot_nodes.contains_key(&peer));
+        assert_eq!(worker.successful_dials, 1);
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_transport_error_parks_for_retry() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3516".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // Transport failure with no retryable address (DNS race,
+        // warming listener, handshake garbage): parked for the bounded
+        // retry rounds instead of crashing the bootstrap.
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                connection_id: ConnectionId::new_unchecked(1),
+                error: DialError::Transport(vec![]),
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
+        // Deterministic config errors still drop cleanly (no pointless
+        // retries, no crash either: the caller moves on).
+        let bad = PeerId::random();
+        worker
+            .boot_nodes
+            .insert(bad, vec!["/memory/1".parse().unwrap()]);
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(bad),
+                connection_id: ConnectionId::new_unchecked(2),
+                error: DialError::NoAddresses,
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&bad));
+        assert!(!worker.retry_boot_nodes.contains_key(&bad));
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn bootstrap_peer_condition_parks_for_retry() {
+        let mut worker = build_worker(
+            vec![],
+            false,
+            NodeType::Addressable,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            "/memory/3517".to_owned(),
+        );
+        let peer = PeerId::random();
+        worker
+            .boot_nodes
+            .insert(peer, vec!["/memory/1".parse().unwrap()]);
+        // Already connected/dialing (racing dials on both ends): not a
+        // failure, the in-flight connection resolves it. Park for a
+        // retry round instead of crashing the bootstrap.
+        worker
+            .handle_connection_events(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                connection_id: ConnectionId::new_unchecked(1),
+                error: DialError::DialPeerConditionFalse(
+                    libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                ),
+            })
+            .await;
+        assert!(!worker.boot_nodes.contains_key(&peer));
+        assert!(worker.retry_boot_nodes.contains_key(&peer));
     }
 
     #[test(tokio::test)]
@@ -3391,7 +4084,7 @@ mod tests {
         let peer = PeerId::random();
         let big_message = Bytes::from(vec![0u8; 20]);
 
-        let result = worker.send_message(peer, big_message);
+        let result = worker.send_message(peer, big_message, Delivery::Queued);
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -3420,7 +4113,7 @@ mod tests {
 
         // Exact-size message should not be rejected by size check.
         // It will fail later because the peer is unknown, but that's a different path.
-        let result = worker.send_message(peer, exact_message);
+        let result = worker.send_message(peer, exact_message, Delivery::Queued);
         assert!(!matches!(result, Err(Error::MessageTooLarge { .. })));
     }
 
@@ -3569,7 +4262,11 @@ mod tests {
         let msg = Bytes::from(vec![1u8, 2u8]);
 
         worker
-            .handle_command(Command::SendMessage { peer, message: msg })
+            .handle_command(Command::SendMessage {
+                peer,
+                message: msg,
+                delivery: Delivery::Queued,
+            })
             .await;
 
         // Safe mode must not enqueue the message or schedule a retry.
@@ -3678,7 +4375,7 @@ mod tests {
         let peer = PeerId::random();
         let msg = Bytes::from(vec![1u8]);
 
-        let result = worker.send_message(peer, msg);
+        let result = worker.send_message(peer, msg, Delivery::Queued);
         assert!(result.is_ok());
         assert!(worker.pending_outbound_messages.contains_key(&peer));
         assert!(worker.retry_by_peer.contains_key(&peer));
@@ -3732,6 +4429,7 @@ mod tests {
             .send_command(Command::SendMessage {
                 peer: boot_peer,
                 message: Bytes::from_static(b"e2e-payload"),
+                delivery: Delivery::Queued,
             })
             .await
             .unwrap();
@@ -3775,5 +4473,174 @@ mod tests {
             .await
             .expect("run_main did not stop after graceful cancellation")
             .expect("run_main panicked");
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn direct_message_to_disconnected_peer_is_dropped_not_queued() {
+        let config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3603".to_owned()],
+        );
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        let peer = PeerId::random();
+        worker
+            .send_message(peer, Bytes::from_static(b"hello"), Delivery::Direct)
+            .expect("direct send");
+
+        // Nothing queued, the drop is counted and the connection is
+        // kicked: the sender's own retry machine will retransmit and
+        // find it open.
+        assert!(worker.pending_outbound_messages.is_empty());
+        assert!(worker.retry_by_peer.contains_key(&peer));
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"direct\"}"
+            ),
+            1.0
+        );
+    }
+
+    #[test(tokio::test)]
+    #[serial]
+    async fn direct_message_to_identified_peer_is_sent_immediately() {
+        let config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3605".to_owned()],
+        );
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+
+        let remote_keys = Libp2pKeypair::generate_ed25519();
+        let remote_peer = remote_keys.public().to_peer_id();
+        worker
+            .handle_event(build_identified_event(
+                remote_peer,
+                remote_keys.public(),
+                ConnectionId::new_unchecked(11),
+            ))
+            .await;
+
+        worker
+            .send_message(
+                remote_peer,
+                Bytes::from_static(b"hello"),
+                Delivery::Direct,
+            )
+            .expect("direct send");
+
+        // Sent immediately: nothing buffered and no drop counted.
+        assert!(!worker.pending_outbound_messages.contains_key(&remote_peer));
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"direct\"}"
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn expired_pending_outbound_is_purged_on_enqueue_and_not_drained() {
+        let config = create_config(
+            vec![],
+            false,
+            NodeType::Addressable,
+            vec!["/memory/3604".to_owned()],
+        );
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let mut registry = Registry::default();
+        let metrics = crate::metrics::register(&mut registry);
+        let mut worker: NetworkWorker<Dummy> = NetworkWorker::new(
+            &keys,
+            config,
+            false,
+            NetworkWorkerRuntime {
+                monitor: None,
+                graceful_token: CancellationToken::new(),
+                crash_token: CancellationToken::new(),
+                machine_spec: None,
+                metrics: Some(metrics),
+            },
+        )
+        .expect("worker");
+        worker.pending_outbound_ttl = Duration::from_millis(100);
+
+        let peer = PeerId::random();
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"old"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // The next enqueue sweeps the expired message from the front.
+        worker.add_pending_outbound_message(peer, Bytes::from_static(b"new"));
+        let queue = worker
+            .pending_outbound_messages
+            .get(&peer)
+            .expect("queue exists");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.messages.front().expect("front").payload,
+            Bytes::from_static(b"new")
+        );
+
+        // Once expired, a queued message is purged on drain instead of
+        // being delivered.
+        std::thread::sleep(Duration::from_millis(150));
+        worker.send_pending_outbound_messages(peer);
+        assert!(
+            worker
+                .pending_outbound_messages
+                .get(&peer)
+                .is_none_or(PendingQueue::is_empty)
+        );
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+        assert_eq!(
+            metric_value(
+                &text,
+                "network_messages_dropped_total{direction=\"outbound\",reason=\"ttl_expired\"}"
+            ),
+            2.0
+        );
     }
 }

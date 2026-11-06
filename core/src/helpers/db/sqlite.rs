@@ -11,10 +11,13 @@ use ave_actors::rusqlite;
 use ave_actors::rusqlite::types::Type;
 use ave_actors::{ActorError, ActorRef, Subscriber};
 use ave_common::SchemaType;
-use ave_common::bridge::request::{AbortsQuery, EventRequestType, EventsQuery};
+use ave_common::bridge::request::{
+    AbortsQuery, EventRequestType, EventsQuery, IncidentsQuery,
+};
 use ave_common::response::{
     AbortDB, GovsData, LedgerDB, Paginator, PaginatorAborts, PaginatorEvents,
     RequestEventDB, SubjectDB, SubjsData, TimeRange, TrackerVisibilityStateDB,
+    WatchdogIncidentRow,
 };
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -27,11 +30,11 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot};
 use tokio::task::{self, JoinHandle};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 use super::{DatabaseError, DbMetricsSnapshot, ReadStore};
 use crate::config::{MachineSpec, resolve_spec};
@@ -43,12 +46,16 @@ use crate::request::tracking::RequestTrackingEvent;
 
 const WRITE_QUEUE_CAPACITY: usize = 1024;
 const WRITE_BATCH_MAX: usize = 128;
-const WRITE_BATCH_MIN_FOR_WINDOW: usize = 8;
-const WRITE_BATCH_WINDOW: Duration = Duration::from_millis(3);
+const WRITE_BATCH_MIN_FOR_WINDOW: usize = 4;
+const WRITE_BATCH_WINDOW: Duration = Duration::from_millis(10);
 const WRITE_BATCH_RETRY_ATTEMPTS: usize = 3;
 const WRITE_BATCH_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(5);
 const READER_STATEMENT_CACHE_CAPACITY: usize = 32;
 const WRITER_STATEMENT_CACHE_CAPACITY: usize = 128;
+/// Bound for waiting on reader capacity before entering the blocking
+/// pool (mirrors the auth database queue timeout): saturation fails
+/// loud instead of holding a blocking thread on the pool condvar.
+const READER_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const PAGE_ANCHOR_CACHE_MAX_QUERIES: usize = 256;
 const PAGE_ANCHOR_CACHE_MAX_ANCHORS_PER_QUERY: usize = 64;
 const PAGE_ANCHOR_WALK_THRESHOLD: u64 = 8;
@@ -288,6 +295,27 @@ const SQL_UPSERT_ABORT: &str = r#"
         abort_type = excluded.abort_type
 "#;
 
+const SQL_INSERT_INCIDENT: &str = r#"
+    INSERT INTO watchdog_incidents (
+        timestamp_nanos, phase, expected_secs, elapsed_secs,
+        request_id, gov_version, node_version, detail
+    ) VALUES (
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+    )
+"#;
+
+const SQL_GET_INCIDENTS_DESC: &str = r#"
+    SELECT
+        timestamp_nanos, phase, expected_secs, elapsed_secs,
+        request_id, gov_version, node_version, detail
+    FROM watchdog_incidents
+    WHERE (?1 IS NULL OR phase = ?1)
+        AND (?2 IS NULL OR timestamp_nanos >= ?2)
+        AND (?3 IS NULL OR timestamp_nanos <= ?3)
+    ORDER BY timestamp_nanos DESC
+    LIMIT ?4
+"#;
+
 const SQL_UPSERT_REGISTER_GOV: &str = r#"
     INSERT INTO register_govs (
         governance_id, active, name, description
@@ -476,6 +504,7 @@ enum WriteCommand {
     Ledger(Box<Ledger>),
     SubjectState(SubjectDB),
     Abort(RequestTrackingEvent),
+    Incident(RequestTrackingEvent),
     Register(RegisterEvent),
     DeleteSubject(String),
 }
@@ -561,6 +590,7 @@ struct PageAnchorCache {
 
 #[derive(Default)]
 struct PageAnchorEntry {
+    subject_id: String,
     subject_generation: u64,
     last_used: u64,
     anchors: BTreeMap<u64, String>,
@@ -568,6 +598,7 @@ struct PageAnchorEntry {
 
 #[derive(Default)]
 struct CountCacheEntry {
+    subject_id: String,
     subject_generation: u64,
     last_used: u64,
     total: u64,
@@ -1025,6 +1056,7 @@ impl PageAnchorCache {
             entry.anchors.clear();
         }
 
+        entry.subject_id = subject_id.to_owned();
         entry.last_used = clock;
         entry.anchors.insert(target_page, cursor);
         while entry.anchors.len() > PAGE_ANCHOR_CACHE_MAX_ANCHORS_PER_QUERY {
@@ -1064,12 +1096,25 @@ impl PageAnchorCache {
         Some(entry.total)
     }
 
-    fn store_count(&mut self, key: String, subject_id: &str, total: u64) {
-        let subject_generation = self.current_subject_generation(subject_id);
+    fn store_count(
+        &mut self,
+        key: String,
+        subject_id: &str,
+        total: u64,
+        expected_generation: u64,
+    ) -> bool {
+        // Publish only if nothing committed since this read started:
+        // a stale total tagged as current would be served as fresh
+        // until the next write. A caller whose generation moved keeps
+        // its (transiently stale) value uncached and moves on.
+        if self.current_subject_generation(subject_id) != expected_generation {
+            return false;
+        }
         let clock = self.next_clock();
         let entry = self.count_entries.entry(key).or_default();
 
-        entry.subject_generation = subject_generation;
+        entry.subject_id = subject_id.to_owned();
+        entry.subject_generation = expected_generation;
         entry.last_used = clock;
         entry.total = total;
 
@@ -1084,6 +1129,7 @@ impl PageAnchorCache {
             };
             self.count_entries.remove(&oldest_key);
         }
+        true
     }
 
     fn bump_subject_generation(&mut self, subject_id: &str) {
@@ -1092,6 +1138,18 @@ impl PageAnchorCache {
             .entry(subject_id.to_owned())
             .or_insert(0);
         *generation = generation.saturating_add(1);
+    }
+
+    /// Drops the generation counter of a deleted subject AND every
+    /// cached entry naming it: without the drain, a read that computed
+    /// before the delete could publish with generation 0 (no counter),
+    /// colliding with the fresh subject that also starts at 0.
+    fn prune_subject_generation(&mut self, subject_id: &str) {
+        self.subject_generations.remove(subject_id);
+        self.query_entries
+            .retain(|_, entry| entry.subject_id != subject_id);
+        self.count_entries
+            .retain(|_, entry| entry.subject_id != subject_id);
     }
 }
 
@@ -1105,6 +1163,13 @@ impl ReadStore for SqliteLocal {
         self.reader.get_aborts(subject_id, query).await
     }
 
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        self.reader.get_recent_incidents(query).await
+    }
+
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -1115,8 +1180,10 @@ impl ReadStore for SqliteLocal {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
-        self.reader.get_governances(active).await
+        self.reader.get_governances(active, limit, offset).await
     }
 
     async fn get_subjects(
@@ -1124,9 +1191,11 @@ impl ReadStore for SqliteLocal {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         self.reader
-            .get_subjects(governance_id, active, schema_id)
+            .get_subjects(governance_id, active, schema_id, limit, offset)
             .await
     }
 
@@ -1144,6 +1213,13 @@ impl ReadStore for SqliteLocal {
         sn: u64,
     ) -> Result<LedgerDB, DatabaseError> {
         self.reader.get_event_sn(subject_id, sn).await
+    }
+
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        self.reader.max_event_sn(subject_id).await
     }
 
     async fn get_first_or_end_events(
@@ -1175,6 +1251,16 @@ impl ReadStore for SqliteReadStore {
         .await
     }
 
+    async fn get_recent_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+        self.with_reader("incidents", move |conn| {
+            get_incidents_from_conn(conn, &query)
+        })
+        .await
+    }
+
     async fn get_subject_state(
         &self,
         subject_id: &str,
@@ -1190,9 +1276,13 @@ impl ReadStore for SqliteReadStore {
     async fn get_governances(
         &self,
         active: Option<bool>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<GovsData>, DatabaseError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         self.with_reader("governances", move |conn| {
-            get_governances_from_conn(conn, active)
+            get_governances_from_conn(conn, active, limit, offset)
         })
         .await
     }
@@ -1202,11 +1292,22 @@ impl ReadStore for SqliteReadStore {
         governance_id: &str,
         active: Option<bool>,
         schema_id: Option<String>,
+        limit: u64,
+        offset: u64,
     ) -> Result<Vec<SubjsData>, DatabaseError> {
         let governance_id = governance_id.to_owned();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
 
         self.with_reader("subjects", move |conn| {
-            get_subjects_from_conn(conn, &governance_id, active, schema_id)
+            get_subjects_from_conn(
+                conn,
+                &governance_id,
+                active,
+                schema_id,
+                limit,
+                offset,
+            )
         })
         .await
     }
@@ -1234,6 +1335,24 @@ impl ReadStore for SqliteReadStore {
 
         self.with_reader("event_sn", move |conn| {
             get_event_sn_from_conn(conn, &subject_id, sn)
+        })
+        .await
+    }
+
+    async fn max_event_sn(
+        &self,
+        subject_id: &str,
+    ) -> Result<Option<u64>, DatabaseError> {
+        let subject_id = subject_id.to_owned();
+
+        self.with_reader("max_event_sn", move |conn| {
+            conn.query_row(
+                "SELECT MAX(sn) FROM events WHERE subject_id = ?1",
+                params![subject_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|max| max.and_then(|sn| u64::try_from(sn).ok()))
+            .map_err(|e| DatabaseError::Query(e.to_string()))
         })
         .await
     }
@@ -1271,10 +1390,19 @@ impl SqliteLocal {
         let tuning = tuning_for_ram(resolved.ram_mb);
         let sync_mode = if durability { "FULL" } else { "NORMAL" };
 
-        let runtime = SqliteRuntime::new(path, sync_mode, &tuning)?;
+        // Opening the database runs migrations and checkpoints: blocking
+        // file IO that must not stall the async executor.
+        let path_owned = path.to_owned();
+        let sync_mode_owned = sync_mode.to_owned();
+        let runtime = task::spawn_blocking(move || {
+            SqliteRuntime::new(&path_owned, &sync_mode_owned, &tuning)
+        })
+        .await
+        .map_err(|e| DatabaseError::BlockingTask(e.to_string()))??;
         let runtime = Arc::new(runtime);
 
-        debug!(
+        info!(
+            msg_type = "Startup",
             path = %path.display(),
             ram_mb = resolved.ram_mb,
             readers = SqliteRuntime::recommended_reader_pool_size(),
@@ -1309,6 +1437,25 @@ impl SqliteLocal {
         self.writer.delete_subject(subject_id.to_owned()).await
     }
 
+    pub(crate) async fn fill_event_gap(
+        &self,
+        events: Vec<Ledger>,
+    ) -> Result<u64, DatabaseError> {
+        let mut filled = 0;
+        for event in events {
+            self.writer.persist_signed_ledger(event).await?;
+            filled += 1;
+        }
+        Ok(filled)
+    }
+
+    pub(crate) async fn upsert_subject_state(
+        &self,
+        state: SubjectDB,
+    ) -> Result<(), DatabaseError> {
+        self.writer.persist_subject_state(state).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), DatabaseError> {
         self.writer.shutdown().await?;
 
@@ -1335,7 +1482,27 @@ impl SqliteReadStore {
     {
         let runtime = Arc::clone(&self.runtime);
 
+        // Capacity before threads: waiting for a reader here never
+        // holds a blocking thread, and saturation fails loud instead
+        // of parking on the pool condvar forever.
+        let permit = timeout(
+            READER_QUEUE_TIMEOUT,
+            runtime.reader_permits.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            DatabaseError::Query(format!(
+                "reader pool saturated; no capacity for {operation_name}"
+            ))
+        })?
+        .map_err(|_| {
+            DatabaseError::Query(
+                "projection reader backpressure semaphore closed".to_string(),
+            )
+        })?;
+
         task::spawn_blocking(move || {
+            let _permit = permit;
             let started = Instant::now();
             let conn = runtime.acquire_reader()?;
             let result = operation(&conn);
@@ -1389,6 +1556,13 @@ impl SqliteWriteStore {
         event: RequestTrackingEvent,
     ) -> Result<(), DatabaseError> {
         self.enqueue(WriteCommand::Abort(event)).await
+    }
+
+    async fn persist_incident(
+        &self,
+        event: RequestTrackingEvent,
+    ) -> Result<(), DatabaseError> {
+        self.enqueue(WriteCommand::Incident(event)).await
     }
 
     async fn persist_register(
@@ -1523,8 +1697,16 @@ fn spawn_write_worker(
             .map_err(|e| DatabaseError::BlockingTask(e.to_string()))
             .and_then(|result| result);
 
-            if result.is_err() {
-                break;
+            // A terminal batch reports its error to its own jobs and
+            // the writer keeps serving the queue: killing the writer
+            // here would wedge every later job silently. Locally fatal
+            // breakage surfaces per batch through the job responses.
+            if let Err(error) = &result {
+                warn!(
+                    msg_type = "WriteBatch",
+                    error = %error,
+                    "SQLite write batch failed terminally, writer continues"
+                );
             }
         }
     })
@@ -1579,6 +1761,26 @@ fn execute_write_batch(
     }
 }
 
+/// Prepares `sql` on first use and hands out the cached handle.
+/// Batches usually touch a subset of tables; preparing all 13 upfront
+/// wastes cache fills on fresh pool connections for single-kind
+/// batches.
+fn lazy_stmt<'t, 's>(
+    slot: &'s mut Option<rusqlite::CachedStatement<'t>>,
+    tx: &'t rusqlite::Transaction<'t>,
+    sql: &str,
+) -> Result<&'s mut rusqlite::CachedStatement<'t>, DatabaseError> {
+    if slot.is_none() {
+        *slot = Some(
+            tx.prepare_cached(sql)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+        );
+    }
+    slot.as_mut().ok_or_else(|| {
+        DatabaseError::Query("statement slot empty after prepare".to_owned())
+    })
+}
+
 fn persist_write_batch(
     runtime: &SqliteRuntime,
     jobs: &[WriteJob],
@@ -1589,55 +1791,46 @@ fn persist_write_batch(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    let mut insert_event_stmt = tx
-        .prepare_cached(SQL_INSERT_EVENT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_subject_stmt = tx
-        .prepare_cached(SQL_UPSERT_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_abort_stmt = tx
-        .prepare_cached(SQL_UPSERT_ABORT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_register_gov_stmt = tx
-        .prepare_cached(SQL_UPSERT_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut eol_register_gov_stmt = tx
-        .prepare_cached(SQL_EOL_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut upsert_register_subject_stmt = tx
-        .prepare_cached(SQL_UPSERT_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut eol_register_subject_stmt = tx
-        .prepare_cached(SQL_EOL_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_subject_state_stmt = tx
-        .prepare_cached(SQL_DELETE_SUBJECT_STATE)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_events_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_EVENTS_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_aborts_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_ABORTS_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_register_subject_stmt = tx
-        .prepare_cached(SQL_DELETE_REGISTER_SUBJECT)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-    let mut delete_register_gov_stmt = tx
-        .prepare_cached(SQL_DELETE_REGISTER_GOV)
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut insert_event_stmt = None;
+    let mut upsert_subject_stmt = None;
+    let mut upsert_abort_stmt = None;
+    let mut insert_incident_stmt = None;
+    let mut upsert_register_gov_stmt = None;
+    let mut eol_register_gov_stmt = None;
+    let mut upsert_register_subject_stmt = None;
+    let mut eol_register_subject_stmt = None;
+    let mut delete_subject_state_stmt = None;
+    let mut delete_events_subject_stmt = None;
+    let mut delete_aborts_subject_stmt = None;
+    let mut delete_register_subject_stmt = None;
+    let mut delete_register_gov_stmt = None;
 
     for job in jobs {
         match &job.command {
             WriteCommand::Ledger(event) => {
                 touched_subjects.push(event.get_subject_id().to_string());
-                insert_event_with_stmt(&mut insert_event_stmt, event)?
+                insert_event_with_stmt(
+                    lazy_stmt(&mut insert_event_stmt, &tx, SQL_INSERT_EVENT)?,
+                    event,
+                )?
             }
             WriteCommand::SubjectState(metadata) => {
                 touched_subjects.push(metadata.subject_id.to_string());
-                upsert_subject_with_stmt(&mut upsert_subject_stmt, metadata)?
+                upsert_subject_with_stmt(
+                    lazy_stmt(
+                        &mut upsert_subject_stmt,
+                        &tx,
+                        SQL_UPSERT_SUBJECT,
+                    )?,
+                    metadata,
+                )?
             }
+            WriteCommand::Incident(event) => insert_incident_with_stmt(
+                lazy_stmt(&mut insert_incident_stmt, &tx, SQL_INSERT_INCIDENT)?,
+                event,
+            )?,
             WriteCommand::Abort(event) => upsert_abort_with_stmt(
-                &mut upsert_abort_stmt,
+                lazy_stmt(&mut upsert_abort_stmt, &tx, SQL_UPSERT_ABORT)?,
                 event.request_id.clone(),
                 {
                     touched_subjects.push(event.subject_id.clone());
@@ -1651,7 +1844,11 @@ fn persist_write_batch(
             WriteCommand::Register(event) => match event {
                 RegisterEvent::RegisterGov { gov_id, data } => {
                     upsert_register_governance_with_stmt(
-                        &mut upsert_register_gov_stmt,
+                        lazy_stmt(
+                            &mut upsert_register_gov_stmt,
+                            &tx,
+                            SQL_UPSERT_REGISTER_GOV,
+                        )?,
                         gov_id,
                         data.active,
                         data.name.clone(),
@@ -1660,7 +1857,11 @@ fn persist_write_batch(
                 }
                 RegisterEvent::EOLGov { gov_id } => {
                     eol_register_governance_with_stmt(
-                        &mut eol_register_gov_stmt,
+                        lazy_stmt(
+                            &mut eol_register_gov_stmt,
+                            &tx,
+                            SQL_EOL_REGISTER_GOV,
+                        )?,
                         gov_id,
                     )?
                 }
@@ -1669,7 +1870,11 @@ fn persist_write_batch(
                     subject_id,
                     data,
                 } => upsert_register_subject_with_stmt(
-                    &mut upsert_register_subject_stmt,
+                    lazy_stmt(
+                        &mut upsert_register_subject_stmt,
+                        &tx,
+                        SQL_UPSERT_REGISTER_SUBJECT,
+                    )?,
                     RegisterSubjectRow {
                         governance_id: gov_id,
                         subject_id,
@@ -1682,32 +1887,59 @@ fn persist_write_batch(
                 )?,
                 RegisterEvent::EOLSubj { gov_id, subj_id } => {
                     eol_register_subject_with_stmt(
-                        &mut eol_register_subject_stmt,
+                        lazy_stmt(
+                            &mut eol_register_subject_stmt,
+                            &tx,
+                            SQL_EOL_REGISTER_SUBJECT,
+                        )?,
                         gov_id,
                         subj_id,
                     )?
                 }
             },
             WriteCommand::DeleteSubject(subject_id) => {
-                touched_subjects.push(subject_id.clone());
+                // Deleted subjects leave the generation map instead of
+                // bumping it: their cache entries (page anchors, counts)
+                // are dropped with them.
+                runtime.prune_subject_generation(subject_id);
                 delete_by_subject_with_stmt(
-                    &mut delete_subject_state_stmt,
+                    lazy_stmt(
+                        &mut delete_subject_state_stmt,
+                        &tx,
+                        SQL_DELETE_SUBJECT_STATE,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_events_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_events_subject_stmt,
+                        &tx,
+                        SQL_DELETE_EVENTS_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_aborts_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_aborts_subject_stmt,
+                        &tx,
+                        SQL_DELETE_ABORTS_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_register_subject_stmt,
+                    lazy_stmt(
+                        &mut delete_register_subject_stmt,
+                        &tx,
+                        SQL_DELETE_REGISTER_SUBJECT,
+                    )?,
                     subject_id,
                 )?;
                 delete_by_subject_with_stmt(
-                    &mut delete_register_gov_stmt,
+                    lazy_stmt(
+                        &mut delete_register_gov_stmt,
+                        &tx,
+                        SQL_DELETE_REGISTER_GOV,
+                    )?,
                     subject_id,
                 )?;
             }
@@ -1724,6 +1956,7 @@ fn persist_write_batch(
     drop(eol_register_gov_stmt);
     drop(upsert_register_gov_stmt);
     drop(upsert_abort_stmt);
+    drop(insert_incident_stmt);
     drop(upsert_subject_stmt);
     drop(insert_event_stmt);
 
@@ -1740,8 +1973,19 @@ fn persist_write_batch(
     Ok(())
 }
 
-const fn is_retryable_write_error(error: &DatabaseError) -> bool {
-    matches!(error, DatabaseError::Query(_))
+/// Only lock contention is transient: constraint violations (a replayed
+/// duplicate row, corrupt data) fail deterministically and must not burn
+/// retries. `ON CONFLICT DO NOTHING` was considered for replays and
+/// rejected: it would also silence a conflicting row with different
+/// bytes, hiding a divergence.
+fn is_retryable_write_error(error: &DatabaseError) -> bool {
+    match error {
+        DatabaseError::Query(details) => {
+            let details = details.to_lowercase();
+            details.contains("locked") || details.contains("busy")
+        }
+        _ => false,
+    }
 }
 
 const fn retry_backoff(attempt: usize) -> Duration {
@@ -1756,6 +2000,10 @@ const fn retry_backoff(attempt: usize) -> Duration {
 struct SqliteRuntime {
     writer: Mutex<Connection>,
     readers: Arc<ConnectionPool>,
+    /// One permit per reader connection, taken before entering the
+    /// blocking pool: waiting for capacity never holds a blocking
+    /// thread, and saturation fails loud instead of parking forever.
+    reader_permits: Arc<Semaphore>,
     metrics: Arc<SqliteMetrics>,
     page_cache: Mutex<PageAnchorCache>,
 }
@@ -1767,17 +2015,20 @@ impl SqliteRuntime {
         tuning: &SqliteTuning,
     ) -> Result<Self, DatabaseError> {
         let metrics = Arc::new(SqliteMetrics::default());
-        let writer = open_writer_connection(path, sync_mode, tuning)?;
         let reader_count = Self::recommended_reader_pool_size();
+        // One cache budget per base, split across writer + readers.
+        let conn_tuning = tuning.for_connections(1 + reader_count);
+        let writer = open_writer_connection(path, sync_mode, &conn_tuning)?;
         let mut readers = Vec::with_capacity(reader_count);
 
         for _ in 0..reader_count {
-            readers.push(open_reader_connection(path, tuning)?);
+            readers.push(open_reader_connection(path, &conn_tuning)?);
         }
 
         Ok(Self {
             writer: Mutex::new(writer),
             readers: Arc::new(ConnectionPool::new(readers)),
+            reader_permits: Arc::new(Semaphore::new(reader_count)),
             metrics,
             page_cache: Mutex::new(PageAnchorCache::default()),
         })
@@ -1803,15 +2054,33 @@ impl SqliteRuntime {
         })
     }
 
+    /// Locks the page cache, resetting it on mutex poisoning: a poisoned
+    /// mutex means a previous holder panicked, so the cached entries can
+    /// not be trusted — dropping them only costs recomputation, while
+    /// serving them would serve stale results silently.
+    fn lock_page_cache(&self) -> std::sync::MutexGuard<'_, PageAnchorCache> {
+        match self.page_cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    msg_type = "Cache",
+                    "Page anchor cache mutex poisoned, resetting cache"
+                );
+                let mut guard = poisoned.into_inner();
+                *guard = PageAnchorCache::default();
+                guard
+            }
+        }
+    }
+
     fn lookup_page_anchor(
         &self,
         key: &str,
         subject_id: &str,
         target_page: u64,
     ) -> Option<(u64, String)> {
-        self.page_cache.lock().ok().and_then(|mut cache| {
-            cache.lookup_anchor(key, subject_id, target_page)
-        })
+        self.lock_page_cache()
+            .lookup_anchor(key, subject_id, target_page)
     }
 
     fn store_page_anchor(
@@ -1821,31 +2090,46 @@ impl SqliteRuntime {
         target_page: u64,
         cursor: String,
     ) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.store_anchor(key, subject_id, target_page, cursor);
-        }
+        self.lock_page_cache().store_anchor(
+            key,
+            subject_id,
+            target_page,
+            cursor,
+        );
     }
 
     fn lookup_count_cache(&self, key: &str, subject_id: &str) -> Option<u64> {
-        let cached = self
-            .page_cache
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.lookup_count(key, subject_id));
+        let cached = self.lock_page_cache().lookup_count(key, subject_id);
         self.metrics.record_count_cache_lookup(cached.is_some());
         cached
     }
 
-    fn store_count_cache(&self, key: String, subject_id: &str, total: u64) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.store_count(key, subject_id, total);
-        }
+    fn store_count_cache(
+        &self,
+        key: String,
+        subject_id: &str,
+        total: u64,
+        expected_generation: u64,
+    ) -> bool {
+        self.lock_page_cache().store_count(
+            key,
+            subject_id,
+            total,
+            expected_generation,
+        )
+    }
+
+    fn subject_generation(&self, subject_id: &str) -> u64 {
+        self.lock_page_cache()
+            .current_subject_generation(subject_id)
     }
 
     fn bump_subject_generation(&self, subject_id: &str) {
-        if let Ok(mut cache) = self.page_cache.lock() {
-            cache.bump_subject_generation(subject_id);
-        }
+        self.lock_page_cache().bump_subject_generation(subject_id);
+    }
+
+    fn prune_subject_generation(&self, subject_id: &str) {
+        self.lock_page_cache().prune_subject_generation(subject_id);
     }
 
     fn run_shutdown_maintenance(&self) -> Result<(), DatabaseError> {
@@ -1891,10 +2175,23 @@ impl ConnectionPool {
     }
 
     fn release(&self, conn: Connection) {
-        if let Ok(mut guard) = self.connections.lock() {
+        // A poisoned pool must not silently shrink: recover the guard so
+        // the connection is returned instead of leaked. The guard
+        // drops before the notify so a woken waiter never blocks on it.
+        {
+            let mut guard = match self.connections.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!(
+                        msg_type = "Pool",
+                        "Reader pool mutex poisoned, recovering guard"
+                    );
+                    poisoned.into_inner()
+                }
+            };
             guard.push(conn);
-            self.available.notify_one();
         }
+        self.available.notify_one();
     }
 }
 
@@ -1907,6 +2204,9 @@ impl std::ops::Deref for PooledConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
+        // Structural invariant: the connection is only taken in `Drop`,
+        // so a live guard always holds one. `Deref` can not return a
+        // `Result`, hence the expect on an unreachable path.
         self.conn.as_ref().expect("pooled connection missing")
     }
 }
@@ -2053,6 +2353,21 @@ struct SqliteTuning {
     mmap_size_bytes: i64,
 }
 
+impl SqliteTuning {
+    /// Share of the tuning for one connection when `connections`
+    /// serve the same base: every connection applies only its slice
+    /// of the total cache budget, so the aggregate stays within the
+    /// budget computed for the base instead of multiplying it.
+    fn for_connections(&self, connections: usize) -> Self {
+        let connections = connections.max(1) as i64;
+        let total_kb = self.cache_size_kb.saturating_abs();
+        Self {
+            cache_size_kb: -(total_kb / connections),
+            ..*self
+        }
+    }
+}
+
 fn get_aborts_from_conn(
     conn: &Connection,
     runtime: &SqliteRuntime,
@@ -2098,6 +2413,86 @@ fn get_aborts_from_conn(
         paginator: build_page_paginator(page, pages),
         events,
     })
+}
+
+fn get_incidents_from_conn(
+    conn: &Connection,
+    query: &IncidentsQuery,
+) -> Result<Vec<WatchdogIncidentRow>, DatabaseError> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let limit = i64::try_from(limit).map_err(|_| {
+        DatabaseError::IntegerConversion(format!(
+            "limit out of range for SQLite INTEGER (i64): {limit}"
+        ))
+    })?;
+    let mut stmt = conn
+        .prepare(SQL_GET_INCIDENTS_DESC)
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let as_u64 = |value: i64, field: &str| {
+        u64::try_from(value).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "{field} out of range for u64: {value}"
+            ))
+        })
+    };
+    let as_i64_opt = |value: Option<u64>, field: &str| {
+        value
+            .map(|v| {
+                i64::try_from(v).map_err(|_| {
+                    DatabaseError::IntegerConversion(format!(
+                        "{field} out of range for SQLite INTEGER (i64): {v}"
+                    ))
+                })
+            })
+            .transpose()
+    };
+    let from_nanos: Option<i64> = as_i64_opt(query.from_nanos, "from_nanos")?;
+    let to_nanos: Option<i64> = as_i64_opt(query.to_nanos, "to_nanos")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![query.phase.clone(), from_nanos, to_nanos, limit],
+            |row| {
+                let timestamp_nanos: i64 = row.get("timestamp_nanos")?;
+                let expected_secs: i64 = row.get("expected_secs")?;
+                let elapsed_secs: i64 = row.get("elapsed_secs")?;
+                let gov_version: i64 = row.get("gov_version")?;
+                Ok((
+                    timestamp_nanos,
+                    expected_secs,
+                    elapsed_secs,
+                    gov_version,
+                    row.get::<_, String>("phase")?,
+                    row.get::<_, String>("request_id")?,
+                    row.get::<_, String>("node_version")?,
+                    row.get::<_, String>("detail")?,
+                ))
+            },
+        )
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            timestamp_nanos,
+            expected_secs,
+            elapsed_secs,
+            gov_version,
+            phase,
+            request_id,
+            node_version,
+            detail,
+        ) = row.map_err(|e| DatabaseError::Query(e.to_string()))?;
+        out.push(WatchdogIncidentRow {
+            timestamp_nanos: as_u64(timestamp_nanos, "timestamp_nanos")?,
+            phase,
+            expected_secs: as_u64(expected_secs, "expected_secs")?,
+            elapsed_secs: as_u64(elapsed_secs, "elapsed_secs")?,
+            request_id,
+            gov_version: as_u64(gov_version, "gov_version")?,
+            node_version,
+            detail,
+        });
+    }
+    Ok(out)
 }
 
 fn get_subject_state_from_conn(
@@ -2180,20 +2575,27 @@ fn get_subject_state_from_conn(
 fn get_governances_from_conn(
     conn: &Connection,
     active: Option<bool>,
+    limit: i64,
+    offset: i64,
 ) -> Result<Vec<GovsData>, DatabaseError> {
+    let (base, tail) = match active {
+        Some(_) => (SQL_GET_REGISTER_GOVS_BY_ACTIVE, "LIMIT ?2 OFFSET ?3"),
+        None => (SQL_GET_REGISTER_GOVS, "LIMIT ?1 OFFSET ?2"),
+    };
+    let sql = format!("{base}\n{tail}");
     let mut stmt = conn
-        .prepare_cached(match active {
-            Some(_) => SQL_GET_REGISTER_GOVS_BY_ACTIVE,
-            None => SQL_GET_REGISTER_GOVS,
-        })
+        .prepare_cached(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let rows = match active {
         Some(active) => stmt
-            .query_map(params![if active { 1 } else { 0 }], map_governance_row)
+            .query_map(
+                params![if active { 1 } else { 0 }, limit, offset],
+                map_governance_row,
+            )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         None => stmt
-            .query_map([], map_governance_row)
+            .query_map(params![limit, offset], map_governance_row)
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
     };
 
@@ -2206,35 +2608,60 @@ fn get_subjects_from_conn(
     governance_id: &str,
     active: Option<bool>,
     schema_id: Option<String>,
+    limit: i64,
+    offset: i64,
 ) -> Result<Vec<SubjsData>, DatabaseError> {
+    let (base, tail) = match (active, schema_id.as_ref()) {
+        (None, None) => (SQL_GET_REGISTER_SUBJECTS, "LIMIT ?2 OFFSET ?3"),
+        (Some(_), None) => {
+            (SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE, "LIMIT ?3 OFFSET ?4")
+        }
+        (None, Some(_)) => {
+            (SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA, "LIMIT ?3 OFFSET ?4")
+        }
+        (Some(_), Some(_)) => (
+            SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA,
+            "LIMIT ?4 OFFSET ?5",
+        ),
+    };
+    let sql = format!("{base}\n{tail}");
     let mut stmt = conn
-        .prepare_cached(match (active, schema_id.as_ref()) {
-            (None, None) => SQL_GET_REGISTER_SUBJECTS,
-            (Some(_), None) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE,
-            (None, Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_SCHEMA,
-            (Some(_), Some(_)) => SQL_GET_REGISTER_SUBJECTS_BY_ACTIVE_SCHEMA,
-        })
+        .prepare_cached(&sql)
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let rows = match (active, schema_id.as_ref()) {
         (None, None) => stmt
-            .query_map(params![governance_id], map_register_subject_row)
+            .query_map(
+                params![governance_id, limit, offset],
+                map_register_subject_row,
+            )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), None) => stmt
             .query_map(
-                params![governance_id, if active { 1 } else { 0 }],
+                params![
+                    governance_id,
+                    if active { 1 } else { 0 },
+                    limit,
+                    offset
+                ],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (None, Some(schema_id)) => stmt
             .query_map(
-                params![governance_id, schema_id],
+                params![governance_id, schema_id, limit, offset],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
         (Some(active), Some(schema_id)) => stmt
             .query_map(
-                params![governance_id, if active { 1 } else { 0 }, schema_id],
+                params![
+                    governance_id,
+                    if active { 1 } else { 0 },
+                    schema_id,
+                    limit,
+                    offset
+                ],
                 map_register_subject_row,
             )
             .map_err(|e| DatabaseError::Query(e.to_string()))?,
@@ -2262,8 +2689,17 @@ fn get_events_from_conn(
     let mut page = query.page.unwrap_or(1).max(1);
     let total = count_events_from_conn(conn, runtime, subject_id, &query)?;
 
+    // An empty ledger is an empty page, like aborts: list endpoints
+    // answer `[]`, only single-item lookups report `NoEvents`.
     if total == 0 {
-        return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+        return Ok(PaginatorEvents {
+            paginator: Paginator {
+                pages: 0,
+                next: None,
+                prev: None,
+            },
+            events: Vec::new(),
+        });
     }
 
     let mut pages = total.div_ceil(quantity);
@@ -2448,6 +2884,9 @@ fn count_aborts_from_conn(
     {
         return Ok(total);
     }
+    // Generation before the SQL read: the publish below lands only if
+    // nothing committed in between (see store_count).
+    let cache_generation = runtime.subject_generation(subject_id);
 
     let started = Instant::now();
     if query.request_id.is_none() && query.sn.is_none() {
@@ -2465,7 +2904,12 @@ fn count_aborts_from_conn(
         runtime
             .metrics
             .record_count_query_duration(started.elapsed());
-        runtime.store_count_cache(count_cache_key, subject_id, total);
+        runtime.store_count_cache(
+            count_cache_key,
+            subject_id,
+            total,
+            cache_generation,
+        );
         return Ok(total);
     }
 
@@ -2504,7 +2948,12 @@ fn count_aborts_from_conn(
     runtime
         .metrics
         .record_count_query_duration(started.elapsed());
-    runtime.store_count_cache(count_cache_key, subject_id, total);
+    runtime.store_count_cache(
+        count_cache_key,
+        subject_id,
+        total,
+        cache_generation,
+    );
     Ok(total)
 }
 
@@ -2829,6 +3278,9 @@ fn count_events_from_conn(
     {
         return Ok(total);
     }
+    // Generation before the SQL read: the publish below lands only if
+    // nothing committed in between (see store_count).
+    let cache_generation = runtime.subject_generation(subject_id);
 
     let started = Instant::now();
     if query.event_request_ts_from.is_none()
@@ -2853,7 +3305,12 @@ fn count_events_from_conn(
         runtime
             .metrics
             .record_count_query_duration(started.elapsed());
-        runtime.store_count_cache(count_cache_key, subject_id, total);
+        runtime.store_count_cache(
+            count_cache_key,
+            subject_id,
+            total,
+            cache_generation,
+        );
         return Ok(total);
     }
 
@@ -2898,7 +3355,12 @@ fn count_events_from_conn(
     runtime
         .metrics
         .record_count_query_duration(started.elapsed());
-    runtime.store_count_cache(count_cache_key, subject_id, total);
+    runtime.store_count_cache(
+        count_cache_key,
+        subject_id,
+        total,
+        cache_generation,
+    );
     Ok(total)
 }
 
@@ -2934,7 +3396,7 @@ fn resolve_event_page_from_anchors(
         let events =
             fetch_events_with_offset(conn, subject_id, &query, offset)?;
         if events.is_empty() {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         }
         if page < pages
             && let Some(last) = events.last()
@@ -2959,7 +3421,7 @@ fn resolve_event_page_from_anchors(
         let events =
             fetch_events_with_cursor(conn, subject_id, &current_query)?;
         if events.is_empty() {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         }
 
         if current_page < pages
@@ -2978,7 +3440,7 @@ fn resolve_event_page_from_anchors(
         }
 
         let Some(last) = events.last() else {
-            return Err(DatabaseError::NoEvents(subject_id.to_owned()));
+            return Ok(Vec::new());
         };
         current_query.cursor = Some(encode_event_cursor(last.sn));
         current_page += 1;
@@ -3464,8 +3926,9 @@ fn insert_event_with_stmt(
     stmt: &mut rusqlite::CachedStatement<'_>,
     event: &Ledger,
 ) -> Result<(), DatabaseError> {
-    let event_db =
-        event.build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos());
+    let event_db = event
+        .build_ledger_db(event.ledger_seal_signature.timestamp.as_nanos())
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
     let sn_i64 = i64::try_from(event_db.sn).map_err(|_| {
         DatabaseError::IntegerConversion(format!(
@@ -3556,6 +4019,39 @@ fn upsert_subject_with_stmt(
         active,
         tracker_visibility_json,
         properties_json
+    ])
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Stores a watchdog incident: plain insert, no upsert — every
+/// firing is its own row (unlike aborts, incidents never update).
+/// Takes the whole tracking event instead of one parameter per
+/// column, so adding a column never trips the argument-count lint.
+fn insert_incident_with_stmt(
+    stmt: &mut rusqlite::CachedStatement<'_>,
+    event: &RequestTrackingEvent,
+) -> Result<(), DatabaseError> {
+    let as_i64 = |value: u64, field: &str| {
+        i64::try_from(value).map_err(|_| {
+            DatabaseError::IntegerConversion(format!(
+                "{field} out of range for SQLite INTEGER (i64): {value}"
+            ))
+        })
+    };
+    stmt.execute(params![
+        as_i64(
+            event.watchdog_timestamp_nanos.unwrap_or(0),
+            "timestamp_nanos"
+        )?,
+        event.watchdog_phase.clone().unwrap_or_default(),
+        as_i64(event.watchdog_expected_secs.unwrap_or(0), "expected_secs")?,
+        as_i64(event.watchdog_elapsed_secs.unwrap_or(0), "elapsed_secs")?,
+        event.request_id.clone(),
+        as_i64(event.incident_gov_version(), "gov_version")?,
+        event.watchdog_node_version.clone().unwrap_or_default(),
+        event.incident_detail().to_owned()
     ])
     .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -3669,8 +4165,10 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                 let subject_id = event.get_subject_id().to_string();
                 let sn = event.sn;
 
-                if let Err(e) = self.persist_signed_ledger(event).await {
+                let persist_result = self.persist_signed_ledger(event).await;
+                if let Err(e) = &persist_result {
                     error!(
+                        msg_type = "PersistLedger",
                         subject_id = %subject_id,
                         sn = sn,
                         error = %e,
@@ -3679,7 +4177,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     if let Err(e) = self
                         .inner
                         .manager
-                        .tell(DBManagerMessage::Error(e))
+                        .tell(DBManagerMessage::Error(e.clone()))
                         .await
                     {
                         error!(
@@ -3696,13 +4194,25 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                         "Signed ledger saved to SQLite successfully"
                     );
                 }
+                // A failed persistence must not report `Ok`: the node
+                // would diverge silently when the manager notice is
+                // lost too.
+                if let Err(e) = persist_result {
+                    return Err(ActorError::FunctionalCritical {
+                        description: format!(
+                            "Failed to save signed ledger to SQLite: {e}"
+                        ),
+                    });
+                }
             }
             SubjectSinkEvent::SinkData(SinkDataEvent::State(metadata)) => {
                 let metadata = metadata.clone();
                 let subject_id = metadata.subject_id.clone();
                 let sn = metadata.sn;
 
-                if let Err(e) = self.persist_subject_state(*metadata).await {
+                let persist_result =
+                    self.persist_subject_state(*metadata).await;
+                if let Err(e) = &persist_result {
                     error!(
                         subject_id = %subject_id,
                         sn = sn,
@@ -3712,7 +4222,7 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                     if let Err(e) = self
                         .inner
                         .manager
-                        .tell(DBManagerMessage::Error(e))
+                        .tell(DBManagerMessage::Error(e.clone()))
                         .await
                     {
                         error!(
@@ -3729,6 +4239,13 @@ impl Subscriber<SubjectSinkEvent> for SqliteWriteStore {
                         "Subject state saved to SQLite successfully"
                     );
                 }
+                if let Err(e) = persist_result {
+                    return Err(ActorError::FunctionalCritical {
+                        description: format!(
+                            "Failed to save subject state to SQLite: {e}"
+                        ),
+                    });
+                }
             }
         }
 
@@ -3742,13 +4259,27 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
         &self,
         event: Arc<RequestTrackingEvent>,
     ) -> Result<(), ActorError> {
+        use crate::request::tracking::WATCHDOG_ABORT_TYPE;
         let event = (*event).clone();
+        // Watchdog incidents are node-monitoring records, not request
+        // verdicts: separate table, warn-only persistence (monitoring
+        // must never crash the node it watches).
+        if event.abort_type == WATCHDOG_ABORT_TYPE {
+            if let Err(e) = self.persist_incident(event).await {
+                error!(
+                    error = %e,
+                    "Failed to save watchdog incident to SQLite"
+                );
+            }
+            return Ok(());
+        }
         let request_id = event.request_id.clone();
         let subject_id = event.subject_id.clone();
         let sn = event.sn;
         let who = event.who.clone();
 
-        if let Err(e) = self.persist_abort(event).await {
+        let persist_result = self.persist_abort(event).await;
+        if let Err(e) = &persist_result {
             error!(
                 subject_id = %subject_id,
                 request_id = %request_id,
@@ -3756,8 +4287,11 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 error = %e,
                 "Failed to save abort record to SQLite"
             );
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e.clone()))
+                .await
             {
                 error!(
                     subject_id = %subject_id,
@@ -3776,6 +4310,13 @@ impl Subscriber<RequestTrackingEvent> for SqliteWriteStore {
                 "Abort record saved to SQLite successfully"
             );
         }
+        if let Err(e) = persist_result {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Failed to save abort record to SQLite: {e}"
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -3786,10 +4327,14 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
         &self,
         event: Arc<RegisterEvent>,
     ) -> Result<(), ActorError> {
-        if let Err(e) = self.persist_register((*event).clone()).await {
+        let persist_result = self.persist_register((*event).clone()).await;
+        if let Err(e) = &persist_result {
             error!(error = %e, event = ?event, "Failed to save register event to SQLite");
-            if let Err(e) =
-                self.inner.manager.tell(DBManagerMessage::Error(e)).await
+            if let Err(e) = self
+                .inner
+                .manager
+                .tell(DBManagerMessage::Error(e.clone()))
+                .await
             {
                 error!(
                     error = %e,
@@ -3798,6 +4343,13 @@ impl Subscriber<RegisterEvent> for SqliteWriteStore {
             }
         } else {
             debug!(event = ?event, "Register event saved to SQLite successfully");
+        }
+        if let Err(e) = persist_result {
+            return Err(ActorError::FunctionalCritical {
+                description: format!(
+                    "Failed to save register event to SQLite: {e}"
+                ),
+            });
         }
         Ok(())
     }
@@ -3846,6 +4398,101 @@ mod tests {
     }
 
     #[test]
+    fn register_lists_page_with_filters_and_stable_order() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(include_str!(
+            "../../../migrations/001_initial_schema.sql"
+        ))
+        .expect("migrate");
+
+        for (gov, active) in [("g-a", 1), ("g-b", 1), ("g-c", 0)] {
+            conn.execute(
+                SQL_UPSERT_REGISTER_GOV,
+                params![
+                    gov,
+                    active,
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("insert gov");
+        }
+        for (subj, schema, active) in [
+            ("s-1", "schema-a", 1),
+            ("s-2", "schema-a", 0),
+            ("s-3", "schema-b", 1),
+        ] {
+            conn.execute(
+                SQL_UPSERT_REGISTER_SUBJECT,
+                params![
+                    "g-a",
+                    subj,
+                    schema,
+                    active,
+                    "ns",
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .expect("insert subject");
+        }
+
+        // Governances: full page ordered, active filter, offset page.
+        let all =
+            get_governances_from_conn(&conn, None, 1000, 0).expect("govs");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].governance_id, "g-a");
+        assert_eq!(all[2].governance_id, "g-c");
+        let active = get_governances_from_conn(&conn, Some(true), 1000, 0)
+            .expect("active govs");
+        assert_eq!(active.len(), 2);
+        let page =
+            get_governances_from_conn(&conn, None, 1, 1).expect("gov page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].governance_id, "g-b");
+
+        // Subjects: every filter combination plus paging.
+        let all = get_subjects_from_conn(&conn, "g-a", None, None, 1000, 0)
+            .expect("subjects");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].subject_id, "s-1");
+        let active =
+            get_subjects_from_conn(&conn, "g-a", Some(true), None, 1000, 0)
+                .expect("active subjects");
+        assert_eq!(active.len(), 2);
+        let by_schema = get_subjects_from_conn(
+            &conn,
+            "g-a",
+            None,
+            Some("schema-a".to_owned()),
+            1000,
+            0,
+        )
+        .expect("schema subjects");
+        assert_eq!(by_schema.len(), 2);
+        let both = get_subjects_from_conn(
+            &conn,
+            "g-a",
+            Some(true),
+            Some("schema-a".to_owned()),
+            1000,
+            0,
+        )
+        .expect("active schema subjects");
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].subject_id, "s-1");
+        let page = get_subjects_from_conn(&conn, "g-a", None, None, 1, 2)
+            .expect("subject page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].subject_id, "s-3");
+        let empty = get_subjects_from_conn(&conn, "g-a", None, None, 10, 99)
+            .expect("empty page");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn count_cache_lookups_track_hit_and_miss() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("database.db");
@@ -3857,7 +4504,8 @@ mod tests {
         runtime.metrics.register_prometheus_metrics(&mut registry);
 
         assert_eq!(runtime.lookup_count_cache("key", "subject"), None);
-        runtime.store_count_cache("key".to_owned(), "subject", 42);
+        let generation = runtime.subject_generation("subject");
+        runtime.store_count_cache("key".to_owned(), "subject", 42, generation);
         assert_eq!(runtime.lookup_count_cache("key", "subject"), Some(42));
 
         let mut text = String::new();
@@ -3877,5 +4525,109 @@ mod tests {
             ),
             1.0
         );
+    }
+
+    #[test]
+    fn stale_count_publish_is_dropped_after_commit() {
+        let mut cache = PageAnchorCache::default();
+        // Read starts at generation 0 and a commit lands mid-read.
+        let generation = cache.current_subject_generation("s");
+        cache.bump_subject_generation("s");
+        // Publishing the stale total must fail: nothing may be
+        // served as fresh afterwards.
+        assert!(!cache.store_count("k".to_string(), "s", 0, generation));
+        assert!(cache.lookup_count("k", "s").is_none());
+        // A fresh read publishes normally.
+        let generation = cache.current_subject_generation("s");
+        assert!(cache.store_count("k".to_string(), "s", 100, generation));
+        assert_eq!(cache.lookup_count("k", "s"), Some(100));
+    }
+
+    #[test]
+    fn delete_purges_entries_and_generation() {
+        let mut cache = PageAnchorCache::default();
+        let generation = cache.current_subject_generation("s");
+        assert!(cache.store_count("k".to_string(), "s", 7, generation));
+        cache.store_anchor("a".to_string(), "s", 2, "cursor".to_string());
+        assert!(cache.lookup_count("k", "s").is_some());
+        // Delete: counter gone AND entries drained, so a recreated
+        // subject starting again at generation 0 finds nothing stale.
+        cache.prune_subject_generation("s");
+        assert!(cache.lookup_count("k", "s").is_none());
+        assert_eq!(cache.current_subject_generation("s"), 0);
+        assert!(cache.store_count("k".to_string(), "s", 1, 0));
+        assert_eq!(cache.lookup_count("k", "s"), Some(1));
+    }
+
+    fn pragma_cache_kb(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("cache_size pragma")
+    }
+
+    #[tokio::test]
+    async fn reader_saturation_fails_loud_instead_of_holding_threads() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("database.db");
+            let tuning = tuning_for_ram(8192);
+            let runtime = Arc::new(
+                SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime"),
+            );
+            let reader_count = SqliteRuntime::recommended_reader_pool_size();
+            // Occupy every permit and every connection: a further read
+            // must fail with saturation after the queue budget instead
+            // of parking a blocking thread on the pool forever.
+            let mut permits = Vec::with_capacity(reader_count);
+            for _ in 0..reader_count {
+                permits.push(
+                    runtime
+                        .reader_permits
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("permit"),
+                );
+            }
+            let mut conns = Vec::with_capacity(reader_count);
+            for _ in 0..reader_count {
+                conns.push(runtime.readers.acquire().expect("reader"));
+            }
+            let reader = SqliteReadStore::new(Arc::clone(&runtime));
+            let err = reader
+                .get_subject_state("missing")
+                .await
+                .expect_err("saturated read must fail");
+            assert!(
+                err.to_string().contains("saturated"),
+                "unexpected error: {err}"
+            );
+        })
+        .await
+        .expect("reader saturation test hung");
+    }
+
+    #[test]
+    fn pool_connections_share_one_cache_budget() {
+        // 8 GiB host: 2 % is 163 MiB total for the base. Every
+        // connection (writer + readers) must apply only its slice so
+        // the aggregate stays within budget instead of multiplying it.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("database.db");
+        let tuning = tuning_for_ram(8192);
+        let total_kb = tuning.cache_size_kb.saturating_abs();
+        assert_eq!(total_kb, 163 * 1024);
+        let runtime =
+            SqliteRuntime::new(&path, "NORMAL", &tuning).expect("runtime");
+
+        let readers = runtime.readers.connections.lock().expect("reader pool");
+        let per_conn = total_kb / (1 + readers.len() as i64);
+        assert_eq!(
+            pragma_cache_kb(&runtime.writer.lock().expect("writer")),
+            -per_conn
+        );
+        for conn in readers.iter() {
+            assert_eq!(pragma_cache_kb(conn), -per_conn);
+        }
+        assert!(per_conn * (1 + readers.len() as i64) <= total_kb);
     }
 }

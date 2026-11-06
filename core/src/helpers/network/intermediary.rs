@@ -1,7 +1,15 @@
 use crate::{
     approval::{
-        light::{ApprLight, ApprLightMessage},
+        Approval, ApprovalMessage,
+        coordinator::{ApprCoordinator, ApprCoordinatorMessage},
         persist::{ApprPersist, ApprPersistMessage},
+    },
+    compilation::contract_compiler::{
+        ContractCompiler, ContractCompilerMessage,
+    },
+    compilation::{
+        coordinator::{CompileCoordinator, CompileCoordinatorMessage},
+        worker::{CompileWorker, CompileWorkerMessage},
     },
     distribution::{
         coordinator::{DistriCoordinator, DistriCoordinatorMessage},
@@ -27,7 +35,10 @@ use crate::{
 use super::error::IntermediaryError;
 
 use super::ActorMessage;
-use super::{NetworkMessage, service::NetworkSender};
+#[cfg(feature = "test")]
+use super::test_faults;
+use super::{NetworkMessage, WIRE_VERSION, service::NetworkSender};
+use crate::metrics::try_core_metrics;
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use ave_network::Command as NetworkCommand;
@@ -50,28 +61,66 @@ impl Intermediary {
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
     ) -> Arc<NetworkSender> {
-        let (command_sender, mut command_receiver) = mpsc::channel(2048);
+        // Separate channels per direction so inbound bursts (bulk
+        // ledger batches) never stall outbound deadline-driven votes.
+        // The loop below polls outbound first.
+        let (outbound_sender, mut outbound_receiver) = mpsc::channel(1024);
+        let (inbound_sender, mut inbound_receiver) = mpsc::channel(1024);
+
+        // Test-only fault injection: one registry per node, shared by
+        // the network sender (outbound) and this task (inbound), and
+        // exposed to the test suites through the `test_faults` helper.
+        #[cfg(feature = "test")]
+        let faults = {
+            let faults: test_faults::SharedFaultRegistry = Arc::new(
+                std::sync::Mutex::new(test_faults::TestFaultRegistry::new(
+                    outbound_sender.clone(),
+                )),
+            );
+            faults
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .set_inbound_sender(inbound_sender.clone());
+            system.add_helper("test_faults", faults.clone());
+            faults
+        };
+
+        #[cfg(feature = "test")]
+        let service_sender =
+            NetworkSender::new(outbound_sender, faults.clone())
+                .with_inbound_sender(inbound_sender.clone());
+        #[cfg(not(feature = "test"))]
+        let service_sender = NetworkSender::new(outbound_sender)
+            .with_inbound_sender(inbound_sender);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    command = command_receiver.recv() => {
-                        if let Some(command) = command
-                            && let Err(e) = Self::handle_command(command, &system, &network_sender).await
-                        {
-                            match e {
-                                IntermediaryError::NetworkSendFailed { .. } => {
-                                    error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
-                                    crash_token.cancel();
-                                    break;
-                                }
-                                _ => {
-                                    warn!(
-                                        error = %e,
-                                        "Intermediary command failed with non-fatal error"
-                                    );
-                                }
-                            }
+                    biased;
+                    command = outbound_receiver.recv() => {
+                        if let Some(command) = command {
+                            Self::drive_command(
+                                command,
+                                &system,
+                                &network_sender,
+                                #[cfg(feature = "test")]
+                                &faults,
+                                &crash_token,
+                            )
+                            .await;
+                        }
+                    },
+                    command = inbound_receiver.recv() => {
+                        if let Some(command) = command {
+                            Self::drive_command(
+                                command,
+                                &system,
+                                &network_sender,
+                                #[cfg(feature = "test")]
+                                &faults,
+                                &crash_token,
+                            )
+                            .await;
                         }
                     },
                     _ = graceful_token.cancelled() => {
@@ -83,19 +132,57 @@ impl Intermediary {
                         break;
                     }
                 }
+                if crash_token.is_cancelled() {
+                    break;
+                }
             }
         });
 
-        Arc::new(NetworkSender::new(command_sender))
+        Arc::new(service_sender)
+    }
+
+    async fn drive_command(
+        command: Command<NetworkMessage>,
+        system: &SystemRef,
+        network_sender: &mpsc::Sender<NetworkCommand>,
+        #[cfg(feature = "test")] faults: &test_faults::SharedFaultRegistry,
+        crash_token: &CancellationToken,
+    ) {
+        if let Err(e) = Self::handle_command(
+            command,
+            system,
+            network_sender,
+            #[cfg(feature = "test")]
+            faults,
+        )
+        .await
+        {
+            match e {
+                IntermediaryError::NetworkSendFailed { .. } => {
+                    error!(error = %e, "Network send failed, cancelling token and stopping intermediary");
+                    crash_token.cancel();
+                }
+                _ => {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_network_ingress_drop(e.cause());
+                    }
+                    warn!(
+                        error = %e,
+                        "Intermediary command failed with non-fatal error"
+                    );
+                }
+            }
+        }
     }
 
     async fn handle_command(
         command: Command<NetworkMessage>,
         system: &SystemRef,
         network_sender: &mpsc::Sender<NetworkCommand>,
+        #[cfg(feature = "test")] faults: &test_faults::SharedFaultRegistry,
     ) -> Result<(), IntermediaryError> {
         match command {
-            Command::SendMessage { message } => {
+            Command::SendMessage { message, delivery } => {
                 let receiver = message.info.receiver.clone();
                 let receiver_actor = message.info.receiver_actor.clone();
 
@@ -127,6 +214,7 @@ impl Intermediary {
                     .send(NetworkCommand::SendMessage {
                         peer: node_peer,
                         message: Bytes::from(network_message),
+                        delivery,
                     })
                     .await
                 {
@@ -148,6 +236,11 @@ impl Intermediary {
                 );
             }
             Command::ReceivedMessage { message, sender } => {
+                #[cfg(feature = "test")]
+                let raw_message = message.clone();
+                #[cfg(feature = "test")]
+                let sender_raw = sender;
+
                 let sender =
                     match PublicKey::new(DSAlgorithm::Ed25519, sender.to_vec())
                     {
@@ -182,6 +275,63 @@ impl Intermediary {
                             );
                         }
                     };
+
+                if message.wire_version != WIRE_VERSION {
+                    if let Some(metrics) = try_core_metrics() {
+                        metrics.observe_network_wire_version(
+                            if message.wire_version < WIRE_VERSION {
+                                "older"
+                            } else {
+                                "newer"
+                            },
+                        );
+                    }
+                    warn!(
+                        sender = %sender,
+                        wire_version = message.wire_version,
+                        current = WIRE_VERSION,
+                        "Peer speaks a different wire version"
+                    );
+                }
+
+                // Test-only fault injection: drop/hold/corrupt inbound
+                // messages by rule before they reach any actor.
+                #[cfg(feature = "test")]
+                let message = {
+                    let mut message = message;
+                    // Test infrastructure: the lock is never held across
+                    // an await; on poisoning (a test already panicked)
+                    // keep going with the guarded state.
+                    let verdict = faults
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .check_inbound(
+                            &sender,
+                            sender_raw,
+                            &raw_message,
+                            &mut message,
+                        );
+                    match verdict {
+                        test_faults::InboundVerdict::Pass => {}
+                        test_faults::InboundVerdict::Drop => {
+                            debug!(
+                                msg_type = "TestFault",
+                                sender = %sender,
+                                "Inbound message dropped by test fault rule"
+                            );
+                            return Ok(());
+                        }
+                        test_faults::InboundVerdict::Held => {
+                            debug!(
+                                msg_type = "TestFault",
+                                sender = %sender,
+                                "Inbound message held by test fault rule"
+                            );
+                            return Ok(());
+                        }
+                    }
+                    message
+                };
 
                 let path = ActorPath::from(message.info.receiver_actor.clone());
                 let request_id = message.info.request_id.clone();
@@ -476,7 +626,7 @@ impl Intermediary {
                                 })?;
                         }
                     }
-                    ActorMessage::ApprovalReq { req } => {
+                    ActorMessage::ApprovalReq { req, asker_actor } => {
                         let actor = system
                             .get_actor::<ApprPersist>(&path)
                             .await
@@ -489,6 +639,33 @@ impl Intermediary {
                                 approval_req: req,
                                 info: message.info,
                                 sender: sender.clone(),
+                                asker_actor,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalHashPing {
+                        approval_req_hash,
+                        asker_actor,
+                    } => {
+                        let actor = system
+                            .get_actor::<ApprPersist>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+
+                        actor
+                            .tell(ApprPersistMessage::HashPing {
+                                approval_req_hash,
+                                info: message.info,
+                                sender: sender.clone(),
+                                asker_actor,
                             })
                             .await
                             .map_err(|e| {
@@ -615,16 +792,360 @@ impl Intermediary {
                     }
                     ActorMessage::ApprovalRes { res } => {
                         let actor = system
-                            .get_actor::<ApprLight>(&path)
+                            .get_actor::<ValiWorker>(&path)
                             .await
                             .map_err(|_| IntermediaryError::ActorNotFound {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(ApprLightMessage::NetworkResponse {
-                                approval_res: *res,
+                            .tell(ValiWorkerMessage::ApprovalResponse {
+                                approval_res: res,
                                 request_id: message.info.request_id,
                                 version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalVoteReport { res } => {
+                        let actor =
+                            system.get_actor::<Approval>(&path).await.map_err(
+                                |_| IntermediaryError::ActorNotFound {
+                                    path: path.to_string(),
+                                },
+                            )?;
+                        actor
+                            .tell(ApprovalMessage::VoteReport {
+                                vote: res,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalStatusReq {
+                        approval_req_hash,
+                        wanted,
+                    } => {
+                        let actor = system
+                            .get_actor::<ValiWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValiWorkerMessage::ApprovalStatusReq {
+                                approval_req_hash,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                                wanted,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalStatusRes {
+                        approval_req_hash,
+                        votes,
+                    } => {
+                        let actor =
+                            system.get_actor::<Approval>(&path).await.map_err(
+                                |_| IntermediaryError::ActorNotFound {
+                                    path: path.to_string(),
+                                },
+                            )?;
+                        actor
+                            .tell(ApprovalMessage::StatusRes {
+                                approval_req_hash,
+                                votes,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalCollectReq { req } => {
+                        let actor = system
+                            .get_actor::<ValiWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ValiWorkerMessage::NetworkApprovalCollect {
+                                approval_req: Box::new(req),
+                                sender: sender.clone(),
+                                info: message.info,
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ApprovalCollectAck {
+                        approval_req_hash,
+                        ack,
+                    } => {
+                        let actor = system
+                            .get_actor::<ApprCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ApprCoordinatorMessage::NetworkAck {
+                                approval_req_hash,
+                                ack,
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::CompilationReq { req } => {
+                        let actor = system
+                            .get_actor::<CompileWorker>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(CompileWorkerMessage::NetworkRequest {
+                                compilation_req: *req,
+                                info: message.info,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::CompilationRes { res } => {
+                        let actor = system
+                            .get_actor::<CompileCoordinator>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(CompileCoordinatorMessage::NetworkResponse {
+                                compilation_res: Box::new(res),
+                                request_id: message.info.request_id,
+                                version: message.info.version,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ArtifactProbeReq {
+                        subject_id,
+                        schema_id,
+                        gov_version,
+                        request_nonce,
+                        receiver_actor,
+                    } => {
+                        // Compilers serve from the governance compile
+                        // worker; evaluators (plan B) from the contract
+                        // compiler of the schema.
+                        if path.key() == "compiler" {
+                            let actor = system
+                                .get_actor::<CompileWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    CompileWorkerMessage::ArtifactProbeRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<ContractCompiler>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    ContractCompilerMessage::ArtifactProbeRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        }
+                    }
+                    ActorMessage::ArtifactProbeRes {
+                        request_nonce,
+                        result,
+                    } => {
+                        let actor = system
+                            .get_actor::<ContractCompiler>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(
+                                ContractCompilerMessage::ArtifactProbeResponse {
+                                    result,
+                                    request_nonce,
+                                    sender: sender.clone(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
+                    ActorMessage::ArtifactReq {
+                        subject_id,
+                        schema_id,
+                        gov_version,
+                        request_nonce,
+                        receiver_actor,
+                    } => {
+                        // Compilers serve from the governance compile
+                        // worker; evaluators (plan B) from the contract
+                        // compiler of the schema.
+                        if path.key() == "compiler" {
+                            let actor = system
+                                .get_actor::<CompileWorker>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(CompileWorkerMessage::ArtifactRequest {
+                                    subject_id,
+                                    schema_id,
+                                    gov_version,
+                                    request_nonce,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                    receiver_actor,
+                                })
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        } else {
+                            let actor = system
+                                .get_actor::<ContractCompiler>(&path)
+                                .await
+                                .map_err(|_| {
+                                    IntermediaryError::ActorNotFound {
+                                        path: path.to_string(),
+                                    }
+                                })?;
+                            actor
+                                .tell(
+                                    ContractCompilerMessage::ArtifactRequest {
+                                        subject_id,
+                                        schema_id,
+                                        gov_version,
+                                        request_nonce,
+                                        info: message.info,
+                                        sender: sender.clone(),
+                                        receiver_actor,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    IntermediaryError::SendMessageFailed {
+                                        path: path.to_string(),
+                                        details: e.to_string(),
+                                    }
+                                })?;
+                        }
+                    }
+                    ActorMessage::ArtifactRes {
+                        request_nonce,
+                        result,
+                    } => {
+                        let actor = system
+                            .get_actor::<ContractCompiler>(&path)
+                            .await
+                            .map_err(|_| IntermediaryError::ActorNotFound {
+                                path: path.to_string(),
+                            })?;
+                        actor
+                            .tell(ContractCompilerMessage::ArtifactResponse {
+                                result,
+                                request_nonce,
                                 sender: sender.clone(),
                             })
                             .await

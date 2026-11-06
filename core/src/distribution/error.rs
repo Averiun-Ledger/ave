@@ -91,17 +91,13 @@ impl From<DistributorError> for ActorError {
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. }
             | DistributorError::TransferEventInvalid { .. }
-            | DistributorError::TrackerBanned => Self::Functional {
-                description: error.to_string(),
-            },
-            DistributorError::MissingGovernanceId { .. }
+            | DistributorError::TrackerBanned
+            | DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
             | DistributorError::UpTrackerFailed { .. }
-            | DistributorError::UpdateLedgerFailed { .. } => {
-                Self::FunctionalCritical {
-                    description: error.to_string(),
-                }
-            }
+            | DistributorError::UpdateLedgerFailed { .. } => Self::Functional {
+                description: error.to_string(),
+            },
         }
     }
 }

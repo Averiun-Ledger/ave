@@ -4,7 +4,9 @@ pub use ave_common::Namespace;
 pub use ave_common::response::MonitorNetworkState;
 pub use ave_common::{
     bridge::request::SinksQuery,
-    bridge::response::{SinkInfo, SinkStatusInfo},
+    bridge::response::{
+        ActorTreeResponse, SinkDeliveryState, SinkInfo, SinkStatusInfo,
+    },
     sink::{
         HttpSinkConfig, KafkaSecurityConfig, KafkaSinkConfig, SinkConfigEntry,
         SinkServer, SinkTarget, SinkTransportConfig,
@@ -12,8 +14,10 @@ pub use ave_common::{
 };
 use ave_common::{
     bridge::request::{
-        AbortsQuery, ApprovalState, ApprovalStateRes, BridgeSignedEventRequest,
-        EventRequestType, EventsQuery, SinkEventsQuery, SinkReplayRequest,
+        AbortsQuery, ActorTreeQuery, ApprovalQuery, ApprovalState,
+        ApprovalStateRes, BridgeSignedEventRequest, EventRequestType,
+        EventsQuery, GovQuery, IncidentsQuery, ListQuery, PatchApproval,
+        SinkDeliveriesQuery, SinkEventsQuery, SinkReplayRequest, SubjectQuery,
         UpdateSubjectQuery,
     },
     identity::{DigestIdentifier, PublicKey, Signature, Signed},
@@ -23,6 +27,7 @@ use ave_common::{
         RequestData as RequestDataRes, RequestInfo, RequestInfoExtend,
         RequestsInManager, RequestsInManagerSubject, SinkEventsPage,
         SinkReplayResponse, SubjectDB, SubjsData, TransferSubject,
+        WatchdogIncidentRow,
     },
 };
 pub use ave_core::config::{MachineSpec, resolve_spec};
@@ -102,7 +107,7 @@ impl Bridge {
             .validate()
             .map_err(|e| BridgeError::ConfigBuild(e.to_string()))?;
 
-        utils::validate_keys_path(&settings.keys_path)
+        utils::validate_keys_path(&settings.keys_path())
             .map_err(BridgeError::KeyPathInvalid)?;
 
         let keys = key_pair(settings, password)?;
@@ -123,7 +128,7 @@ impl Bridge {
         )
         .await?;
 
-        Self::bind_with_shutdown(graceful_token.clone())?;
+        Self::bind_with_shutdown(graceful_token.clone(), api.clone())?;
 
         #[cfg(feature = "prometheus")]
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
@@ -157,10 +162,18 @@ impl Bridge {
         self.registry.clone()
     }
 
-    fn bind_with_shutdown(token: CancellationToken) -> Result<(), BridgeError> {
+    fn bind_with_shutdown(
+        token: CancellationToken,
+        api: AveApi,
+    ) -> Result<(), BridgeError> {
         let cancellation_token = token;
         let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to register SIGTERM handler");
+            tracing::error!(
+                target: "ave::bridge",
+                msg_type = "sigterm_failed",
+                error = %e,
+                "Failed to register SIGTERM handler"
+            );
             BridgeError::SignalRegistration(e.to_string())
         })?;
 
@@ -173,6 +186,12 @@ impl Bridge {
                 // nothing left to do — exit instead of leaking the task.
                 _ = cancellation_token.cancelled() => return,
             }
+
+            // Clean-shutdown handshake BEFORE stopping the system: the
+            // node persists the clean marker while still alive, so the
+            // next boot skips reconciliation. Bounded inside; a failure
+            // just means the next boot syncs (always safe).
+            api.prepare_clean_shutdown().await;
 
             cancellation_token.cancel();
         });
@@ -251,23 +270,29 @@ impl Bridge {
 
         Ok(self.api.get_approval(subject_id, state).await?.map(|x| {
             ApprovalEntry {
-                request: core_approval_req_to_common(x.0),
-                state: x.1,
+                request: core_approval_req_to_common(x.request),
+                state: x.state,
+                request_id: x.request_id,
+                version: x.version,
             }
         }))
     }
 
     pub async fn get_approvals(
         &self,
-        state: Option<ApprovalState>,
+        query: ApprovalQuery,
     ) -> Result<Vec<ApprovalEntry>, BridgeError> {
-        let res = self.api.get_approvals(state).await?;
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        let res = self.api.get_approvals(query.state, limit, offset).await?;
 
         Ok(res
             .into_iter()
             .map(|x| ApprovalEntry {
-                request: core_approval_req_to_common(x.0),
-                state: x.1,
+                request: core_approval_req_to_common(x.request),
+                state: x.state,
+                request_id: x.request_id,
+                version: x.version,
             })
             .collect())
     }
@@ -275,16 +300,25 @@ impl Bridge {
     pub async fn patch_approve(
         &self,
         subject_id: String,
-        state: ApprovalStateRes,
+        approval: PatchApproval,
     ) -> Result<String, BridgeError> {
         let subject_id = Self::parse_subject_id(subject_id)?;
-        if state == ApprovalStateRes::Obsolete {
+        if approval.state == ApprovalStateRes::Obsolete {
             return Err(BridgeError::Core(Error::InvalidApprovalState(
                 "Obsolete is not a valid target approval state".to_owned(),
             )));
         }
 
-        Ok(self.api.approve(subject_id, state).await?)
+        Ok(self
+            .api
+            .approve(
+                subject_id,
+                approval.state,
+                approval.expected_request_id,
+                approval.expected_version,
+                approval.expected_issued_at,
+            )
+            .await?)
     }
 
     pub async fn post_manual_request_abort(
@@ -309,17 +343,26 @@ impl Bridge {
 
     pub async fn get_all_request_state(
         &self,
+        query: ListQuery,
     ) -> Result<Vec<RequestInfoExtend>, BridgeError> {
-        Ok(self.api.all_request_state().await?)
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        Ok(self.api.all_request_state(limit, offset).await?)
     }
 
     ///////// Node
     ////////////////////////////
     pub async fn get_pending_transfers(
         &self,
+        query: ListQuery,
     ) -> Result<Vec<TransferSubject>, BridgeError> {
-        let res = self.api.get_pending_transfers().await?;
-        Ok(res.into_iter().map(core_tranfer_subject_to_common).collect())
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        let res = self.api.get_pending_transfers(limit, offset).await?;
+        Ok(res
+            .into_iter()
+            .map(core_tranfer_subject_to_common)
+            .collect())
     }
 
     ///////// Sink
@@ -346,6 +389,18 @@ impl Bridge {
         &self,
     ) -> Result<Vec<SinkStatusInfo>, BridgeError> {
         Ok(self.api.get_sinks_status().await?)
+    }
+
+    pub async fn get_sink_deliveries(
+        &self,
+        query: SinkDeliveriesQuery,
+    ) -> Result<Vec<SinkDeliveryState>, BridgeError> {
+        let subject = query.subject.map(Self::parse_subject_id).transpose()?;
+        if let Some(ref sink) = query.sink {
+            Self::require_non_empty_str("sink", sink)?;
+        }
+
+        Ok(self.api.get_sink_deliveries(subject, query.sink).await?)
     }
 
     pub async fn unblock_sink(
@@ -559,27 +614,48 @@ impl Bridge {
         Ok(self.api.manual_distribution(subject_id).await?)
     }
 
+    pub async fn lift_subject_for_sync(
+        &self,
+        subject_id: String,
+    ) -> Result<String, BridgeError> {
+        let subject_id = Self::parse_subject_id(subject_id)?;
+
+        Ok(self.api.lift_subject_for_sync(subject_id).await?)
+    }
+
     ///////// Register
     ////////////////////////////
     pub async fn get_all_govs(
         &self,
-        active: Option<bool>,
+        query: GovQuery,
     ) -> Result<Vec<GovsData>, BridgeError> {
-        Ok(self.api.all_govs(active).await?)
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
+        Ok(self.api.all_govs(query.active, limit, offset).await?)
     }
 
     pub async fn get_all_subjs(
         &self,
         governance_id: String,
-        active: Option<bool>,
-        schema_id: Option<String>,
+        query: SubjectQuery,
     ) -> Result<Vec<SubjsData>, BridgeError> {
         let governance_id = Self::parse_governance_id(governance_id)?;
-        if let Some(schema_id) = schema_id.as_deref() {
+        if let Some(schema_id) = query.schema_id.as_deref() {
             Self::require_non_empty_str("schema_id", schema_id)?;
         }
+        let (limit, offset) =
+            ave_core::resolve_page(query.limit, query.offset)?;
 
-        Ok(self.api.all_subjs(governance_id, active, schema_id).await?)
+        Ok(self
+            .api
+            .all_subjs(
+                governance_id,
+                query.active,
+                query.schema_id,
+                limit,
+                offset,
+            )
+            .await?)
     }
 
     ///////// Query
@@ -615,6 +691,27 @@ impl Bridge {
         ave_core::validate_aborts_query(&query)?;
 
         Ok(self.api.get_aborts(subject_id, query).await?)
+    }
+
+    pub async fn get_watchdog_incidents(
+        &self,
+        query: IncidentsQuery,
+    ) -> Result<Vec<WatchdogIncidentRow>, BridgeError> {
+        ave_core::validate_incidents_query(&query)?;
+
+        Ok(self.api.get_recent_incidents(query).await?)
+    }
+
+    pub async fn get_actor_tree(
+        &self,
+        query: ActorTreeQuery,
+    ) -> Result<ActorTreeResponse, BridgeError> {
+        use ave_common::bridge::request::DEFAULT_TREE_LIMIT;
+        ave_core::validate_actor_tree_query(&query)?;
+        let subject = query.subject.map(Self::parse_subject_id).transpose()?;
+        let limit = query.limit.unwrap_or(DEFAULT_TREE_LIMIT);
+
+        Ok(self.api.get_actor_tree(subject, limit)?)
     }
 
     pub async fn get_event_sn(

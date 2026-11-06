@@ -4,33 +4,14 @@ use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, NotPersistentActor,
 };
-use ave_common::identity::{PublicKey, TimeStamp};
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
 use tracing::{Span, error, info_span};
 
-use crate::{NetworkMessage, helpers::network::service::NetworkSender};
+use crate::{
+    NetworkMessage,
+    helpers::network::{delivery_of, service::NetworkSender},
+};
 
 use super::common::crash_system;
-
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Hash,
-    BorshSerialize,
-    BorshDeserialize,
-    Ord,
-    PartialOrd,
-)]
-pub struct TimeOut {
-    pub who: PublicKey,
-    pub re_trys: u32,
-    pub timestamp: TimeStamp,
-}
 
 #[derive(Clone, Debug)]
 pub struct RetryNetwork {
@@ -73,6 +54,7 @@ impl Handler<Self> for RetryNetwork {
         if let Err(e) = self
             .network
             .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&msg.message),
                 message: msg,
             })
             .await

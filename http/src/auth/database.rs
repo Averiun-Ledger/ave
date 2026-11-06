@@ -15,7 +15,7 @@ use super::{
 };
 use ave_actors::rusqlite::{
     Connection, OptionalExtension, Result as SqliteResult, TransactionBehavior,
-    params,
+    params, params_from_iter,
 };
 use ave_bridge::{
     MachineSpec,
@@ -236,14 +236,43 @@ const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$6bLVReaW/buHRw
 /// Thread-safe database service for auth operations
 #[derive(Clone)]
 pub struct AuthDatabase {
+    pub(crate) audit_sender: Arc<
+        std::sync::Mutex<
+            Option<
+                tokio::sync::mpsc::Sender<
+                    super::database_audit::QueuedAuditLog,
+                >,
+            >,
+        >,
+    >,
     runtime: Arc<AuthDbRuntime>,
     metrics: Arc<DbMetrics>,
     blocking_task_semaphore: Arc<Semaphore>,
+    pub(crate) touch_sender: Arc<
+        std::sync::Mutex<
+            Option<
+                tokio::sync::mpsc::Sender<
+                    super::database_apikeys::LastUsedTouch,
+                >,
+            >,
+        >,
+    >,
     #[cfg(feature = "prometheus")]
     prometheus:
         Arc<std::sync::OnceLock<super::metrics::SharedAuthPrometheusMetrics>>,
     runtime_config: Arc<RuntimeAuthConfig>,
     pub(crate) config: Arc<AuthConfig>,
+    /// Serializes whole system-config updates (validate, persist,
+    /// publish) across the audited and plain variants: without it a
+    /// newer commit can be published before an older one resumes and
+    /// the process keeps applying the stale value after a newer one
+    /// was confirmed.
+    pub(crate) system_config_write: Arc<std::sync::Mutex<()>>,
+    /// Test-only barrier slot fired between commit and publish so a
+    /// test can force the stale-publish interleave deterministically.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) commit_publish_hook:
+        Arc<std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>>>,
 }
 
 impl AuthDatabase {
@@ -321,6 +350,7 @@ impl AuthDatabase {
         if elapsed >= Duration::from_millis(10) {
             warn!(
                 target: TARGET,
+                msg_type = "slow_pool_wait",
                 pool = pool_name,
                 elapsed_ms,
                 "slow auth db pool wait"
@@ -500,6 +530,7 @@ impl AuthDatabase {
 
         debug!(
             target: TARGET,
+            msg_type = "auth_db_request",
             request_kind,
             result,
             elapsed_ms,
@@ -514,6 +545,13 @@ impl AuthDatabase {
                 elapsed_ms,
                 "slow auth db request"
             );
+        }
+    }
+
+    pub(crate) fn record_login_attempt(&self, result: &'static str) {
+        #[cfg(feature = "prometheus")]
+        if let Some(metrics) = self.prometheus_metrics() {
+            metrics.observe_login_attempt(result);
         }
     }
 
@@ -734,6 +772,23 @@ impl AuthDatabase {
                     e
                 ))
             })
+    }
+
+    /// Largest window any admission query can consult: the default
+    /// plus every endpoint override. Cleanup must retain at least
+    /// this long, or live counters get deleted while still gating
+    /// requests.
+    pub(crate) fn rate_limit_max_window_seconds(&self) -> i64 {
+        let (_, default_window) = self.rate_limit_defaults();
+        let mut max_window = default_window.max(0);
+        if let Ok(endpoints) = self.rate_limit_sensitive_endpoints() {
+            for endpoint in &endpoints {
+                max_window = max_window
+                    .max(endpoint.window_seconds.unwrap_or(default_window))
+                    .max(0);
+            }
+        }
+        max_window
     }
 
     pub(crate) fn audit_enabled(&self) -> bool {
@@ -989,6 +1044,21 @@ impl AuthDatabase {
         Ok(())
     }
 
+    /// Test-only one-shot barrier between commit and publish: lets a
+    /// test force the stale-publish interleave deterministically.
+    /// Costless in production (compiled out without the test feature).
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn wait_commit_publish_hook(&self) {
+        let barrier = self
+            .commit_publish_hook
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
     /// Get a locked database connection with error handling
     pub(super) fn lock_conn(&self) -> Result<PooledConnection, DatabaseError> {
         let started = Instant::now();
@@ -1066,7 +1136,7 @@ impl AuthDatabase {
         spec: Option<MachineSpec>,
     ) -> Result<Self, DatabaseError> {
         // Create parent directory if it doesn't exist
-        let path = config.database_path.clone();
+        let path = config.database_path();
         if !Path::new(&path).exists() {
             fs::create_dir_all(&path).map_err(|e| {
                 DatabaseError::Initialize(format!(
@@ -1087,6 +1157,8 @@ impl AuthDatabase {
         let blocking_capacity = pool_size.saturating_mul(2).max(4);
 
         let db = Self {
+            audit_sender: Arc::new(std::sync::Mutex::new(None)),
+            touch_sender: Arc::new(std::sync::Mutex::new(None)),
             runtime: Arc::new(runtime),
             metrics: Arc::new(DbMetrics::default()),
             blocking_task_semaphore: Arc::new(Semaphore::new(
@@ -1096,6 +1168,9 @@ impl AuthDatabase {
             prometheus: Arc::new(std::sync::OnceLock::new()),
             runtime_config: Arc::new(RuntimeAuthConfig::from_config(&config)),
             config: Arc::new(config),
+            system_config_write: Arc::new(std::sync::Mutex::new(())),
+            #[cfg(any(test, feature = "test"))]
+            commit_publish_hook: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // Run migrations
@@ -1303,6 +1378,16 @@ impl AuthDatabase {
 // =============================================================================
 // USER OPERATIONS
 // =============================================================================
+
+/// Out-of-transaction Argon2 pre-check for a password change: the
+/// observed hash, the verification outcome and (when valid) the new
+/// hash. The transaction trusts them only while the stored hash is
+/// unchanged. Mirrors the login precheck pattern.
+pub(crate) struct ChangePasswordPrecomputed {
+    seen_hash: Option<String>,
+    current_valid: bool,
+    new_hash: Option<String>,
+}
 
 impl AuthDatabase {
     fn release_deleted_username_with_conn(
@@ -1563,11 +1648,43 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         drop(stmt);
 
-        // Get roles for each user
-        let mut result = Vec::new();
-        for (user_id, mut user_info) in users {
-            user_info.roles = Self::get_user_roles_internal(&conn, user_id)?;
-            result.push(user_info);
+        // One batched roles lookup for the whole page instead of
+        // one query per user (N+1).
+        let mut result: Vec<UserInfo> =
+            users.into_iter().map(|(_, info)| info).collect();
+        if !result.is_empty() {
+            let ids: Vec<i64> = result.iter().map(|u| u.id).collect();
+            let placeholders =
+                ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let roles_query = format!(
+                "SELECT ur.user_id, r.name
+                 FROM user_roles ur
+                 INNER JOIN roles r ON r.id = ur.role_id
+                 WHERE ur.user_id IN ({placeholders})
+                   AND r.is_deleted = 0
+                 ORDER BY ur.user_id, r.name"
+            );
+            let mut roles_stmt = conn
+                .prepare(&roles_query)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let mut roles_by_user: std::collections::HashMap<i64, Vec<String>> =
+                std::collections::HashMap::new();
+            let rows = roles_stmt
+                .query_map(params_from_iter(ids.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            for row in rows {
+                let (user_id, role) =
+                    row.map_err(|e| DatabaseError::Query(e.to_string()))?;
+                roles_by_user.entry(user_id).or_default().push(role);
+            }
+            drop(roles_stmt);
+            for user in &mut result {
+                if let Some(roles) = roles_by_user.remove(&user.id) {
+                    user.roles = roles;
+                }
+            }
         }
         drop(conn);
 
@@ -1973,7 +2090,49 @@ impl AuthDatabase {
         password: &str,
     ) -> Result<User, DatabaseError> {
         let conn = self.lock_conn()?;
-        self.verify_credentials_with_conn(&conn, username, password)
+        self.verify_credentials_with_conn(&conn, username, password, None)
+    }
+
+    /// Argon2 pre-check without holding a pooled connection: fetches
+    /// the user row, releases the connection, then verifies (real or
+    /// dummy hash for timing parity). The caller must re-validate the
+    /// hash inside its transaction — a concurrent password change
+    /// between here and there aborts the login instead of issuing a
+    /// key on stale credentials.
+    pub(crate) fn verify_credentials_precheck(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<(Option<String>, bool), DatabaseError> {
+        let hash: Option<String> = {
+            let conn = self.lock_conn()?;
+            conn.query_row(
+                "SELECT password_hash FROM users WHERE username = ?1 AND is_deleted = 0",
+                params![username],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+        match hash {
+            Some(hash) => {
+                let valid = super::crypto::verify_password(password, &hash)
+                    .map_err(|e| {
+                        DatabaseError::Crypto(format!(
+                            "Password verification failed: {}",
+                            e
+                        ))
+                    })?;
+                Ok((Some(hash), valid))
+            }
+            None => {
+                let _ = super::crypto::verify_password(
+                    password,
+                    DUMMY_PASSWORD_HASH,
+                );
+                Ok((None, false))
+            }
+        }
     }
 
     pub(crate) fn verify_credentials_with_conn(
@@ -1981,6 +2140,7 @@ impl AuthDatabase {
         conn: &Connection,
         username: &str,
         password: &str,
+        precomputed: Option<(bool, String)>,
     ) -> Result<User, DatabaseError> {
         // Try to find the user
         let user_result = conn.query_row(
@@ -2012,23 +2172,40 @@ impl AuthDatabase {
         // Use a real Argon2id hash to ensure identical parameters and computation cost
         let (user, password_valid) = match user_result {
             Ok(u) => {
-                // User exists - verify with real hash
-                let valid =
-                    super::crypto::verify_password(password, &u.password_hash)
-                        .map_err(|e| {
-                            DatabaseError::Crypto(format!(
-                                "Password verification failed: {}",
-                                e
-                            ))
-                        })?;
+                // With a precheck the Argon2 already ran outside any
+                // pooled connection: trust it only while the hash is
+                // unchanged, otherwise fail closed like a wrong
+                // password (a concurrent reset/rotation aborts).
+                let valid = match &precomputed {
+                    Some((pre_valid, seen_hash))
+                        if seen_hash == &u.password_hash =>
+                    {
+                        *pre_valid
+                    }
+                    Some(_) => false,
+                    None => super::crypto::verify_password(
+                        password,
+                        &u.password_hash,
+                    )
+                    .map_err(|e| {
+                        DatabaseError::Crypto(format!(
+                            "Password verification failed: {}",
+                            e
+                        ))
+                    })?,
+                };
                 (Some(u), valid)
             }
             Err(_) => {
-                // User doesn't exist - verify with dummy hash to match timing
-                let _ = super::crypto::verify_password(
-                    password,
-                    DUMMY_PASSWORD_HASH,
-                );
+                // No precheck ran: verify with dummy hash to match
+                // timing. With precheck the timing already matched
+                // there, so skip the second burn.
+                if precomputed.is_none() {
+                    let _ = super::crypto::verify_password(
+                        password,
+                        DUMMY_PASSWORD_HASH,
+                    );
+                }
                 (None, false)
             }
         };
@@ -2115,6 +2292,13 @@ impl AuthDatabase {
         (User, Vec<String>, Vec<super::models::Permission>, String),
         DatabaseError,
     > {
+        // Argon2 runs outside any pooled connection (50–200 ms
+        // of pool hold per login otherwise); the transaction below
+        // re-validates the hash, so a concurrent password change
+        // aborts instead of issuing on stale credentials.
+        let (seen_hash, pre_valid) =
+            self.verify_credentials_precheck(username, password)?;
+        let precomputed = Some((pre_valid, seen_hash.unwrap_or_default()));
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
         let result = (|| {
@@ -2122,9 +2306,12 @@ impl AuthDatabase {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
-            let user = match self
-                .verify_credentials_with_conn(&tx, username, password)
-            {
+            let user = match self.verify_credentials_with_conn(
+                &tx,
+                username,
+                password,
+                precomputed,
+            ) {
                 Ok(user) => user,
                 Err(err) => {
                     // The failure (and the lockout counter increment) must
@@ -2216,19 +2403,110 @@ impl AuthDatabase {
     /// SECURITY: This function uses constant-time comparison to prevent username enumeration
     /// via timing attacks. When a user doesn't exist, we still perform a dummy hash computation
     /// to make the response time similar to a failed password change for an existing user.
+    ///
+    /// Argon2 runs outside the pooled connection (see
+    /// [`Self::change_password_precheck`]); only the short
+    /// read-modify-write below holds the connection.
     pub fn change_password_with_credentials(
         &self,
         username: &str,
         current_password: &str,
         new_password: &str,
     ) -> Result<User, DatabaseError> {
+        let precomputed = self.change_password_precheck(
+            username,
+            current_password,
+            new_password,
+        )?;
         let conn = self.lock_conn()?;
         self.change_password_with_conn(
             &conn,
             username,
             current_password,
             new_password,
+            Some(&precomputed),
         )
+    }
+
+    /// Argon2 pre-check without holding a pooled connection: fetches
+    /// the user row, releases the connection, then verifies the
+    /// current password (real or dummy hash for timing parity) and,
+    /// when it verifies, hashes the new password. Policy checks run
+    /// again inside the transaction, so a rejected new password just
+    /// wastes this hash on an error path instead of changing any
+    /// outcome. The caller must re-validate the hash inside its
+    /// transaction — a concurrent password change between here and
+    /// there aborts the change instead of applying on stale
+    /// credentials. Mirrors
+    /// [`Self::verify_credentials_precheck`].
+    pub(crate) fn change_password_precheck(
+        &self,
+        username: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<ChangePasswordPrecomputed, DatabaseError> {
+        let row: Option<(String, bool, Option<i64>, bool)> = {
+            let conn = self.lock_conn()?;
+            conn.query_row(
+                "SELECT password_hash, is_active, locked_until, must_change_password
+                 FROM users WHERE username = ?1 AND is_deleted = 0",
+                params![username],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+        match row {
+            Some((hash, _, _, _)) => {
+                let valid =
+                    super::crypto::verify_password(current_password, &hash)
+                        .map_err(|e| {
+                            DatabaseError::Crypto(format!(
+                                "Password verification failed: {}",
+                                e
+                            ))
+                        })?;
+                // Hash the new password only on the valid path; the
+                // transaction re-runs the cheap policy checks, so a
+                // rejected new password just wastes this hash on an
+                // error path instead of changing any outcome.
+                let new_hash = if valid {
+                    Some(super::crypto::hash_password(new_password).map_err(
+                        |e| {
+                            DatabaseError::Crypto(format!(
+                                "Failed to hash password: {}",
+                                e
+                            ))
+                        },
+                    )?)
+                } else {
+                    None
+                };
+                Ok(ChangePasswordPrecomputed {
+                    seen_hash: Some(hash),
+                    current_valid: valid,
+                    new_hash,
+                })
+            }
+            None => {
+                let _ = super::crypto::verify_password(
+                    current_password,
+                    DUMMY_PASSWORD_HASH,
+                );
+                Ok(ChangePasswordPrecomputed {
+                    seen_hash: None,
+                    current_valid: false,
+                    new_hash: None,
+                })
+            }
+        }
     }
 
     /// Audited variant of [`Self::change_password_with_credentials`]
@@ -2252,6 +2530,14 @@ impl AuthDatabase {
             );
         }
 
+        // Argon2 (verify + new hash) runs outside any pooled
+        // connection; the Immediate transaction below only
+        // revalidates and writes. Mirrors the login flow.
+        let precomputed = self.change_password_precheck(
+            username,
+            current_password,
+            new_password,
+        )?;
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
         let result = (|| {
@@ -2264,6 +2550,7 @@ impl AuthDatabase {
                 username,
                 current_password,
                 new_password,
+                Some(&precomputed),
             ) {
                 Ok(user) => user,
                 Err(err) => {
@@ -2332,6 +2619,7 @@ impl AuthDatabase {
         username: &str,
         current_password: &str,
         new_password: &str,
+        precomputed: Option<&ChangePasswordPrecomputed>,
     ) -> Result<User, DatabaseError> {
         let user_result = conn
             .query_row(
@@ -2365,25 +2653,41 @@ impl AuthDatabase {
         // Use a real Argon2id hash to ensure identical parameters and computation cost
         let (user, password_valid) = match user_result {
             Ok(Some(u)) => {
-                // User exists - verify with real hash
-                let valid = super::crypto::verify_password(
-                    current_password,
-                    &u.password_hash,
-                )
-                .map_err(|e| {
-                    DatabaseError::Crypto(format!(
-                        "Password verification failed: {}",
-                        e
-                    ))
-                })?;
+                // With a precheck the Argon2 already ran outside any
+                // pooled connection: trust it only while the hash is
+                // unchanged, otherwise fail closed like a wrong
+                // password (a concurrent reset aborts the change).
+                let valid = match precomputed {
+                    Some(pre)
+                        if pre.seen_hash.as_deref()
+                            == Some(&u.password_hash) =>
+                    {
+                        pre.current_valid
+                    }
+                    Some(_) => false,
+                    None => super::crypto::verify_password(
+                        current_password,
+                        &u.password_hash,
+                    )
+                    .map_err(|e| {
+                        DatabaseError::Crypto(format!(
+                            "Password verification failed: {}",
+                            e
+                        ))
+                    })?,
+                };
                 (Some(u), valid)
             }
             Ok(None) | Err(_) => {
-                // User doesn't exist - verify with dummy hash to match timing
-                let _ = super::crypto::verify_password(
-                    current_password,
-                    DUMMY_PASSWORD_HASH,
-                );
+                // No precheck ran: verify with dummy hash to match
+                // timing. With precheck the timing already matched
+                // there, so skip the second burn.
+                if precomputed.is_none() {
+                    let _ = super::crypto::verify_password(
+                        current_password,
+                        DUMMY_PASSWORD_HASH,
+                    );
+                }
                 (None, false)
             }
         };
@@ -2458,9 +2762,17 @@ impl AuthDatabase {
             ));
         }
 
-        let password_hash = hash_password(new_password).map_err(|e| {
-            DatabaseError::Crypto(format!("Failed to hash password: {}", e))
-        })?;
+        // With a precheck the new hash was already computed outside
+        // any pooled connection; reuse it (it belongs to this run:
+        // same inputs, hash revalidated above).
+        let password_hash = match precomputed
+            .and_then(|pre| pre.new_hash.clone())
+        {
+            Some(hash) => hash,
+            None => hash_password(new_password).map_err(|e| {
+                DatabaseError::Crypto(format!("Failed to hash password: {}", e))
+            })?,
+        };
 
         conn.execute(
             "UPDATE users

@@ -2,7 +2,7 @@
 //
 // Database-backed login endpoint that returns full authentication context
 
-use super::database::AuthDatabase;
+use super::database::{AuthDatabase, DatabaseError};
 use super::http_api::{
     DatabaseErrorMapping, db_error_to_response, rate_limit_error_response,
     request_result_from_status,
@@ -15,7 +15,7 @@ use axum::{Extension, Json, extract::ConnectInfo, http::StatusCode};
 use serde::Deserialize;
 use std::time::Instant;
 use std::{net::SocketAddr, sync::Arc};
-use tracing::warn;
+use tracing::{debug, warn};
 
 const TARGET: &str = "ave::http::auth";
 
@@ -61,6 +61,7 @@ pub async fn login(
     .await
     .map_err(|e| {
         let response = rate_limit_error_response(e);
+        db.record_login_attempt(request_result_from_status(response.0));
         db.record_request_metrics(
             "login",
             request_result_from_status(response.0),
@@ -89,22 +90,31 @@ pub async fn login(
         })
         .await
         .map_err(|e| {
-            warn!(
+            debug!(
                 target: TARGET,
+                msg_type = "login_failed",
                 username = %req.username,
                 ip = ?ip_address,
                 error = %e,
                 "login failed"
             );
+            let locked = matches!(e, DatabaseError::AccountLocked(_));
             let response =
                 db_error_to_response(e, DatabaseErrorMapping::login());
+            let result = if locked {
+                "locked"
+            } else {
+                request_result_from_status(response.0)
+            };
+            db.record_login_attempt(result);
             db.record_request_metrics(
                 "login",
-                request_result_from_status(response.0),
+                result,
                 request_started.elapsed(),
             );
             response
         })?;
+    db.record_login_attempt("success");
     db.record_request_metrics("login", "success", request_started.elapsed());
 
     // Build user info
@@ -186,6 +196,8 @@ pub async fn change_password(
     let username = req.username.clone();
     let current_password = req.current_password.clone();
     let new_password = req.new_password.clone();
+    let log_username = username.clone();
+    let log_ip = ip_address.clone();
     db.run_blocking("change_password_with_credentials", move |db| {
         db.change_password_with_credentials_transactional(
             &username,
@@ -198,6 +210,13 @@ pub async fn change_password(
     .await
     .map_err(|e| {
         let response = db_error_to_response(e, DatabaseErrorMapping::login());
+        warn!(
+            target: TARGET,
+            msg_type = "change_password_failed",
+            username = %log_username,
+            ip = ?log_ip,
+            "change password failed"
+        );
         db.record_request_metrics(
             "change_password",
             request_result_from_status(response.0),

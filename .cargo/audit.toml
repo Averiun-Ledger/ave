@@ -1,0 +1,8 @@
+[advisories]
+# RUSTSEC-2024-0436 (`paste` unmaintained): transitive-only, reachable
+# as paste <- netlink-packet-core <- if-watch <- libp2p-tcp <- libp2p
+# <- ave-network. No maintained alternative upstream; re-audit on
+# every libp2p upgrade. Run audits as `cargo audit -D warnings` so
+# any NEW advisory or warning still fails; this is the only
+# allowlisted advisory.
+ignore = ["RUSTSEC-2024-0436"]

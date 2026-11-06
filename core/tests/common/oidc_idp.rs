@@ -6,12 +6,14 @@
 //! exactly as it would against a production IdP. RS256 because Redpanda's
 //! JWKS verifier only accepts RSA keys.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::rsa::KeySize;
 use aws_lc_rs::signature::{self, KeyPair as _, RsaKeyPair};
+use axum::Form;
 use axum::extract::State;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -136,14 +138,13 @@ async fn jwks(State(state): State<Arc<IdpState>>) -> Json<Value> {
 
 async fn token(
     State(state): State<Arc<IdpState>>,
-    Json(body): Json<Value>,
+    Form(body): Form<HashMap<String, String>>,
 ) -> Json<Value> {
     IdpHits::bump(&state.hits.token);
     let subject = body
         .get("client_id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_owned();
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned());
     Json(json!({
         "access_token": sign_jwt(&state, &subject),
         "token_type": "Bearer",

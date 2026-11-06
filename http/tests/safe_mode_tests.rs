@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use test_log::test;
 
 use crate::common::{
-    TestPersistencePaths, TestServer, TestServerOptions,
+    MEMBER_PUBLIC_KEY, TestPersistencePaths, TestServer, TestServerOptions,
     add_example_schema_to_governance, add_governance_member_as_witness,
     create_governance, create_subject, login, make_request,
     server_auth_route_catalog, server_main_route_catalog,
@@ -14,8 +14,6 @@ use crate::common::{
 };
 
 pub mod common;
-
-const MEMBER_PUBLIC_KEY: &str = "EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk";
 
 fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
     matches!(
@@ -27,6 +25,7 @@ fn safe_mode_main_route_classified(method: &str, path: &str) -> bool {
             | ("post", "/subjects/{subject_id}/abort-request")
             | ("post", "/subjects/{subject_id}/update")
             | ("post", "/subjects/{subject_id}/manual-distribution")
+            | ("post", "/subjects/{subject_id}/sync-lift")
             | ("put", "/governances/{subject_id}/authorize")
             | ("delete", "/governances/{subject_id}/authorize")
             | ("put", "/trackers/{subject_id}/ban")
@@ -152,14 +151,32 @@ async fn accept_approval(
         .await;
 
         if status == StatusCode::OK && !body.is_null() {
+            let (Some(request_id), Some(version), Some(issued_at)) = (
+                body["request_id"].as_str(),
+                body["version"].as_u64(),
+                body["request"]["issued_at"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok()),
+            ) else {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            };
             let (status, body) = make_request(
                 client,
                 &server.url(&format!("/approvals/{subject_id}")),
                 "PATCH",
                 None,
-                Some(json!("accepted")),
+                Some(json!({
+                    "state": "accepted",
+                    "expected_request_id": request_id,
+                    "expected_version": version,
+                    "expected_issued_at": issued_at,
+                })),
             )
             .await;
+            if status == StatusCode::CONFLICT {
+                continue;
+            }
             assert_eq!(status, StatusCode::OK, "{body}");
             return;
         }
@@ -853,7 +870,12 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "PATCH",
         &format!("/approvals/{}", fixture.governance_id),
-        Some(json!("accepted")),
+        Some(json!({
+            "state": "accepted",
+            "expected_request_id": "blocked",
+            "expected_version": 0,
+            "expected_issued_at": 0,
+        })),
     )
     .await;
     assert_safe_mode_blocked(
@@ -871,7 +893,7 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "PUT",
         &format!("/governances/{}/authorize", fixture.governance_id),
-        Some(json!(["EMSGajRDD_4QkngbQi3nJmCo1LKKrT9MHZncZK790ekk"])),
+        Some(json!([MEMBER_PUBLIC_KEY])),
     )
     .await;
     assert_safe_mode_blocked(
@@ -898,6 +920,15 @@ async fn safe_mode_node_api_without_auth_keeps_reads_and_blocks_mutations() {
         None,
         "POST",
         &format!("/subjects/{}/manual-distribution", fixture.governance_id),
+        None,
+    )
+    .await;
+    assert_safe_mode_blocked(
+        &client,
+        &env.server,
+        None,
+        "POST",
+        &format!("/subjects/{}/sync-lift", fixture.governance_id),
         None,
     )
     .await;

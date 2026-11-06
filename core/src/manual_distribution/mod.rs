@@ -14,7 +14,13 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use crate::{
     distribution::{Distribution, DistributionMessage, DistributionType},
-    governance::model::{RoleTypes, WitnessesData},
+    governance::{
+        model::{RoleTypes, WitnessesData},
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
+    },
     helpers::network::service::NetworkSender,
     model::common::{
         node::i_can_send_last_ledger,
@@ -281,7 +287,63 @@ impl Handler<Self> for ManualDistribution {
 
                     let namespace =
                         ave_common::Namespace::from(data.get_namespace());
-                    let signer = &ledger.ledger_seal_signature.signer;
+                    // Witnesses resolve against the subject owner (like
+                    // the automatic plan), not the ledger seal signer:
+                    // after transfers the two diverge and the witness
+                    // sets would too. The owner comes from the witnesses
+                    // register (not the subject actor, which this node
+                    // may not even track — that is the point of manual
+                    // distribution).
+                    let register_path = ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/witnesses_register",
+                        governance_id
+                    ));
+                    let register = ctx
+                        .system()
+                        .get_actor::<WitnessesRegister>(&register_path)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to reach witnesses register for tracker manual plan"
+                            );
+                            ActorError::Functional {
+                                description: e.to_string(),
+                            }
+                        })?;
+                    let owner = match register
+                        .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(WitnessesRegisterResponse::TrackerOwnerSn {
+                            data: Some((owner, _)),
+                        }) => owner,
+                        Ok(_) => {
+                            return Err(ActorError::Functional {
+                                description: format!(
+                                    "No tracked owner for subject {subject_id} in manual plan"
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            error!(
+                                msg_type = "Update",
+                                subject_id = %subject_id,
+                                governance_id = %governance_id,
+                                error = %e,
+                                "Failed to get tracker owner for manual plan"
+                            );
+                            return Err(ActorError::Functional {
+                                description: e.to_string(),
+                            });
+                        }
+                    };
+                    let signer = &owner;
 
                     let witnesses = get_witnesses(
                         ctx,
@@ -408,10 +470,30 @@ impl Handler<Self> for ManualDistribution {
                     });
                 };
 
+                // A fresh id per manual run: the empty default
+                // collides across runs and blinds traceability.
+                let request_id = {
+                    use ave_common::identity::{HashAlgorithm, hash_borsh};
+                    hash_borsh(
+                        &*HashAlgorithm::Blake3.hasher(),
+                        &(
+                            subject_id.to_string(),
+                            ledger.sn,
+                            ave_common::identity::TimeStamp::now().as_nanos(),
+                        ),
+                    )
+                    .map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Can not hash manual distribution id: {e}"
+                            ),
+                        }
+                    })?
+                };
                 let distribution = Distribution::new(
                     network,
                     DistributionType::Manual,
-                    DigestIdentifier::default(),
+                    request_id,
                 );
 
                 let distribution_actor = ctx.create_child(&subject_id.to_string(), distribution).await.map_err(|e| {

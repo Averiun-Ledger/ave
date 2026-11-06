@@ -6,28 +6,31 @@ mod common;
 
 use ave_common::{
     ValueWrapper,
+    bridge::request::SinkEventsQuery,
     identity::{KeyPair, PublicKey, keys::Ed25519Signer},
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
+    sink::DataToSinkEvent,
 };
 use ave_core::auth::AuthWitness;
 use ave_network::{NodeType, RoutingNode};
 use common::{
+    EXAMPLE_CONTRACT, assert_tracker_fact_opaque,
     create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_fact, emit_reject, emit_transfer,
-    get_subject,
+    create_subject, emit_confirm, emit_eol, emit_fact, emit_fact_viewpoints,
+    emit_reject, emit_transfer, get_events, get_subject, governance_properties,
 };
 use futures::future::join_all;
 use serde_json::json;
 use test_log::test;
 
+use crate::common::sink_setup::example_schema_governance_fact;
+use crate::common::sink_setup::governance_with_viewpoints_fact;
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
     create_node, emit_fact_signed, get_abort_request, node_running,
     wait_request, wait_request_state,
 };
-
-const EXAMPLE_CONTRACT: &str = "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==";
 
 #[test(tokio::test)]
 // distribución manual.
@@ -70,7 +73,7 @@ async fn manual_distribution() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -389,7 +392,7 @@ async fn test_up_down_compiler() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -517,7 +520,7 @@ async fn test_issuer_any() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -683,7 +686,7 @@ async fn test_limits_in_subjects() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -1051,7 +1054,7 @@ async fn test_namespace_in_role_1() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -1309,7 +1312,7 @@ async fn test_namespace_in_role_2() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -1484,7 +1487,7 @@ async fn test_subject_transfer_event_1() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -1613,7 +1616,10 @@ async fn test_subject_transfer_event_1() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1624,7 +1630,8 @@ async fn test_subject_transfer_event_1() {
     );
     assert_eq!(transfer_data[0].subject_id, subject_id);
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         owner_governance.public_key()
@@ -1639,10 +1646,14 @@ async fn test_subject_transfer_event_1() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     assert!(
@@ -1741,7 +1752,7 @@ async fn test_subject_transfer_event_2() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -1864,7 +1875,10 @@ async fn test_subject_transfer_event_2() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1878,7 +1892,7 @@ async fn test_subject_transfer_event_2() {
         subject_id.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1892,7 +1906,8 @@ async fn test_subject_transfer_event_2() {
         subject_id.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -1920,13 +1935,17 @@ async fn test_subject_transfer_event_2() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
     let _state = get_subject(old_owner, subject_id.clone(), Some(3), true)
@@ -2079,7 +2098,7 @@ async fn test_subject_transfer_event_3() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -2212,7 +2231,10 @@ async fn test_subject_transfer_event_3() {
         .await
         .unwrap();
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2226,7 +2248,7 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2240,7 +2262,8 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2267,7 +2290,10 @@ async fn test_subject_transfer_event_3() {
             .is_err()
     );
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2281,7 +2307,7 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2295,7 +2321,8 @@ async fn test_subject_transfer_event_3() {
         subject_id_1.to_string()
     );
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert_eq!(
         transfer_data[0].actual_owner.to_string(),
         old_owner.public_key()
@@ -2332,13 +2359,17 @@ async fn test_subject_transfer_event_3() {
         .await
         .unwrap();
 
-    let transfer_data = old_owner.get_pending_transfers().await.unwrap();
+    let transfer_data = old_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = future_owner.get_pending_transfers().await.unwrap();
+    let transfer_data =
+        future_owner.get_pending_transfers(1000, 0).await.unwrap();
     assert!(transfer_data.is_empty());
 
-    let transfer_data = owner_governance.get_pending_transfers().await.unwrap();
+    let transfer_data = owner_governance
+        .get_pending_transfers(1000, 0)
+        .await
+        .unwrap();
     assert!(transfer_data.is_empty());
 
     assert!(
@@ -2451,7 +2482,7 @@ async fn test_dynamic_witnesses_1() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -2694,7 +2725,7 @@ async fn test_dynamic_witnesses_2() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3018,7 +3049,7 @@ async fn test_dynamic_witnesses_explicit_1() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3210,7 +3241,7 @@ async fn test_dynamic_witnesses_explicit_2() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3431,7 +3462,7 @@ async fn test_no_subject_validator() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3537,7 +3568,7 @@ async fn test_no_subject_evaluator() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3687,7 +3718,7 @@ async fn test_no_subject_issuer() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3791,7 +3822,7 @@ async fn test_300_events() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -3933,7 +3964,7 @@ async fn test_subj_no_all_validators() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -4099,7 +4130,7 @@ async fn test_update_protocol() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -4262,7 +4293,7 @@ async fn test_subj_no_all_evaluators() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -4409,7 +4440,7 @@ async fn test_infinty_creations() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -4581,7 +4612,7 @@ async fn test_quantity_creations() {
             "add": [
                 {
                     "id": "Example",
-                    "contract": "dXNlIHNlcmRlOjp7U2VyaWFsaXplLCBEZXNlcmlhbGl6ZX07CnVzZSBhdmVfY29udHJhY3Rfc2RrIGFzIHNkazsKCi8vLyBEZWZpbmUgdGhlIHN0YXRlIG9mIHRoZSBjb250cmFjdC4gCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUsIENsb25lKV0Kc3RydWN0IFN0YXRlIHsKICBwdWIgb25lOiB1MzIsCiAgcHViIHR3bzogdTMyLAogIHB1YiB0aHJlZTogdTMyCn0KCiNbZGVyaXZlKFNlcmlhbGl6ZSwgRGVzZXJpYWxpemUpXQplbnVtIFN0YXRlRXZlbnQgewogIE1vZE9uZSB7IGRhdGE6IHUzMiB9LAogIE1vZFR3byB7IGRhdGE6IHUzMiB9LAogIE1vZFRocmVlIHsgZGF0YTogdTMyIH0sCiAgTW9kQWxsIHsgb25lOiB1MzIsIHR3bzogdTMyLCB0aHJlZTogdTMyIH0KfQoKI1t1bnNhZmUobm9fbWFuZ2xlKV0KcHViIHVuc2FmZSBmbiBtYWluX2Z1bmN0aW9uKHN0YXRlX3B0cjogaTMyLCBpbml0X3N0YXRlX3B0cjogaTMyLCBldmVudF9wdHI6IGkzMiwgaXNfb3duZXI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmV4ZWN1dGVfY29udHJhY3Qoc3RhdGVfcHRyLCBpbml0X3N0YXRlX3B0ciwgZXZlbnRfcHRyLCBpc19vd25lciwgY29udHJhY3RfbG9naWMpCn0KCiNbdW5zYWZlKG5vX21hbmdsZSldCnB1YiB1bnNhZmUgZm4gaW5pdF9jaGVja19mdW5jdGlvbihzdGF0ZV9wdHI6IGkzMikgLT4gdTMyIHsKICBzZGs6OmNoZWNrX2luaXRfZGF0YShzdGF0ZV9wdHIsIGluaXRfbG9naWMpCn0KCmZuIGluaXRfbG9naWMoCiAgX3N0YXRlOiAmU3RhdGUsCiAgY29udHJhY3RfcmVzdWx0OiAmbXV0IHNkazo6Q29udHJhY3RJbml0Q2hlY2ssCikgewogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQoKZm4gY29udHJhY3RfbG9naWMoCiAgY29udGV4dDogJnNkazo6Q29udGV4dDxTdGF0ZUV2ZW50PiwKICBjb250cmFjdF9yZXN1bHQ6ICZtdXQgc2RrOjpDb250cmFjdFJlc3VsdDxTdGF0ZT4sCikgewogIGxldCBzdGF0ZSA9ICZtdXQgY29udHJhY3RfcmVzdWx0LnN0YXRlOwogIG1hdGNoIGNvbnRleHQuZXZlbnQgewogICAgICBTdGF0ZUV2ZW50OjpNb2RPbmUgeyBkYXRhIH0gPT4gewogICAgICAgIHN0YXRlLm9uZSA9IGRhdGE7CiAgICAgIH0sCiAgICAgIFN0YXRlRXZlbnQ6Ok1vZFR3byB7IGRhdGEgfSA9PiB7CiAgICAgICAgc3RhdGUudHdvID0gZGF0YTsKICAgICAgfSwKICAgICAgU3RhdGVFdmVudDo6TW9kVGhyZWUgeyBkYXRhIH0gPT4gewogICAgICAgIGlmIGRhdGEgPT0gNTAgewogICAgICAgICAgY29udHJhY3RfcmVzdWx0LmVycm9yID0gIkNhbiBub3QgY2hhbmdlIHRocmVlIHZhbHVlLCA1MCBpcyBhIGludmFsaWQgdmFsdWUiLnRvX293bmVkKCk7CiAgICAgICAgICByZXR1cm4KICAgICAgICB9CiAgICAgICAgCiAgICAgICAgc3RhdGUudGhyZWUgPSBkYXRhOwogICAgICB9LAogICAgICBTdGF0ZUV2ZW50OjpNb2RBbGwgeyBvbmUsIHR3bywgdGhyZWUgfSA9PiB7CiAgICAgICAgc3RhdGUub25lID0gb25lOwogICAgICAgIHN0YXRlLnR3byA9IHR3bzsKICAgICAgICBzdGF0ZS50aHJlZSA9IHRocmVlOwogICAgICB9CiAgfQogIGNvbnRyYWN0X3Jlc3VsdC5zdWNjZXNzID0gdHJ1ZTsKfQ==",
+                    "contract": EXAMPLE_CONTRACT,
                     "initial_value": {
                         "one": 0,
                         "two": 0,
@@ -5723,4 +5754,2258 @@ async fn test_emisor_sender_no_access() {
     // Owner intenta manual_distribution → debe fallar porque no hay witnesses elegibles
     let result = owner.manual_distribution(subject_id.clone()).await;
     assert!(result.is_err());
+}
+
+#[test(tokio::test)]
+// Una request atascada en la fase de validación (un validador caído y
+// quórum Majority que lo exige) se puede abortar manualmente con
+// limpieza: el manager para la fase con reintentos de red en vuelo,
+// registra el abort y el sujeto no avanza.
+async fn test_subject_validation_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser validador del esquema. Con 2
+    // validadores y quórum Majority se exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    node2
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&node2.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // El sujeto se crea con AveNode2 vivo: la validación cierra.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Con AveNode2 caído la validación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let request_id = emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Se espera a que la fase de validación esté en vuelo.
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Validation),
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de validación en vuelo.
+    node1
+        .manual_request_abort(subject_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, subject_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // El sujeto no ha avanzado: sigue en el SN 0.
+    let state = get_subject(node1, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 0);
+}
+
+#[test(tokio::test)]
+// Una request atascada en la fase de evaluación (un evaluador caído y
+// quórum Majority que lo exige) se puede abortar manualmente con
+// limpieza: el manager para la fase con reintentos de red en vuelo,
+// registra el abort y el sujeto no avanza.
+async fn test_subject_evaluation_request_aborted_manually() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let node1 = &nodes[0].api;
+
+    let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(node1, vec![&node2.api]).await;
+
+    // SN 1: AveNode2 pasa a ser evaluador del esquema. Con 2
+    // evaluadores y quórum Majority se exige el visto bueno de ambos.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": node2.api.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "AveNode2",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(node1, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    get_subject(node1, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // El sujeto se crea con validación solo del owner: AveNode2 no
+    // participa y no necesita estar sincronizado.
+    let (subject_id, ..) =
+        create_subject(node1, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // Con AveNode2 caído la evaluación no puede cerrar el quórum: la
+    // fase se queda reintentando el envío de red.
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+
+    let request_id = emit_fact(
+        node1,
+        subject_id.clone(),
+        json!({ "ModOne": { "data": 100 } }),
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Se espera a que la fase de evaluación esté en vuelo.
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Evaluation),
+    )
+    .await
+    .unwrap();
+
+    // Abort manual con la fase de evaluación en vuelo.
+    node1
+        .manual_request_abort(subject_id.clone())
+        .await
+        .unwrap();
+
+    wait_request_state(
+        node1,
+        request_id.clone(),
+        Some(RequestState::Abort {
+            subject_id: String::default(),
+            who: String::default(),
+            sn: None,
+            error: String::default(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let aborts = get_abort_request(node1, subject_id.clone(), request_id)
+        .await
+        .unwrap();
+    assert_eq!(aborts.events.len(), 1);
+    assert_eq!(
+        aborts.events[0].error,
+        "The user manually aborted the request"
+    );
+
+    // El sujeto no ha avanzado: sigue en el SN 0.
+    let state = get_subject(node1, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 0);
+}
+
+/// NS setup: owner bootstrap + one creator with a schema-level
+/// Creator grant at `grant_ns` (segments, e.g. `["ventas"]`).
+/// Returns (owner, creator, governance_id) synced at v1.
+async fn ns_setup_with_creator(
+    grant_ns: serde_json::Value,
+    quantity: serde_json::Value,
+) -> (
+    common::NodeData,
+    common::NodeData,
+    ave_common::identity::DigestIdentifier,
+) {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes.remove(0);
+    let creator = nodes.remove(0);
+    let _ = nodes;
+    node_running(&owner.api).await.unwrap();
+    node_running(&creator.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&creator.api]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                { "name": "AveNode2", "key": creator.api.public_key() }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": { "one": 0, "two": 0, "three": 0 }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": { "witness": ["AveNode2"] }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "validator": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "witness": [
+                            { "name": "Owner", "namespace": [] }
+                        ],
+                        "creator": [
+                            {
+                                "name": "AveNode2",
+                                "namespace": grant_ns,
+                                "quantity": quantity
+                            }
+                        ],
+                        "issuer": [
+                            { "name": "Any", "namespace": [] }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner.api, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    creator
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    (owner, creator, governance_id)
+}
+
+#[test(tokio::test)]
+// QA-001 NS-01: exact namespace grants create. Baseline proving
+// non-empty namespaces work end to end (every other creation test
+// uses the root namespace).
+async fn test_namespace_exact_grant_creates() {
+    let (owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!("infinity")).await;
+
+    let (subject_id, ..) = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        true,
+    )
+    .await
+    .unwrap();
+    // Committed and readable by both nodes: the creation holds.
+    for api in [&owner.api, &creator.api] {
+        get_subject(api, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+}
+
+#[test(tokio::test)]
+// QA-001 NS-02: parent grant does NOT cover child creation today.
+// The intake gate is hierarchical (ancestor grants pass) but the
+// creation quota register keys exact namespaces, so building under
+// `ventas.europa` with only a `ventas` grant aborts deterministically
+// and nothing is applied. Pinned as-is: flipping to hierarchical
+// quota must flip this test first.
+async fn test_namespace_parent_grant_rejects_child() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!("infinity")).await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas.europa",
+        false,
+    )
+    .await
+    .expect_err("parent grant must not cover child creation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Is not a Creator"),
+        "rejection must come from the quota register, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-03: child grant never covers the parent. A creator
+// holding only `ventas.europa` can not create directly under
+// `ventas`: the hierarchical intake gate (`ancestor_or_equal`)
+// rejects it synchronously, nothing applied.
+async fn test_namespace_child_grant_rejects_parent() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas", "europa"]), json!("infinity"))
+            .await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("child grant must not cover the parent");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("has to be a creator"),
+        "rejection must come from the hierarchical gate, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-04: root grant does NOT cover nested creation today.
+// Root is an ancestor of everything so the gate passes, but the
+// quota register holds only the root key and the nested creation
+// aborts deterministically, nothing applied. Same pinning rationale
+// as NS-02.
+async fn test_namespace_root_grant_rejects_nested() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!([]), json!("infinity")).await;
+
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("root grant must not cover nested creation today");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Is not a Creator"),
+        "rejection must come from the quota register, got: {msg}"
+    );
+    get_subject(&creator.api, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+#[test(tokio::test)]
+// QA-001 NS-05: quota counts per exact namespace. One creation
+// under `ventas` with quantity 1 commits; the second aborts while
+// the first stays committed.
+async fn test_namespace_quota_counts_per_namespace() {
+    let (_owner, creator, governance_id) =
+        ns_setup_with_creator(json!(["ventas"]), json!(1)).await;
+
+    create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        true,
+    )
+    .await
+    .unwrap();
+    let err = create_subject(
+        &creator.api,
+        governance_id.clone(),
+        "Example",
+        "ventas",
+        false,
+    )
+    .await
+    .expect_err("second creation must exceed the quota");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Maximum number of subjects"),
+        "rejection must name the quota, got: {msg}"
+    );
+}
+#[test(tokio::test)]
+// Wiping sn and visibility state is strictly worse than any crash
+// window: if the boot replay heals them back, it heals any crash
+// loss too.
+async fn test_reconcile_heals_sn_visibility() {
+    use ave_common::bridge::response::{
+        TrackerEventVisibilityDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityDB, TrackerStoredVisibilityRangeDB,
+        TrackerVisibilityModeDB,
+    };
+    use common::assert_tracker_visibility;
+
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner_governance = nodes[0].api.clone();
+    let emit_events = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&emit_events])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode2",
+                    "key": emit_events.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode2"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode2",
+                                    "namespace": [],
+                                    "quantity": 1
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Any",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id_1, ..) = create_subject(
+        &emit_events,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    for data in [100, 200] {
+        let json = json!({
+            "ModOne": {
+                "data": data,
+            }
+        });
+        let issuer_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        emit_fact_signed(
+            &emit_events,
+            &issuer_keys,
+            subject_id_1.clone(),
+            json,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    let assert_visibility = |state: &ave_common::response::SubjectDB| {
+        assert_tracker_visibility(
+            state,
+            TrackerVisibilityModeDB::Full,
+            vec![TrackerStoredVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: None,
+                visibility: TrackerStoredVisibilityDB::Full,
+            }],
+            vec![
+                TrackerEventVisibilityRangeDB {
+                    from_sn: 0,
+                    to_sn: Some(0),
+                    visibility: TrackerEventVisibilityDB::NonFact,
+                },
+                TrackerEventVisibilityRangeDB {
+                    from_sn: 1,
+                    to_sn: None,
+                    visibility: TrackerEventVisibilityDB::Fact {
+                        viewpoints: vec![],
+                    },
+                },
+            ],
+        )
+        .unwrap()
+    };
+
+    let state = get_subject(&emit_events, subject_id_1.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2);
+    assert_visibility(&state);
+
+    // Wipe derived state and reboot: the replay must converge back.
+    emit_events
+        .test_purge_register(governance_id.clone(), "sn")
+        .await
+        .unwrap();
+    emit_events
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so everything below observes post-boot state.
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(
+        evaluators
+            .iter()
+            .any(|key| { key.to_string() == owner_governance.public_key() })
+    );
+
+    // One more fact after the reboot: its snapshot is built live from
+    // the healed registers (never from the pre-reboot ext_db rows),
+    // and merged ranges must equal the pre-purge snapshot.
+    let json = json!({
+        "ModOne": {
+            "data": 300,
+        }
+    });
+    let issuer_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    emit_fact_signed(&api, &issuer_keys, subject_id_1.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&api, subject_id_1.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3);
+    assert_visibility(&state);
+
+    node_running(&api).await.unwrap();
+}
+#[test(tokio::test)]
+// Tracker ownership rotation must survive witnesses loss: after
+// wiping the witnesses register and rebooting, visibility heals
+// (entry recreated, ranges converged) and the new owner operates.
+async fn test_reconcile_heals_tracker_rotation() {
+    use ave_common::bridge::response::{
+        TrackerEventVisibilityDB, TrackerEventVisibilityRangeDB,
+        TrackerStoredVisibilityDB, TrackerStoredVisibilityRangeDB,
+        TrackerVisibilityModeDB,
+    };
+    use common::assert_tracker_visibility;
+
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let future_owner = nodes[0].api.clone();
+    let owner_governance = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner_governance, vec![&future_owner])
+            .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "AveNode1",
+                    "key": future_owner.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "AveNode1"
+                    ]
+                }
+            },
+            "tracker_schemas": {
+                "add": {
+                    "issuer": [
+                        {
+                            "name": "AveNode1",
+                            "namespace": []
+                        },
+                        {
+                            "name": "Owner",
+                            "namespace": []
+                        }
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode1",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        },
+    });
+
+    emit_fact(&owner_governance, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) = create_subject(
+        &owner_governance,
+        governance_id.clone(),
+        "Example",
+        "",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let json = json!({
+        "ModOne": {
+            "data": 100,
+        }
+    });
+    emit_fact(&owner_governance, subject_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    future_owner
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(
+                PublicKey::from_str(owner_governance.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &owner_governance,
+        subject_id.clone(),
+        PublicKey::from_str(future_owner.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    future_owner
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
+
+    emit_confirm(&future_owner, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&future_owner, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+
+    // Wipe witnesses (visibility + transfer state) and reboot the new
+    // owner back into the network: replay recreates the entry and
+    // converges visibility.
+    future_owner
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[0].token.cancel();
+    join_all(nodes[0].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[1].api.peer_id().to_string(),
+            address: vec![nodes[1].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[0].keys.clone()),
+        local_db: Some(dirs[0].path().to_path_buf()),
+        ext_db: Some(dirs[1].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so the emit below observes post-boot state.
+    let owner_key = PublicKey::from_str(owner_governance.public_key()).unwrap();
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(evaluators.contains(&owner_key));
+
+    // The new owner operates: fresh snapshot built live from healed
+    // registers, with merged ranges equal to a clean run.
+    let json = json!({
+        "ModOne": {
+            "data": 150,
+        }
+    });
+    emit_fact(&api, subject_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let state = get_subject(&api, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(state.owner, future_owner.public_key());
+    assert_tracker_visibility(
+        &state,
+        TrackerVisibilityModeDB::Full,
+        vec![TrackerStoredVisibilityRangeDB {
+            from_sn: 0,
+            to_sn: None,
+            visibility: TrackerStoredVisibilityDB::Full,
+        }],
+        vec![
+            TrackerEventVisibilityRangeDB {
+                from_sn: 0,
+                to_sn: Some(0),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 1,
+                to_sn: Some(1),
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 2,
+                to_sn: Some(3),
+                visibility: TrackerEventVisibilityDB::NonFact,
+            },
+            TrackerEventVisibilityRangeDB {
+                from_sn: 4,
+                to_sn: None,
+                visibility: TrackerEventVisibilityDB::Fact {
+                    viewpoints: vec![],
+                },
+            },
+        ],
+    )
+    .unwrap();
+
+    node_running(&api).await.unwrap();
+}
+
+#[test(tokio::test)]
+async fn dirty_restart_repairs_projection_gap() {
+    // Crash backstop: ledger events persisted but never projected are
+    // replayed above max(sn) on dirty boot, plus the state row.
+    // Governances heal on boot; trackers heal once lifted.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let api = node.api.clone();
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
+    emit_fact(
+        &api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, ..) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    api.get_subject_state(subject_id.clone()).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    // Simulate the crash cut: projection rows gone, ledger intact.
+    {
+        let conn =
+            rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        for id in [&governance_id, &subject_id] {
+            conn.execute(
+                "DELETE FROM events WHERE subject_id = ?1",
+                rusqlite::params![id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM subjects WHERE subject_id = ?1",
+                rusqlite::params![id.to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "DELETE FROM register_govs WHERE governance_id = ?1",
+            rusqlite::params![governance_id.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM register_subjects WHERE subject_id = ?1",
+            rusqlite::params![subject_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+
+    // The governance boots with the node: its gap self-heals.
+    api.get_subject_state(governance_id.clone()).await.unwrap();
+    api.get_event_sn(governance_id.clone(), 0).await.unwrap();
+    api.get_event_sn(governance_id.clone(), 1).await.unwrap();
+    assert!(
+        api.all_govs(None, 100, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|gov| gov.governance_id == governance_id.to_string())
+    );
+
+    // The tracker stays down until lifted: the hole is still visible...
+    assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+    // ...and closes once lifted through boot healing.
+    api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+    assert_eq!(state.sn, 2);
+    api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 1).await.unwrap();
+    api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+    assert!(
+        api.all_subjs(governance_id.clone(), None, None, 100, 0)
+            .await
+            .unwrap()
+            .iter()
+            .any(|sub| sub.subject_id == subject_id.to_string())
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+#[test(tokio::test)]
+async fn dirty_restart_repairs_genesis_only_projection() {
+    // Caso A del gap de proyección: el journal solo contiene el
+    // génesis (sn 0) y no hay watermark. El relleno debe procesar
+    // sn 0 en vez de saltar el bucle, y el upsert debe dejar el
+    // estado consultable. Sin la corrección, el evento 0 nunca se
+    // inserta aunque el estado sí se escriba.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+
+        let api = node.api.clone();
+        let governance_id = create_and_authorize_governance(&api, vec![]).await;
+        emit_fact(
+            &api,
+            governance_id.clone(),
+            example_schema_governance_fact(),
+            true,
+        )
+        .await
+        .unwrap();
+        let (subject_id, ..) =
+            create_subject(&api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        api.get_subject_state(subject_id.clone()).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+
+        let keys = node.keys.clone();
+        let local_db = dirs[0].path().to_path_buf();
+        let ext_db = dirs[1].path().to_path_buf();
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        // Simulate the crash cut: projection rows gone, ledger intact.
+        {
+            let conn =
+                rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            for id in [&governance_id, &subject_id] {
+                conn.execute(
+                    "DELETE FROM events WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+                conn.execute(
+                    "DELETE FROM subjects WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        let api = node.api.clone();
+
+        // The tracker stays down until lifted like in the general
+        // case; the genesis event must be there afterwards.
+        assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+        api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+        let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 0);
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+    })
+    .await
+    .expect("test overran its 120s budget");
+}
+
+#[test(tokio::test)]
+async fn dirty_restart_refreshes_stale_subject_state() {
+    // Caso B del gap de proyección: los eventos están al día pero la
+    // fila de estado falta o está atrasada. Sin eventos nuevos que
+    // copiar, la reparación debe refrescar el estado igualmente en
+    // vez de volver antes por tener el tip ya cubierto.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+
+        let api = node.api.clone();
+        let governance_id = create_and_authorize_governance(&api, vec![]).await;
+        emit_fact(
+            &api,
+            governance_id.clone(),
+            example_schema_governance_fact(),
+            true,
+        )
+        .await
+        .unwrap();
+        let (subject_id, ..) =
+            create_subject(&api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        for i in 1..=2 {
+            emit_fact(
+                &api,
+                subject_id.clone(),
+                json!({"ModOne": {"data": i}}),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        api.get_subject_state(subject_id.clone()).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+        let keys = node.keys.clone();
+        let local_db = dirs[0].path().to_path_buf();
+        let ext_db = dirs[1].path().to_path_buf();
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        // Simulate the crash cut: events intact, state rows gone.
+        {
+            let conn =
+                rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            for id in [&governance_id, &subject_id] {
+                conn.execute(
+                    "DELETE FROM subjects WHERE subject_id = ?1",
+                    rusqlite::params![id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (mut node, _dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{}", port),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        let api = node.api.clone();
+
+        // The governance heals at boot: no new events, state back.
+        let state = api.get_subject_state(governance_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 1);
+
+        // The tracker heals once lifted, with its history untouched.
+        assert!(api.get_subject_state(subject_id.clone()).await.is_err());
+        api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+        let state = api.get_subject_state(subject_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 2);
+        api.get_event_sn(subject_id.clone(), 0).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 1).await.unwrap();
+        api.get_event_sn(subject_id.clone(), 2).await.unwrap();
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+    })
+    .await
+    .expect("test overran its 120s budget");
+}
+
+// Handover a espejo degradado con resync: el espejo que tiene
+// el fact en opaco no puede aceptar; patron del nodo (restart
+// safe-mode, delete, reboot, fetch) y luego confirm + EOL.
+// Presupuesto de 60s: si el resync se atasca, falla en vez de
+// colgar la suite.
+#[test(tokio::test)]
+async fn test_tracker_resync_degraded_mirror_confirm_eol() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1.clone()],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+        let (mut node3, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node3.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let follower = node2.api.clone();
+        let mirror = node3.api.clone();
+        let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&follower, &mirror])
+                .await;
+
+        // sn1: miembros + schema Example (A) + testigos.
+        let json = json!({
+            "members": {"add": [
+                {"name": "AveNode2", "key": follower.public_key()},
+                {"name": "AveNode3", "key": node3.api.public_key()},
+            ]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua", "basura"],
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2", "AveNode3"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(1), true)
+                .await
+                .unwrap();
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 1);
+
+        // sn2: roles (espejo miembro + creator + witness).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity",
+                         "witnesses": [
+                            {"name": "AveNode2", "viewpoints": ["agua"]},
+                            {"name": "AveNode3", "viewpoints": ["basura"]},
+                        ]},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode3", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [
+                        {"name": "Owner", "namespace": []},
+                        {"name": "AveNode2", "namespace": []},
+                        {"name": "AveNode3", "namespace": []},
+                    ],
+                    "witness": [
+                        {"name": "AveNode2", "namespace": []},
+                        {"name": "AveNode3", "namespace": []},
+                    ],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let state =
+            get_subject(&owner, governance_id.clone(), Some(2), true)
+                .await
+                .unwrap();
+        let gov = governance_properties(state.properties);
+        assert_eq!(gov.version, 2);
+
+        // Tracker del owner + fact full; el espejo (basura)
+        // sincroniza. AveNode2 tambien autoriza (testigo).
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 1}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        mirror
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+        mirror.update_subject(tracker_id.clone()).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        follower
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Fact con viewpoint agua: el espejo (basura) lo ve opaco.
+        emit_fact_viewpoints(
+            &owner,
+            tracker_id.clone(),
+            json!({"ModOne": {"data": 2}}),
+            BTreeSet::from(["agua".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        let mirror_events =
+            get_events(&mirror, tracker_id.clone(), 3, true).await.unwrap();
+        let mirror_agua = mirror_events
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("mirror must hold sn 2");
+        assert_tracker_fact_opaque(&mirror_agua.event, &["agua"])
+            .expect("unheld agua fact mirrors opaque");
+
+        // Transfer al espejo degradado y resync: restart
+        // safe-mode, delete local, reboot, fetch copia full.
+        let mirror_key = PublicKey::from_str(mirror.public_key()).unwrap();
+        emit_transfer(&owner, tracker_id.clone(), mirror_key, true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+
+        let mirror_keys = node3.keys.clone();
+        let mirror_db = dirs[4].path().to_path_buf();
+        node3.token.cancel();
+        join_all(node3.handler.iter_mut()).await;
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (safe_node, mut safe_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![],
+            always_accept: true,
+            local_db: Some(mirror_db.clone()),
+            keys: Some(mirror_keys.clone()),
+            safe_mode: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut safe_dirs);
+        node_running(&safe_node.api).await.unwrap();
+        safe_node.api.delete_subject(tracker_id.clone()).await.unwrap();
+        let mut safe_node = safe_node;
+        safe_node.token.cancel();
+        join_all(safe_node.handler.iter_mut()).await;
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (new_node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: node1.api.peer_id().to_string(),
+                address: vec![node1.listen_address.clone()],
+            }],
+            always_accept: true,
+            local_db: Some(mirror_db),
+            keys: Some(mirror_keys),
+            safe_mode: false,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&new_node2.api).await.unwrap();
+        node3 = new_node2;
+        let mirror = node3.api.clone();
+        mirror
+            .authorize_governance(
+                tracker_id.clone(),
+                AuthWitness::One(owner_key.clone()),
+            )
+            .await
+            .unwrap();
+        mirror.update_subject(tracker_id.clone()).await.unwrap();
+        for _ in 0..3 {
+            match get_subject(&mirror, tracker_id.clone(), Some(3), true).await
+            {
+                Ok(_) => break,
+                Err(_) => {
+                    mirror.update_subject(tracker_id.clone()).await.unwrap();
+                }
+            }
+        }
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+
+        // Con copia full ya acepta: confirm + EOL.
+        emit_confirm(&mirror, tracker_id.clone(), None, true).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(4), true)
+            .await
+            .unwrap();
+        emit_eol(&mirror, tracker_id.clone(), true).await.unwrap();
+        let _ = get_subject(&mirror, tracker_id.clone(), Some(5), true)
+            .await
+            .unwrap();
+        assert!(
+            owner.get_pending_transfers(1000, 0).await.unwrap().is_empty()
+        );
+        assert!(
+            mirror.get_pending_transfers(1000, 0).await.unwrap().is_empty()
+        );
+
+        node_running(&node1.api).await.unwrap();
+        node_running(&node2.api).await.unwrap();
+        node_running(&node3.api).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+// Fact firmado por una clave ajena (ni miembro ni issuer):
+// se rechaza o aborta sin commitear; el siguiente fact
+// legitimo avanza. Presupuesto de 60s.
+async fn test_tracker_rogue_signature_aborts_without_commit() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (node1, mut dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        node_running(&node1.api).await.unwrap();
+        let peer1 = RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        };
+        let (node2, mut new_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!(
+                "/memory/{}",
+                PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+            ),
+            peers: vec![peer1],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut new_dirs);
+        node_running(&node2.api).await.unwrap();
+
+        let owner = node1.api.clone();
+        let witness = node2.api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&witness]).await;
+
+        // sn1: miembro + schema Example + testigo.
+        let json = json!({
+            "members": {"add": [{"name": "AveNode2", "key": witness.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["AveNode2"]}},
+            },
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // sn2: roles (issuer Owner).
+        let json = json!({
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "AveNode2", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "AveNode2", "namespace": []}],
+                },
+            }]},
+        });
+        emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+        let _ = get_subject(&owner, governance_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+
+        // Tracker + fact legitimo (sn1).
+        let (tracker_id, ..) =
+            create_subject(&owner, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 1}}), true)
+            .await
+            .unwrap();
+        let _ = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+
+        // Fact firmado por un ajeno: rechazo en intake o abort,
+        // nunca commit.
+        let rogue_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let rogue = emit_fact_signed(
+            &owner,
+            &rogue_keys,
+            tracker_id.clone(),
+            json!({"ModOne": {"data": 100}}),
+            false,
+        )
+        .await;
+        if let Ok(request_id) = rogue {
+            wait_request_state(
+                &owner,
+                request_id.clone(),
+                Some(RequestState::Abort {
+                    subject_id: String::default(),
+                    who: String::default(),
+                    sn: None,
+                    error: String::default(),
+                }),
+            )
+            .await
+            .unwrap();
+            let aborts =
+                get_abort_request(&owner, tracker_id.clone(), request_id)
+                    .await
+                    .unwrap();
+            assert_eq!(aborts.events.len(), 1);
+        }
+
+        // El sn no avanzo y el fact legitimo commitea sn2.
+        let state = get_subject(&owner, tracker_id.clone(), Some(1), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 1);
+        emit_fact(&owner, tracker_id.clone(), json!({"ModOne": {"data": 2}}), true)
+            .await
+            .unwrap();
+        let state = get_subject(&owner, tracker_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+        assert_eq!(state.properties, json!({"one": 2, "two": 0, "three": 0}));
+
+        node_running(&owner).await.unwrap();
+        node_running(&witness).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+#[test(tokio::test)]
+async fn tracker_sink_replay_pages_past_sync_batches() {
+    // The sink-events replay must walk the whole ledger up to the
+    // requested tip instead of stopping at the first sync batch: a
+    // collector that trusts the page flag alone returns the first
+    // batch with has_more=false, and a follow-up page from beyond
+    // that batch comes back empty although events exist.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (nodes, _dirs) =
+            create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+                bootstrap: vec![vec![]],
+                addressable: vec![vec![0], vec![0]],
+                always_accept: true,
+                ledger_batch_size: Some(5),
+                ..Default::default()
+            })
+            .await;
+
+        let owner = nodes[0].api.clone();
+        let creator = nodes[1].api.clone();
+
+        let governance_id =
+            create_and_authorize_governance(&owner, vec![&creator]).await;
+
+        // AveNode2 joins as member, creator and witness; the schema
+        // evaluates with the Owner role like the other suites.
+        let json = json!({
+            "members": {
+                "add": [
+                    {
+                        "name": "AveNode2",
+                        "key": creator.public_key()
+                    }
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0
+                        }
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {
+                    "add": {
+                        "witness": [
+                            "AveNode2"
+                        ]
+                    }
+                },
+                "schema":
+                    [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "AveNode2",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Any",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(&owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let (subject_id, ..) = create_subject(
+            &creator,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let _state = get_subject(&creator, subject_id.clone(), Some(0), true)
+            .await
+            .unwrap();
+
+        // Ten async facts plus a final sync one flush the queue:
+        // sn 1..=11, twelve events counting the create.
+        for i in 0..10 {
+            emit_fact(
+                &creator,
+                subject_id.clone(),
+                json!({"ModOne": {"data": i}}),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        emit_fact(
+            &creator,
+            subject_id.clone(),
+            json!({"ModOne": {"data": 99}}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let state = get_subject(&creator, subject_id.clone(), Some(11), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 11);
+
+        // Full history in one page even though it spans three sync
+        // batches (5 + 5 + 2): all 12 events, nothing more.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 12);
+        assert!(!page.has_more);
+        assert!(page.next_sn.is_none());
+
+        // A tail page starting past the first batch is not empty.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(6),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 6);
+        assert!(matches!(
+            page.events[0].payload,
+            DataToSinkEvent::FactFull { sn: 6, .. }
+        ));
+        assert!(!page.has_more);
+
+        // A short limit reports continuation instead of a false end.
+        let page = owner
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(5),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 5);
+        assert!(page.has_more);
+        assert_eq!(page.next_sn, Some(5));
+
+        node_running(&owner).await.unwrap();
+        node_running(&creator).await.unwrap();
+    })
+    .await
+    .expect("test overran its 60s budget");
+}
+
+/// Test 44: visibility replay must be idempotent per sn.
+///
+/// The live path records visibility per event; boot reconcile
+/// re-sends the tail. `SnRegister` and the visibility ranges live in
+/// different journals, so a crash between the two derived writes
+/// leaves the sn map behind the ranges. The replay then re-sends an
+/// older sn whose value differs from the recorded tail, and the
+/// append-only range builder must ignore the stale write instead of
+/// closing the newer range with `end < start` and appending
+/// duplicates out of order (the queries assume ordered,
+/// non-overlapping ranges with `from_sn <= to_sn`).
+///
+/// Setup: Owner + Witness, schema `Example` with viewpoints
+/// `["agua", "basura"]`, no grants anywhere (stored visibility toggles
+/// Full→None, event visibility toggles `Fact({basura})`→`Fact({agua})`).
+///
+/// Sequence:
+/// 1. Owner creates tracker `S1`; emits SN 1..4 with `["basura"]`.
+///    Witness syncs SN 0..4.
+/// 2. Owner emits SN 5 with `["agua"]`. Witness syncs SN 0..5.
+/// 3. Control: live ranges are ordered
+///    `stored [(0, 0, Full), (1, None, None)]`,
+///    `events [(0, 0, NonFact), (1, 4, Fact({basura})), (5, None, Fact({agua}))]`.
+/// 4. Shut down; the store flushes the sn snapshot. Replace it
+///    with the SN-4 state (same Borsh layout the store uses):
+///    recovery loads the sn map at SN 4 while the tracker journal
+///    and the visibility ranges still cover SN 5 — the crash
+///    window. Fail loudly if the snapshot row is missing instead
+///    of staging a vacuous restart.
+/// 5. Restart and lift the tracker: boot reconcile replays from SN 4
+///    and re-sends SN 4's values against the recorded B-from-5 tail.
+/// 6. Read back both range vectors.
+///
+/// Expected: identical to the live vectors. Without the stale-sn
+/// guard the replay closes B-from-5 with end 3 and appends A-from-4,
+/// leaving starts `[0, 5, 4, 5]` and a `(5, 3)` range.
+#[test(tokio::test)]
+async fn reconcile_visibility_replay_ignores_stale_sn() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            ephemeral: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = nodes.remove(0);
+    let mut witness = nodes.remove(0);
+
+    let _owner_dirs: Vec<_> = dirs.drain(0..2).collect();
+    let mut witness_dirs: Vec<_> = dirs.drain(0..2).collect();
+
+    let governance_id =
+        create_and_authorize_governance(&owner.api, vec![&witness.api]).await;
+    emit_fact(
+        &owner.api,
+        governance_id.clone(),
+        governance_with_viewpoints_fact(witness.api.public_key()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&owner.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    // SN 1..4 with ["basura"] (event visibility A), SN 5 with
+    // ["agua"] (event visibility B). Single gov version throughout.
+    // The witness is ungranted for both, so it stores everything
+    // opaque (stored visibility None after the create).
+    for data in [10, 20, 30, 40] {
+        emit_fact_viewpoints(
+            &owner.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            BTreeSet::from(["basura".to_owned()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    get_subject(&witness.api, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // SN 5 with ["agua"]. Witness journals SN 0..5.
+    emit_fact_viewpoints(
+        &owner.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 50}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // Control: live ranges are ordered and sane in both worlds.
+    let (stored_live, events_live) = witness
+        .api
+        .test_get_tracker_visibility(governance_id.clone(), subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_live,
+        vec![
+            (0, Some(0), "Full".to_owned()),
+            (1, None, "None".to_owned())
+        ],
+        "live stored ranges must be sane, got {stored_live:?}"
+    );
+    assert_eq!(
+        events_live,
+        vec![
+            (0, Some(0), "NonFact".to_owned()),
+            (1, Some(4), "Fact({\"basura\"})".to_owned()),
+            (5, None, "Fact({\"agua\"})".to_owned()),
+        ],
+        "live event ranges must be sane, got {events_live:?}"
+    );
+
+    // Crash window: the sn map loses SN 5 while the journal and the
+    // visibility ranges still cover it. The store only flushes a
+    // snapshot on shutdown, so replace the flushed snapshot with the
+    // SN-4 state (same Borsh layout the store itself uses):
+    // recovery then loads `{v1:4}` with the journal intact.
+    // Fail loudly on unexpected row counts instead of staging a
+    // vacuous restart.
+    let witness_keys = witness.keys.clone();
+    let witness_local_db = witness_dirs[0].path().to_path_buf();
+    let witness_ext_db = witness_dirs[1].path().to_path_buf();
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
+    {
+        use ave_core::model::common::CeilingMap;
+        use std::collections::HashMap;
+
+        #[derive(borsh::BorshSerialize)]
+        struct SnRegMirror {
+            register: HashMap<
+                ave_common::identity::DigestIdentifier,
+                CeilingMap<u64>,
+            >,
+        }
+
+        let gov_prefix = governance_id.to_string();
+        let mut versions = CeilingMap::new();
+        versions.insert(1, 4);
+        let mut register = HashMap::new();
+        register.insert(subject_id.clone(), versions);
+        let blob = borsh::to_vec(&(SnRegMirror { register }, 0u64)).unwrap();
+        let conn =
+            rusqlite::Connection::open(witness_local_db.join("database.db"))
+                .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let updated = conn
+            .execute(
+                "UPDATE sn_register_states SET value = ?1 WHERE prefix = ?2",
+                rusqlite::params![blob, gov_prefix],
+            )
+            .unwrap();
+        assert_eq!(
+            updated, 1,
+            "exactly one sn snapshot row must exist, updated {updated}"
+        );
+    }
+
+    // Restart with the SN-4 snapshot in place. Boot reconcile
+    // replays from SN 4 and re-sends SN 4's values against the
+    // recorded B-from-5 tail.
+    let witness_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut witness, mut witness_dirs2) =
+        create_node(crate::common::sink_setup::restart_config_with_peers(
+            witness_keys,
+            witness_local_db,
+            witness_ext_db,
+            format!("/memory/{}", witness_port),
+            vec![],
+            vec![],
+        ))
+        .await;
+    witness_dirs.append(&mut witness_dirs2);
+    node_running(&witness.api).await.unwrap();
+    // Force the tracker boot: projections are intact, so nothing
+    // would lift it on its own and boot reconcile would never run.
+    witness
+        .api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
+    get_subject(&witness.api, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // The replayed ranges must match the live ones: the stale SN 4
+    // resend is ignored instead of corrupting the B-from-5 tail.
+    let (stored, events) = witness
+        .api
+        .test_get_tracker_visibility(governance_id.clone(), subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        vec![
+            (0, Some(0), "Full".to_owned()),
+            (1, None, "None".to_owned())
+        ],
+        "reconcile must not corrupt stored ranges, got {stored:?}"
+    );
+    assert_eq!(
+        events,
+        vec![
+            (0, Some(0), "NonFact".to_owned()),
+            (1, Some(4), "Fact({\"basura\"})".to_owned()),
+            (5, None, "Fact({\"agua\"})".to_owned()),
+        ],
+        "reconcile must not corrupt event ranges, got {events:?}"
+    );
+
+    witness.token.cancel();
+    join_all(witness.handler.iter_mut()).await;
 }

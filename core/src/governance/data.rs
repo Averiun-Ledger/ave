@@ -30,7 +30,6 @@ pub type MemberName = String;
     Eq,
     Serialize,
     Deserialize,
-    Default,
     BorshDeserialize,
     BorshSerialize,
 )]
@@ -43,6 +42,31 @@ pub struct GovernanceData {
     pub roles_schema: BTreeMap<SchemaType, RolesSchema>,
     pub roles_tracker_schemas: RolesTrackerSchemas,
     pub policies_schema: BTreeMap<SchemaType, PolicySchema>,
+    /// Active build toolchain pin: exactly one per governance version.
+    /// New field (breaking change, accepted): JSON without it reads as
+    /// the default, Borsh without it fails loud.
+    #[serde(default = "default_toolchain_pin")]
+    pub toolchain: String,
+}
+
+fn default_toolchain_pin() -> String {
+    ave_common::governance::DEFAULT_PIN.to_owned()
+}
+
+impl Default for GovernanceData {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            members: BTreeMap::new(),
+            roles_gov: RolesGov::default(),
+            policies_gov: PolicyGov::default(),
+            schemas: BTreeMap::new(),
+            roles_schema: BTreeMap::new(),
+            roles_tracker_schemas: RolesTrackerSchemas::default(),
+            policies_schema: BTreeMap::new(),
+            toolchain: default_toolchain_pin(),
+        }
+    }
 }
 
 impl GovernanceData {
@@ -51,6 +75,7 @@ impl GovernanceData {
             approve: Quorum::Majority,
             evaluate: Quorum::Majority,
             validate: Quorum::Majority,
+            compile: Quorum::Majority,
         };
 
         let owner_signers_gov: BTreeSet<MemberName> =
@@ -63,8 +88,9 @@ impl GovernanceData {
             witness: owner_signers_gov.clone(),
             issuer: RoleGovIssuer {
                 any: false,
-                signers: owner_signers_gov,
+                signers: owner_signers_gov.clone(),
             },
+            compiler: owner_signers_gov,
         };
 
         let not_gov_role = RolesTrackerSchemas {
@@ -89,6 +115,7 @@ impl GovernanceData {
             roles_schema: BTreeMap::new(),
             roles_tracker_schemas: not_gov_role,
             policies_schema: BTreeMap::new(),
+            toolchain: default_toolchain_pin(),
         }
     }
 
@@ -101,6 +128,7 @@ impl GovernanceData {
             HashSet::new();
 
         let mut new_approver = None;
+        let mut new_compiler = None;
         let mut new_evaluator = None;
         let mut new_validator = None;
 
@@ -110,6 +138,7 @@ impl GovernanceData {
         > = HashMap::new();
 
         let remove_approver: PublicKey = old_owner_key.clone();
+        let remove_compiler: PublicKey = old_owner_key.clone();
         let mut remove_evaluators: HashMap<
             (SchemaType, PublicKey),
             Vec<Namespace>,
@@ -130,6 +159,10 @@ impl GovernanceData {
         if let Some(old_name) = old_name {
             if !self.roles_gov.approver.contains(&old_name) {
                 new_approver = Some(new_owner_key.clone());
+            }
+
+            if !self.roles_gov.compiler.contains(&old_name) {
+                new_compiler = Some(new_owner_key.clone());
             }
 
             if !self.roles_gov.evaluator.contains(&old_name) {
@@ -269,9 +302,11 @@ impl GovernanceData {
 
         RolesUpdateConfirm {
             new_approver,
+            new_compiler,
             new_evaluator,
             new_validator,
             remove_approver,
+            remove_compiler,
             remove_creator,
             remove_evaluators,
             remove_validators,
@@ -293,6 +328,7 @@ impl GovernanceData {
         > = HashMap::new();
 
         let mut remove_approvers: Vec<PublicKey> = vec![];
+        let mut remove_compilers: Vec<PublicKey> = vec![];
         let mut remove_evaluators: HashMap<
             (SchemaType, PublicKey),
             Vec<Namespace>,
@@ -350,6 +386,9 @@ impl GovernanceData {
                 if let Some(user_key) = self.members.get(user) {
                     if self.roles_gov.approver.contains(user) {
                         remove_approvers.push(user_key.clone());
+                    }
+                    if self.roles_gov.compiler.contains(user) {
+                        remove_compilers.push(user_key.clone());
                     }
                     if self.roles_gov.evaluator.contains(user) {
                         remove_evaluators
@@ -454,6 +493,7 @@ impl GovernanceData {
             witnesses: remove_witnesses,
             creator: remove_creator,
             approvers: remove_approvers,
+            compilers: remove_compilers,
             evaluators: remove_evaluators,
             validators: remove_validators,
         }
@@ -500,7 +540,12 @@ impl GovernanceData {
     }
 
     pub fn to_value_wrapper(&self) -> ValueWrapper {
-        ValueWrapper(serde_json::to_value(self).expect("It cannot fail; it does not contain a map with keys other than strings"))
+        // Serializing the governance itself can not fail (all map keys
+        // are strings); the fallback only keeps the panic-free
+        // invariant and never runs.
+        ValueWrapper(
+            serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     pub fn check_basic_gov(&self) -> bool {
@@ -920,6 +965,21 @@ impl GovernanceData {
         }
 
         (issuers, self.roles_gov.issuer.any)
+    }
+
+    /// Public keys of the members holding the validator role at
+    /// governance level. Derived from the governance state itself, so it
+    /// is available before the role register is populated.
+    pub fn governance_validators(&self) -> HashSet<PublicKey> {
+        let mut validators = HashSet::new();
+
+        for name in self.roles_gov.validator.iter() {
+            if let Some(key) = self.members.get(name) {
+                validators.insert(key.clone());
+            }
+        }
+
+        validators
     }
 
     pub fn schema_issuers_namespace(

@@ -13,12 +13,9 @@ use tokio::fs;
 use tracing::{Span, debug, error, info_span};
 
 use crate::{
-    auth::{
-        SubjectAccess, SubjectAccessInitParams, SubjectAccessMessage,
-        SubjectAccessResponse,
-    },
+    auth::{SubjectAccess, SubjectAccessInitParams},
     config::SinkTarget,
-    db::Storable,
+    db::{Storable, check_dir_writable},
     distribution::worker::DistriWorker,
     governance::{
         Governance, GovernanceMessage, GovernanceResponse,
@@ -49,11 +46,11 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Event, Handler,
-    Message, Response,
+    Message, Response, SystemRef,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use serde::{Deserialize, Serialize};
 
 pub mod register;
@@ -161,6 +158,17 @@ pub struct Node {
     transfer_subjects: HashMap<DigestIdentifier, TransferData>,
 
     reject_subjects: HashSet<DigestIdentifier>,
+
+    /// Whether the last shutdown was dirty (crash, power loss) or
+    /// unknown. Subjects skip boot reconciliation only when this is
+    /// false, which solely the explicit clean-shutdown handshake
+    /// (`PrepareCleanShutdown`) persists. Safe default: sync.
+    dirty_shutdown: bool,
+
+    /// Boot governances still to report reconciliation. Runtime
+    /// only: restarts re-derive it from persisted subjects.
+    #[serde(skip)]
+    pending_reconcile: HashSet<DigestIdentifier>,
 }
 
 // Manual Borsh implementation to skip the 'owner' field
@@ -174,6 +182,7 @@ impl BorshSerialize for Node {
         BorshSerialize::serialize(&self.known_subjects, writer)?;
         BorshSerialize::serialize(&self.transfer_subjects, writer)?;
         BorshSerialize::serialize(&self.reject_subjects, writer)?;
+        BorshSerialize::serialize(&self.dirty_shutdown, writer)?;
         Ok(())
     }
 }
@@ -197,10 +206,15 @@ impl BorshDeserialize for Node {
             )?;
         let reject_subjects =
             HashSet::<DigestIdentifier>::deserialize_reader(reader)?;
+        // The flag did not exist before boot reconciliation: old
+        // snapshots decode to dirty (safe direction: sync).
+        let dirty_shutdown = bool::deserialize_reader(reader).unwrap_or(true);
 
         // Create a default/placeholder KeyPair for 'owner'
         // This will be replaced by the actual owner during actor initialization
         let owner = KeyPair::default();
+        // Runtime-only: the store re-injects the live key through
+        // `restore_runtime` before any replay touches this base.
         let our_key = Arc::new(PublicKey::default());
         let hash = None;
 
@@ -208,15 +222,36 @@ impl BorshDeserialize for Node {
             hash,
             our_key,
             owner,
-            ledger_batch_size: 100,
+            ledger_batch_size: SINK_REPLAY_LEDGER_BATCH_SIZE,
             owned_subjects,
             known_subjects,
             transfer_subjects,
             reject_subjects,
+            dirty_shutdown,
             is_service: false,
             only_clear_events: false,
+            pending_reconcile: HashSet::new(),
         })
     }
+}
+
+/// Ledger page size for sink-event replay scans. Paging only:
+/// any positive value returns the same events.
+pub(crate) const SINK_REPLAY_LEDGER_BATCH_SIZE: u64 = 100;
+
+/// Inputs for mailbox-free ledger replay for sink events (see
+/// [`Node::replay_sink_events`]): the resolved subject plus the
+/// range and paging the caller asked for.
+pub(crate) struct SinkReplayInput<'a> {
+    pub system: &'a SystemRef,
+    pub subject_manager: &'a ActorRef<SubjectManager>,
+    pub our_key: &'a str,
+    pub subject_data: SubjectData,
+    pub subject_id: &'a DigestIdentifier,
+    pub from_sn: u64,
+    pub to_sn: Option<u64>,
+    pub limit: u64,
+    pub ledger_batch_size: u64,
 }
 
 impl Node {
@@ -344,7 +379,7 @@ impl Node {
         {
             config.contracts_path
         } else {
-            error!("Config helper not found");
+            error!(msg_type = "Config", "Config helper not found");
             return Err(ActorError::Helper {
                 name: "config".to_owned(),
                 reason: "Not found".to_string(),
@@ -375,6 +410,28 @@ impl Node {
             })?;
         }
         Ok(())
+    }
+
+    /// Stops the gossip distributor of a subject leaving this node
+    /// (delete, transfer out, end of life): without it the actor keeps
+    /// gossiping and serving with stale roles, leaking the actor. A
+    /// missing distributor is not an error.
+    async fn remove_distributor(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        let distributor_name = format!("distributor_{}", subject_id);
+        if let Ok(distributor) =
+            ctx.get_child::<DistriWorker>(&distributor_name).await
+            && let Err(e) = distributor.ask_stop().await
+        {
+            debug!(
+                subject_id = %subject_id,
+                error = %e,
+                "Failed to stop subject distributor"
+            );
+        }
     }
 
     async fn create_distributors(
@@ -449,9 +506,8 @@ impl Node {
         governance_ids.into_iter().collect()
     }
 
-    async fn get_tracker_ledger_batch(
-        ctx: &ActorContext<Self>,
-        actor: &ave_actors::ActorRef<Tracker>,
+    pub(crate) async fn get_tracker_ledger_batch(
+        actor: &ActorRef<Tracker>,
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<Ledger>, bool), ActorError> {
@@ -462,15 +518,14 @@ impl Node {
         match response {
             TrackerResponse::Ledger { ledger, is_all } => Ok((ledger, is_all)),
             _ => Err(ActorError::UnexpectedResponse {
-                path: ctx.path().clone() / "subject_manager",
+                path: actor.path(),
                 expected: "TrackerResponse::Ledger".to_owned(),
             }),
         }
     }
 
-    async fn get_governance_ledger_batch(
-        ctx: &ActorContext<Self>,
-        actor: &ave_actors::ActorRef<Governance>,
+    pub(crate) async fn get_governance_ledger_batch(
+        actor: &ActorRef<Governance>,
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<Ledger>, bool), ActorError> {
@@ -483,26 +538,25 @@ impl Node {
                 Ok((ledger, is_all))
             }
             _ => Err(ActorError::UnexpectedResponse {
-                path: ctx.path().clone() / "subject_manager",
+                path: actor.path(),
                 expected: "GovernanceResponse::Ledger".to_owned(),
             }),
         }
     }
 
-    async fn collect_tracker_ledger(
-        &self,
-        ctx: &ActorContext<Self>,
+    pub(crate) async fn collect_tracker_ledger(
+        system: &SystemRef,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
+        ledger_batch_size: u64,
     ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
         ));
-        let tracker = ctx.system().get_actor::<Tracker>(&path).await?;
+        let tracker = system.get_actor::<Tracker>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
-        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
             let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
@@ -510,19 +564,18 @@ impl Node {
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, is_all) = Self::get_tracker_ledger_batch(
-                ctx,
-                &tracker,
-                lo_sn,
-                batch_hi_sn,
-            )
-            .await?;
+            let (mut batch, _) =
+                Self::get_tracker_ledger_batch(&tracker, lo_sn, batch_hi_sn)
+                    .await?;
             if batch.is_empty() {
                 break;
             }
             lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
-            if is_all {
+            // Stop on the global objective, not on the page flag: a
+            // page read reports completion of its own range, which
+            // says nothing about the remaining history.
+            if lo_sn.is_some_and(|sn| sn >= hi_sn) {
                 break;
             }
         }
@@ -530,20 +583,19 @@ impl Node {
         Ok(ledger)
     }
 
-    async fn collect_governance_ledger(
-        &self,
-        ctx: &ActorContext<Self>,
+    pub(crate) async fn collect_governance_ledger(
+        system: &SystemRef,
         subject_id: &DigestIdentifier,
         hi_sn: u64,
+        ledger_batch_size: u64,
     ) -> Result<Vec<Ledger>, ActorError> {
         let path = ActorPath::from(format!(
             "/user/node/subject_manager/{}",
             subject_id
         ));
-        let governance = ctx.system().get_actor::<Governance>(&path).await?;
+        let governance = system.get_actor::<Governance>(&path).await?;
         let mut ledger = Vec::new();
         let mut lo_sn = None;
-        let ledger_batch_size = self.ledger_batch_size;
 
         loop {
             let from_sn = lo_sn.map_or(0_u64, |sn: u64| sn.saturating_add(1));
@@ -551,8 +603,7 @@ impl Node {
                 .saturating_add(ledger_batch_size)
                 .saturating_sub(1)
                 .min(hi_sn);
-            let (mut batch, is_all) = Self::get_governance_ledger_batch(
-                ctx,
+            let (mut batch, _) = Self::get_governance_ledger_batch(
                 &governance,
                 lo_sn,
                 batch_hi_sn,
@@ -563,7 +614,8 @@ impl Node {
             }
             lo_sn = batch.last().map(|event| event.sn);
             ledger.append(&mut batch);
-            if is_all {
+            // Same as above: the page flag only covers its range.
+            if lo_sn.is_some_and(|sn| sn >= hi_sn) {
                 break;
             }
         }
@@ -571,18 +623,43 @@ impl Node {
         Ok(ledger)
     }
 
-    async fn replay_sink_events(
-        &self,
-        ctx: &ActorContext<Self>,
-        subject_id: DigestIdentifier,
-        from_sn: u64,
-        to_sn: Option<u64>,
-        limit: u64,
+    /// Mailbox-free ledger replay for sink events. This must never
+    /// `await` on the [`Node`] actor: it runs while other actors (or
+    /// no actor, from the API) hold *their* mailboxes, and the
+    /// governance actors it reads may themselves be waiting on
+    /// [`Node`] mid-transfer. Waiting on [`Node`] here would
+    /// deadlock the central actor exactly as the old in-handler
+    /// replay did. The caller resolves [`SubjectData`] locally first
+    /// (a plain map read on [`Node`]).
+    pub(crate) async fn replay_sink_events(
+        input: SinkReplayInput<'_>,
     ) -> Result<SinkEventsPage, ActorError> {
+        let SinkReplayInput {
+            system,
+            subject_manager,
+            our_key,
+            subject_data,
+            subject_id,
+            from_sn,
+            to_sn,
+            limit,
+            ledger_batch_size,
+        } = input;
         if limit == 0 {
             return Err(ActorError::Functional {
                 description: "Replay limit must be greater than zero"
                     .to_owned(),
+            });
+        }
+        // Same cap as the HTTP edge: the replay joins every event with
+        // per-item buffers, so callers bypassing the edge must not
+        // request unbounded batches.
+        if limit > crate::api_input_validation::MAX_QUERY_LIMIT {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Replay limit must not exceed {}",
+                    crate::api_input_validation::MAX_QUERY_LIMIT
+                ),
             });
         }
         if let Some(to_sn) = to_sn
@@ -594,22 +671,8 @@ impl Node {
             });
         }
 
-        let Some(subject_data) = self
-            .owned_subjects
-            .get(&subject_id)
-            .cloned()
-            .or_else(|| self.known_subjects.get(&subject_id).cloned())
-        else {
-            return Err(ActorError::NotFound {
-                path: ActorPath::from(format!(
-                    "/user/node/subject_manager/{}",
-                    subject_id
-                )),
-            });
-        };
-
         let sink_timestamp = ave_common::identity::TimeStamp::now().as_nanos();
-        let public_key = self.our_key.to_string();
+        let public_key = our_key.to_owned();
 
         match subject_data {
             SubjectData::Governance { .. } => {
@@ -617,8 +680,7 @@ impl Node {
                     "/user/node/subject_manager/{}",
                     subject_id
                 ));
-                let governance =
-                    ctx.system().get_actor::<Governance>(&path).await?;
+                let governance = system.get_actor::<Governance>(&path).await?;
                 let response =
                     governance.ask(GovernanceMessage::GetMetadata).await?;
                 let GovernanceResponse::Metadata(metadata) = response else {
@@ -630,9 +692,13 @@ impl Node {
                 let hi_sn = to_sn
                     .map(|to_sn| to_sn.min(metadata.sn))
                     .unwrap_or(metadata.sn);
-                let ledger = self
-                    .collect_governance_ledger(ctx, &subject_id, hi_sn)
-                    .await?;
+                let ledger = Self::collect_governance_ledger(
+                    system,
+                    subject_id,
+                    hi_sn,
+                    ledger_batch_size,
+                )
+                .await?;
                 replay_ledgers_to_sink_events(
                     &ledger,
                     &public_key,
@@ -643,8 +709,6 @@ impl Node {
                 )
             }
             SubjectData::Tracker { governance_id, .. } => {
-                let subject_manager =
-                    ctx.get_child::<SubjectManager>("subject_manager").await?;
                 let requester = format!(
                     "node_replay_sink_events:{}:{}:{}",
                     subject_id, from_sn, limit
@@ -663,10 +727,8 @@ impl Node {
                         governance_id
                     ));
 
-                    let sn = if let Ok(actor) = ctx
-                        .system()
-                        .get_actor::<WitnessesRegister>(&actor_path)
-                        .await
+                    let sn = if let Ok(actor) =
+                        system.get_actor::<WitnessesRegister>(&actor_path).await
                     {
                         let response = actor
                             .ask(WitnessesRegisterMessage::GetTrackerSnOwner {
@@ -698,10 +760,8 @@ impl Node {
                             "/user/node/subject_manager/{}",
                             subject_id
                         ));
-                        let tracker = ctx
-                            .system()
-                            .get_actor::<Tracker>(&tracker_path)
-                            .await?;
+                        let tracker =
+                            system.get_actor::<Tracker>(&tracker_path).await?;
                         let response =
                             tracker.ask(TrackerMessage::GetMetadata).await?;
                         let TrackerResponse::Metadata(metadata) = response
@@ -716,9 +776,13 @@ impl Node {
                     };
 
                     let hi_sn = to_sn.map(|to_sn| to_sn.min(sn)).unwrap_or(sn);
-                    let ledger = self
-                        .collect_tracker_ledger(ctx, &subject_id, hi_sn)
-                        .await?;
+                    let ledger = Self::collect_tracker_ledger(
+                        system,
+                        subject_id,
+                        hi_sn,
+                        ledger_batch_size,
+                    )
+                    .await?;
                     replay_ledgers_to_sink_events(
                         &ledger,
                         &public_key,
@@ -730,12 +794,29 @@ impl Node {
                 }
                 .await;
 
-                let _ = subject_manager
+                // The `Up` above holds a requester slot: a lost
+                // `Finish` leaks the tracker alive forever, so retry
+                // once and fail loud instead of dropping the error.
+                if subject_manager
                     .ask(SubjectManagerMessage::Finish {
-                        subject_id,
-                        requester,
+                        subject_id: subject_id.clone(),
+                        requester: requester.clone(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                    && let Err(e) = subject_manager
+                        .ask(SubjectManagerMessage::Finish {
+                            subject_id: subject_id.clone(),
+                            requester,
+                        })
+                        .await
+                {
+                    error!(
+                        error = %e,
+                        "Failed to release replay requester slot after retry"
+                    );
+                    return Err(e);
+                }
 
                 result
             }
@@ -747,12 +828,6 @@ impl Node {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeMessage {
     GetGovernances,
-    GetSinkEvents {
-        subject_id: DigestIdentifier,
-        from_sn: u64,
-        to_sn: Option<u64>,
-        limit: u64,
-    },
     SignRequest(Box<SignTypesNode>),
     PendingTransfers,
     RegisterSubject {
@@ -765,14 +840,26 @@ pub enum NodeMessage {
     DeleteSubject(DigestIdentifier),
     IOwnerNewOwnerSubject(DigestIdentifier),
     ICanSendLastLedger(DigestIdentifier),
-    SubjectAccessData(DigestIdentifier),
     TransferSubject(TransferSubject),
     RejectTransfer(DigestIdentifier),
     ConfirmTransfer(DigestIdentifier),
+    /// A governance finished its boot reconciliation (derived state
+    /// caught up to the ledger tip). The node counts them to order
+    /// resume and tracker waits; nothing is ever rejected.
+    /// Late reports (governances created after boot, or double
+    /// reports) are harmless.
+    GovernanceReconciled {
+        governance_id: DigestIdentifier,
+    },
     EOLSubject {
         subject_id: DigestIdentifier,
         i_owner: bool,
     },
+    /// Clean-shutdown handshake (binary calls it before stopping
+    /// the system on graceful shutdown): persists the clean marker
+    /// so the next boot skips reconciliation. Never sent on crash
+    /// paths, so a missing marker always means dirty.
+    PrepareCleanShutdown,
 }
 
 impl Message for NodeMessage {
@@ -784,6 +871,7 @@ impl Message for NodeMessage {
                 | Self::RejectTransfer(..)
                 | Self::ConfirmTransfer(..)
                 | Self::EOLSubject { .. }
+                | Self::PrepareCleanShutdown
         )
     }
 }
@@ -792,7 +880,6 @@ impl Message for NodeMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
     Governances(Vec<DigestIdentifier>),
-    SinkEvents(SinkEventsPage),
     SubjectData(Option<SubjectData>),
     GovernanceTrackers(Vec<DigestIdentifier>),
     PendingTransfers(Vec<TransferSubject>),
@@ -800,11 +887,6 @@ pub enum NodeResponse {
     IOwnerNewOwner {
         i_owner: bool,
         i_new_owner: Option<bool>,
-    },
-    SubjectAccessData {
-        is_gov_authorized: bool,
-        is_tracker_banned: bool,
-        subject_data: Option<SubjectData>,
     },
     Ok,
 }
@@ -829,6 +911,10 @@ pub enum NodeEvent {
         subject_id: DigestIdentifier,
         i_owner: bool,
     },
+    /// Clean-shutdown handshake marker: the last shutdown completed
+    /// gracefully, so the next boot may skip reconciliation. Appended
+    /// last: old journals decode without it.
+    MarkCleanShutdown,
 }
 
 impl Event for NodeEvent {}
@@ -874,7 +960,7 @@ impl Actor for Node {
         let Some(config_helper) =
             ctx.system().get_helper::<ConfigHelper>("config")
         else {
-            error!("Config helper not found");
+            error!(msg_type = "Config", "Config helper not found");
             return Err(ActorError::Helper {
                 name: "config".to_string(),
                 reason: "Not found".to_string(),
@@ -885,6 +971,11 @@ impl Actor for Node {
             .await
         {
             Ok(actor) => actor,
+            // A supervised restart re-runs `pre_start` with live
+            // children: reuse them instead of failing.
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SinkRegistry>("sink_registry").await?
+            }
             Err(e) => {
                 error!(error = %e, "Failed to create SinkRegistry");
                 return Err(e);
@@ -907,7 +998,7 @@ impl Actor for Node {
             ))
             .flat_map(|entry| entry.servers.clone())
             .collect();
-        if let Err(e) = ctx
+        match ctx
             .create_child(
                 "node_sink_manager",
                 SinkManager::initial(SinkManagerInitParams {
@@ -918,8 +1009,14 @@ impl Actor for Node {
             )
             .await
         {
-            error!(error = %e, "Failed to create NodeSinkManager");
-            return Err(e);
+            Ok(_) => {}
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SinkManager>("node_sink_manager").await?;
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to create NodeSinkManager");
+                return Err(e);
+            }
         }
 
         let config = config_helper;
@@ -938,6 +1035,9 @@ impl Actor for Node {
             let register_actor =
                 match ctx.create_child("register", Register).await {
                     Ok(actor) => actor,
+                    Err(ActorError::Exists { .. }) => {
+                        ctx.get_child::<Register>("register").await?
+                    }
                     Err(e) => {
                         error!(error = %e, "Failed to create register child");
                         return Err(e);
@@ -954,21 +1054,28 @@ impl Actor for Node {
                 });
             };
 
-            let mut sink = register_actor.register_sink("internal", None)?;
+            let sink = register_actor.register_sink("internal", None)?;
             sink.add("ext_db", ext_db.get_register());
 
-            if let Err(e) = ctx
+            match ctx
                 .create_child(
                     "manual_distribution",
                     ManualDistribution::new(self.our_key.clone()),
                 )
                 .await
             {
-                error!(
-                    error = %e,
-                    "Failed to create manual_distribution child"
-                );
-                return Err(e);
+                Ok(_) => {}
+                Err(ActorError::Exists { .. }) => {
+                    ctx.get_child::<ManualDistribution>("manual_distribution")
+                        .await?;
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to create manual_distribution child"
+                    );
+                    return Err(e);
+                }
             }
 
             if let Err(e) = self.create_distributors(ctx, &network).await {
@@ -987,36 +1094,9 @@ impl Actor for Node {
             });
         };
 
-        let subject_manager = match ctx
-            .create_child(
-                "subject_manager",
-                SubjectManager::new(
-                    self.our_key.clone(),
-                    hash,
-                    self.is_service,
-                    self.only_clear_events,
-                ),
-            )
-            .await
-        {
-            Ok(actor) => actor,
-            Err(e) => {
-                error!(error = %e, "Failed to create subject_manager child");
-                return Err(e);
-            }
-        };
-
-        if let Err(e) = subject_manager
-            .ask(SubjectManagerMessage::UpGovernances {
-                governance_ids: self.governance_ids(),
-            })
-            .await
-        {
-            error!(error = %e, "Failed to bootstrap governances");
-            return Err(e);
-        }
-
-        if let Err(e) = ctx
+        // The access actor first: booting governances query it (sync
+        // peers, bans) and must never observe it missing.
+        match ctx
             .create_child(
                 "auth",
                 SubjectAccess::initial(SubjectAccessInitParams {
@@ -1034,11 +1114,66 @@ impl Actor for Node {
             )
             .await
         {
-            error!(
-                error = %e,
-                "Failed to create subject_access child"
-            );
+            Ok(_) => {}
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SubjectAccess>("auth").await?;
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to create subject_access child"
+                );
+                return Err(e);
+            }
+        }
+
+        let subject_manager = match ctx
+            .create_child(
+                "subject_manager",
+                SubjectManager::new(
+                    self.our_key.clone(),
+                    hash,
+                    self.is_service,
+                    self.only_clear_events,
+                ),
+            )
+            .await
+        {
+            Ok(actor) => actor,
+            Err(ActorError::Exists { .. }) => {
+                ctx.get_child::<SubjectManager>("subject_manager").await?
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to create subject_manager child");
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = subject_manager
+            .ask(SubjectManagerMessage::UpGovernances {
+                governance_ids: self.governance_ids(),
+                dirty_boot: self.dirty_shutdown,
+            })
+            .await
+        {
+            error!(error = %e, "Failed to bootstrap governances");
             return Err(e);
+        }
+
+        // Boot reconciliation gate: governances reconcile derived
+        // state in their own pre_start and report back; ingress stays
+        // gated until every boot governance does. Empty set (fresh
+        // node) stays ready: there is nothing to reconcile. The
+        // shared helper mirrors the set so gates check per subject
+        // without messaging.
+        self.pending_reconcile = self.governance_ids().into_iter().collect();
+        if let Some(pending) = ctx
+            .system()
+            .get_helper::<crate::system::PendingReconcile>("pending_reconcile")
+        {
+            for governance_id in &self.pending_reconcile {
+                pending.insert(governance_id.clone());
+            }
         }
 
         let hash = self.hash()?;
@@ -1101,20 +1236,25 @@ impl Handler<Self> for Node {
         ctx: &mut ave_actors::ActorContext<Self>,
     ) -> Result<NodeResponse, ActorError> {
         match msg {
-            NodeMessage::GetSinkEvents {
-                subject_id,
-                from_sn,
-                to_sn,
-                limit,
-            } => Ok(NodeResponse::SinkEvents(
-                self.replay_sink_events(ctx, subject_id, from_sn, to_sn, limit)
-                    .await?,
-            )),
             NodeMessage::RegisterSubject {
                 owner,
                 subject_id,
                 data,
             } => {
+                // Backstop: new subjects only come from live creation,
+                // which is dead in safe mode — but registering here
+                // persists a journal event and spawns a distributor,
+                // so refuse loudly instead of depending on that.
+                if let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config")
+                    && config.safe_mode
+                {
+                    return Err(ActorError::Functional {
+                        description:
+                            "RegisterSubject is not available in safe mode"
+                                .to_owned(),
+                    });
+                }
                 let Some(network): Option<Arc<NetworkSender>> =
                     ctx.system().get_helper("network")
                 else {
@@ -1173,6 +1313,8 @@ impl Handler<Self> for Node {
                     ctx,
                 )
                 .await;
+                // No distributor stop here (same as transfers): late
+                // syncers still need the history after end of life.
 
                 debug!(
                     msg_type = "EOLSubject",
@@ -1246,6 +1388,7 @@ impl Handler<Self> for Node {
                     ctx,
                 )
                 .await;
+                self.remove_distributor(ctx, &subject_id).await;
 
                 debug!(
                     msg_type = "DeleteSubject",
@@ -1293,6 +1436,10 @@ impl Handler<Self> for Node {
             NodeMessage::TransferSubject(data) => {
                 let subject_id = data.subject_id.clone();
                 self.on_event(NodeEvent::TransferSubject(data), ctx).await;
+                // No distributor stop here: after transferring out the
+                // node still witnesses and receives distributions for
+                // the subject — stopping it wedges inbound sync with
+                // "actor not found" retries on the senders' side.
 
                 debug!(
                     msg_type = "TransferSubject",
@@ -1317,12 +1464,46 @@ impl Handler<Self> for Node {
 
                 Ok(NodeResponse::Ok)
             }
+            NodeMessage::PrepareCleanShutdown => {
+                self.on_event(NodeEvent::MarkCleanShutdown, ctx).await;
+
+                debug!(
+                    msg_type = "PrepareCleanShutdown",
+                    "Clean shutdown marker persisted"
+                );
+
+                Ok(NodeResponse::Ok)
+            }
+            NodeMessage::GovernanceReconciled { governance_id } => {
+                // Late reports (governances created after boot, or
+                // double reports) are harmless: only the boot set
+                // gates per-subject traffic.
+                self.pending_reconcile.remove(&governance_id);
+                if let Some(pending) =
+                    ctx.system().get_helper::<crate::system::PendingReconcile>(
+                        "pending_reconcile",
+                    )
+                {
+                    pending.remove(&governance_id);
+                }
+                if self.pending_reconcile.is_empty() {
+                    debug!(
+                        msg_type = "GovernanceReconciled",
+                        governance_id = %governance_id,
+                        "All boot governances reconciled"
+                    );
+                }
+
+                Ok(NodeResponse::Ok)
+            }
             NodeMessage::SignRequest(content) => {
                 let content = *content;
                 let content_type = match &content {
                     SignTypesNode::EventRequest(_) => "EventRequest",
                     SignTypesNode::ValidationReq(_) => "ValidationReq",
                     SignTypesNode::ValidationRes(_) => "ValidationRes",
+                    SignTypesNode::CompilationReq(_) => "CompilationReq",
+                    SignTypesNode::CompilationSignature(_) => "CompilationRes",
                     SignTypesNode::EvaluationReq(_) => "EvaluationReq",
                     SignTypesNode::EvaluationSignature(_) => "EvaluationRes",
                     SignTypesNode::ApprovalReq(_) => "ApprovalReq",
@@ -1340,6 +1521,12 @@ impl Handler<Self> for Node {
                     }
                     SignTypesNode::ValidationRes(validation_res) => {
                         self.sign(&validation_res)
+                    }
+                    SignTypesNode::CompilationReq(compilation_req) => {
+                        self.sign(&*compilation_req)
+                    }
+                    SignTypesNode::CompilationSignature(compilation_res) => {
+                        self.sign(&compilation_res)
                     }
                     SignTypesNode::EvaluationReq(evaluation_req) => {
                         self.sign(&*evaluation_req)
@@ -1401,79 +1588,6 @@ impl Handler<Self> for Node {
                     i_new_owner,
                 })
             }
-            NodeMessage::SubjectAccessData(subject_id) => {
-                let access = match ctx.get_child::<SubjectAccess>("auth").await
-                {
-                    Ok(access) => access,
-                    Err(e) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "SubjectAccess actor not found"
-                        );
-                        ctx.system().crash_system();
-                        return Err(e);
-                    }
-                };
-
-                let (is_gov_authorized, is_tracker_banned) = match access
-                    .ask(SubjectAccessMessage::GetAccessInfo {
-                        subject_id: subject_id.clone(),
-                    })
-                    .await
-                {
-                    Ok(SubjectAccessResponse::AccessInfo {
-                        is_gov_authorized,
-                        is_tracker_banned,
-                    }) => (is_gov_authorized, is_tracker_banned),
-                    Ok(other) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            ?other,
-                            "Unexpected response from subject_access actor for GetAccessInfo"
-                        );
-                        ctx.system().crash_system();
-                        return Err(ActorError::UnexpectedResponse {
-                            expected: "SubjectAccessResponse::AccessInfo"
-                                .to_owned(),
-                            path: ctx.path().clone() / "auth",
-                        });
-                    }
-                    Err(e) => {
-                        error!(
-                            msg_type = "SubjectAccessData",
-                            subject_id = %subject_id,
-                            error = %e,
-                            "Failed to get access info from subject_access actor"
-                        );
-                        ctx.system().crash_system();
-                        return Err(e);
-                    }
-                };
-
-                let subj_data = self
-                    .known_subjects
-                    .get(&subject_id)
-                    .or_else(|| self.owned_subjects.get(&subject_id))
-                    .cloned();
-
-                debug!(
-                    msg_type = "SubjectAccessData",
-                    subject_id = %subject_id,
-                    is_gov_authorized = is_gov_authorized,
-                    is_tracker_banned = is_tracker_banned,
-                    subject_data = ?subj_data,
-                    "Checked subject access status"
-                );
-
-                Ok(NodeResponse::SubjectAccessData {
-                    is_gov_authorized,
-                    is_tracker_banned,
-                    subject_data: subj_data,
-                })
-            }
         }
     }
 
@@ -1503,9 +1617,27 @@ pub struct InitParamsNode {
 
 #[async_trait]
 impl PersistentActor for Node {
-    type Persistence = LightPersistence;
     type InitParams = InitParamsNode;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
+
+    /// The split owned/known is decided in `apply` against this key,
+    /// so every replay base (snapshot decode included) must carry
+    /// the live one — never the deserialization placeholder.
+    fn restore_runtime(
+        base: Arc<Self::State>,
+        live: &Self::State,
+    ) -> Arc<Self::State> {
+        let mut out = (*base).clone();
+        out.our_key = live.our_key.clone();
+        Arc::new(out)
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {
@@ -1519,6 +1651,8 @@ impl PersistentActor for Node {
             known_subjects: HashMap::new(),
             transfer_subjects: HashMap::new(),
             reject_subjects: HashSet::new(),
+            dirty_shutdown: true,
+            pending_reconcile: HashSet::new(),
         }
     }
 
@@ -1592,6 +1726,13 @@ impl PersistentActor for Node {
                     "Applied subject transfer"
                 );
             }
+            NodeEvent::MarkCleanShutdown => {
+                inner.dirty_shutdown = false;
+                debug!(
+                    event_type = "MarkCleanShutdown",
+                    "Applied clean shutdown marker"
+                );
+            }
         };
 
         Ok(state)
@@ -1607,57 +1748,12 @@ impl PersistentActor for Node {
         self.known_subjects.clone_from(&state.known_subjects);
         self.transfer_subjects.clone_from(&state.transfer_subjects);
         self.reject_subjects.clone_from(&state.reject_subjects);
+        self.dirty_shutdown = state.dirty_shutdown;
     }
 }
 
 #[async_trait]
 impl Storable for Node {}
-
-/// Check that a directory exists and is writable.
-/// If it does not exist, check the nearest existing ancestor.
-fn check_dir_writable(path: &std::path::Path) -> Result<(), String> {
-    let target = if path.exists() {
-        if !path.is_dir() {
-            return Err(format!(
-                "'{}' exists but is not a directory",
-                path.display()
-            ));
-        }
-        path
-    } else {
-        let mut ancestor = path;
-        while !ancestor.exists() {
-            match ancestor.parent() {
-                Some(p) => ancestor = p,
-                None => {
-                    return Err(format!(
-                        "'{}' does not exist and has no existing parent",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        if !ancestor.is_dir() {
-            return Err(format!(
-                "ancestor '{}' exists but is not a directory",
-                ancestor.display()
-            ));
-        }
-        ancestor
-    };
-
-    let test_file = target.join(".ave_write_test");
-    match std::fs::File::create(&test_file) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&test_file);
-        }
-        Err(e) => {
-            return Err(format!("'{}' is not writable: {e}", target.display()));
-        }
-    }
-
-    Ok(())
-}
 
 async fn populate_sink_registry(
     registry: &ActorRef<SinkRegistry>,
@@ -1666,6 +1762,8 @@ async fn populate_sink_registry(
     use std::collections::HashSet;
 
     let mut seen = HashSet::new();
+    let mut seen_normalized: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut config_names = HashSet::new();
     for entry in sinks {
         let crate::config::SinkTarget::Schema {
@@ -1678,9 +1776,33 @@ async fn populate_sink_registry(
                     "duplicate sink name '{}' in configuration",
                     server.server
                 );
-                error!(%msg);
+                error!(
+                    msg_type = "SinkRegistry",
+                    server = %server.server,
+                    "duplicate sink name in configuration"
+                );
                 return Err(ActorError::Functional { description: msg });
             }
+            // Credential variables are derived from the normalized
+            // name: distinct raw names colliding here would silently
+            // share `AVE_SINK_*` secrets across sinks.
+            let normalized =
+                crate::sink::delivery::normalized_sink_name(&server.server);
+            if let Some(first) = seen_normalized.get(&normalized) {
+                let msg = format!(
+                    "sink names '{first}' and '{}' share one credential name",
+                    server.server
+                );
+                error!(
+                    msg_type = "SinkRegistry",
+                    first = %first,
+                    second = %server.server,
+                    normalized = %normalized,
+                    "sink credential names collide"
+                );
+                return Err(ActorError::Functional { description: msg });
+            }
+            seen_normalized.insert(normalized, server.server.clone());
             config_names.insert(server.server.clone());
             registry
                 .tell(SinkRegistryMessage::RegisterSink {

@@ -84,6 +84,7 @@ struct KafkaOAuthContext {
     password: String,
     principal: String,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
 }
 
 /// Producer context that forwards librdkafka statistics to the core metrics.
@@ -94,6 +95,24 @@ struct KafkaStatsContext {
     last_tx_errors: AtomicU64,
     /// Present only with the OAUTHBEARER SASL mechanism.
     oauth: Option<KafkaOAuthContext>,
+}
+
+/// Absolute expiry of an OAUTHBEARER token in the librdkafka clock
+/// (milliseconds since the Unix epoch): every step is checked, so an
+/// extreme `expires_in` is a diagnostic authentication error instead
+/// of a wrapped or saturated lifetime.
+fn oauth_lifetime_ms(now_ms: i64, expires_in: i64) -> Result<i64, String> {
+    if expires_in <= 0 {
+        return Err(format!(
+            "non-positive lifetime ({expires_in}s), token unusable"
+        ));
+    }
+    let ttl_ms = expires_in.checked_mul(1_000).ok_or_else(|| {
+        format!("lifetime overflows milliseconds ({expires_in}s)")
+    })?;
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| "lifetime overflows the epoch-millis range".to_owned())
 }
 
 impl rdkafka::ClientContext for KafkaStatsContext {
@@ -122,11 +141,17 @@ impl rdkafka::ClientContext for KafkaStatsContext {
                 &oauth.auth,
                 &oauth.password,
                 oauth.retry_base_delay_ms,
+                oauth.retry_max_delay_ms,
             ))?;
-        let lifetime_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as i64
-            + response.expires_in.saturating_mul(1_000);
+        let lifetime_ms = oauth_lifetime_ms(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as i64,
+            response.expires_in,
+        )
+        .map_err(|detail| {
+            format!("OAUTHBEARER token has an unusable lifetime: {detail}")
+        })?;
         Ok(rdkafka::client::OAuthToken {
             token: response.access_token,
             principal_name: oauth.principal.clone(),
@@ -428,6 +453,7 @@ impl KafkaTransport {
                         password: secret,
                         principal: username.clone(),
                         retry_base_delay_ms: config.retry_base_delay_ms,
+                        retry_max_delay_ms: config.retry_max_delay_ms,
                     });
                 }
                 KafkaSaslMechanism::Gssapi => {
@@ -910,24 +936,28 @@ impl SinkTransport for KafkaTransport {
         &self,
         events: Vec<IncomingSinkEvent>,
     ) -> Result<(), SinkError> {
-        for (event_type, group) in
+        // Same concurrent-groups shape as the HTTP sink: one
+        // produce per group, whole batch fails on the first error.
+        let sends =
             group_events_by_type(events, self.topic_template.has_event_type())
-        {
-            let Some((topic, key, payload, request_id)) =
-                self.prepare_group(&event_type, &group)?
-            else {
-                continue;
-            };
-            self.produce(
-                &topic,
-                key.as_deref(),
-                &payload,
-                None,
-                None,
-                &request_id,
-            )
-            .await?;
-        }
+                .into_iter()
+                .map(|(event_type, group)| async move {
+                    let Some((topic, key, payload, request_id)) =
+                        self.prepare_group(&event_type, &group)?
+                    else {
+                        return Ok(());
+                    };
+                    self.produce(
+                        &topic,
+                        key.as_deref(),
+                        &payload,
+                        None,
+                        None,
+                        &request_id,
+                    )
+                    .await
+                });
+        futures::future::try_join_all(sends).await?;
 
         Ok(())
     }
@@ -998,6 +1028,18 @@ impl SinkTransport for KafkaTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_lifetime_rejects_impossible_values() {
+        assert_eq!(
+            oauth_lifetime_ms(1_700_000_000_000, 3_600),
+            Ok(1_700_003_600_000)
+        );
+        assert!(oauth_lifetime_ms(1_700_000_000_000, 0).is_err());
+        assert!(oauth_lifetime_ms(1_700_000_000_000, -5).is_err());
+        assert!(oauth_lifetime_ms(1_700_000_000_000, i64::MAX).is_err());
+        assert!(oauth_lifetime_ms(i64::MAX, 3_600).is_err());
+    }
 
     #[test]
     fn build_headers_contains_delivery_metadata() {
@@ -1099,6 +1141,7 @@ mod tests {
                 password: "secret".to_owned(),
                 principal: "client-1".to_owned(),
                 retry_base_delay_ms: 10,
+                retry_max_delay_ms: 30_000,
             }),
         };
 

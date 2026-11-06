@@ -24,11 +24,27 @@ pub(super) struct PooledConnection {
     pool: Arc<ConnectionPool>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct AuthSqliteTuning {
     wal_autocheckpoint_pages: i64,
     journal_size_limit_bytes: i64,
     cache_size_kb: i64,
     mmap_size_bytes: i64,
+}
+
+impl AuthSqliteTuning {
+    /// Share of the tuning for one connection when `connections`
+    /// serve the same base: every connection applies only its slice
+    /// of the total cache budget, so the aggregate stays within the
+    /// budget computed for the base instead of multiplying it.
+    fn for_connections(&self, connections: usize) -> Self {
+        let connections = connections.max(1) as i64;
+        let total_kb = self.cache_size_kb.saturating_abs();
+        Self {
+            cache_size_kb: -(total_kb / connections),
+            ..*self
+        }
+    }
 }
 
 impl AuthDbRuntime {
@@ -38,11 +54,14 @@ impl AuthDbRuntime {
         tuning: &AuthSqliteTuning,
         pool_size: usize,
     ) -> Result<Self, DatabaseError> {
+        // One cache budget per base, split across pool + maintenance.
+        let conn_tuning = tuning.for_connections(pool_size + 1);
         let mut connections = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            connections.push(open_connection(path, sync_mode, tuning)?);
+            connections.push(open_connection(path, sync_mode, &conn_tuning)?);
         }
-        let maintenance_connection = open_connection(path, sync_mode, tuning)?;
+        let maintenance_connection =
+            open_connection(path, sync_mode, &conn_tuning)?;
 
         Ok(Self {
             primary: Arc::new(ConnectionPool::new(connections)),
@@ -190,5 +209,44 @@ pub(super) fn auth_tuning_for_ram(ram_mb: u64) -> AuthSqliteTuning {
         journal_size_limit_bytes,
         cache_size_kb,
         mmap_size_bytes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn pragma_cache_kb(conn: &ave_actors::rusqlite::Connection) -> i64 {
+        conn.query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("cache_size pragma")
+    }
+
+    #[test]
+    fn pool_connections_share_one_cache_budget() {
+        // 8 GiB host: 2 % is 163 MiB total for the base. Every
+        // connection (pool + maintenance) must apply only its slice
+        // so the aggregate stays within budget instead of
+        // multiplying it.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("auth.db");
+        let tuning = auth_tuning_for_ram(8192);
+        let total_kb = tuning.cache_size_kb.saturating_abs();
+        assert_eq!(total_kb, 163 * 1024);
+        let pool_size = 4;
+        let runtime = AuthDbRuntime::new(&path, "NORMAL", &tuning, pool_size)
+            .expect("runtime");
+
+        let per_conn = total_kb / (pool_size as i64 + 1);
+        let primary = runtime.primary.connections.lock().expect("primary pool");
+        assert_eq!(primary.len(), pool_size);
+        for conn in primary.iter() {
+            assert_eq!(pragma_cache_kb(conn), -per_conn);
+        }
+        drop(primary);
+        let maintenance = runtime.maintenance.connections.lock().expect("pool");
+        assert_eq!(maintenance.len(), 1);
+        assert_eq!(pragma_cache_kb(&maintenance[0]), -per_conn);
+        assert!(per_conn * (pool_size as i64 + 1) <= total_kb);
     }
 }

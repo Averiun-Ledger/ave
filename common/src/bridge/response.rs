@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Display,
 };
 
@@ -33,6 +33,11 @@ pub struct ApprovalEntry {
     pub request: ApprovalReq,
     /// Current state of the approval
     pub state: ApprovalState,
+    /// Collection request id: echo it back when voting so a
+    /// replaced request conflicts instead of receiving the vote.
+    pub request_id: String,
+    /// Collection version: echo it back when voting.
+    pub version: u64,
 }
 
 #[derive(
@@ -87,6 +92,23 @@ pub struct ApprovalReq {
     pub patch: Value,
 
     pub signer: String,
+    /// When the owner issued the request, in nanoseconds since the Unix
+    /// epoch. Together with `deadline` it fixes the approval window.
+    ///
+    /// Decimal strings on the wire (see `quoted_u64`): nanosecond
+    /// timestamps lose precision as raw JSON integers in JavaScript.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub issued_at: u64,
+    /// Approvers that have not voted by this instant (nanoseconds since
+    /// the Unix epoch) are counted as absent.
+    ///
+    /// Decimal string on the wire, like `issued_at`.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub deadline: u64,
 }
 
 /// Network status exposed by monitoring endpoints.
@@ -111,8 +133,19 @@ pub enum MonitorNetworkState {
 pub struct LedgerDB {
     pub subject_id: String,
     pub sn: u64,
+    /// Decimal strings on the wire (see `quoted_u64`): nanosecond
+    /// timestamps lose precision as raw JSON integers in JavaScript.
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_request_timestamp: u64,
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub event_ledger_timestamp: u64,
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub sink_timestamp: u64,
     pub event: RequestEventDB,
     pub event_type: EventRequestType,
@@ -134,6 +167,50 @@ pub struct RequestsInManager {
 pub struct RequestsInManagerSubject {
     pub handling: Option<String>,
     pub in_queue: Option<Vec<String>>,
+}
+
+/// One live actor in the supervision forest (ops view; mirrors
+/// `ave_actors::ActorTreeNode` flattened to pre-order so the
+/// response needs no recursive schema).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeNodeView {
+    pub path: String,
+    pub actor_type: String,
+    pub depth: u64,
+}
+
+/// Point-in-time supervision forest.
+///
+/// `nodes` carries at most `limit` entries in pre-order (parent
+/// before children, siblings by path), `total` counts every live
+/// node, `truncated` tells the caller entries were dropped.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct ActorTreeResponse {
+    pub nodes: Vec<ActorTreeNodeView>,
+    pub total: u64,
+    pub truncated: bool,
+}
+
+/// One subject's delivery position on one sink, for the ops audit
+/// view backing `GET /sinks/deliveries`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct SinkDeliveryState {
+    pub sink: String,
+    pub subject_id: String,
+    /// Last delivered sn; `None` when the subject is known but
+    /// nothing was delivered yet.
+    pub cursor_sn: Option<u64>,
+    pub last_seen_sn: u64,
+    pub lagging: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -174,6 +251,7 @@ pub enum RequestEventDB {
         payload: Value,
         evaluation_response: EvalResDB,
         approval_success: Option<bool>,
+        compilation_response: Option<CompResDB>,
     },
     Transfer {
         evaluation_error: Option<String>,
@@ -212,6 +290,26 @@ impl RequestEventDB {
 pub enum EvalResDB {
     Patch(Value),
     Error(String),
+}
+
+/// Compilation verdict stored in the query database.
+///
+/// Mirrors `EvalResDB`: only the voted outcome (contracts or
+/// deterministic error) plus the attested toolchain version.
+/// Signatures, hashes and requests stay in the ledger, never here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub enum CompResDB {
+    Ok {
+        contracts: BTreeMap<String, String>,
+        toolchain_version: String,
+    },
+    Error {
+        error: String,
+        toolchain_version: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -618,6 +716,28 @@ pub struct PaginatorAborts {
     pub events: Vec<AbortDB>,
 }
 
+/// One watchdog incident row: a request phase that produced nothing
+/// for its whole worst-case budget. System monitoring, never ledger
+/// evidence; newest first from the query side.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+pub struct WatchdogIncidentRow {
+    /// Decimal string on the wire (see `quoted_u64`).
+    #[serde(with = "super::quoted_u64")]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub timestamp_nanos: u64,
+    pub phase: String,
+    pub expected_secs: u64,
+    pub elapsed_secs: u64,
+    pub request_id: String,
+    pub gov_version: u64,
+    pub node_version: String,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -677,6 +797,7 @@ pub enum RequestState {
         seconds: u64,
         count: u64,
     },
+    Compilation,
     Evaluation,
     Approval,
     Validation,
@@ -731,6 +852,7 @@ impl Display for RequestState {
                 "Reboot timeout, try: {}, seconds: {}",
                 count, seconds
             ),
+            Self::Compilation => write!(f, "Compilation"),
             Self::Evaluation => write!(f, "Evaluation"),
             Self::Approval => write!(f, "Approval"),
             Self::Validation => write!(f, "Validation"),
@@ -821,13 +943,19 @@ mod tests {
                     gov_version: 1,
                     patch: json!({}),
                     signer: "signer".to_string(),
+                    issued_at: 1,
+                    deadline: 2,
                 },
                 state: state.clone(),
+                request_id: "req1".to_string(),
+                version: 1,
             };
             let json_str = serde_json::to_string(&entry).unwrap();
             let decoded: ApprovalEntry =
                 serde_json::from_str(&json_str).unwrap();
             assert_eq!(decoded.state, state);
+            assert_eq!(decoded.request.issued_at, 1);
+            assert_eq!(decoded.request.deadline, 2);
         }
     }
 

@@ -538,11 +538,15 @@ pub fn governance_event_roles_update_fact(
     rm_roles: Option<RolesUpdateRemove>,
 ) -> RolesUpdate {
     let mut appr_quorum: Option<EventQuorum> = None;
+    let mut comp_quorum: Option<EventQuorum> = None;
     let mut eval_quorum: HashMap<SchemaType, EventQuorum> = HashMap::new();
     let mut vali_quorum: HashMap<SchemaType, EventQuorum> = HashMap::new();
 
     let mut new_approvers: Vec<PublicKey> = vec![];
     let mut remove_approvers: Vec<PublicKey> = vec![];
+
+    let mut new_compilers: Vec<PublicKey> = vec![];
+    let mut remove_compilers: Vec<PublicKey> = vec![];
 
     let mut new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>> =
         HashMap::new();
@@ -595,6 +599,14 @@ pub fn governance_event_roles_update_fact(
                     });
                 }
 
+                if let Some(compilers) = &add.compiler {
+                    compilers.iter().for_each(|x| {
+                        if let Some(user) = members.get(x) {
+                            new_compilers.push(user.clone());
+                        }
+                    });
+                }
+
                 if let Some(evaluators) = &add.evaluator {
                     evaluators.iter().for_each(|x| {
                         if let Some(user) = members.get(x) {
@@ -622,6 +634,14 @@ pub fn governance_event_roles_update_fact(
                     approvers.iter().for_each(|x| {
                         if let Some(user) = members.get(x) {
                             remove_approvers.push(user.clone());
+                        }
+                    });
+                }
+
+                if let Some(compilers) = &remove.compiler {
+                    compilers.iter().for_each(|x| {
+                        if let Some(user) = members.get(x) {
+                            remove_compilers.push(user.clone());
                         }
                     });
                 }
@@ -1010,6 +1030,7 @@ pub fn governance_event_roles_update_fact(
         // gov
         if let Some(governance) = &policies.governance {
             appr_quorum = governance.change.approve.clone();
+            comp_quorum = governance.change.compile.clone();
 
             if let Some(quorum) = &governance.change.evaluate {
                 eval_quorum.insert(SchemaType::Governance, quorum.clone());
@@ -1038,6 +1059,7 @@ pub fn governance_event_roles_update_fact(
         remove_witnesses.extend(rm.witnesses);
         remove_creator.extend(rm.creator);
         remove_approvers.extend(rm.approvers);
+        remove_compilers.extend(rm.compilers);
         remove_evaluators.extend(rm.evaluators);
         remove_validators.extend(rm.validators);
     }
@@ -1049,6 +1071,9 @@ pub fn governance_event_roles_update_fact(
         eval_quorum,
         new_approvers,
         remove_approvers,
+        comp_quorum,
+        new_compilers,
+        remove_compilers,
         vali_quorum,
         remove_evaluators,
         remove_validators,
@@ -1064,6 +1089,7 @@ pub const fn governance_event_is_empty(event: &GovernanceEvent) -> bool {
         && event.roles.is_none()
         && event.schemas.is_none()
         && event.policies.is_none()
+        && event.toolchain.is_none()
 }
 
 ///// Members /////
@@ -1137,6 +1163,11 @@ pub fn gov_role_event_check_data(
                 check_and_register("issuer", issuer)?;
             }
         }
+        if let Some(ref compilers) = add.compiler {
+            for compiler in compilers {
+                check_and_register("compiler", compiler)?;
+            }
+        }
     }
 
     // Validar remove operations
@@ -1164,6 +1195,11 @@ pub fn gov_role_event_check_data(
         if let Some(ref issuers) = remove.issuer {
             for issuer in issuers {
                 check_and_register("issuer", issuer)?;
+            }
+        }
+        if let Some(ref compilers) = remove.compiler {
+            for compiler in compilers {
+                check_and_register("compiler", compiler)?;
             }
         }
     }
@@ -1521,6 +1557,72 @@ pub fn gov_role_event_check_data(
                 }
             }
         }
+
+        // Compilers
+        if let Some(compilers) = add.compiler {
+            if compilers.is_empty() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "compilers vec in governance roles add"
+                            .to_owned(),
+                    },
+                });
+            }
+
+            for compiler in compilers {
+                if compiler != compiler.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "compiler name".to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+
+                if compiler.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "compiler name".to_owned(),
+                        },
+                    });
+                }
+
+                if compiler.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: "compiler name".to_owned(),
+                            actual: compiler.len(),
+                            max: 100,
+                        },
+                    });
+                }
+
+                if !members.contains(&compiler) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::NotMember {
+                            who: compiler,
+                        },
+                    });
+                }
+
+                if !new_roles.compiler.insert(compiler.clone()) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::AlreadyExists {
+                            what: "governance compiler".to_owned(),
+                            id: compiler,
+                        },
+                    });
+                };
+            }
+        }
     }
 
     if let Some(remove) = event.remove.clone() {
@@ -1698,6 +1800,24 @@ pub fn gov_role_event_check_data(
                         },
                     });
                 }
+                if issuer.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: "issuer name to remove".to_owned(),
+                        },
+                    });
+                }
+                if issuer.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: "issuer name to remove".to_owned(),
+                            actual: issuer.len(),
+                            max: 100,
+                        },
+                    });
+                }
                 if issuer != ReservedWords::Any.to_string() {
                     if !new_roles.issuer.signers.remove(&issuer) {
                         return Err(RunnerError::InvalidEvent {
@@ -1719,6 +1839,41 @@ pub fn gov_role_event_check_data(
                         });
                     }
                     new_roles.issuer.any = false;
+                }
+            }
+        }
+
+        // Compilers
+        if let Some(compilers) = remove.compiler {
+            if compilers.is_empty() {
+                return Err(RunnerError::InvalidEvent {
+                    location: "GovRoleEvent::check_data",
+                    kind: error::InvalidEventKind::Empty {
+                        what: "compilers vec in governance roles remove"
+                            .to_owned(),
+                    },
+                });
+            }
+            for compiler in compilers {
+                if compiler != compiler.trim() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::InvalidValue {
+                            field: "compiler name to remove".to_owned(),
+                            reason:
+                                "cannot have leading or trailing whitespace"
+                                    .to_owned(),
+                        },
+                    });
+                }
+                if !new_roles.compiler.remove(&compiler) {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "GovRoleEvent::check_data",
+                        kind: error::InvalidEventKind::CannotRemove {
+                            what: format!("compiler {}", compiler),
+                            reason: "does not have this role".to_owned(),
+                        },
+                    });
                 }
             }
         }
@@ -2661,6 +2816,30 @@ pub fn schema_id_role_check_data(
                         },
                     });
                 }
+                if issuer.name.is_empty() {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::Empty {
+                            what: format!(
+                                "issuer name to remove in schema {}",
+                                schema_id
+                            ),
+                        },
+                    });
+                }
+                if issuer.name.len() > 100 {
+                    return Err(RunnerError::InvalidEvent {
+                        location: "SchemaIdRole::check_data",
+                        kind: error::InvalidEventKind::InvalidSize {
+                            field: format!(
+                                "issuer name to remove in schema {}",
+                                schema_id
+                            ),
+                            actual: issuer.name.len(),
+                            max: 100,
+                        },
+                    });
+                }
                 if issuer.name != ReservedWords::Any.to_string() {
                     if !issuer.namespace.check() {
                         return Err(RunnerError::InvalidEvent {
@@ -3339,6 +3518,7 @@ pub const fn gov_roles_event_is_empty(event: &GovRolesEvent) -> bool {
         && event.validator.is_none()
         && event.witness.is_none()
         && event.issuer.is_none()
+        && event.compiler.is_none()
 }
 
 pub const fn tracker_schemas_roles_add_event_is_empty(
@@ -3429,6 +3609,7 @@ pub const fn gov_policie_change_is_empty(event: &GovPolicieChange) -> bool {
     event.approve.is_none()
         && event.evaluate.is_none()
         && event.validate.is_none()
+        && event.compile.is_none()
 }
 
 pub const fn schema_policie_change_is_empty(

@@ -1,6 +1,7 @@
 //! # Configuration module
 
 use std::{
+    collections::BTreeMap,
     fmt::{self, Display},
     path::PathBuf,
     time::Instant,
@@ -18,6 +19,28 @@ pub use ave_common::sink::{
 };
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};
+
+/// Sane upper bounds: pages and batches above these exhaust memory or
+/// bandwidth long before they help throughput.
+const MAX_LEDGER_BATCH_SIZE: usize = 1_000_000;
+const MAX_SYNC_PAGE_SIZE: usize = 10_000;
+
+/// Canonical production paths.
+///
+/// Production builds fix every filesystem location to these constants:
+/// the config file can not move them (the fields only exist with the
+/// `test` feature, and unknown keys fail loud). Operators map volumes
+/// onto these container paths; tests keep fully custom directories.
+pub const CONTRACTS_DIR: &str = "/contracts";
+pub const DB_LOCAL_ROCKSDB_DIR: &str = "/db/local/rocksdb";
+pub const DB_LOCAL_SQLITE_DIR: &str = "/db/local/sqlite";
+pub const DB_EXT_SQLITE_DIR: &str = "/db/ext/sqlite";
+pub const PINNED_CARGO_BIN: &str = "/usr/local/bin/cargo-ave-pinned";
+pub const LOGS_DIR: &str = "/logs";
+pub const KEYS_DIR: &str = "/keys";
+pub const AUTH_DB_DIR: &str = "/db/auth";
+pub const TLS_CERT_PATH: &str = "/keys/tls.crt";
+pub const TLS_KEY_PATH: &str = "/keys/tls.key";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TokenResponse {
@@ -41,8 +64,13 @@ impl TokenResponse {
 }
 
 /// Node configuration.
+///
+/// Filesystem locations are FIXED in production (see the `CONTRACTS_DIR`
+/// and `DB_*` constants): the path fields below only exist with the
+/// `test` feature. A production config file carrying them fails loud
+/// (`deny_unknown_fields`).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub struct Config {
     /// Key derivator.
@@ -55,7 +83,8 @@ pub struct Config {
     pub external_db: AveExternalDBConfig,
     /// Network configuration.
     pub network: NetworkConfig,
-    /// Contract dir.
+    /// Contract dir. TEST BUILDS ONLY (production: `CONTRACTS_DIR`).
+    #[cfg(feature = "test")]
     pub contracts_path: PathBuf,
     /// Approval mode.
     pub always_accept: bool,
@@ -69,9 +98,64 @@ pub struct Config {
     pub only_clear_events: bool,
     /// Sync protocol configuration.
     pub sync: SyncConfig,
+    /// Approval collection configuration.
+    pub approval: ApprovalConfig,
+    /// Compiler pool the node delegates contract builds to — TEST
+    /// BUILDS ONLY: production nodes compile in-process (`toolchain`
+    /// feature). The field exists so tests can point at the embedded
+    /// compiler or at dead endpoints on purpose.
+    #[cfg(feature = "test")]
+    pub compiler: CompilerNodeConfig,
     /// Wasmtime execution environment sizing.
     /// `None` machine spec → auto-detect RAM and CPU from the host.
     pub spec: Option<MachineSpec>,
+    /// Locally installed build toolchains, pin ID → rustup toolchain
+    /// name (`""` selects the system cargo). The governance pin
+    /// selects, never the local default: a pin with no entry means
+    /// this node can not build it and stands down. Empty by default,
+    /// which resolves exactly `DEFAULT_PIN` to the system toolchain
+    /// (today's behavior) and nothing else. Production consequence:
+    /// the vote always carries the MEASURED system version, so an
+    /// empty map only works while the system rustc IS the pin —
+    /// otherwise validators reject every build (fail closed, never
+    /// silent divergence). Map explicitly in production.
+    pub toolchains: BTreeMap<String, String>,
+    /// Pinned reproducible cargo binary. TEST BUILDS ONLY (production:
+    /// `PINNED_CARGO_BIN`): path to a cargo carrying the
+    /// host-metadata fix (rust-lang/cargo#17522 backport) the
+    /// pins were measured with. When set, every local contract build
+    /// runs through it with `RUSTC` pinned to the selected toolchain
+    /// — the only way a mixed-architecture network votes identical
+    /// bytes. Unset means `rustup` cargo (single-architecture
+    /// networks only). The binary hash must match the registry
+    /// `cargo_bins` for this architecture, or the boot fails loud.
+    /// Empty by default (today's behavior).
+    #[cfg(feature = "test")]
+    pub cargo_bin: Option<PathBuf>,
+}
+
+impl Config {
+    /// Contract dir: the fixed production constant, or the custom
+    /// test directory.
+    pub fn contracts_path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return self.contracts_path.clone();
+        #[cfg(not(feature = "test"))]
+        return PathBuf::from(CONTRACTS_DIR);
+    }
+
+    /// Pinned cargo binary: the fixed production binary on compiler
+    /// images, the custom test one in tests, and none on light images
+    /// (no `toolchain` feature: nothing to bless, the node stands
+    /// down from compiling by construction).
+    pub fn cargo_bin(&self) -> Option<PathBuf> {
+        #[cfg(feature = "test")]
+        return self.cargo_bin.clone();
+        #[cfg(all(not(feature = "test"), feature = "toolchain"))]
+        return Some(PathBuf::from(PINNED_CARGO_BIN));
+        #[cfg(all(not(feature = "test"), not(feature = "toolchain")))]
+        return None;
+    }
 }
 
 impl Default for Config {
@@ -82,14 +166,61 @@ impl Default for Config {
             internal_db: Default::default(),
             external_db: Default::default(),
             network: Default::default(),
-            contracts_path: PathBuf::from("contracts"),
+            #[cfg(feature = "test")]
+            contracts_path: PathBuf::from(CONTRACTS_DIR),
             always_accept: Default::default(),
             safe_mode: false,
             tracking_size: 100,
             is_service: false,
             only_clear_events: false,
             sync: Default::default(),
+            approval: Default::default(),
+            #[cfg(feature = "test")]
+            compiler: Default::default(),
             spec: None,
+            toolchains: BTreeMap::new(),
+            #[cfg(feature = "test")]
+            cargo_bin: None,
+        }
+    }
+}
+
+/// Compiler pool configuration of the node — TEST BUILDS ONLY. The
+/// embedded test compiler is auto-injected when no endpoints are set;
+/// explicit endpoints win, so failure-path tests can point at dead
+/// addresses. Production nodes compile in-process (`toolchain`
+/// feature) and have no compiler pool at all.
+#[cfg(feature = "test")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct CompilerNodeConfig {
+    /// Compiler endpoints (`http://` or `https://`), tried in order.
+    pub endpoints: Vec<String>,
+    /// API key sent as `x-api-key` metadata on every request.
+    pub api_key: Option<String>,
+    /// Expected toolchain fingerprint (DigestIdentifier Display form);
+    /// responses with another fingerprint are discarded.
+    pub expected_toolchain: Option<String>,
+    /// Pinned compiler public key (Display form) used to verify
+    /// attestation signatures.
+    pub compiler_public_key: Option<String>,
+    /// Pinned TLS certificate (PEM) for `https://` endpoints.
+    pub pinned_cert_pem: Option<String>,
+    /// Per-attempt request timeout in seconds.
+    pub request_timeout_secs: u64,
+}
+
+#[cfg(feature = "test")]
+impl Default for CompilerNodeConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            api_key: None,
+            expected_toolchain: None,
+            compiler_public_key: None,
+            pinned_cert_pem: None,
+            request_timeout_secs: 120,
         }
     }
 }
@@ -98,6 +229,9 @@ impl Config {
     /// Validates the node configuration, returning an error describing the
     /// first invalid value found.
     pub fn validate(&self) -> Result<(), Error> {
+        // Production paths are constants (no fields to validate);
+        // test builds validate their custom directories.
+        #[cfg(feature = "test")]
         if self.contracts_path.as_os_str().is_empty() {
             return Err(Error::InvalidConfiguration {
                 component: "node.contracts_path".to_string(),
@@ -129,6 +263,25 @@ impl Config {
                 component: "node.sync".to_string(),
                 reason: e.to_string(),
             })?;
+        self.approval
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.approval".to_string(),
+                reason: e.to_string(),
+            })?;
+        self.network
+            .validate()
+            .map_err(|e| Error::InvalidConfiguration {
+                component: "node.network".to_string(),
+                reason: e.to_string(),
+            })?;
+        #[cfg(feature = "test")]
+        if self.compiler.request_timeout_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "node.compiler.request_timeout_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
 
         if let Some(spec) = &self.spec {
             spec.validate().map_err(|e| Error::InvalidConfiguration {
@@ -170,6 +323,12 @@ impl SyncConfig {
             return Err(Error::InvalidConfiguration {
                 component: "sync.ledger_batch_size".to_string(),
                 reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.ledger_batch_size > MAX_LEDGER_BATCH_SIZE {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.ledger_batch_size".to_string(),
+                reason: format!("must not exceed {MAX_LEDGER_BATCH_SIZE}"),
             });
         }
 
@@ -316,6 +475,102 @@ fn default_reboot_timeout_retry_schedule_secs() -> Vec<u64> {
     vec![30, 60, 120, 300]
 }
 
+/// Approval collection configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "snake_case")]
+pub struct ApprovalConfig {
+    /// Minimum window, in seconds, between request issuance and its
+    /// approval deadline. Must equal the sum of `probe_schedule_secs`.
+    pub min_window_secs: u64,
+    /// Backoff schedule, in seconds, for vote probes sent to approvers
+    /// that have not voted yet.
+    pub probe_schedule_secs: Vec<u64>,
+    /// Seconds between keepalive rounds while waiting for votes.
+    pub keepalive_secs: u64,
+}
+
+impl Default for ApprovalConfig {
+    fn default() -> Self {
+        Self {
+            min_window_secs: default_approval_min_window_secs(),
+            probe_schedule_secs: default_approval_probe_schedule_secs(),
+            keepalive_secs: default_approval_keepalive_secs(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_min_window_secs() -> u64 {
+    300
+}
+
+#[cfg(not(any(test, feature = "test")))]
+const fn default_approval_min_window_secs() -> u64 {
+    100_800
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_probe_schedule_secs() -> Vec<u64> {
+    // Early rounds are fast so votes are collected quickly; the window is
+    // long so a parked approval never closes on its own mid-test (the old
+    // approval retries were hours, effectively never firing in tests).
+    vec![1, 2, 4, 293]
+}
+
+#[cfg(not(any(test, feature = "test")))]
+fn default_approval_probe_schedule_secs() -> Vec<u64> {
+    vec![14_400, 28_800, 57_600]
+}
+
+#[cfg(any(test, feature = "test"))]
+fn default_approval_keepalive_secs() -> u64 {
+    1
+}
+
+#[cfg(not(any(test, feature = "test")))]
+const fn default_approval_keepalive_secs() -> u64 {
+    3_600
+}
+
+impl ApprovalConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.min_window_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.min_window_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        validate_positive_vec(
+            "approval.probe_schedule_secs",
+            &self.probe_schedule_secs,
+        )?;
+        let mut schedule_sum: u64 = 0;
+        for value in &self.probe_schedule_secs {
+            let Some(next) = schedule_sum.checked_add(*value) else {
+                return Err(Error::InvalidConfiguration {
+                    component: "approval.probe_schedule_secs".to_string(),
+                    reason: "sum overflows u64".to_string(),
+                });
+            };
+            schedule_sum = next;
+        }
+        if schedule_sum != self.min_window_secs {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.probe_schedule_secs".to_string(),
+                reason: "must sum exactly approval.min_window_secs".to_string(),
+            });
+        }
+        if self.keepalive_secs == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "approval.keepalive_secs".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "snake_case")]
@@ -402,6 +657,12 @@ impl TrackerSyncConfig {
             return Err(Error::InvalidConfiguration {
                 component: "sync.tracker.page_size".to_string(),
                 reason: "must be greater than zero".to_string(),
+            });
+        }
+        if self.page_size > MAX_SYNC_PAGE_SIZE {
+            return Err(Error::InvalidConfiguration {
+                component: "sync.tracker.page_size".to_string(),
+                reason: format!("must not exceed {MAX_SYNC_PAGE_SIZE}"),
             });
         }
         if self.response_timeout_secs == 0 {
@@ -653,44 +914,72 @@ impl From<MachineSpec> for ave_actors::MachineSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AveInternalDBConfig {
     #[serde(deserialize_with = "AveInternalDBFeatureConfig::deserialize_db")]
     pub db: AveInternalDBFeatureConfig,
     pub durability: bool,
 }
 
-/// Database configuration.
+/// Database configuration. The engine comes from cargo features; the
+/// directory is FIXED in production (constants below) and only
+/// settable with the `test` feature.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveInternalDBFeatureConfig {
     /// Rocksdb database.
     #[cfg(feature = "rocksdb")]
     Rocksdb {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
     /// Sqlite database.
     #[cfg(feature = "sqlite")]
     Sqlite {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
+}
+
+impl AveInternalDBFeatureConfig {
+    /// Database directory: the fixed production constant, or the
+    /// custom test directory.
+    pub fn path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return match self {
+            #[cfg(feature = "rocksdb")]
+            Self::Rocksdb { path } => path.clone(),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite { path } => path.clone(),
+        };
+        #[cfg(not(feature = "test"))]
+        return match self {
+            #[cfg(feature = "rocksdb")]
+            Self::Rocksdb { .. } => PathBuf::from(DB_LOCAL_ROCKSDB_DIR),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite { .. } => PathBuf::from(DB_LOCAL_SQLITE_DIR),
+        };
+    }
 }
 
 impl Default for AveInternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "rocksdb")]
         return AveInternalDBFeatureConfig::Rocksdb {
-            path: PathBuf::from("db").join("local").join("rocksdb"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_LOCAL_ROCKSDB_DIR),
         };
         #[cfg(feature = "sqlite")]
         return Self::Sqlite {
-            path: PathBuf::from("db").join("local").join("sqlite"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_LOCAL_SQLITE_DIR),
         };
     }
 }
 
 impl AveInternalDBFeatureConfig {
+    #[cfg(feature = "test")]
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "rocksdb")]
         return AveInternalDBFeatureConfig::Rocksdb {
@@ -707,14 +996,24 @@ impl AveInternalDBFeatureConfig {
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
-        #[cfg(feature = "rocksdb")]
-        return Ok(AveInternalDBFeatureConfig::Rocksdb {
-            path: PathBuf::from(path),
-        });
-        #[cfg(feature = "sqlite")]
-        return Ok(Self::Sqlite {
-            path: PathBuf::from(path),
-        });
+        #[cfg(feature = "test")]
+        {
+            #[cfg(feature = "rocksdb")]
+            return Ok(AveInternalDBFeatureConfig::Rocksdb {
+                path: PathBuf::from(path),
+            });
+            #[cfg(feature = "sqlite")]
+            return Ok(Self::Sqlite {
+                path: PathBuf::from(path),
+            });
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = path;
+            Err(serde::de::Error::custom(
+                "database paths are fixed in production builds",
+            ))
+        }
     }
 }
 
@@ -730,6 +1029,11 @@ impl fmt::Display for AveInternalDBFeatureConfig {
 }
 
 impl AveInternalDBConfig {
+    // Production directories are constants; test builds validate
+    // their custom ones. Split by cfg: the test body allocates
+    // (`to_string`) and can never be `const`, while the production
+    // body is trivially `const` (and clippy requires it to be).
+    #[cfg(feature = "test")]
     pub fn validate(&self) -> Result<(), Error> {
         match &self.db {
             #[cfg(feature = "rocksdb")]
@@ -753,37 +1057,64 @@ impl AveInternalDBConfig {
         }
         Ok(())
     }
+
+    #[cfg(not(feature = "test"))]
+    pub const fn validate(&self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AveExternalDBConfig {
     #[serde(deserialize_with = "AveExternalDBFeatureConfig::deserialize_db")]
     pub db: AveExternalDBFeatureConfig,
     pub durability: bool,
 }
 
-/// Database configuration.
+/// Database configuration. The engine comes from cargo features; the
+/// directory is FIXED in production and only settable with the
+/// `test` feature.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub enum AveExternalDBFeatureConfig {
     /// Sqlite database.
     #[cfg(feature = "ext-sqlite")]
     Sqlite {
-        /// Path to the database.
+        /// Path to the database. TEST BUILDS ONLY.
+        #[cfg(feature = "test")]
         path: PathBuf,
     },
+}
+
+impl AveExternalDBFeatureConfig {
+    /// Database directory: the fixed production constant, or the
+    /// custom test directory.
+    pub fn path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::Sqlite { path } => path.clone(),
+        };
+        #[cfg(not(feature = "test"))]
+        return match self {
+            #[cfg(feature = "ext-sqlite")]
+            Self::Sqlite { .. } => PathBuf::from(DB_EXT_SQLITE_DIR),
+        };
+    }
 }
 
 impl Default for AveExternalDBFeatureConfig {
     fn default() -> Self {
         #[cfg(feature = "ext-sqlite")]
         return Self::Sqlite {
-            path: PathBuf::from("db").join("ext").join("sqlite"),
+            #[cfg(feature = "test")]
+            path: PathBuf::from(DB_EXT_SQLITE_DIR),
         };
     }
 }
 
 impl AveExternalDBFeatureConfig {
+    #[cfg(feature = "test")]
     pub fn build(path: &PathBuf) -> Self {
         #[cfg(feature = "ext-sqlite")]
         return Self::Sqlite {
@@ -796,10 +1127,20 @@ impl AveExternalDBFeatureConfig {
         D: Deserializer<'de>,
     {
         let path: String = String::deserialize(deserializer)?;
-        #[cfg(feature = "ext-sqlite")]
-        return Ok(Self::Sqlite {
-            path: PathBuf::from(path),
-        });
+        #[cfg(feature = "test")]
+        {
+            #[cfg(feature = "ext-sqlite")]
+            return Ok(Self::Sqlite {
+                path: PathBuf::from(path),
+            });
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = path;
+            Err(serde::de::Error::custom(
+                "database paths are fixed in production builds",
+            ))
+        }
     }
 }
 
@@ -810,6 +1151,11 @@ impl fmt::Display for AveExternalDBFeatureConfig {
 }
 
 impl AveExternalDBConfig {
+    // Production directories are constants; test builds validate
+    // their custom ones. Split by cfg: the test body allocates
+    // (`to_string`) and can never be `const`, while the production
+    // body is trivially `const` (and clippy requires it to be).
+    #[cfg(feature = "test")]
     pub fn validate(&self) -> Result<(), Error> {
         match &self.db {
             #[cfg(feature = "ext-sqlite")]
@@ -822,6 +1168,11 @@ impl AveExternalDBConfig {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "test"))]
+    pub const fn validate(&self) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -871,13 +1222,15 @@ impl Display for LoggingRotation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub output: LoggingOutput,
     /// Endpoint that receives the log batches. `https://` is expected in
     /// production: `http://` is accepted (e.g. collectors on localhost or a
     /// trusted internal network) but ships the logs unencrypted.
     pub api_url: Option<String>,
+    /// Base dir for log files. TEST BUILDS ONLY (production: `LOGS_DIR`).
+    #[cfg(feature = "test")]
     pub file_path: PathBuf, // ruta base de logs
     pub rotation: LoggingRotation,
     pub max_size: usize,  // bytes
@@ -893,7 +1246,8 @@ impl Default for LoggingConfig {
         Self {
             output: LoggingOutput::default(),
             api_url: None,
-            file_path: PathBuf::from("logs"),
+            #[cfg(feature = "test")]
+            file_path: PathBuf::from(LOGS_DIR),
             rotation: LoggingRotation::default(),
             max_size: 100 * 1024 * 1024,
             max_files: 3,
@@ -903,6 +1257,14 @@ impl Default for LoggingConfig {
 }
 
 impl LoggingConfig {
+    /// Base dir for log files: the fixed production constant, or the
+    /// custom test directory.
+    pub fn file_path(&self) -> PathBuf {
+        #[cfg(feature = "test")]
+        return self.file_path.clone();
+        #[cfg(not(feature = "test"))]
+        return PathBuf::from(LOGS_DIR);
+    }
     pub const fn logs(&self) -> bool {
         self.output.api || self.output.file || self.output.stdout
     }
@@ -925,6 +1287,7 @@ impl LoggingConfig {
         }
 
         if self.output.file {
+            #[cfg(feature = "test")]
             if self.file_path.as_os_str().is_empty() {
                 return Err(Error::InvalidConfiguration {
                     component: "logging.file_path".to_string(),
@@ -976,4 +1339,24 @@ fn validate_positive_vec(component: &str, values: &[u64]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_schedule_overflow_is_rejected() {
+        let config = ApprovalConfig {
+            min_window_secs: u64::MAX,
+            probe_schedule_secs: vec![u64::MAX, u64::MAX],
+            keepalive_secs: 1,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn default_config_validates() {
+        assert!(ApprovalConfig::default().validate().is_ok());
+    }
 }

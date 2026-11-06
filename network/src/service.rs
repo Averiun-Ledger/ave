@@ -38,7 +38,7 @@ impl NetworkService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Command;
+    use crate::{Command, Delivery};
     use bytes::Bytes;
     use libp2p::PeerId;
 
@@ -51,6 +51,7 @@ mod tests {
         let command = Command::SendMessage {
             peer,
             message: Bytes::from_static(b"hello"),
+            delivery: Delivery::Queued,
         };
 
         service.send_command(command).await.unwrap();
@@ -69,6 +70,7 @@ mod tests {
         let command = Command::SendMessage {
             peer,
             message: Bytes::from_static(b"hello"),
+            delivery: Delivery::Queued,
         };
 
         let result = service.send_command(command).await;

@@ -1,6 +1,8 @@
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
-    bridge::request::{AbortsQuery, ApprovalStateRes, EventsQuery},
+    bridge::request::{
+        AbortsQuery, ApprovalStateRes, EventsQuery, SinkEventsQuery,
+    },
     identity::{
         DigestIdentifier, HashAlgorithm, KeyPairAlgorithm, PublicKey,
         Signature, Signed,
@@ -15,21 +17,28 @@ use ave_common::{
         RequestState, SubjectDB, TrackerEventVisibilityRangeDB,
         TrackerStoredVisibilityRangeDB, TrackerVisibilityModeDB,
     },
+    sink::DataToSink,
 };
+#[cfg(feature = "test")]
+use ave_core::config::CompilerNodeConfig;
 use ave_core::{
     Api,
     config::{
-        AveExternalDBConfig, AveExternalDBFeatureConfig, AveInternalDBConfig,
-        AveInternalDBFeatureConfig, Config, GovernanceSyncConfig,
-        RebootSyncConfig, SinkConfigEntry, SyncConfig, TrackerSyncConfig,
-        UpdateSyncConfig,
+        ApprovalConfig, AveExternalDBConfig, AveExternalDBFeatureConfig,
+        AveInternalDBConfig, AveInternalDBFeatureConfig, Config,
+        GovernanceSyncConfig, RebootSyncConfig, SinkConfigEntry, SyncConfig,
+        TrackerSyncConfig, UpdateSyncConfig,
     },
+    governance::data::GovernanceData,
 };
 use ave_network::{Config as NetworkConfig, RoutingNode};
 use prometheus_client::registry::Registry;
+use serde_json::{Value, from_value};
 use std::{
     collections::BTreeSet,
-    env, fs,
+    env,
+    error::Error,
+    fs,
     path::PathBuf,
     process,
     str::FromStr,
@@ -42,6 +51,33 @@ use tokio_util::sync::CancellationToken;
 
 pub static PORT_COUNTER: AtomicU16 = AtomicU16::new(45000);
 pub static CONTRACTS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Local rustup toolchain name building for `pin`: tests vote and
+/// validate exactly like production, so pins resolve to the real
+/// installed toolchains they name (never system cargo).
+#[allow(dead_code)]
+pub fn toolchain_name(pin: &str) -> String {
+    ave_common::governance::toolchain_info(pin)
+        .map(|entry| entry.rustc_version.to_owned())
+        .unwrap_or_default()
+}
+
+/// Test nodes vote and validate exactly like production, so they need
+/// the pinned toolchain installed (`rustup toolchain install 1.95.0`
+/// plus the wasm32 target): the default map below points `DEFAULT_PIN`
+/// at it. Tests simulating missing capacity pass their own map
+/// (unknown pins or an explicitly empty one) instead of `None`.
+#[allow(dead_code)]
+pub fn pinned_toolchains() -> std::collections::BTreeMap<String, String> {
+    let default = ave_common::governance::DEFAULT_PIN.to_owned();
+    let name = toolchain_name(&default);
+    let name = if name.is_empty() {
+        "1.95.0".to_owned()
+    } else {
+        name
+    };
+    std::collections::BTreeMap::from([(default, name)])
+}
 
 /// Helper to set an environment variable for the duration of a test and clean
 /// it up afterwards. `std::env::set_var`/`remove_var` are unsafe in Rust 2024
@@ -98,6 +134,9 @@ pub struct CreateNodesAndConnectionsConfig {
     pub is_service: bool,
     pub only_clear_events: bool,
     pub ledger_batch_size: Option<usize>,
+    /// Uniform toolchain map for every node; per-node differences need
+    /// `create_node` directly.
+    pub toolchains: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -114,9 +153,48 @@ pub struct CreateNodeConfig {
     pub ledger_batch_size: Option<usize>,
     pub safe_mode: bool,
     pub sinks: Vec<SinkConfigEntry>,
+    /// Explicit compiler configuration; `None` uses the default (in tests,
+    /// the auto-injected embedded compiler). Only exists in test builds:
+    /// production nodes compile in-process and have no pool config.
+    #[cfg(feature = "test")]
+    pub compiler: Option<CompilerNodeConfig>,
+    /// Explicit contracts directory; `None` generates a fresh one. Needed
+    /// by tests that manipulate the on-disk artifacts (permissions,
+    /// deletions) to exercise boot-time failures.
+    pub contracts_path: Option<PathBuf>,
+    /// Explicit toolchain map pin → local name; `None` uses
+    /// [`pinned_toolchains`] (same votes as production). Tests that
+    /// simulate partial capacity (nodes standing down on unknown
+    /// pins) pass their own map instead.
+    pub toolchains: Option<std::collections::BTreeMap<String, String>>,
+    /// Pinned reproducible cargo binary; wired straight into
+    /// `Config::cargo_bin`. Needed by tests that prove nodes build
+    /// through the patched cargo (cross-architecture byte identity).
+    pub cargo_bin: Option<PathBuf>,
+    /// Explicit governance sync timing; `None` uses the default test
+    /// values. Needed by tests that wait on idle sync rounds so they do
+    /// not pay the full default interval.
+    pub governance_sync: Option<GovernanceSyncConfig>,
+    /// Explicit tracker sync timing; `None` uses the default test
+    /// values (10s interval). Needed by tests that wait on the fetch
+    /// tick so they do not pay the full default interval.
+    pub tracker_sync: Option<TrackerSyncConfig>,
+    /// Explicit approval timing; `None` uses the default test values
+    /// (long window, fast early probes). Needed by tests that exercise
+    /// the approval deadline: they set a short window explicitly.
+    pub approval: Option<ApprovalConfig>,
 }
 
 pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
+    try_create_node(config).await.unwrap()
+}
+
+/// Fallible variant of [`create_node`] for tests that expect the node boot
+/// to fail (fatal contract artifact errors surface as `Api::build` errors).
+#[allow(dead_code)]
+pub async fn try_create_node(
+    config: CreateNodeConfig,
+) -> Result<(NodeData, Vec<TempDir>), ave_core::error::Error> {
     let CreateNodeConfig {
         node_type,
         listen_address,
@@ -130,35 +208,37 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         ledger_batch_size,
         safe_mode,
         sinks,
+        #[cfg(feature = "test")]
+        compiler,
+        contracts_path,
+        governance_sync,
+        tracker_sync,
+        approval,
+        toolchains,
+        cargo_bin,
     } = config;
 
     let keys =
         keys.unwrap_or(KeyPair::Ed25519(Ed25519Signer::generate().unwrap()));
 
     let mut vec_dirs = vec![];
-    let local_db = local_db.map_or_else(
-        || {
-            let dir =
-                tempfile::tempdir().expect("Can not create temporal directory");
-            let local_db = dir.path().to_path_buf();
-            vec_dirs.push(dir);
+    let local_db = local_db.unwrap_or_else(|| {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let local_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-            local_db
-        },
-        |local_db| local_db,
-    );
+        local_db
+    });
 
-    let ext_db = ext_db.map_or_else(
-        || {
-            let dir =
-                tempfile::tempdir().expect("Can not create temporal directory");
-            let ext_db = dir.path().to_path_buf();
-            vec_dirs.push(dir);
+    let ext_db = ext_db.unwrap_or_else(|| {
+        let dir =
+            tempfile::tempdir().expect("Can not create temporal directory");
+        let ext_db = dir.path().to_path_buf();
+        vec_dirs.push(dir);
 
-            ext_db
-        },
-        |ext_db| ext_db,
-    );
+        ext_db
+    });
 
     let network_config = NetworkConfig::new(
         node_type,
@@ -167,11 +247,13 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         peers,
     );
 
-    let contracts_path = env::temp_dir().join(format!(
-        "ave-test-contracts-{}-{}",
-        process::id(),
-        CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
+    let contracts_path = contracts_path.unwrap_or_else(|| {
+        env::temp_dir().join(format!(
+            "ave-test-contracts-{}-{}",
+            process::id(),
+            CONTRACTS_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ))
+    });
     fs::create_dir_all(&contracts_path)
         .expect("Can not create contracts directory");
 
@@ -192,24 +274,31 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         contracts_path,
         safe_mode,
         always_accept,
+        approval: approval.unwrap_or_default(),
         tracking_size: 100,
         sync: SyncConfig {
             ledger_batch_size: ledger_batch_size.unwrap_or(100),
-            governance: GovernanceSyncConfig {
+            governance: governance_sync.unwrap_or(GovernanceSyncConfig {
                 interval_secs: 10,
                 sample_size: 3,
                 response_timeout_secs: 5,
-            },
-            tracker: TrackerSyncConfig {
+            }),
+            tracker: tracker_sync.unwrap_or(TrackerSyncConfig {
                 interval_secs: 10,
                 page_size: 10,
                 response_timeout_secs: 5,
                 update_batch_size: 2,
                 update_timeout_secs: 5,
-            },
+            }),
             update: UpdateSyncConfig::default(),
             reboot: RebootSyncConfig::default(),
         },
+        // The field only exists in test builds (production nodes
+        // compile in-process and have no compiler pool config).
+        #[cfg(feature = "test")]
+        compiler: compiler.unwrap_or_default(),
+        toolchains: toolchains.unwrap_or_else(pinned_toolchains),
+        cargo_bin,
         spec: None,
     };
 
@@ -226,10 +315,9 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
         graceful_token.clone(),
         crash_token,
     )
-    .await
-    .unwrap();
+    .await?;
 
-    (
+    Ok((
         NodeData {
             api,
             handler: runners,
@@ -238,7 +326,7 @@ pub async fn create_node(config: CreateNodeConfig) -> (NodeData, Vec<TempDir>) {
             listen_address,
         },
         vec_dirs,
-    )
+    ))
 }
 
 #[allow(dead_code)]
@@ -253,6 +341,7 @@ pub async fn create_nodes_and_connections(
         is_service,
         only_clear_events,
         ledger_batch_size,
+        toolchains,
     } = config;
 
     let mut nodes: Vec<NodeData> = Vec::new();
@@ -283,6 +372,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;
@@ -312,6 +402,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;
@@ -341,6 +432,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            toolchains: toolchains.clone(),
             ..Default::default()
         })
         .await;
@@ -529,13 +621,22 @@ pub async fn get_subject(
     sn: Option<u64>,
     timeout: bool,
 ) -> Result<SubjectDB, Box<dyn std::error::Error>> {
+    // Iterations without progress (same sn or node unreachable).
+    // Advancing toward the target resets the budget, so slowness
+    // under load never fails: only a stuck subject times out.
     let mut count = 0;
+    let mut last_sn: Option<u64> = None;
     loop {
         if let Ok(state) = node.get_subject_state(subject_id.clone()).await {
             if let Some(sn) = sn {
                 if sn == state.sn {
                     return Ok(state);
-                } else if count > 100 {
+                }
+                if last_sn.is_some_and(|last| last != state.sn) {
+                    count = 0;
+                }
+                last_sn = Some(state.sn);
+                if timeout && count > 100 {
                     return Err(format!(
                         "timeout waiting for subject {} at sn {}, actual sn {}",
                         subject_id, sn, state.sn
@@ -545,13 +646,14 @@ pub async fn get_subject(
             } else {
                 return Ok(state);
             }
-        } else if count > 100 {
+        } else if timeout && count > 100 {
             return Err(format!(
                 "timeout waiting for subject {} at sn {:?}",
                 subject_id, sn
             )
             .into());
         }
+
         tokio::time::sleep(Duration::from_millis(300)).await;
         if timeout {
             count += 1;
@@ -566,7 +668,11 @@ pub async fn get_events(
     expected_len: usize,
     timeout: bool,
 ) -> Result<Vec<LedgerDB>, Box<dyn std::error::Error>> {
+    // Iterations without progress (same event count). Appends reset
+    // the budget: slowness under load never fails, only a stuck
+    // ledger times out.
     let mut count = 0;
+    let mut last_len: Option<usize> = None;
     loop {
         if let Ok(state) = node
             .get_events(
@@ -580,7 +686,12 @@ pub async fn get_events(
         {
             if state.events.len() == expected_len {
                 return Ok(state.events);
-            } else if count > 100 {
+            }
+            if last_len.is_some_and(|last| last != state.events.len()) {
+                count = 0;
+            }
+            last_len = Some(state.events.len());
+            if timeout && count > 100 {
                 return Err(format!(
                     "timeout waiting for events {} at len {}, actual len {}",
                     subject_id,
@@ -589,7 +700,7 @@ pub async fn get_events(
                 )
                 .into());
             }
-        } else if count > 100 {
+        } else if timeout && count > 100 {
             return Err(format!(
                 "timeout waiting for events {} at len {}",
                 subject_id, expected_len
@@ -639,7 +750,7 @@ pub async fn wait_request_state(
     loop {
         if let Ok(state) = node.get_request_state(request_id.clone()).await {
             if let Some(request_state) = request_state.clone() {
-                match (request_state, state.state.clone()) {
+                match (request_state.clone(), state.state.clone()) {
                     (RequestState::InQueue, RequestState::InQueue)
                     | (RequestState::Handling, RequestState::Handling)
                     | (
@@ -659,6 +770,8 @@ pub async fn wait_request_state(
                         RequestState::RebootTimeOut { .. },
                         RequestState::RebootTimeOut { .. },
                     )
+                    | (RequestState::Evaluation, RequestState::Evaluation)
+                    | (RequestState::Approval, RequestState::Approval)
                     | (RequestState::Validation, RequestState::Validation)
                     | (
                         RequestState::Distribution,
@@ -666,6 +779,19 @@ pub async fn wait_request_state(
                     )
                     | (RequestState::Finish, RequestState::Finish) => {
                         return Ok(state.state);
+                    }
+                    // Terminal states never transition: waiting for
+                    // anything else while the request already finished,
+                    // aborted or was invalidated can not succeed no
+                    // matter the load — fail fast instead of hanging
+                    // forever and hiding the real outcome.
+                    (_, RequestState::Finish)
+                    | (_, RequestState::Abort { .. })
+                    | (_, RequestState::Invalid { .. }) => {
+                        panic!(
+                            "request {:?} ended in {:?}, waited for {:?}",
+                            request_id, state.state, request_state
+                        );
                     }
                     _ => {
                         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -760,7 +886,57 @@ pub async fn emit_approve(
     request_id: DigestIdentifier,
     wait_request_state: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    node.approve(governance_id.clone(), res).await.unwrap();
+    // Bind the vote to the exact pending request: fetch its
+    // collection coordinates first (poll: the collecting validator
+    // registers it asynchronously), then approve with them so a
+    // replaced request conflicts instead of receiving the vote.
+    // Concurrent collections can supersede the stored request
+    // between fetch and vote; that is a stale read, not a lost
+    // vote, so re-fetch and retry a few times (compare-and-swap).
+    let mut attempts_left = 10usize;
+    loop {
+        let stored = {
+            let started = tokio::time::Instant::now();
+            loop {
+                if let Ok(Some(stored)) =
+                    node.get_approval(governance_id.clone(), None).await
+                {
+                    break stored;
+                }
+                if started.elapsed() >= Duration::from_secs(10) {
+                    return Err("approval not registered in time".into());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        match node
+            .approve(
+                governance_id.clone(),
+                res.clone(),
+                stored.request_id,
+                stored.version,
+                stored.request.issued_at.as_nanos(),
+            )
+            .await
+        {
+            Ok(_) => break,
+            Err(e)
+                if attempts_left > 0
+                    && matches!(
+                        &e,
+                        ave_core::error::Error::InvalidApprovalState(
+                            description
+                        ) if description.starts_with(
+                            ave_core::request::error::APPROVAL_CONFLICT_PREFIX
+                        )
+                    ) =>
+            {
+                attempts_left -= 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     // state of request
     if !wait_request_state {
@@ -900,4 +1076,118 @@ pub fn assert_tracker_visibility(
     }
 
     Ok(())
+}
+
+// Contract fixtures live in `ave_core::test_contracts` (single source
+// of truth, shared with unit tests); re-exported here so suites keep
+// using `common::EXAMPLE_CONTRACT` etc.
+#[allow(unused_imports)]
+pub use ave_core::test_contracts::*;
+
+#[track_caller]
+#[allow(dead_code)]
+pub fn assert_governance_properties_eq(
+    actual: Value,
+    expected: GovernanceData,
+) {
+    let actual: GovernanceData = from_value(actual).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[track_caller]
+#[allow(dead_code)]
+pub fn governance_properties(actual: Value) -> GovernanceData {
+    from_value(actual).unwrap()
+}
+
+#[allow(dead_code)]
+pub async fn wait_sink_events(
+    node: &ave_core::Api,
+    subject_id: DigestIdentifier,
+    expected_len: usize,
+) -> Result<Vec<DataToSink>, Box<dyn Error>> {
+    let mut attempts = 0;
+    loop {
+        let page = node
+            .get_sink_events(
+                subject_id.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(0),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await?;
+
+        if page.events.len() == expected_len {
+            return Ok(page.events);
+        }
+
+        if attempts > 100 {
+            return Err(format!(
+                "timeout waiting for sink events for subject {} at len {}, actual len {}",
+                subject_id,
+                expected_len,
+                page.events.len()
+            )
+            .into());
+        }
+
+        attempts += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// Espera acotada a que el artefacto wasm de un schema exista en disco y
+// devuelve sus bytes.
+#[allow(dead_code)]
+pub async fn wait_artifact_bytes(
+    contracts_path: &std::path::Path,
+    artifact_name: &str,
+) -> Vec<u8> {
+    // persist_artifact (compilation/pipeline.rs) escribe contract.wasm
+    // PRIMERO y contract.cwasm después: un wasm legible puede ser un
+    // prefijo en plena escritura. Exigir el cwasm garantiza que la
+    // escritura del wasm ya terminó.
+    let dir = contracts_path.join("contracts").join(artifact_name);
+    let path = dir.join("contract.wasm");
+    let precompiled = dir.join("contract.cwasm");
+    for _ in 0..100 {
+        if precompiled.exists()
+            && let Ok(bytes) = fs::read(&path)
+        {
+            return bytes;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!("timeout waiting for artifact {}", path.display());
+}
+
+// Espera acotada a que el artefacto wasm de un schema exista en disco
+// con exactamente los bytes esperados (cubre el caso tampered: el
+// fichero existe con basura hasta que el refetch lo reemplaza).
+#[allow(dead_code)]
+pub async fn wait_artifact_bytes_eq(
+    contracts_path: &std::path::Path,
+    artifact_name: &str,
+    expected: &[u8],
+) {
+    // Misma carrera que wait_artifact_bytes: exigir el cwasm (escrito
+    // después del wasm) antes de comparar.
+    let dir = contracts_path.join("contracts").join(artifact_name);
+    let path = dir.join("contract.wasm");
+    let precompiled = dir.join("contract.cwasm");
+    for _ in 0..100 {
+        if precompiled.exists()
+            && let Ok(bytes) = fs::read(&path)
+            && bytes == expected
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!(
+        "timeout waiting for artifact {} with expected bytes",
+        path.display()
+    );
 }

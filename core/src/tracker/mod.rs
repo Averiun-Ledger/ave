@@ -15,11 +15,15 @@ use crate::{
         common::{
             TrackerEventVisibility, TrackerStoredVisibility,
             TrackerVisibilityMode, TrackerVisibilityState, crash_system,
-            get_last_event, purge_storage, remove_verified_transfer,
+            get_last_event, get_n_events, purge_storage,
+            remove_verified_transfer,
         },
         event::{Ledger, Protocols, ValidationMetadata},
     },
-    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    node::{
+        Node, NodeMessage, NodeResponse, TransferSubject,
+        register::RegisterMessage,
+    },
     sink::{SinkManager, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
@@ -39,11 +43,13 @@ use ave_common::{
 };
 
 use async_trait::async_trait;
-use ave_actors::{FullPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span, warn};
+
+pub mod reconcile;
 
 #[derive(
     Debug, Serialize, Deserialize, Clone, BorshSerialize, BorshDeserialize,
@@ -66,6 +72,9 @@ pub struct Tracker {
     pub service: bool,
     pub only_clear_events: bool,
     pub hash: Option<HashAlgorithm>,
+    /// Skip boot reconciliation (clean boot or already reconciled
+    /// this boot): the subject manager decides once per boot.
+    pub skip_reconcile: bool,
     pub state: Arc<TrackerState>,
 }
 
@@ -76,6 +85,7 @@ impl Clone for Tracker {
             service: self.service,
             only_clear_events: self.only_clear_events,
             hash: self.hash,
+            skip_reconcile: self.skip_reconcile,
             state: self.state.clone(),
         }
     }
@@ -144,24 +154,42 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::EOLSubject {
-            subject_id: self.subject_metadata.subject_id.clone(),
-            i_owner: *self.our_key == self.subject_metadata.owner,
-        })
-        .await
+        // Ask, not tell: the node journals before replying, so an
+        // Ok means the write is durable.
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::EOLSubject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                i_owner: *self.our_key == self.subject_metadata.owner,
+            })
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::RejectTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::RejectTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
         let witnesses_register = ctx
             .system()
@@ -170,29 +198,52 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Reject {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Reject {
                 subject_id: self.subject_metadata.subject_id.clone(),
-                sn: self.subject_metadata.sn + 1,
+                sn: event_sn,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn confirm(
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
+        old_owner: PublicKey,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::ConfirmTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::ConfirmTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
-        if self.service || *self.our_key == self.subject_metadata.owner {
+        // Every witness tracks ownership moves for subjects it
+        // observes: distribution-time quota checks run on all
+        // witnesses, so a partial register would reject valid
+        // creations after transfers.
+        {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -204,7 +255,7 @@ impl Subject for Tracker {
             let _ = subject_register
                 .ask(SubjectRegisterMessage::UpdateSubject {
                     new_owner,
-                    old_owner: self.subject_metadata.owner.clone(),
+                    old_owner: old_owner.clone(),
                     subject_id: self.subject_metadata.subject_id.clone(),
                     namespace: self.namespace.to_string(),
                     schema_id: self.subject_metadata.schema_id.clone(),
@@ -220,13 +271,23 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Confirm {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Confirm {
                 subject_id: self.subject_metadata.subject_id.clone(),
-                sn: self.subject_metadata.sn + 1,
+                sn: event_sn,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn transfer(
@@ -237,13 +298,20 @@ impl Subject for Tracker {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::TransferSubject(TransferSubject {
-            name: self.subject_metadata.name.clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            new_owner: new_owner.clone(),
-            actual_owner: self.subject_metadata.owner.clone(),
-        }))
-        .await?;
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::TransferSubject(TransferSubject {
+                name: self.subject_metadata.name.clone(),
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner: new_owner.clone(),
+                actual_owner: self.subject_metadata.owner.clone(),
+            }))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
 
         let witnesses_register = ctx
             .system()
@@ -252,13 +320,23 @@ impl Subject for Tracker {
                 self.governance_id
             )))
             .await?;
-        witnesses_register
-            .tell(WitnessesRegisterMessage::Transfer {
+        let WitnessesRegisterResponse::Ok = witnesses_register
+            .ask(WitnessesRegisterMessage::Transfer {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 new_owner,
                 gov_version,
             })
-            .await
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/witnesses_register",
+                    self.governance_id
+                )),
+                expected: "WitnessesRegisterResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn get_last_ledger(
@@ -272,7 +350,17 @@ impl Subject for Tracker {
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        // Trackers never compile during apply: the flag only gates
+        // governance artifact acquisition.
+        _defer_acquisition: bool,
     ) -> Result<(), ActorError> {
+        // Nothing to apply: skip the state publish below (an empty batch
+        // on a fresh subject would force a build and publish with zero
+        // changes).
+        if events.is_empty() {
+            return Ok(());
+        }
+
         let Some(hash) = self.hash else {
             return Err(ActorError::FunctionalCritical {
                 description: "Can not obtain Hash".to_string(),
@@ -285,18 +373,20 @@ impl Subject for Tracker {
         {
             if let ActorError::Functional { description } = e.clone() {
                 warn!(
+                    msg_type = "VerifyLedger",
                     error = %description,
                     subject_id = %self.subject_metadata.subject_id,
                     sn = self.subject_metadata.sn,
                     "Error verifying new ledger events"
                 );
 
-                // Falló en la creación
+                // Failed during creation
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
             } else {
                 error!(
+                    msg_type = "VerifyLedger",
                     error = %e,
                     subject_id = %self.subject_metadata.subject_id,
                     sn = self.subject_metadata.sn,
@@ -338,11 +428,20 @@ impl Subject for Tracker {
                     .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
                     .await
                 {
-                    error!(error = %e, "Failed to notify SinkManager");
+                    warn!(
+                        msg_type = "NotifySink",
+                        error = %e,
+                        "Failed to notify SinkManager"
+                    );
                 }
             }
             Err(e) => {
-                debug!(error = %e, path = %manager_path, "SinkManager not found");
+                debug!(
+                    msg_type = "NotifySink",
+                    error = %e,
+                    path = %manager_path,
+                    "SinkManager not found"
+                );
             }
         }
         Ok(())
@@ -426,6 +525,7 @@ impl Tracker {
         &self,
         ctx: &ActorContext<Self>,
         event: &Ledger,
+        era_mode: TrackerVisibilityMode,
     ) -> Result<(), ActorError> {
         let (stored_visibility, event_visibility, mode) = match &event.protocols
         {
@@ -449,17 +549,17 @@ impl Tracker {
                 };
                 let (stored_visibility, event_visibility) =
                     Self::fact_visibilities(&fact_request.viewpoints, false);
-                (stored_visibility, event_visibility, self.visibility_mode)
+                (stored_visibility, event_visibility, era_mode)
             }
             Protocols::TrackerFactOpaque { evaluation, .. } => {
                 let (stored_visibility, event_visibility) =
                     Self::fact_visibilities(&evaluation.viewpoints, true);
-                let mode = if evaluation.is_ok() {
+                let resolved = if evaluation.is_ok() {
                     TrackerVisibilityMode::Opaque
                 } else {
-                    self.visibility_mode
+                    era_mode
                 };
-                (stored_visibility, event_visibility, mode)
+                (stored_visibility, event_visibility, resolved)
             }
             Protocols::Transfer { .. }
             | Protocols::TrackerConfirm { .. }
@@ -467,7 +567,7 @@ impl Tracker {
             | Protocols::EOL { .. } => {
                 let (stored_visibility, event_visibility) =
                     Self::public_visibilities();
-                (stored_visibility, event_visibility, self.visibility_mode)
+                (stored_visibility, event_visibility, era_mode)
             }
             _ => {
                 return Err(ActorError::Functional {
@@ -587,7 +687,10 @@ impl Tracker {
             })
             .await?;
 
-        if self.service || *self.our_key == self.subject_metadata.owner {
+        // Every witness tracks creations it observes: the
+        // distribution-time quota check runs everywhere, so all
+        // witnesses must converge on the same counts.
+        {
             let subject_register = ctx
                 .system()
                 .get_actor::<SubjectRegister>(&ActorPath::from(&format!(
@@ -616,12 +719,13 @@ impl Tracker {
             .await?;
 
         witnesses_register
-            .tell(WitnessesRegisterMessage::Create {
+            .ask(WitnessesRegisterMessage::Create {
                 subject_id: self.subject_metadata.subject_id.clone(),
                 gov_version,
                 owner: self.subject_metadata.owner.clone(),
             })
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn register_gov_version_sn(
@@ -678,10 +782,11 @@ impl Tracker {
                 });
             }
 
+            self.on_event(first.clone(), ctx).await;
             self.create(ctx, first.gov_version).await?;
 
-            self.on_event(first.clone(), ctx).await;
-            self.record_visibility_event(ctx, &first).await?;
+            self.record_visibility_event(ctx, &first, self.visibility_mode)
+                .await?;
 
             Self::register(
                 ctx,
@@ -745,6 +850,15 @@ impl Tracker {
             let last_data = LastData {
                 gov_version: last_ledger.gov_version,
                 vali_data: last_ledger.protocols.get_validation_data(),
+                approval_data_hash: last_ledger
+                    .protocols
+                    .approval_data_hash(hash)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Can not create approval data hash: {}",
+                            e
+                        ),
+                    })?,
             };
 
             let last_gov_version = last_data.gov_version;
@@ -766,8 +880,22 @@ impl Tracker {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
                     // Check if it's a sequence number error
-                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
-                        // El evento que estamos aplicando no es el siguiente.
+                    if let SubjectError::InvalidSequenceNumber {
+                        expected,
+                        actual,
+                    } = &e
+                    {
+                        // The event being applied is not next: it is
+                        // skipped in this batch (sync re-delivers while
+                        // pending) but it is recorded — a silent skip
+                        // is a lost event with no trace.
+                        debug!(
+                            msg_type = "ApplyBatch",
+                            subject_id = %self.subject_metadata.subject_id,
+                            expected_sn = expected,
+                            event_sn = actual,
+                            "Skipping out-of-order ledger event in batch"
+                        );
                         continue;
                     } else {
                         return Err(ActorError::Functional {
@@ -781,13 +909,51 @@ impl Tracker {
 
             let event_request = event.get_event_request();
 
+            // Journal first: persist the authoritative event before any
+            // derived write, so a crash can only leave registers behind
+            // (fixed by boot reconciliation), never ahead of the journal.
+            // Capture pre-apply values first: apply bumps sn and, on
+            // confirm, rotates the owner.
+            let pre_sn = self.subject_metadata.sn;
+            let pre_owner = self.subject_metadata.owner.clone();
+            let pre_subject_id = self.subject_metadata.subject_id.clone();
+
+            // Persist event.
+            self.on_event(event.clone(), ctx).await;
+
             if last_event_is_ok {
+                // Failed events only leave their ledger record: every
+                // derived write below mirrors exactly what `apply`
+                // mutates. Visibility and sn describe the ledger event
+                // itself, so they always record.
+                let transfer_ok = matches!(
+                    &event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
                 if last_gov_version != event_gov_version {
-                    self.register_gov_version_sn(ctx, last_gov_version).await?;
+                    // Transition mapping uses the pre-event sn: the last
+                    // sn of the previous gov version.
+                    let sn_register = ctx
+                        .system()
+                        .get_actor::<SnRegister>(&ActorPath::from(format!(
+                            "/user/node/subject_manager/{}/sn_register",
+                            self.governance_id
+                        )))
+                        .await?;
+                    sn_register
+                        .tell(SnRegisterMessage::RegisterSn {
+                            subject_id: pre_subject_id.clone(),
+                            gov_version: last_gov_version,
+                            sn: pre_sn,
+                        })
+                        .await?;
                 }
                 if let Some(event_request) = &event_request {
                     match event_request {
-                        EventRequest::Transfer(transfer_request) => {
+                        EventRequest::Transfer(transfer_request)
+                            if transfer_ok =>
+                        {
                             self.transfer(
                                 ctx,
                                 transfer_request.new_owner.clone(),
@@ -801,13 +967,17 @@ impl Tracker {
                             )
                             .await?;
                         }
+                        EventRequest::Transfer(..) => {}
                         EventRequest::Reject(..) => {
-                            self.reject(ctx, event.gov_version).await?;
+                            self.reject(ctx, event.sn, event.gov_version)
+                                .await?;
                         }
                         EventRequest::Confirm(..) => {
                             self.confirm(
                                 ctx,
                                 event.ledger_seal_signature.signer.clone(),
+                                pre_owner.clone(),
+                                event.sn,
                                 event.gov_version,
                             )
                             .await?;
@@ -832,9 +1002,8 @@ impl Tracker {
                 }
             }
 
-            // Aplicar evento.
-            self.on_event(event.clone(), ctx).await;
-            self.record_visibility_event(ctx, &event).await?;
+            self.record_visibility_event(ctx, &event, self.visibility_mode)
+                .await?;
 
             let (issuer, event_request_timestamp) =
                 event.get_issuer_event_request_timestamp();
@@ -929,8 +1098,9 @@ impl Actor for Tracker {
     ) -> Result<(), ActorError> {
         if let Err(e) = self.init_store("tracker", None, true, ctx).await {
             error!(
-                error = %e,
-                "Failed to initialize tracker store"
+            msg_type = "Init",
+            error = %e,
+            "Failed to initialize tracker store"
             );
             return Err(e);
         }
@@ -944,8 +1114,172 @@ impl Actor for Tracker {
             });
         };
 
+        // Safe mode performs no boot healing (like governances and
+        // resumed requests): diagnostics and deletes run against
+        // persisted state as is.
         if config.safe_mode {
             return Ok(());
+        }
+
+        // Snapshot repair: a snapshot saved before the genesis fields
+        // were adopted keeps an empty governance id (the journal
+        // replay that should have filled it was skipped). Rebuild
+        // them from the genesis event before anything reads the
+        // registers; the next snapshot persists the healed state.
+        // A valid tracker always belongs to a governance, so an
+        // empty id means a stale snapshot, never a legitimate state.
+        if self.governance_id.is_empty() {
+            let genesis: Vec<Ledger> = get_n_events(ctx, 0, 1).await?;
+            let Some(first) = genesis.first() else {
+                // No history (unknown subject lifted manually):
+                // nothing to repair and no registers to read.
+                return Ok(());
+            };
+            if !first.is_create_event() {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: journal tip without genesis create",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            }
+            let Protocols::Create { validation, .. } = &first.protocols else {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis event is not a create",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            };
+            let ValidationMetadata::Metadata(metadata) =
+                &validation.validation_metadata
+            else {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis has no metadata",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            };
+            if metadata.governance_id.is_empty() {
+                return Err(ActorError::FunctionalCritical {
+                    description: format!(
+                        "Cannot repair tracker {}: genesis governance_id is empty",
+                        self.subject_metadata.subject_id
+                    ),
+                });
+            }
+            let inner = Arc::make_mut(&mut self.state);
+            inner.governance_id = metadata.governance_id.clone();
+            inner.namespace = metadata.namespace.clone();
+            inner.genesis_gov_version = metadata.genesis_gov_version;
+            debug!(
+                subject_id = %self.subject_metadata.subject_id,
+                "Repaired tracker genesis fields from journal"
+            );
+        }
+
+        // Boot reconciliation: replay sn registrations and visibility
+        // records so governance registers catch up to the persisted
+        // tip before this actor processes anything (race-free: the
+        // mailbox is still closed). Skipped on clean boots and
+        // repeat boots (the subject manager decides once per boot).
+        // Target writes are key-anchored and idempotent, so
+        // interleaving with the governance's own reconcile is safe.
+        // A failure here is a broken node, not a degraded one: fail
+        // the boot loud.
+        if let Err(e) = self.reconcile_registers(ctx).await {
+            error!(
+                error = %e,
+                "Failed to reconcile tracker registers at boot"
+            );
+            return Err(e);
+        }
+
+        // Crash backstop: replay ledger events the query projection
+        // missed between persist and projection write, and refresh
+        // the subject state row. Dirty boots only (clean runs
+        // project live); once per boot like the reconcile above.
+        // Skipped for ledgers without history (unknown subject
+        // lifted manually): there is nothing to replay and the
+        // state snapshot needs registers that do not exist.
+        if !self.skip_reconcile
+            && crate::model::common::get_last_event(ctx).await?.is_some()
+        {
+            let state = self.build_subject_db(ctx).await?;
+            if let Err(e) = crate::model::common::fill_projection_gap(
+                ctx,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+                state,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to fill projection gap at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for register-table tails: re-emit this
+        // subject's registration (upsert, idempotent). Dirty boots
+        // only; deleted subjects stay deleted.
+        if !self.skip_reconcile && self.subject_metadata.active {
+            use crate::node::register::RegisterMessage;
+            if let Err(e) = Self::reemit_registration(
+                ctx,
+                RegisterMessage::RegisterSubj {
+                    gov_id: self.governance_id.to_string(),
+                    subject_id: self.subject_metadata.subject_id.to_string(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    name: self.subject_metadata.name.clone(),
+                    description: self.subject_metadata.description.clone(),
+                },
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to re-emit subject registration at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for quiet subjects: report the ledger tip to
+        // the sink manager so undelivered past events are caught up
+        // even without fresh traffic. Map reads only; the catch-up
+        // chain lifts this subject itself if delivery is needed.
+        // Dirty boots only: on a running node the reconciled set
+        // already gates repeats, and firing on every request-driven
+        // reboot could race slow live acks with duplicate catch-ups.
+        // Ledgers without history (unknown subject lifted manually)
+        // report nothing: with no tip a missing cursor must not read
+        // as behind.
+        if !self.skip_reconcile
+            && crate::model::common::get_last_event(ctx).await?.is_some()
+        {
+            let manager_path = ActorPath::from(format!(
+                "/user/node/subject_manager/{}/sink_manager",
+                self.governance_id
+            ));
+            if let Err(e) = crate::model::common::review_sink_cursor(
+                ctx.system(),
+                manager_path,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to review sink cursor at boot"
+                );
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -997,7 +1331,7 @@ impl Handler<Self> for Tracker {
             TrackerMessage::UpdateLedger { events } => {
                 let events_count = events.len();
                 if let Err(e) =
-                    self.manager_new_ledger_events(ctx, events).await
+                    self.manager_new_ledger_events(ctx, events, false).await
                 {
                     warn!(
                         msg_type = "UpdateLedger",
@@ -1053,13 +1387,21 @@ pub struct InitParamsTracker {
     pub hash: HashAlgorithm,
     pub is_service: bool,
     pub only_clear_events: bool,
+    pub skip_reconcile: bool,
 }
 
 #[async_trait]
 impl PersistentActor for Tracker {
-    type Persistence = FullPersistence;
     type InitParams = InitParamsTracker;
     type State = TrackerState;
+
+    /// Wide cadence: snapshots rewrite the whole state (properties
+    /// included) while replay of up to 1000 events stays in the
+    /// millisecond range. The event log itself is never pruned: it
+    /// doubles as the servable ledger.
+    fn snapshot_every() -> Option<u64> {
+        Some(1000)
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         let init = params.data.unwrap_or_default();
@@ -1069,6 +1411,7 @@ impl PersistentActor for Tracker {
             only_clear_events: params.only_clear_events,
             hash: Some(params.hash),
             our_key: params.public_key,
+            skip_reconcile: params.skip_reconcile,
             state: Arc::new(TrackerState {
                 subject_metadata: init.subject_metadata,
                 properties: init.properties,
@@ -1109,9 +1452,58 @@ impl PersistentActor for Tracker {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
+                    // Same genesis gates as the first-event verification:
+                    // adopted state must match node-constructed defaults
+                    // and requester-controlled fields must pass the create
+                    // validation rules, never blind-synced bytes.
+                    if let Some(name) = &metadata.name
+                        && (name.is_empty() || name.len() > 100)
+                    {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis name is invalid"
+                                    .to_owned(),
+                        });
+                    }
+                    if let Some(description) = &metadata.description
+                        && (description.is_empty() || description.len() > 200)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis description is invalid".to_owned() });
+                    }
+                    if metadata.governance_id.is_empty() {
+                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must be set".to_owned() });
+                    }
+                    if !metadata.schema_id.is_valid_in_request() {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis schema_id is invalid"
+                                    .to_owned(),
+                        });
+                    }
+                    if metadata.creator != metadata.owner {
+                        return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
+                    }
+                    if metadata.new_owner.is_some() {
+                        return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
+                    }
+                    if !metadata.active {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis must be active"
+                                    .to_owned(),
+                        });
+                    }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = metadata.properties.clone();
                     inner.visibility_mode = TrackerVisibilityMode::Full;
+                    // The create parameters are transient: after a
+                    // snapshot-less recovery the journal replay is the
+                    // only source for these fields, so adopt them from
+                    // the genesis event itself (never blind-synced:
+                    // the gates above already validated them).
+                    inner.governance_id = metadata.governance_id.clone();
+                    inner.namespace = metadata.namespace.clone();
+                    inner.genesis_gov_version = metadata.genesis_gov_version;
 
                     debug!(
                         event_type = "Create",
@@ -1332,3 +1724,149 @@ impl PersistentActor for Tracker {
 }
 
 impl Storable for Tracker {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tracker, TrackerState, TrackerVisibilityMode};
+    use crate::model::event::{
+        Ledger, Protocols, ValidationData, ValidationMetadata,
+    };
+    use crate::subject::{Metadata, SubjectMetadata};
+    use ave_actors::PersistentActor;
+    use ave_common::identity::{
+        DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed,
+        hash_borsh,
+        keys::{DSAlgorithm, Ed25519Signer, KeyPair},
+    };
+    use ave_common::request::{CreateRequest, EventRequest};
+    use ave_common::{Namespace, SchemaType, ValueWrapper};
+    use std::sync::Arc;
+
+    fn test_owner() -> (KeyPair, PublicKey) {
+        let keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+        let owner =
+            PublicKey::new(DSAlgorithm::Ed25519, keys.public_key_bytes())
+                .unwrap();
+        (keys, owner)
+    }
+
+    fn test_metadata(owner: &PublicKey) -> Metadata {
+        let gov_version = 7u64;
+        let governance_id =
+            hash_borsh(&*HashAlgorithm::Blake3.hasher(), &gov_version).unwrap();
+        Metadata {
+            name: Some("Name".to_owned()),
+            description: Some("Description".to_owned()),
+            subject_id: DigestIdentifier::default(),
+            governance_id,
+            genesis_gov_version: gov_version,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            namespace: Namespace::from("ns"),
+            sn: 0,
+            creator: owner.clone(),
+            owner: owner.clone(),
+            new_owner: None,
+            active: true,
+            properties: ValueWrapper::default(),
+        }
+    }
+
+    fn test_create_ledger(metadata: &Metadata, keys: &KeyPair) -> Ledger {
+        let request = EventRequest::Create(CreateRequest {
+            name: metadata.name.clone(),
+            description: metadata.description.clone(),
+            governance_id: metadata.governance_id.clone(),
+            schema_id: metadata.schema_id.clone(),
+            namespace: metadata.namespace.clone(),
+        });
+        let signed = Signed::new(request, keys).unwrap();
+        Ledger {
+            gov_version: metadata.genesis_gov_version,
+            sn: 0,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            ledger_seal_signature: signed.signature().clone(),
+            protocols: Protocols::Create {
+                event_request: Arc::new(signed),
+                validation: ValidationData {
+                    validation_req_signature: signed_signature(keys),
+                    validation_req_hash: DigestIdentifier::default(),
+                    validators_signatures: vec![],
+                    validation_metadata: ValidationMetadata::Metadata(
+                        Box::new(metadata.clone()),
+                    ),
+                },
+            },
+        }
+    }
+
+    fn signed_signature(keys: &KeyPair) -> Signature {
+        let request = EventRequest::Create(CreateRequest {
+            name: None,
+            description: None,
+            governance_id: DigestIdentifier::default(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            namespace: Namespace::new(),
+        });
+        Signed::new(request, keys).unwrap().into_parts().1
+    }
+
+    // A recovered tracker without a snapshot replays from the journal:
+    // `apply(Create)` must restore the transient linkage (governance,
+    // namespace, genesis version) from the genesis event itself, since
+    // creation parameters are gone by then.
+    #[test]
+    fn create_apply_restores_genesis_linkage() {
+        let (keys, owner) = test_owner();
+        let metadata = test_metadata(&owner);
+        let ledger = test_create_ledger(&metadata, &keys);
+
+        let initial = TrackerState {
+            subject_metadata: SubjectMetadata::new(&Metadata {
+                governance_id: DigestIdentifier::default(),
+                ..test_metadata(&owner)
+            }),
+            governance_id: DigestIdentifier::default(),
+            namespace: Namespace::new(),
+            genesis_gov_version: 0,
+            visibility_mode: TrackerVisibilityMode::Full,
+            properties: ValueWrapper::default(),
+        };
+
+        let applied =
+            <Tracker as PersistentActor>::apply(Arc::new(initial), &ledger)
+                .unwrap();
+        assert_eq!(
+            applied.governance_id, metadata.governance_id,
+            "genesis governance must be adopted from the journal"
+        );
+        assert_eq!(applied.namespace, metadata.namespace);
+        assert_eq!(applied.genesis_gov_version, metadata.genesis_gov_version);
+        assert_eq!(applied.subject_metadata.owner, owner);
+    }
+
+    // The genesis gate rejects an empty governance id instead of
+    // persisting an unlinkable state that would break every
+    // register lookup after a restart.
+    #[test]
+    fn create_apply_rejects_missing_governance() {
+        let (keys, owner) = test_owner();
+        let mut metadata = test_metadata(&owner);
+        metadata.governance_id = DigestIdentifier::default();
+        let ledger = test_create_ledger(&metadata, &keys);
+
+        let initial = TrackerState {
+            subject_metadata: SubjectMetadata::default(),
+            governance_id: DigestIdentifier::default(),
+            namespace: Namespace::new(),
+            genesis_gov_version: 0,
+            visibility_mode: TrackerVisibilityMode::Full,
+            properties: ValueWrapper::default(),
+        };
+
+        assert!(
+            <Tracker as PersistentActor>::apply(Arc::new(initial), &ledger)
+                .is_err()
+        );
+    }
+}

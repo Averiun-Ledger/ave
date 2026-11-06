@@ -1,24 +1,28 @@
 use ave_common::SchemaType;
 use borsh::{BorshDeserialize, BorshSerialize};
+use rand::SeedableRng;
 use rand::rng;
+use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::slice;
-use tracing::error;
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
-    PersistentActor, Store, StoreCommand, StoreResponse,
+    PersistentActor, Store, StoreCommand, StoreResponse, SystemRef,
 };
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::response::SubjectDB;
 
 use crate::governance::model::Quorum;
 use crate::governance::role_register::{
-    CurrentValidationRoles, RoleDataRegister, RoleRegister,
-    RoleRegisterMessage, RoleRegisterResponse, SearchRole,
+    RoleDataRegister, RoleRegister, RoleRegisterMessage, RoleRegisterResponse,
+    SearchRole,
 };
 use crate::governance::subject_register::{
     SubjectRegister, SubjectRegisterMessage,
@@ -31,6 +35,8 @@ use crate::governance::witnesses_register::{
     WitnessStatus, WitnessesRegister, WitnessesRegisterMessage,
     WitnessesRegisterResponse,
 };
+use crate::helpers::db::{ExternalDB, ReadStore};
+use crate::model::event::Ledger;
 use crate::request::manager::{
     RebootType, RequestManager, RequestManagerMessage,
 };
@@ -68,8 +74,11 @@ pub fn check_quorum_signers(
     quorum: &Quorum,
     workers: &HashSet<PublicKey>,
 ) -> bool {
-    signers.is_subset(workers)
-        && quorum.check_quorum(workers.len() as u32, signers.len() as u32)
+    // Set sizes can not overflow `u32` on any real node, but never truncate
+    // them with `as` in consensus code.
+    let total = u32::try_from(workers.len()).unwrap_or(u32::MAX);
+    let signed = u32::try_from(signers.len()).unwrap_or(u32::MAX);
+    signers.is_subset(workers) && quorum.check_quorum(total, signed)
 }
 
 pub async fn get_actual_roles_register<A>(
@@ -77,8 +86,16 @@ pub async fn get_actual_roles_register<A>(
     governance_id: &DigestIdentifier,
     evaluation: SearchRole,
     approval: bool,
+    compilation: bool,
     version: u64,
-) -> Result<(RoleDataRegister, Option<RoleDataRegister>), ActorError>
+) -> Result<
+    (
+        RoleDataRegister,
+        Option<RoleDataRegister>,
+        Option<RoleDataRegister>,
+    ),
+    ActorError,
+>
 where
     A: Actor + Handler<A>,
 {
@@ -93,6 +110,7 @@ where
             version,
             evaluation,
             approval,
+            compilation,
         })
         .await?;
 
@@ -100,10 +118,13 @@ where
         RoleRegisterResponse::ActualRoles {
             evaluation,
             approval,
-        } => Ok((evaluation, approval)),
-        _ => Err(ActorError::UnexpectedResponse {
+            compilation,
+        } => Ok((evaluation, approval, compilation)),
+        other => Err(ActorError::UnexpectedResponse {
             path,
-            expected: "RolesRegisterResponse::ActualRoles".to_string(),
+            expected: format!(
+                "RolesRegisterResponse::ActualRoles, got {other:?}"
+            ),
         }),
     }
 }
@@ -129,43 +150,17 @@ where
 
     match response {
         RoleRegisterResponse::Validation(validation) => Ok(validation),
-        _ => Err(ActorError::UnexpectedResponse {
+        other => Err(ActorError::UnexpectedResponse {
             path,
-            expected: "RolesRegisterResponse::Validation".to_string(),
-        }),
-    }
-}
-
-pub async fn get_current_validation_roles_register<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    schema_id: SchemaType,
-) -> Result<CurrentValidationRoles, ActorError>
-where
-    A: Actor + Handler<A>,
-{
-    let path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/role_register",
-        governance_id
-    ));
-    let actor = ctx.system().get_actor::<RoleRegister>(&path).await?;
-
-    let response = actor
-        .ask(RoleRegisterMessage::GetCurrentValidationRoles { schema_id })
-        .await?;
-
-    match response {
-        RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
-        _ => Err(ActorError::UnexpectedResponse {
-            path,
-            expected: "RolesRegisterResponse::CurrentValidationRoles"
-                .to_string(),
+            expected: format!(
+                "RolesRegisterResponse::Validation, got {other:?}"
+            ),
         }),
     }
 }
 
 pub async fn check_subject_creation<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     creator: PublicKey,
     gov_version: u64,
@@ -369,6 +364,21 @@ impl Interval {
     pub const fn contains(&self, value: u64) -> bool {
         value >= self.lo && value <= self.hi
     }
+
+    /// Membership `[from, version)` as a closed range, or `None` when it
+    /// never held (opened and closed in the same version): callers must
+    /// not fabricate inverted ranges — `new` swaps them into a
+    /// retroactively active grant.
+    pub const fn closed_before(from: u64, version: u64) -> Option<Self> {
+        if from < version {
+            Some(Self {
+                lo: from,
+                hi: version.saturating_sub(1),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(
@@ -392,6 +402,12 @@ impl IntervalSet {
         }
     }
 
+    /// Highest closed end across intervals, if any. Read-only helper
+    /// for boot reconciliation tail bounding.
+    pub fn max_hi(&self) -> Option<u64> {
+        self.intervals.iter().map(|iv| iv.hi).max()
+    }
+
     // Devuelve true si `x` está dentro de algún intervalo (extremos inclusivos).
     pub fn contains(&self, x: u64) -> bool {
         if self.intervals.is_empty() {
@@ -407,6 +423,15 @@ impl IntervalSet {
                 let iv = self.intervals[pos - 1];
                 iv.hi >= x
             }
+        }
+    }
+
+    /// Closes a membership opened at `open_from` as of `version`
+    /// (`[open_from, version - 1]`), ignoring memberships that never
+    /// held (opened and closed in the same version).
+    pub fn close_open(&mut self, open_from: u64, version: u64) {
+        if let Some(closed) = Interval::closed_before(open_from, version) {
+            self.insert(closed);
         }
     }
 
@@ -631,6 +656,13 @@ impl TrackerVisibilityState {
                 return;
             }
 
+            // Stale resend (replay tail behind the recorded tip):
+            // closing here would set `end < start` and appending
+            // would break the ordered/non-overlapping invariant.
+            if sn <= last.from_sn {
+                return;
+            }
+
             if last.to_sn.is_none() {
                 last.to_sn = Some(sn.saturating_sub(1));
             }
@@ -646,6 +678,13 @@ impl TrackerVisibilityState {
     fn push_event(&mut self, sn: u64, visibility: TrackerEventVisibility) {
         if let Some(last) = self.event_ranges.last_mut() {
             if last.visibility == visibility {
+                return;
+            }
+
+            // Stale resend (replay tail behind the recorded tip):
+            // closing here would set `end < start` and appending
+            // would break the ordered/non-overlapping invariant.
+            if sn <= last.from_sn {
                 return;
             }
 
@@ -872,26 +911,6 @@ where
         self.inner.iter()
     }
 
-    pub fn range_with_predecessor(
-        &self,
-        lower: u64,
-        upper: u64,
-    ) -> Vec<(u64, T)> {
-        let mut out: Vec<(u64, T)> = Vec::new();
-
-        if let Some((key, value)) = self.inner.range(..lower).next_back() {
-            out.push((*key, value.clone()));
-        }
-
-        for (key, value) in
-            self.inner.range((Included(&lower), Included(&upper)))
-        {
-            out.push((*key, value.clone()));
-        }
-
-        out
-    }
-
     pub fn get_prev_or_equal(&self, key: u64) -> Option<T> {
         self.inner
             .range((Unbounded, Included(&key)))
@@ -928,6 +947,29 @@ where
     error
 }
 
+/// Governance version sync between this node and an incoming request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GovVersionSync {
+    /// Same version: the request can be served.
+    Current,
+    /// This node is behind the request's governance version: it can not
+    /// serve the request — the worker answers `Unavailable` so the
+    /// requester replaces it from its pending pool.
+    NodeBehind,
+    /// The requester is behind this node's governance version: the
+    /// worker answers `Reboot` so the requester syncs and retries.
+    RequesterBehind,
+}
+
+/// Compares the local governance version with the request's one.
+pub fn gov_version_sync(local: u64, request: u64) -> GovVersionSync {
+    match local.cmp(&request) {
+        std::cmp::Ordering::Less => GovVersionSync::NodeBehind,
+        std::cmp::Ordering::Equal => GovVersionSync::Current,
+        std::cmp::Ordering::Greater => GovVersionSync::RequesterBehind,
+    }
+}
+
 pub fn take_random_signers(
     signers: HashSet<PublicKey>,
     quantity: usize,
@@ -953,6 +995,93 @@ pub fn take_random_signers(
     (random_signers, signers)
 }
 
+fn seed_u64(seed: &DigestIdentifier) -> u64 {
+    borsh::to_vec(seed)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take(8)
+        .enumerate()
+        .fold(0u64, |acc, (i, &byte)| acc | (u64::from(byte) << (8 * i)))
+}
+
+/// Deterministic variant of `take_random_signers` for owner-side
+/// initial picks.
+///
+/// Every participant can recompute the subset from `seed` (a phase
+/// request hash), so the draw is auditable instead of trusting the
+/// picker's RNG. Failover replacements and probe batches
+/// keep the local CSPRNG (`take_random_signers`).
+pub fn take_seeded_signers(
+    signers: HashSet<PublicKey>,
+    quantity: usize,
+    seed: &DigestIdentifier,
+) -> (HashSet<PublicKey>, HashSet<PublicKey>) {
+    if quantity >= signers.len() {
+        if quantity > signers.len() {
+            warn!(
+                quantity = quantity,
+                signers = signers.len(),
+                "Signer draw quantity exceeds eligible signers; taking all"
+            );
+        }
+        return (signers, HashSet::new());
+    }
+
+    // HashSet iteration order is per-process random: sort first so the
+    // same seed always draws the same subset on every node.
+    let mut ordered: Vec<PublicKey> = signers.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        borsh::to_vec(a)
+            .unwrap_or_default()
+            .cmp(&borsh::to_vec(b).unwrap_or_default())
+    });
+
+    let mut rng = StdRng::seed_from_u64(seed_u64(seed));
+
+    let chosen: HashSet<PublicKey> = ordered
+        .iter()
+        .sample(&mut rng, quantity)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    let rest = ordered
+        .into_iter()
+        .filter(|signer| !chosen.contains(signer))
+        .collect::<HashSet<PublicKey>>();
+
+    (chosen, rest)
+}
+
+/// Hedging spares for quorum collection: contact a few extra signers
+/// beyond the quorum quantity so one dead or slow signer does not
+/// stall the round to timeout plus replenish.
+///
+/// Returns `(spares, rest)`: `ceil(quantity / 10)` signers moved from
+/// `pending` (at least 1 while anyone is spare, at most what exists).
+/// Deterministic like [`take_seeded_signers`] (borsh-byte order), so
+/// every node derives the same spare set from the same pool. Spare
+/// votes are ordinary authorized votes: they count toward quorum when
+/// they arrive first and are ignored after close like any straggler.
+pub fn take_hedge_spares(
+    pending: HashSet<PublicKey>,
+    quantity: usize,
+) -> (HashSet<PublicKey>, HashSet<PublicKey>) {
+    if quantity == 0 || pending.is_empty() {
+        return (HashSet::new(), pending);
+    }
+    let mut ordered: Vec<PublicKey> = pending.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        borsh::to_vec(a)
+            .unwrap_or_default()
+            .cmp(&borsh::to_vec(b).unwrap_or_default())
+    });
+    let spare_count = quantity.div_ceil(10).min(ordered.len());
+    let rest = ordered.split_off(spare_count);
+    (ordered.into_iter().collect(), rest.into_iter().collect())
+}
+
 pub async fn send_reboot_to_req<A>(
     ctx: &mut ActorContext<A>,
     request_id: DigestIdentifier,
@@ -970,6 +1099,128 @@ where
             request_id,
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use ave_common::identity::{KeyPair, keys::Ed25519Signer};
+
+    use super::*;
+
+    #[test]
+    fn split_page_fresh_keeps_only_past_frontier() {
+        // Empty table: everything is fresh, frontier jumps to max.
+        let mut done = None;
+        assert_eq!(
+            split_page_fresh(&[0, 1, 2], &mut done),
+            vec![true, true, true]
+        );
+        assert_eq!(done, Some(2));
+
+        // Overlapping boundary (inclusive range): the repeated
+        // event is dropped, never re-inserted.
+        let mut done = Some(2);
+        assert_eq!(
+            split_page_fresh(&[2, 3, 4], &mut done),
+            vec![false, true, true]
+        );
+        assert_eq!(done, Some(4));
+
+        // Fully covered page (stale re-read): nothing fresh, the
+        // caller stops paging.
+        let mut done = Some(4);
+        assert_eq!(split_page_fresh(&[4], &mut done), vec![false]);
+        assert_eq!(done, Some(4));
+
+        // Duplicates inside one page collapse to a single insert.
+        let mut done = Some(4);
+        assert_eq!(
+            split_page_fresh(&[5, 5, 6], &mut done),
+            vec![true, false, true]
+        );
+        assert_eq!(done, Some(6));
+
+        // Empty page leaves the frontier untouched.
+        let mut done = Some(6);
+        assert!(split_page_fresh(&[], &mut done).is_empty());
+        assert_eq!(done, Some(6));
+    }
+
+    fn sample_keys(n: usize) -> HashSet<PublicKey> {
+        (0..n)
+            .map(|_| {
+                KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"))
+                    .public_key()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quorum_table() {
+        use ave_common::governance::Quorum;
+
+        let workers = sample_keys(3);
+        let two: HashSet<PublicKey> = workers.iter().take(2).cloned().collect();
+        assert!(check_quorum_signers(&two, &Quorum::Majority, &workers));
+        assert!(check_quorum_signers(&two, &Quorum::Fixed(2), &workers));
+        assert!(!check_quorum_signers(&two, &Quorum::Fixed(3), &workers));
+        assert!(!check_quorum_signers(
+            &HashSet::new(),
+            &Quorum::Majority,
+            &workers
+        ));
+        // Count reached but not a subset: still no quorum.
+        let mut outsider = two.clone();
+        outsider.insert(sample_keys(1).into_iter().next().expect("key"));
+        assert!(!check_quorum_signers(
+            &outsider,
+            &Quorum::Fixed(3),
+            &workers
+        ));
+    }
+
+    #[test]
+    fn seeded_draw_is_deterministic_and_partitions() {
+        let seed = DigestIdentifier::default();
+        let all = sample_keys(5);
+        let (chosen_a, rest_a) = take_seeded_signers(all.clone(), 2, &seed);
+        let (chosen_b, rest_b) = take_seeded_signers(all.clone(), 2, &seed);
+        assert_eq!(chosen_a, chosen_b);
+        assert_eq!(rest_a, rest_b);
+        assert_eq!(chosen_a.len(), 2);
+        assert_eq!(rest_a.len(), 3);
+        assert!(chosen_a.is_disjoint(&rest_a));
+        let union: HashSet<PublicKey> =
+            chosen_a.union(&rest_a).cloned().collect();
+        assert_eq!(union, all);
+    }
+
+    #[test]
+    fn hedge_spares_math_and_determinism() {
+        // ceil(10%), at least 1 while anyone is spare.
+        let (spares, rest) = take_hedge_spares(sample_keys(8), 8);
+        assert_eq!(spares.len(), 1);
+        assert_eq!(rest.len(), 7);
+        let (spares, rest) = take_hedge_spares(sample_keys(12), 12);
+        assert_eq!(spares.len(), 2);
+        assert_eq!(rest.len(), 10);
+        // Capped by availability, empty stays empty.
+        let (spares, rest) = take_hedge_spares(sample_keys(2), 30);
+        assert_eq!(spares.len(), 2);
+        assert!(rest.is_empty());
+        let (spares, rest) = take_hedge_spares(HashSet::new(), 8);
+        assert!(spares.is_empty());
+        assert!(rest.is_empty());
+        let (spares, rest) = take_hedge_spares(sample_keys(5), 0);
+        assert!(spares.is_empty());
+        assert_eq!(rest.len(), 5);
+        // Deterministic and disjoint.
+        let pool = sample_keys(20);
+        let (a, _) = take_hedge_spares(pool.clone(), 12);
+        let (b, _) = take_hedge_spares(pool.clone(), 12);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 2);
+    }
 }
 
 pub async fn abort_req<A>(
@@ -1038,7 +1289,7 @@ where
     let response = store
         .ask(StoreCommand::GetEvents {
             from: last_sn,
-            to: last_sn + quantity,
+            to: last_sn.saturating_add(quantity),
         })
         .await?;
 
@@ -1049,4 +1300,164 @@ where
             expected: "StoreResponse::Events".to_owned(),
         }),
     }
+}
+
+/// Asks a sink manager to compare its persisted delivery cursor
+/// against the subject's ledger tip.
+///
+/// Catches up where behind (boot backstop for quiet subjects:
+/// without fresh traffic the gap would never be noticed), including
+/// a missing cursor at SN 0. Pure map reads on the manager side; the
+/// catch-up chain lifts the subject itself only when delivery is
+/// actually needed. Unknown manager (no sinks configured) is a clean
+/// no-op. Only call with tips of ledgers that have history: a
+/// history-less subject must skip the review, never report tip 0.
+pub async fn review_sink_cursor(
+    system: &SystemRef,
+    manager_path: ActorPath,
+    subject_id: &DigestIdentifier,
+    tip_sn: u64,
+) -> Result<(), ActorError> {
+    use crate::sink::manager::{
+        SinkManager, SinkManagerMessage, SinkManagerResponse,
+    };
+    let manager = match system.get_actor::<SinkManager>(&manager_path).await {
+        Ok(manager) => manager,
+        Err(ActorError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match manager
+        .ask(SinkManagerMessage::ReviewSubject {
+            subject_id: subject_id.to_string(),
+            tip_sn,
+        })
+        .await?
+    {
+        SinkManagerResponse::SubjectReview(_) => Ok(()),
+        _ => Err(ActorError::Functional {
+            description: "unexpected sink review response".to_owned(),
+        }),
+    }
+}
+
+/// Splits one inclusive-range ledger page against the projection
+/// frontier, advancing it past every kept event. Everything at or
+/// below `done` is already projected (including the overlapping
+/// boundary event and any in-page duplicate): only strictly newer
+/// sns are kept, so a plain `INSERT` never collides. Pages arrive
+/// ordered by sn. Pure: unit-tested below.
+fn split_page_fresh(sns: &[u64], done: &mut Option<u64>) -> Vec<bool> {
+    let mut mask = Vec::with_capacity(sns.len());
+    for sn in sns {
+        if done.is_none_or(|cut| *sn > cut) {
+            mask.push(true);
+            *done = Some(*sn);
+        } else {
+            mask.push(false);
+        }
+    }
+    mask
+}
+
+/// Replays ledger events above the query-DB projection watermark.
+///
+/// Refreshes the subject state row (crash backstop: events
+/// persisted to the ledger but never projected after a power cut,
+/// including a subject missing entirely on first event).
+/// Exact-range: events at or below the watermark are skipped, so
+/// the plain `INSERT` never collides, and the state row is an
+/// upsert. Callers gate this on dirty boot; the watermark check
+/// itself makes clean runs a single indexed query.
+/// Returns events written.
+pub async fn fill_projection_gap<A>(
+    ctx: &mut ActorContext<A>,
+    subject_id: &DigestIdentifier,
+    tip_sn: u64,
+    state: SubjectDB,
+) -> Result<u64, ActorError>
+where
+    A: PersistentActor<Event = Ledger>,
+{
+    let Some(ext_db): Option<Arc<ExternalDB>> =
+        ctx.system().get_helper("ext_db")
+    else {
+        // No projection configured (unit-test systems): nothing to
+        // fill. Production nodes always register this helper at
+        // build, so a missing helper never hides a real gap there.
+        debug!("Skipping projection gap-fill: no ext_db helper registered");
+        return Ok(0);
+    };
+    let watermark = ext_db
+        .max_event_sn(&subject_id.to_string())
+        .await
+        .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+    // No ledger history (unknown subject lifted manually): nothing
+    // persisted, so no projection row may exist either.
+    if get_last_event(ctx).await?.is_none() {
+        return Ok(0);
+    }
+    info!(
+        msg_type = "FillProjectionGapCheck",
+        subject_id = %subject_id,
+        watermark = ?watermark,
+        tip_sn,
+        "Checking query projection against ledger tip"
+    );
+    let floor = watermark.unwrap_or(0);
+    // No early return when the event watermark already reached the
+    // tip: reaching the tip in `events` does not prove `subjects`
+    // is current (the row is written separately and may have been
+    // cut in between), so the state upsert below always runs. The
+    // loop itself still skips when there is nothing new to copy.
+    // Paged reads overlap at the boundary (inclusive range), so the
+    // frontier is what is already projected, not the page start:
+    // re-inserting a boundary event would collide on its primary key.
+    let mut done: Option<u64> = watermark;
+    let mut from = floor;
+    let mut filled = 0;
+    // A missing watermark with journal history still walks from sn
+    // 0: the genesis event counts as fillable, not as already done.
+    while done.is_none_or(|cut| cut < tip_sn) {
+        let events: Vec<Ledger> = get_n_events(ctx, from, 256).await?;
+        if events.is_empty() {
+            break;
+        }
+        let sns: Vec<u64> = events.iter().map(|event| event.sn).collect();
+        if let Some(page_max) = sns.iter().max() {
+            from = from.max(*page_max);
+        }
+        let mask = split_page_fresh(&sns, &mut done);
+        if !mask.iter().any(|keep| *keep) {
+            break;
+        }
+        let fresh: Vec<Ledger> = events
+            .into_iter()
+            .zip(mask)
+            .filter(|(_, keep)| *keep)
+            .map(|(event, _)| event)
+            .collect();
+        filled += ext_db.fill_event_gap(fresh).await.map_err(|e| {
+            ActorError::Functional {
+                description: e.to_string(),
+            }
+        })?;
+    }
+    ext_db.upsert_subject_state(state).await.map_err(|e| {
+        ActorError::Functional {
+            description: e.to_string(),
+        }
+    })?;
+    if filled > 0 {
+        info!(
+            msg_type = "FillProjectionGap",
+            subject_id = %subject_id,
+            watermark = ?watermark,
+            tip_sn,
+            filled,
+            "Replayed ledger events missed by the query projection"
+        );
+    }
+    Ok(filled)
 }

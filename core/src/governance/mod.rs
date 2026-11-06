@@ -3,15 +3,26 @@
 
 use crate::{
     approval::{
-        persist::{ApprPersist, InitApprPersist},
+        persist::{ApprPersist, ApprPersistMessage, InitApprPersist},
         types::VotationType,
     },
-    config::SinkTarget,
-    db::Storable,
-    evaluation::{
-        compiler::{
-            CompilerResponse, ContractCompiler, ContractCompilerMessage,
+    auth::{SubjectAccess, SubjectAccessMessage, SubjectAccessResponse},
+    compilation::{
+        contract_compiler::{
+            ContractCompiler, ContractCompilerAction, ContractCompilerMessage,
         },
+        error::CompilerError,
+        join_contained, payload_contract_sources,
+        support::{
+            CompilerResponse, CompilerSupport, ContractSourceInput,
+            is_local_fatal_compiler_error,
+            is_retryable_compiler_recovery_error,
+        },
+        worker::{CompileWorker, CompileWorkerMessage},
+    },
+    config::SinkTarget,
+    db::{Database, Storable},
+    evaluation::{
         request::EvalWorkerContext,
         schema::{EvaluationSchema, EvaluationSchemaMessage},
         worker::{EvalWorker, EvalWorkerMessage},
@@ -38,12 +49,15 @@ use crate::{
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
-        tracker_sync::{TrackerSync, TrackerSyncConfig},
+        tracker_sync::{TrackerSync, TrackerSyncConfig, TrackerSyncMessage},
         transfer_verification_register::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
         },
-        version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage},
+        version_sync::{
+            GovernanceVersionSync, GovernanceVersionSyncConfig,
+            GovernanceVersionSyncMessage,
+        },
         witnesses_register::{
             CreatorWitnessGrant, CreatorWitnessRegistration, WitnessesRegister,
             WitnessesRegisterMessage, WitnessesRegisterResponse, WitnessesType,
@@ -52,18 +66,20 @@ use crate::{
     helpers::network::service::NetworkSender,
     model::sink::{SinkDataEvent, SubjectSinkEvent},
     model::{
-        common::{
-            crash_system, get_last_event, purge_storage, subject::make_obsolete,
-        },
-        event::{Ledger, Protocols, ValidationMetadata},
+        common::{crash_system, get_last_event, subject::make_obsolete},
+        event::{CompilationResponse, Ledger, Protocols, ValidationMetadata},
     },
-    node::{Node, NodeMessage, TransferSubject, register::RegisterMessage},
+    node::{
+        Node, NodeMessage, NodeResponse, TransferSubject,
+        register::RegisterMessage,
+    },
     sink::{SinkManager, SinkManagerInitParams, SinkManagerMessage},
     subject::{
         DataForSink, EventLedgerDataForSink, Metadata, Subject,
         SubjectMetadata, error::SubjectError,
     },
     system::ConfigHelper,
+    update::{Update, UpdateMessage, UpdateNew, UpdateSubjectKind, UpdateType},
     validation::{
         request::LastData,
         schema::{ValidationSchema, ValidationSchemaMessage},
@@ -72,19 +88,19 @@ use crate::{
 };
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler, Message,
-    Response,
+    Actor, ActorContext, ActorError, ActorPath, ActorRef, DbManager, Handler,
+    Message, Response,
 };
 use ave_common::{
     DataToSink, Namespace, SchemaType, ValueWrapper,
-    identity::{DigestIdentifier, HashAlgorithm, PublicKey},
+    identity::{DigestIdentifier, HashAlgorithm, PublicKey, hash_borsh},
     request::EventRequest,
     response::SubjectDB,
     schematype::ReservedWords,
 };
 
 use async_trait::async_trait;
-use ave_actors::{FullPersistence, PersistentActor};
+use ave_actors::PersistentActor;
 use borsh::{BorshDeserialize, BorshSerialize};
 use json_patch::{Patch, patch};
 use serde::{Deserialize, Serialize};
@@ -103,6 +119,7 @@ pub mod data;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod reconcile;
 pub mod role_register;
 pub mod sn_register;
 pub mod subject_register;
@@ -123,10 +140,24 @@ struct SchemaRuntimeRoles<'a> {
     creators_vali: &'a SchemaCreatorsByNamespace,
 }
 
+/// Delay between approver recreate attempts while a draining
+/// predecessor still holds the actor name. Teardown never blocks
+/// waiting for the child, so creation races a fast local drain
+/// (purge + stop of an idle actor), never a stuck one.
+const APPROVER_CREATE_RETRY_DELAY_MS: u64 = 200;
+
+/// Recreate attempts before failing loud. Exhaustion mirrors a
+/// create collision today: the update fails instead of wedging.
+const MAX_APPROVER_CREATE_ATTEMPTS: usize = 10;
+
 pub struct RolesUpdate {
     pub appr_quorum: Option<Quorum>,
     pub new_approvers: Vec<PublicKey>,
     pub remove_approvers: Vec<PublicKey>,
+
+    pub comp_quorum: Option<Quorum>,
+    pub new_compilers: Vec<PublicKey>,
+    pub remove_compilers: Vec<PublicKey>,
 
     pub eval_quorum: HashMap<SchemaType, Quorum>,
     pub new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -150,6 +181,9 @@ pub struct RolesUpdateConfirm {
     pub new_approver: Option<PublicKey>,
     pub remove_approver: PublicKey,
 
+    pub new_compiler: Option<PublicKey>,
+    pub remove_compiler: PublicKey,
+
     pub new_evaluator: Option<PublicKey>,
     pub remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 
@@ -164,6 +198,7 @@ pub struct RolesUpdateRemove {
     pub witnesses: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     pub creator: HashSet<(SchemaType, String, PublicKey)>,
     pub approvers: Vec<PublicKey>,
+    pub compilers: Vec<PublicKey>,
     pub evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     pub validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 }
@@ -202,6 +237,9 @@ pub struct Governance {
     pub our_key: Arc<PublicKey>,
     pub service: bool,
     pub hash: Option<HashAlgorithm>,
+    /// Skip boot reconciliation (clean boot or already reconciled
+    /// this boot): the subject manager decides once per boot.
+    pub skip_reconcile: bool,
     pub state: Arc<GovernanceState>,
 }
 
@@ -211,6 +249,7 @@ impl Clone for Governance {
             our_key: self.our_key.clone(),
             service: self.service,
             hash: self.hash,
+            skip_reconcile: self.skip_reconcile,
             state: self.state.clone(),
         }
     }
@@ -252,38 +291,68 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::EOLSubject {
-            subject_id: self.subject_metadata.subject_id.clone(),
-            i_owner: *self.our_key == self.subject_metadata.owner,
-        })
-        .await
+        // Ask, not tell: the node journals before replying, so an Ok
+        // means the write is durable and boot reconciliation never
+        // needs to replay it.
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::EOLSubject {
+                subject_id: self.subject_metadata.subject_id.clone(),
+                i_owner: *self.our_key == self.subject_metadata.owner,
+            })
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        _event_sn: u64,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::RejectTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::RejectTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn confirm(
         &self,
         ctx: &mut ActorContext<Self>,
         _new_owner: PublicKey,
+        _old_owner: PublicKey,
+        _event_sn: u64,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::ConfirmTransfer(
-            self.subject_metadata.subject_id.clone(),
-        ))
-        .await
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::ConfirmTransfer(
+                self.subject_metadata.subject_id.clone(),
+            ))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn transfer(
@@ -294,13 +363,22 @@ impl Subject for Governance {
     ) -> Result<(), ActorError> {
         let node_path = ActorPath::from("/user/node");
         let node = ctx.system().get_actor::<Node>(&node_path).await?;
-        node.tell(NodeMessage::TransferSubject(TransferSubject {
-            name: self.subject_metadata.name.clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            new_owner: new_owner.clone(),
-            actual_owner: self.subject_metadata.owner.clone(),
-        }))
-        .await
+        // Ask, not tell: durable on Ok (see `eol`).
+        let NodeResponse::Ok = node
+            .ask(NodeMessage::TransferSubject(TransferSubject {
+                name: self.subject_metadata.name.clone(),
+                subject_id: self.subject_metadata.subject_id.clone(),
+                new_owner: new_owner.clone(),
+                actual_owner: self.subject_metadata.owner.clone(),
+            }))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: ActorPath::from("/user/node"),
+                expected: "NodeResponse::Ok".to_owned(),
+            });
+        };
+        Ok(())
     }
 
     async fn get_last_ledger(
@@ -314,6 +392,7 @@ impl Subject for Governance {
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError> {
         let Some(network) =
             ctx.system().get_helper::<Arc<NetworkSender>>("network")
@@ -338,6 +417,14 @@ impl Subject for Governance {
 
         let current_properties = self.properties.clone();
 
+        // Compilation evidence of the governance fact events being
+        // applied: artifact hashes of the successful ones (to promote
+        // their staged artifacts to official) and payload contract
+        // sources of the failed ones (their staged artifacts are
+        // dropped).
+        let (evidence_contracts, failed_compile_sources) =
+            Self::compile_evidence_of(&events);
+
         if let Err(e) = self.verify_new_ledger_events(ctx, events, &hash).await
         {
             if let ActorError::Functional { description } = e.clone() {
@@ -348,7 +435,7 @@ impl Subject for Governance {
                     "Error verifying new ledger events"
                 );
 
-                // Falló en la creación
+                // Failed during creation
                 if self.subject_metadata.sn == 0 {
                     return Err(e);
                 }
@@ -367,7 +454,7 @@ impl Subject for Governance {
             let old_gov = current_properties;
             if !self.subject_metadata.active {
                 if current_owner == *self.our_key {
-                    Self::down_owner(ctx).await?;
+                    self.down_owner(ctx).await?;
                 } else {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
                         .await?;
@@ -396,11 +483,11 @@ impl Subject for Governance {
                 let mut up_owner: bool = false;
 
                 if current_owner == *self.our_key {
-                    // Eramos dueños
+                    // We were owners
                     if current_owner != self.subject_metadata.owner {
-                        // Ya no somos dueño
+                        // No longer owner
                         if !current_new_owner_some && !i_new_owner {
-                            // Si antes new owner false
+                            // If new owner was false before
                             up_not_owner = true;
                         } else if current_new_owner_some && i_new_owner {
                             up_owner = true;
@@ -433,7 +520,7 @@ impl Subject for Governance {
                 }
 
                 if up_not_owner {
-                    Self::down_owner(ctx).await?;
+                    self.down_owner(ctx).await?;
                     self.up_not_owner(ctx, &hash, &network).await?;
                 } else if up_owner {
                     Self::down_not_owner(ctx, &old_gov, self.our_key.clone())
@@ -451,11 +538,32 @@ impl Subject for Governance {
                         .await?;
                 }
 
-                self.manager_schemas_compilers(ctx, &old_gov).await?;
+                self.manager_schemas_compilers(
+                    ctx,
+                    &old_gov,
+                    &evidence_contracts,
+                    defer_acquisition,
+                )
+                .await?;
+                Self::drop_failed_staged_contracts(
+                    ctx,
+                    &failed_compile_sources,
+                    &self.subject_metadata.subject_id,
+                    &hash,
+                )
+                .await?;
                 self.update_childs(ctx).await?;
+                self.set_artifact_serving_blocked(ctx, false).await;
             }
 
-            let _ = make_obsolete(ctx, &self.subject_metadata.subject_id).await;
+            if let Err(e) =
+                make_obsolete(ctx, &self.subject_metadata.subject_id).await
+            {
+                debug!(
+                    error = %e,
+                    "Failed to mark approval obsolete on governance update"
+                );
+            }
         }
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
@@ -466,6 +574,13 @@ impl Subject for Governance {
             self.update_sn(ctx).await?;
             self.refresh_version_sync(ctx).await?;
         }
+
+        // Late sink attachment (see `SinkManagerMessage::EnsureSinks`):
+        // the creation-time wiring only sees schemas known then. A
+        // governance synced after boot, or gaining schemas later, would
+        // otherwise never get its configured sinks without a restart.
+        // Best effort only: sink wiring must never fail governance apply.
+        self.upsert_sink_servers(ctx).await;
 
         Ok(())
     }
@@ -488,7 +603,11 @@ impl Subject for Governance {
                     .tell(SinkManagerMessage::NotifyNewEvent(Arc::new(data)))
                     .await
                 {
-                    error!(error = %e, "Failed to notify NodeSinkManager");
+                    warn!(
+                        msg_type = "SinkNotify",
+                        error = %e,
+                        "Failed to notify NodeSinkManager"
+                    );
                 }
             }
             Err(e) => {
@@ -562,6 +681,64 @@ impl GovernanceState {
 }
 
 impl Governance {
+    /// Attaches configured sinks matching this governance and its
+    /// current schemas to the child sink manager, if any are missing.
+    /// Same filter as the creation-time wiring in `pre_start`, but
+    /// re-evaluated on every applied batch: a governance learned after
+    /// boot starts empty and only gains schemas as events apply.
+    /// Warn-and-continue: sink wiring must never fail governance apply.
+    async fn upsert_sink_servers(&self, ctx: &ActorContext<Self>) {
+        let matching = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config")
+        {
+            let schema_ids: std::collections::HashSet<String> = self
+                .properties
+                .schemas
+                .keys()
+                .map(|s| s.to_string())
+                .collect();
+            let governance_id = self.subject_metadata.subject_id.to_string();
+            config
+                .sinks
+                .iter()
+                .filter(|entry| {
+                    let SinkTarget::Schema {
+                        schema_id,
+                        governance_id: target_governance_id,
+                    } = &entry.target;
+                    schema_id != "governance"
+                        && schema_ids.contains(schema_id)
+                        && target_governance_id.as_ref() == Some(&governance_id)
+                })
+                .flat_map(|entry| entry.servers.clone())
+                .collect::<Vec<_>>()
+        } else {
+            return;
+        };
+        if matching.is_empty() {
+            return;
+        }
+        let child = match ctx.get_child::<SinkManager>("sink_manager").await {
+            Ok(child) => child,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Sink manager child missing when attaching configured sinks"
+                );
+                return;
+            }
+        };
+        if let Err(e) = child
+            .tell(SinkManagerMessage::EnsureSinks { servers: matching })
+            .await
+        {
+            warn!(
+                error = %e,
+                "Failed to attach configured sinks to sink manager"
+            );
+        }
+    }
+
     async fn ledger_batch_size(
         ctx: &ActorContext<Self>,
     ) -> Result<usize, ActorError> {
@@ -627,12 +804,154 @@ impl Governance {
             subject_id: self.subject_metadata.subject_id.clone(),
             pass_votation,
             helpers: (*hash, network.clone()),
+            validators: self.current_validator_set(),
         };
 
         ctx.create_child("approver", ApprPersist::initial(init_approver))
             .await?;
 
         Ok(())
+    }
+
+    /// Non-blocking approver teardown: purge the vote store and stop
+    /// the child without waiting for either. Blocking here (`ask`)
+    /// deadlocks when the child is itself waiting on a metadata read
+    /// from this actor: the child cannot finish its handler to reach
+    /// the purge, and this actor cannot reach its next message to
+    /// answer the read, and neither wait has a timeout. PurgeStorage
+    /// is critical, so the stop drain processes it before stopping;
+    /// this mailbox stays free, so in-flight child queries keep
+    /// getting answered while the teardown lands.
+    async fn retire_approver(
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // Missing child means nothing to tear down (already stopped
+        // or never created): teardown is idempotent, so that is a
+        // success, not a failure.
+        let Ok(actor) = ctx.get_child::<ApprPersist>("approver").await else {
+            return Ok(());
+        };
+        if actor.tell(ApprPersistMessage::PurgeStorage).await.is_err() {
+            warn!(
+                msg_type = "RetireApprover",
+                "Approver gone while purging; stopping anyway"
+            );
+        }
+        actor.tell_stop().await;
+        Ok(())
+    }
+
+    /// Creates the approver child, deferring to a retry when a
+    /// draining predecessor still holds the actor name. Teardown
+    /// never blocks, so a live update can race a fast local stop;
+    /// failing the whole update on that race would wedge every
+    /// ownership or role change.
+    async fn spawn_approver(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        node_key: PublicKey,
+        attempts_left: usize,
+    ) -> Result<(), ActorError> {
+        let always_accept = if let Some(config) =
+            ctx.system().get_helper::<ConfigHelper>("config")
+        {
+            config.always_accept
+        } else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not Found".to_string(),
+            });
+        };
+        let pass_votation = if always_accept {
+            VotationType::AlwaysAccept
+        } else {
+            VotationType::Manual
+        };
+
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
+        };
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
+        else {
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not Found".to_string(),
+            });
+        };
+
+        let init_approver = InitApprPersist {
+            our_key: self.our_key.clone(),
+            node_key,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            pass_votation,
+            helpers: (hash, network),
+            validators: self.current_validator_set(),
+        };
+
+        match ctx
+            .create_child("approver", ApprPersist::initial(init_approver))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(ActorError::Exists { .. }) => {
+                if attempts_left == 0 {
+                    return Err(ActorError::Functional {
+                        description: format!(
+                            "Approver child for governance {} still exists after retries",
+                            self.subject_metadata.subject_id
+                        ),
+                    });
+                }
+                ctx.schedule_once(
+                    Duration::from_millis(APPROVER_CREATE_RETRY_DELAY_MS),
+                    GovernanceMessage::RetryApproverCreate {
+                        attempts_left: attempts_left - 1,
+                    },
+                )?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Recreates the approver after a deferred teardown, recomputing
+    /// from current state whether one is still wanted: a role flap
+    /// may have removed the need while the retry was queued. Mirrors
+    /// the build-time dispatch (owner paths always carry an
+    /// approver, non-owner paths only with the approver role), so a
+    /// stale retry converges instead of resurrecting a removed role.
+    async fn retry_approver_create(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        attempts_left: usize,
+    ) -> Result<(), ActorError> {
+        let owner = *self.our_key == self.subject_metadata.owner;
+        let i_new_owner =
+            self.subject_metadata.new_owner == Some((*self.our_key).clone());
+        let new_owner = self.subject_metadata.new_owner.is_some();
+        // Owner paths always carry an approver; non-owner paths only
+        // with the approver role (same dispatch as build_childs).
+        let owner_path = (owner && !new_owner) || i_new_owner;
+        if !owner_path
+            && !self.properties.has_this_role(HashThisRole::Gov {
+                who: (*self.our_key).clone(),
+                role: RoleTypes::Approver,
+            })
+        {
+            return Ok(());
+        }
+        let node_key = if owner_path {
+            (*self.our_key).clone()
+        } else {
+            self.subject_metadata
+                .new_owner
+                .clone()
+                .unwrap_or_else(|| self.subject_metadata.owner.clone())
+        };
+        self.spawn_approver(ctx, node_key, attempts_left).await
     }
 
     async fn current_validation_roles(
@@ -647,15 +966,22 @@ impl Governance {
 
         match response {
             RoleRegisterResponse::CurrentValidationRoles(roles) => Ok(roles),
-            _ => Err(ActorError::UnexpectedResponse {
+            other => Err(ActorError::UnexpectedResponse {
                 path: ActorPath::from(format!(
                     "/user/node/subject_manager/{}/role_register",
                     self.subject_metadata.subject_id
                 )),
-                expected: "RoleRegisterResponse::CurrentValidationRoles"
-                    .to_owned(),
+                expected: format!(
+                    "RoleRegisterResponse::CurrentValidationRoles, got {other:?}"
+                ),
             }),
         }
+    }
+
+    /// Current validator set of this governance, for the approver
+    /// worker gate.
+    fn current_validator_set(&self) -> HashSet<PublicKey> {
+        self.properties.governance_validators()
     }
 
     async fn refresh_version_sync(
@@ -682,6 +1008,119 @@ impl Governance {
                 governance_peers,
             })
             .await?;
+
+        // Same refresh point for the tracker sync peer set: every
+        // governance update re-pushes members + witnesses, so the
+        // serving gate never goes stale (SYNC-08).
+        self.push_tracker_sync_peers(ctx).await?;
+
+        Ok(())
+    }
+
+    /// Pushes the current members + gov witnesses to the tracker sync
+    /// child for its serving gate. Same fire-and-forget pattern as the
+    /// version sync refresh above.
+    async fn push_tracker_sync_peers(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let tracker_sync = ctx.get_child::<TrackerSync>("tracker_sync").await?;
+        let members: HashSet<PublicKey> =
+            self.properties.members.values().cloned().collect();
+        let witnesses = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+                description: e.to_string(),
+            })?;
+        tracker_sync
+            .tell(TrackerSyncMessage::RefreshPeers { members, witnesses })
+            .await?;
+        Ok(())
+    }
+
+    /// Forces a manual governance update round (the `Update` actor
+    /// pattern of the request reboot and auth): asks the governance
+    /// witnesses and sync peers for the ledger after our sn. A round
+    /// already running is reused — the child name deduplicates.
+    async fn trigger_gov_update(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(network) =
+            ctx.system().get_helper::<Arc<NetworkSender>>("network")
+        else {
+            return Err(ActorError::Helper {
+                name: "network".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let mut witnesses = self
+            .properties
+            .get_witnesses(WitnessesData::Gov)
+            .map_err(|e| ActorError::Functional {
+            description: e.to_string(),
+        })?;
+
+        let access_path = ActorPath::from("/user/node/auth");
+        if let Ok(access) =
+            ctx.system().get_actor::<SubjectAccess>(&access_path).await
+            && let Ok(SubjectAccessResponse::Peers(peers)) = access
+                .ask(SubjectAccessMessage::GetSyncPeers {
+                    subject_id: self.subject_metadata.subject_id.clone(),
+                })
+                .await
+        {
+            witnesses.extend(peers);
+        }
+        witnesses.remove(&*self.our_key);
+
+        if witnesses.is_empty() {
+            debug!(
+                governance_id = %self.subject_metadata.subject_id,
+                "No witnesses to ask for a governance update"
+            );
+            return Ok(());
+        }
+
+        let updater = Update::new(UpdateNew {
+            network,
+            subject_id: self.subject_metadata.subject_id.clone(),
+            witnesses,
+            update_type: UpdateType::Auth,
+            our_sn: Some(self.subject_metadata.sn),
+            subject_kind_hint: Some(UpdateSubjectKind::Governance),
+            round_retry_interval_secs: config
+                .sync_update
+                .round_retry_interval_secs,
+            max_round_retries: config.sync_update.max_round_retries,
+            witness_retry_count: config.sync_update.witness_retry_count,
+            witness_retry_interval_secs: config
+                .sync_update
+                .witness_retry_interval_secs,
+        });
+
+        match ctx.create_child("gov_manual_update", updater).await {
+            Ok(child) => {
+                child.tell(UpdateMessage::Run).await?;
+                debug!(
+                    governance_id = %self.subject_metadata.subject_id,
+                    "Manual governance update round initiated"
+                );
+            }
+            // A round is already running: reuse it.
+            Err(ActorError::Exists { .. }) => {}
+            Err(e) => return Err(e),
+        }
 
         Ok(())
     }
@@ -738,7 +1177,6 @@ impl Governance {
                         .get(schema_id)
                         .map(|schema| schema.viewpoints.clone())
                         .unwrap_or_default(),
-                    sn: self.subject_metadata.sn,
                     gov_version: self.properties.version,
                     init_state: init_state.clone(),
                 })
@@ -814,7 +1252,6 @@ impl Governance {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
-                sn: self.subject_metadata.sn,
                 members: self.properties.members.values().cloned().collect(),
                 creators: schema_roles
                     .creators_eval
@@ -875,10 +1312,927 @@ impl Governance {
         Ok(())
     }
 
+    /// Splits the compilation evidence of the governance fact events
+    /// being applied: artifact hashes per schema of the successful ones
+    /// (their staged artifacts are promoted to official) and the payload
+    /// contract sources per schema of the failed ones (their staged
+    /// artifacts are dropped).
+    fn compile_evidence_of(
+        events: &[Ledger],
+    ) -> (
+        BTreeMap<SchemaType, DigestIdentifier>,
+        Vec<(SchemaType, String)>,
+    ) {
+        let mut evidence_contracts = BTreeMap::new();
+        let mut failed_sources = Vec::new();
+
+        for ledger in events {
+            let Protocols::GovFact {
+                compilation,
+                evaluation,
+                approval,
+                event_request,
+                ..
+            } = &ledger.protocols
+            else {
+                continue;
+            };
+
+            let EventRequest::Fact(fact_request) = event_request.content()
+            else {
+                continue;
+            };
+
+            // Same criterion as the event apply: the patch is only
+            // applied when the evaluation succeeded AND the approval
+            // accepted. A rejected fact commits without applying, so
+            // its staged contracts are swept, not promoted.
+            let success = evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.evaluator_response_ok())
+                .is_some()
+                && approval.as_ref().is_some_and(|approval| approval.approved);
+
+            if success {
+                if let Some(compilation) = compilation
+                    && let CompilationResponse::Ok { result, .. } =
+                        &compilation.response
+                {
+                    evidence_contracts.extend(result.contracts.clone());
+                }
+            } else {
+                // Only contracts coming in the payload were staged;
+                // unchanged ones reuse the official artifact.
+                failed_sources
+                    .extend(payload_contract_sources(&fact_request.payload));
+            }
+        }
+
+        (evidence_contracts, failed_sources)
+    }
+
+    /// Promotes the staged artifact of every committed contract to its
+    /// official slot, replacing the previous one. Staged artifacts whose
+    /// hash is not the quorum-anchored one are discarded — the
+    /// registered pipeline obtains the right artifact as usual.
+    async fn promote_staged_contracts(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        if evidence_contracts.is_empty() {
+            return Ok(());
+        }
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        let subject_id = &self.subject_metadata.subject_id;
+        for (schema_id, evidence_wasm_hash) in evidence_contracts {
+            let Some(schema) = self.properties.schemas.get(schema_id) else {
+                continue;
+            };
+            let contract_hash = hash_borsh(&*hash.hasher(), &schema.contract);
+            let contract_hash = match contract_hash {
+                Ok(contract_hash) => contract_hash,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not hash contract of schema {}: {}",
+                                schema_id, e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                subject_id, schema_id, contract_hash
+            );
+
+            let staged = match contract_register
+                .ask(ContractRegisterMessage::GetMetadata {
+                    contract_name: staging_name.clone(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Metadata(metadata)) => metadata,
+                Ok(_) => None,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not read staged contract metadata: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+
+            // This node did not compile the contract: the registered
+            // pipeline obtains the artifact as usual.
+            let Some(record) = staged else {
+                continue;
+            };
+
+            if &record.wasm_hash != evidence_wasm_hash {
+                // The staged artifact is not the one the quorum
+                // anchored: discard it.
+                warn!(
+                    msg_type = "StagedMismatch",
+                    schema_id = %schema_id,
+                    staged_hash = %record.wasm_hash,
+                    evidence_hash = %evidence_wasm_hash,
+                    "Staged contract artifact does not match the committed evidence, discarding"
+                );
+                if let Err(e) = contract_register
+                    .tell(ContractRegisterMessage::DeleteMetadata {
+                        contract_name: staging_name.clone(),
+                    })
+                    .await
+                {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not drop staged contract metadata: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+                // Fail closed: never delete outside the contracts
+                // root (boot sweep collects the leaked staging dir,
+                // if any).
+                let Some(staging_path) =
+                    join_contained(&config.contracts_path, &staging_name)
+                else {
+                    warn!(
+                        contract_name = %staging_name,
+                        "Refusing to remove staging path outside contracts root"
+                    );
+                    continue;
+                };
+                if let Err(e) = fs::remove_dir_all(staging_path).await {
+                    debug!(
+                        error = %e,
+                        staging = %staging_name,
+                        "Failed to remove dropped staging directory (boot sweep collects it)"
+                    );
+                }
+                continue;
+            }
+
+            let official_name = format!("{}_{}", subject_id, schema_id);
+            let Some(official_path) = join_contained(
+                &config.contracts_path.join("contracts"),
+                &official_name,
+            ) else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote artifact path outside contracts root"
+                );
+                continue;
+            };
+            let Some(staging_path) =
+                join_contained(&config.contracts_path, &staging_name)
+            else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote staging path outside contracts root"
+                );
+                continue;
+            };
+            // Swap through a backup instead of delete + rename: a crash
+            // leaves the old or the new official artifact, never an
+            // empty window. The backup lives at the contracts root with
+            // the governance prefix, so the boot sweep removes it.
+            let backup_name = format!("{official_name}_temp_promote");
+            let Some(backup_path) =
+                join_contained(&config.contracts_path, &backup_name)
+            else {
+                warn!(
+                    msg_type = "PromoteStaging",
+                    schema_id = %schema_id,
+                    "Refusing to promote backup path outside contracts root"
+                );
+                continue;
+            };
+            if official_path.exists() {
+                // Stale backup from an interrupted promotion.
+                if let Err(e) = fs::remove_dir_all(&backup_path).await {
+                    debug!(
+                        error = %e,
+                        path = %backup_path.display(),
+                        "Failed to remove stale promotion backup (boot sweep collects it)"
+                    );
+                }
+                if let Err(e) = fs::rename(&official_path, &backup_path).await {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not move aside previous contract artifact {}: {}",
+                                official_path.display(),
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+            if let Err(e) = fs::rename(&staging_path, &official_path).await {
+                // Restore the previous official artifact if it was
+                // moved aside.
+                if backup_path.exists()
+                    && let Err(restore_err) =
+                        fs::rename(&backup_path, &official_path).await
+                {
+                    debug!(
+                        error = %restore_err,
+                        path = %backup_path.display(),
+                        "Failed to restore promotion backup after failed rename"
+                    );
+                }
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not promote staged contract artifact to {}: {}",
+                            official_path.display(),
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+            if let Err(e) = fs::remove_dir_all(&backup_path).await {
+                debug!(
+                    error = %e,
+                    path = %backup_path.display(),
+                    "Failed to remove promotion backup (boot sweep collects it)"
+                );
+            }
+            // fsync both parent directories so the rename survives a
+            // power cut (best-effort: the anchor + heal paths recover
+            // from any residual loss).
+            if let Ok(dir) =
+                fs::File::open(config.contracts_path.join("contracts")).await
+            {
+                let _ = dir.sync_all().await;
+            }
+            if let Ok(dir) = fs::File::open(&config.contracts_path).await {
+                let _ = dir.sync_all().await;
+            }
+
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::SetMetadata {
+                    contract_name: official_name.clone(),
+                    metadata: record,
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not register promoted contract {}: {}",
+                            official_name, e
+                        ),
+                    },
+                )
+                .await);
+            }
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: staging_name,
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not drop promoted staging metadata: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+
+            debug!(
+                schema_id = %schema_id,
+                contract_name = %official_name,
+                "Promoted staged contract artifact to official"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Drops the staged artifacts of governance fact events that
+    /// committed as failed: their contracts never become official.
+    async fn drop_failed_staged_contracts(
+        ctx: &mut ActorContext<Self>,
+        sources: &[(SchemaType, String)],
+        subject_id: &DigestIdentifier,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        for (schema_id, source) in sources {
+            let contract_hash = hash_borsh(&*hash.hasher(), source);
+            let contract_hash = match contract_hash {
+                Ok(contract_hash) => contract_hash,
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not hash staged contract source: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            };
+            let staging_name = format!(
+                "{}_temp_staging_{}_{}",
+                subject_id, schema_id, contract_hash
+            );
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::DeleteMetadata {
+                    contract_name: staging_name.clone(),
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not drop failed staged contract metadata: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+            // Best-effort: a leftover directory is swept on the next
+            // boot by `sweep_contract_artifacts`.
+            let Some(staging_path) =
+                join_contained(&config.contracts_path, &staging_name)
+            else {
+                warn!(
+                    contract_name = %staging_name,
+                    "Refusing to remove staging path outside contracts root"
+                );
+                continue;
+            };
+            if let Err(e) = fs::remove_dir_all(staging_path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(
+                    contract_name = %staging_name,
+                    error = %e,
+                    "Can not remove failed staged contract artifact"
+                );
+            }
+        }
+
+        debug!(
+            count = sources.len(),
+            "Dropped staged artifacts of failed governance events"
+        );
+
+        Ok(())
+    }
+
+    /// Records the ledger anchor (the quorum-anchored wasm hash) of
+    /// every contract that just committed, whether or not this node
+    /// holds the artifact bytes: it is the local projection of the
+    /// compilation evidence that the fetch path verifies against.
+    async fn record_compile_anchors(
+        ctx: &mut ActorContext<Self>,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        subject_id: &DigestIdentifier,
+    ) -> Result<(), ActorError> {
+        if evidence_contracts.is_empty() {
+            return Ok(());
+        }
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        for (schema_id, wasm_hash) in evidence_contracts {
+            if let Err(e) = contract_register
+                .tell(ContractRegisterMessage::SetAnchor {
+                    contract_name: format!("{}_{}", subject_id, schema_id),
+                    wasm_hash: wasm_hash.clone(),
+                })
+                .await
+            {
+                return Err(crash_system(
+                    ctx,
+                    ActorError::FunctionalCritical {
+                        description: format!(
+                            "Can not record contract anchor: {}",
+                            e
+                        ),
+                    },
+                )
+                .await);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rebuilds missing ledger anchors from the committed governance
+    /// events at boot. The anchor is a local projection of the
+    /// compilation evidence: a crash (or power loss) between the event
+    /// persistence and its recording must never be fatal. Walks the
+    /// ledger backwards from the tip until the most recent event that
+    /// committed each missing contract with Ok evidence is found. A
+    /// committed contract without evidence in the ledger means local
+    /// ledger corruption — a controlled crash.
+    async fn recover_missing_compile_anchors(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let subject_id = &self.subject_metadata.subject_id;
+
+        let contract_register = ctx
+            .get_child::<ContractRegister>("contract_register")
+            .await?;
+
+        let mut missing: BTreeMap<SchemaType, String> = BTreeMap::new();
+        for schema_id in self
+            .properties
+            .schemas
+            .iter()
+            .filter(|(_, schema)| !schema.contract.is_empty())
+            .map(|(schema_id, _)| schema_id)
+        {
+            let contract_name = format!("{}_{}", subject_id, schema_id);
+            match contract_register
+                .ask(ContractRegisterMessage::GetAnchor {
+                    contract_name: contract_name.clone(),
+                })
+                .await
+            {
+                Ok(ContractRegisterResponse::Anchor(Some(_))) => {}
+                Ok(ContractRegisterResponse::Anchor(None)) => {
+                    missing.insert(schema_id.clone(), contract_name);
+                }
+                Ok(_) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::UnexpectedResponse {
+                            path: ActorPath::from(format!(
+                                "{}/contract_register",
+                                ctx.path()
+                            )),
+                            expected: "ContractRegisterResponse::Anchor"
+                                .to_owned(),
+                        },
+                    )
+                    .await);
+                }
+                Err(e) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not read contract anchor: {}",
+                                e
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+        }
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        warn!(
+            count = missing.len(),
+            "Rebuilding missing contract anchors from the ledger"
+        );
+
+        let batch = Self::ledger_batch_size(ctx).await? as u64;
+        let mut hi_sn = self.subject_metadata.sn;
+
+        while !missing.is_empty() {
+            let lo_sn = hi_sn.saturating_sub(batch.saturating_sub(1));
+            let (events, _) = if lo_sn == 0 {
+                self.get_ledger(ctx, None, hi_sn).await?
+            } else {
+                self.get_ledger(ctx, Some(lo_sn - 1), hi_sn).await?
+            };
+
+            if events.is_empty() {
+                break;
+            }
+
+            for event in events.iter().rev() {
+                let (evidence, _) =
+                    Self::compile_evidence_of(std::slice::from_ref(event));
+                for (schema_id, wasm_hash) in evidence {
+                    let Some(contract_name) = missing.get(&schema_id).cloned()
+                    else {
+                        continue;
+                    };
+                    if let Err(e) = contract_register
+                        .tell(ContractRegisterMessage::SetAnchor {
+                            contract_name,
+                            wasm_hash,
+                        })
+                        .await
+                    {
+                        return Err(crash_system(
+                            ctx,
+                            ActorError::FunctionalCritical {
+                                description: format!(
+                                    "Can not record contract anchor: {}",
+                                    e
+                                ),
+                            },
+                        )
+                        .await);
+                    }
+                    missing.remove(&schema_id);
+                }
+            }
+
+            if lo_sn == 0 {
+                break;
+            }
+            hi_sn = lo_sn - 1;
+        }
+
+        if !missing.is_empty() {
+            return Err(crash_system(
+                ctx,
+                ActorError::FunctionalCritical {
+                    description: format!(
+                        "No compilation evidence in the ledger for committed contracts: {:?}",
+                        missing.keys().collect::<Vec<_>>()
+                    ),
+                },
+            )
+            .await);
+        }
+
+        Ok(())
+    }
+
+    /// Whitelist of the artifact protocol: the governance compilers and
+    /// the evaluators of each schema. The same sets are used by the
+    /// serving actors to validate requesters and by the fetching ones to
+    /// choose whom to ask (compilers first, evaluators as plan B).
+    /// Artifact whitelists: the governance compilers (plan A fetch
+    /// targets — they compile their artifacts, they never request them)
+    /// and, per schema, its evaluators (schema-level and tracker-schemas
+    /// roles; namespaces only balance the evaluation load, every
+    /// evaluator of a schema uses the same contract artifact).
+    fn artifact_whitelists(
+        &self,
+    ) -> (
+        BTreeSet<PublicKey>,
+        BTreeMap<SchemaType, BTreeSet<PublicKey>>,
+    ) {
+        let compilers = self
+            .properties
+            .get_signers(
+                RoleTypes::Compiler,
+                &SchemaType::Governance,
+                Namespace::default(),
+            )
+            .0
+            .into_iter()
+            .collect();
+        // Per-schema evaluator whitelist, mirroring `get_signers`: the
+        // evaluators of a schema are the schema-level roles UNION the
+        // tracker-schemas roles. Every declared schema gets an entry,
+        // even one without schema-level roles.
+        let evaluators = self
+            .properties
+            .schemas
+            .keys()
+            .map(|schema_id| {
+                let mut keys: BTreeSet<PublicKey> = self
+                    .properties
+                    .roles_tracker_schemas
+                    .evaluator
+                    .iter()
+                    .filter_map(|role| {
+                        self.properties.members.get(&role.name).cloned()
+                    })
+                    .collect();
+                if let Some(roles) = self.properties.roles_schema.get(schema_id)
+                {
+                    keys.extend(roles.evaluator.iter().filter_map(|role| {
+                        self.properties.members.get(&role.name).cloned()
+                    }));
+                }
+                (schema_id.clone(), keys)
+            })
+            .collect();
+        (compilers, evaluators)
+    }
+
+    /// Whether this node has the compiler role in the governance.
+    fn is_compiler(&self) -> bool {
+        self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        })
+    }
+
+    async fn up_compile_worker(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        node_key: PublicKey,
+        hash: &HashAlgorithm,
+        network: &Arc<NetworkSender>,
+    ) -> Result<(), ActorError> {
+        // Ownership transitions may retain the compiler role and its
+        // standing worker; its regular Update refreshes the new state.
+        if ctx.get_child::<CompileWorker>("compiler").await.is_ok() {
+            return Ok(());
+        }
+
+        let (issuers, issuer_any) = self.properties.governance_issuers();
+        // The compile worker serves artifacts: only the evaluator
+        // whitelist matters (compilers compile, they never request).
+        let (_, evaluators) = self.artifact_whitelists();
+        // Operator-visible pin coverage: whether this node can build
+        // under the committed pin or stays dormant (serving only).
+        // Resolved here, not just per-operation, so a misconfigured
+        // node states its situation once at boot instead of warning
+        // on every request.
+        let pin_held = self.properties.toolchain.is_empty()
+            || CompilerSupport::toolchains_helper(ctx)
+                .ok()
+                .and_then(|toolchains| {
+                    toolchains.resolve(&self.properties.toolchain)
+                })
+                .is_some();
+        tracing::info!(
+            msg_type = "CompilerBoot",
+            governance_id = %self.subject_metadata.subject_id,
+            gov_version = self.properties.version,
+            toolchain_pin = %self.properties.toolchain,
+            pin_held = pin_held,
+            "Compiler role boot: pin coverage"
+        );
+        ctx.create_child(
+            "compiler",
+            CompileWorker {
+                node_key,
+                our_key: self.our_key.clone(),
+                governance_id: self.subject_metadata.subject_id.clone(),
+                gov_version: self.properties.version,
+                issuers,
+                issuer_any,
+                schemas: self.properties.schemas.clone(),
+                evaluators,
+                toolchain_pin: self.properties.toolchain.clone(),
+                committed_pin: self.properties.toolchain.clone(),
+                // Governance opens the gate only after anchor recovery.
+                serving_blocked: true,
+                serving_cache: HashMap::new(),
+                hash: *hash,
+                network: network.clone(),
+                stop: false,
+                pending: None,
+                build_children: BTreeSet::new(),
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn recover_compiler_artifacts(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        schemas: &BTreeMap<SchemaType, Schema>,
+        hash: &HashAlgorithm,
+    ) -> Result<(), ActorError> {
+        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
+        else {
+            return Err(ActorError::Helper {
+                name: "config".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
+        >>("contracts") else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_owned(),
+                reason: "Not found".to_owned(),
+            });
+        };
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+
+        // Module residency follows the evaluator role: schemas this node
+        // does not evaluate are recovered and verified the same way, but
+        // their module is dropped once the init check passes — it is never
+        // executed locally and the node serves raw bytes from disk.
+        let evaluated = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+
+        for (schema_id, schema) in schemas {
+            let contract_name =
+                format!("{}_{}", self.subject_metadata.subject_id, schema_id);
+            let Some(contract_path) = join_contained(
+                &config.contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "RecoverArtifacts",
+                    schema_id = %schema_id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
+            let mut delays = [1_u64, 2, 4].into_iter();
+
+            let recovered = loop {
+                match CompilerSupport::recover_official_artifact(
+                    *hash,
+                    ctx,
+                    ContractSourceInput {
+                        contract_name: &contract_name,
+                        contract: &schema.contract,
+                        contract_path: &contract_path,
+                        initial_value: schema.initial_value.0.clone(),
+                    },
+                    &register_path,
+                    &self.properties.toolchain,
+                )
+                .await
+                {
+                    Ok(recovered) => break Ok(recovered),
+                    Err(error)
+                        if is_retryable_compiler_recovery_error(&error) =>
+                    {
+                        let Some(delay) = delays.next() else {
+                            break Err(error);
+                        };
+                        warn!(
+                            schema_id = %schema_id,
+                            delay_secs = delay,
+                            error = %error,
+                            "Compiler artifact recovery failed transiently, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+
+            match recovered {
+                Ok(module) => {
+                    if evaluated.contains_key(schema_id) {
+                        contracts.write().await.insert(contract_name, module);
+                    }
+                }
+                Err(CompilerError::UnknownToolchainPin { pin }) => {
+                    // No local toolchain for the committed pin: stand
+                    // down for this schema (keep serving retained
+                    // bytes), never crash-loop. Healing resumes on the
+                    // next Update/Reconcile with a resolvable pin —
+                    // same dormant policy as HealArtifact and the
+                    // contract-compiler healing path.
+                    warn!(
+                        schema_id = %schema_id,
+                        pin = %pin,
+                        "No local toolchain for pin, apply-time recovery stays dormant"
+                    );
+                }
+                Err(error @ CompilerError::ToolchainDrift { .. }) => {
+                    // The local toolchain can not reproduce the anchor
+                    // (drifted): same dormancy, fetch and quorum peers
+                    // carry this schema until the toolchain returns.
+                    warn!(
+                        schema_id = %schema_id,
+                        error = %error,
+                        "Toolchain drift, apply-time recovery stays dormant"
+                    );
+                }
+                Err(error) => {
+                    return Err(crash_system(
+                        ctx,
+                        ActorError::FunctionalCritical {
+                            description: format!(
+                                "Can not recover official compiler artifact {}: {}",
+                                schema_id, error
+                            ),
+                        },
+                    )
+                    .await);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sends `ServingBlocked` to every artifact server of this node (the
+    /// standing compile worker and the contract compiler of every
+    /// evaluated schema): while a governance update is being applied,
+    /// between versions there is no good answer.
+    async fn set_artifact_serving_blocked(
+        &self,
+        ctx: &ActorContext<Self>,
+        blocked: bool,
+    ) {
+        if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await
+            && let Err(e) = compiler
+                .tell(CompileWorkerMessage::ServingBlocked { blocked })
+                .await
+        {
+            warn!(
+                error = %e,
+                blocked,
+                "Failed to update serving gate of the compile worker"
+            );
+        }
+
+        let schemas = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+        for schema_id in schemas.keys() {
+            if let Ok(contract_compiler) = ctx
+                .get_child::<ContractCompiler>(&format!(
+                    "{}_contract_compiler",
+                    schema_id
+                ))
+                .await
+                && let Err(e) = contract_compiler
+                    .tell(ContractCompilerMessage::ServingBlocked { blocked })
+                    .await
+            {
+                warn!(
+                    error = %e,
+                    schema_id = %schema_id,
+                    blocked,
+                    "Failed to update serving gate of the contract compiler"
+                );
+            }
+        }
+    }
+
     async fn manager_schemas_compilers(
         &self,
         ctx: &mut ActorContext<Self>,
         old_gov: &GovernanceData,
+        evidence_contracts: &BTreeMap<SchemaType, DigestIdentifier>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError> {
         let Some(network) =
             ctx.system().get_helper::<Arc<NetworkSender>>("network")
@@ -894,6 +2248,81 @@ impl Governance {
                 description: "Hash algorithm is None".to_string(),
             });
         };
+
+        // Serving artifacts is blocked while the update is applied
+        // (promotion, schema compilers up/down/refresh): between
+        // versions there is no good answer. If a step fails, staying
+        // blocked is the safe failure mode — a restart clears it.
+        self.set_artifact_serving_blocked(ctx, true).await;
+
+        // The ledger anchor of every committed contract is recorded by
+        // every node, with or without the artifact: it is the only hash
+        // this node accepts when fetching the artifact from the network.
+        // It is a pure function of the committed event and is recorded
+        // BEFORE promotion, so a crash during promotion leaves the anchor
+        // in place and recovery can re-obtain the artifact.
+        Self::record_compile_anchors(
+            ctx,
+            evidence_contracts,
+            &self.subject_metadata.subject_id,
+        )
+        .await?;
+
+        // Staged artifacts of the contracts that just committed become
+        // the official ones: the registered pipeline below then finds
+        // them already in place and does not recompile.
+        self.promote_staged_contracts(ctx, evidence_contracts, &hash)
+            .await?;
+
+        if self.is_compiler() {
+            let was_compiler = old_gov.has_this_role(HashThisRole::Gov {
+                who: (*self.our_key).clone(),
+                role: RoleTypes::Compiler,
+            });
+            let recovery_schemas = if was_compiler {
+                evidence_contracts
+                    .keys()
+                    .filter_map(|schema_id| {
+                        self.properties
+                            .schemas
+                            .get(schema_id)
+                            .map(|schema| (schema_id.clone(), schema.clone()))
+                    })
+                    .collect()
+            } else {
+                self.properties.schemas.clone()
+            };
+
+            if !recovery_schemas.is_empty() {
+                if defer_acquisition {
+                    // Intermediate versions of the sync window are
+                    // never built — mark the owed acquisition; the pass
+                    // at the certified tip builds the final version
+                    // only.
+                    Self::set_acquisition_pending(
+                        ctx,
+                        recovery_schemas
+                            .keys()
+                            .map(|schema_id| {
+                                format!(
+                                    "{}_{}",
+                                    self.subject_metadata.subject_id, schema_id
+                                )
+                            })
+                            .collect(),
+                        true,
+                    )
+                    .await?;
+                } else {
+                    self.recover_compiler_artifacts(
+                        ctx,
+                        &recovery_schemas,
+                        &hash,
+                    )
+                    .await?;
+                }
+            }
+        }
 
         let (old_schemas_eval, new_schemas_eval) = {
             let old_schemas_eval =
@@ -919,35 +2348,56 @@ impl Governance {
             .await?;
 
             // Subimos los compilers que soy nuevo evaluador
-            let up = new_schemas_eval
+            let up: BTreeMap<SchemaType, Schema> = new_schemas_eval
                 .clone()
                 .iter()
                 .filter(|x| !old_schemas_eval.contains(x.0))
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            Self::up_compilers_schemas(
-                ctx,
-                &up,
-                self.subject_metadata.subject_id.clone(),
-                &hash,
-            )
-            .await?;
-
             // Compilo los nuevos contratos en el caso de que hayan sido modificados, sino no afecta.
-            let current = new_schemas_eval
+            let current: HashMap<SchemaType, Schema> = new_schemas_eval
                 .clone()
                 .iter()
                 .filter(|x| old_schemas_eval.contains(x.0))
                 .map(|x| (x.0.clone(), x.1.clone()))
                 .collect();
 
-            Self::compile_schemas(
-                ctx,
-                current,
-                self.subject_metadata.subject_id.clone(),
-            )
-            .await?;
+            if defer_acquisition {
+                // The artifact work (fetch/compile) is deferred to
+                // the certified-tip pass — intermediate versions of the
+                // sync window are never acquired. The ContractCompiler
+                // actors are NOT created here; the pass creates them.
+                Self::set_acquisition_pending(
+                    ctx,
+                    up.keys()
+                        .chain(current.keys())
+                        .map(|schema_id| {
+                            format!(
+                                "{}_{}",
+                                self.subject_metadata.subject_id, schema_id
+                            )
+                        })
+                        .collect(),
+                    true,
+                )
+                .await?;
+            } else {
+                self.up_compilers_schemas(
+                    ctx,
+                    &up,
+                    self.subject_metadata.subject_id.clone(),
+                    &hash,
+                )
+                .await?;
+
+                self.compile_schemas(
+                    ctx,
+                    current,
+                    self.subject_metadata.subject_id.clone(),
+                )
+                .await?;
+            }
 
             (
                 old_schemas_eval,
@@ -957,6 +2407,7 @@ impl Governance {
                     .collect::<BTreeMap<SchemaType, ValueWrapper>>(),
             )
         };
+
         let old_schemas_vali =
             old_gov.schemas_name(ProtocolTypes::Validation, &self.our_key);
 
@@ -1054,42 +2505,322 @@ impl Governance {
         .await
     }
 
+    /// Marks or clears the deferred-acquisition marker of the given
+    /// contract names. The marker is what distinguishes an expected
+    /// missing artifact at boot (acquisition deferred by a catch-up
+    /// sync, node crashed mid-window) from a corrupt one (immediate
+    /// anchored heal / crash-fast).
+    async fn set_acquisition_pending(
+        ctx: &ActorContext<Self>,
+        contract_names: Vec<String>,
+        pending: bool,
+    ) -> Result<(), ActorError> {
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Can not access contract register for deferred acquisition: {}",
+                    e
+                ),
+            })?;
+
+        for contract_name in contract_names {
+            register
+                .ask(ContractRegisterMessage::SetAcquisitionPending {
+                    contract_name,
+                    pending,
+                })
+                .await
+                .map_err(|e| ActorError::Functional {
+                    description: format!(
+                        "Can not update deferred acquisition marker: {}",
+                        e
+                    ),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Contract names whose artifact acquisition is pending
+    /// (deferred by a catch-up sync).
+    async fn list_acquisition_pending(
+        ctx: &ActorContext<Self>,
+    ) -> Result<Vec<String>, ActorError> {
+        let register_path =
+            ActorPath::from(format!("{}/contract_register", ctx.path()));
+        let register = ctx
+            .system()
+            .get_actor::<ContractRegister>(&register_path)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Can not access contract register for deferred acquisition: {}",
+                    e
+                ),
+            })?;
+
+        match register
+            .ask(ContractRegisterMessage::ListPending)
+            .await
+            .map_err(|e| ActorError::Functional {
+                description: format!(
+                    "Can not list deferred acquisitions: {}",
+                    e
+                ),
+            })? {
+            ContractRegisterResponse::Contracts(names) => Ok(names),
+            _ => Err(ActorError::UnexpectedResponse {
+                path: register_path,
+                expected: "ContractRegisterResponse::Contracts".to_owned(),
+            }),
+        }
+    }
+
+    /// Drops deferred-acquisition markers when a governance goes
+    /// EOL (no deferred acquisition will ever run for it).
+    async fn clear_acquisition_pending(
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // The governance is inactive from here: no deferred
+        // acquisition will ever run for it, so drop pending markers
+        // instead of leaking them.
+        let pending = Self::list_acquisition_pending(ctx)
+            .await
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            Self::set_acquisition_pending(ctx, pending, false).await?;
+        }
+        Ok(())
+    }
+
+    /// Single artifact acquisition pass, fired when a catch-up
+    /// round reaches the witness-certified tip (`RunDeferredAcquisition`)
+    /// or a version-sync round proves this node is already at it
+    /// (`SyncRoundIdle`). Only the CURRENT contracts are acquired:
+    /// compilers recover against the ledger anchor (same crash-fast
+    /// policy the per-batch apply had), evaluators start their fetch
+    /// cycle (their ContractCompiler actors are created here — deferred
+    /// applies do not create them). Markers of schemas that left the
+    /// governance mid-window or that no current role needs are just
+    /// cleared.
+    async fn run_deferred_acquisition(
+        &self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        let Some(hash) = self.hash else {
+            return Err(ActorError::FunctionalCritical {
+                description: "Hash algorithm is None".to_string(),
+            });
+        };
+
+        let pending = Self::list_acquisition_pending(ctx).await?;
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let subject_id = self.subject_metadata.subject_id.clone();
+        let is_compiler = self.is_compiler();
+        let eval_schemas = self
+            .properties
+            .schemas(ProtocolTypes::Evaluation, &self.our_key);
+
+        let mut recover_schemas: BTreeMap<SchemaType, Schema> = BTreeMap::new();
+        let mut fetch_schemas: BTreeMap<SchemaType, Schema> = BTreeMap::new();
+
+        for contract_name in &pending {
+            let schema_entry =
+                self.properties.schemas.iter().find(|(schema_id, _)| {
+                    format!("{}_{}", subject_id, schema_id) == *contract_name
+                });
+
+            let Some((schema_id, schema)) = schema_entry else {
+                // The schema left the governance mid-window: nothing to
+                // acquire, the marker is cleared below.
+                continue;
+            };
+
+            if is_compiler {
+                recover_schemas.insert(schema_id.clone(), schema.clone());
+            }
+            // Independent of the compiler branch: an evaluated schema
+            // also needs its ContractCompiler actor (it compiles or
+            // fetches inside, by role).
+            if eval_schemas.contains_key(schema_id) {
+                fetch_schemas.insert(schema_id.clone(), schema.clone());
+            }
+            // No current role needs the artifact: the marker is cleared
+            // below.
+        }
+
+        if !recover_schemas.is_empty() {
+            self.recover_compiler_artifacts(ctx, &recover_schemas, &hash)
+                .await?;
+        }
+
+        if !fetch_schemas.is_empty() {
+            // Deferred applies did not create the ContractCompiler
+            // actors: schemas without one go through the create path,
+            // the rest through the refresh path.
+            let mut up: BTreeMap<SchemaType, Schema> = BTreeMap::new();
+            let mut current: HashMap<SchemaType, Schema> = HashMap::new();
+            for (schema_id, schema) in fetch_schemas {
+                let actor_name = format!("{}_contract_compiler", schema_id);
+                if ctx.get_child::<ContractCompiler>(&actor_name).await.is_ok()
+                {
+                    current.insert(schema_id, schema);
+                } else {
+                    up.insert(schema_id, schema);
+                }
+            }
+
+            if !up.is_empty() {
+                self.up_compilers_schemas(ctx, &up, subject_id.clone(), &hash)
+                    .await?;
+            }
+            if !current.is_empty() {
+                self.compile_schemas(ctx, current, subject_id.clone())
+                    .await?;
+            }
+        }
+
+        // The pass ran: nothing is owed anymore. Actors created in this
+        // pass were born serving-blocked (they missed the
+        // governance-wide gate); their artifacts are verified against
+        // the anchor, so the gate opens.
+        Self::set_acquisition_pending(ctx, pending, false).await?;
+        self.set_artifact_serving_blocked(ctx, false).await;
+
+        Ok(())
+    }
+
     async fn update_childs(
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        let node_key = self.subject_metadata.new_owner.as_ref().map_or_else(
+            || self.subject_metadata.owner.clone(),
+            |new_owner| new_owner.clone(),
+        );
         if let Ok(evaluator) = ctx.get_child::<EvalWorker>("evaluator").await {
             let (issuers, issuer_any) = self.properties.governance_issuers();
             evaluator
                 .tell(EvalWorkerMessage::Update {
                     gov_version: self.properties.version,
-                    issuers,
+                    node_key: node_key.clone(),
+                    issuers: issuers.clone(),
                     issuer_any,
+                    toolchain: self.properties.toolchain.clone(),
                 })
                 .await?;
         }
 
-        if let Ok(validator) = ctx.get_child::<ValiWorker>("validator").await {
+        if let Ok(compiler) = ctx.get_child::<CompileWorker>("compiler").await {
+            let (issuers, issuer_any) = self.properties.governance_issuers();
+            let (_, evaluators) = self.artifact_whitelists();
+            compiler
+                .tell(CompileWorkerMessage::Update {
+                    gov_version: self.properties.version,
+                    node_key: node_key.clone(),
+                    issuers,
+                    issuer_any,
+                    schemas: self.properties.schemas.clone(),
+                    evaluators,
+                    toolchain_pin: self.properties.toolchain.clone(),
+                })
+                .await?;
+        }
+
+        let validator = ctx.get_child::<ValiWorker>("validator").await.ok();
+        let approver = ctx.get_child::<ApprPersist>("approver").await.ok();
+
+        if validator.is_some() || approver.is_some() {
             let current_roles = self
                 .current_validation_roles(ctx, SchemaType::Governance)
                 .await?;
-            validator
-                .tell(ValiWorkerMessage::UpdateCurrentRoles {
-                    gov_version: self.properties.version,
-                    current_roles: crate::validation::worker::CurrentWorkerRoles {
-                        approval: current_roles.approval,
-                        evaluation: crate::governance::role_register::RoleDataRegister {
-                            workers: current_roles
-                                .schema
-                                .evaluation
-                                .iter()
-                                .map(|role| role.key.clone())
-                                .collect(),
-                            quorum: current_roles.schema.evaluation_quorum,
-                        },
-                    },
-                })
-                .await?;
+
+            if let Some(validator) = validator {
+                let node_key =
+                    self.subject_metadata.new_owner.as_ref().map_or_else(
+                        || self.subject_metadata.owner.clone(),
+                        |new_owner| new_owner.clone(),
+                    );
+                validator
+                    .tell(ValiWorkerMessage::UpdateCurrentRoles {
+                        gov_version: self.properties.version,
+                        node_key,
+                        current_roles:
+                            crate::validation::worker::CurrentWorkerRoles {
+                                approval: current_roles.approval.clone(),
+                                compilation: current_roles
+                                    .compilation
+                                    .clone(),
+                                evaluation:
+                                    crate::governance::role_register::RoleDataRegister {
+                                        workers: current_roles
+                                            .schema
+                                            .evaluation
+                                            .iter()
+                                            .map(|role| role.key.clone())
+                                            .collect(),
+                                        quorum: current_roles
+                                            .schema
+                                            .evaluation_quorum
+                                            .clone(),
+                                    },
+                                validation:
+                                    crate::governance::role_register::RoleDataRegister {
+                                        workers: current_roles
+                                            .schema
+                                            .validation
+                                            .iter()
+                                            .map(|role| role.key.clone())
+                                            .collect(),
+                                        quorum: current_roles
+                                            .schema
+                                            .validation_quorum
+                                            .clone(),
+                                    },
+                            },
+                    })
+                    .await?;
+            }
+
+            if let Some(approver) = approver {
+                let node_key =
+                    self.subject_metadata.new_owner.as_ref().map_or_else(
+                        || self.subject_metadata.owner.clone(),
+                        |new_owner| new_owner.clone(),
+                    );
+                // Best effort: the approver may be draining after a
+                // concurrent teardown (retire never blocks for it),
+                // in which case the update is dropped with the actor.
+                // Fresh state arrives with the next recreate or update,
+                // so a failed send must not fail the whole update.
+                if let Err(e) = approver
+                    .tell(ApprPersistMessage::Update {
+                        validators: current_roles
+                            .schema
+                            .validation
+                            .iter()
+                            .map(|role| role.key.clone())
+                            .collect(),
+                        node_key,
+                    })
+                    .await
+                {
+                    debug!(
+                        msg_type = "UpdateApprover",
+                        error = %e,
+                        "Approver gone while pushing validator update; skipping"
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -1122,19 +2853,28 @@ impl Governance {
             .await?;
 
         let prefix = format!("{}_", self.subject_metadata.subject_id);
-        let mut allowed: HashSet<String> = schemas
+        let allowed: HashSet<String> = schemas
             .keys()
             .map(|schema_id| {
                 format!("{}_{}", self.subject_metadata.subject_id, schema_id)
             })
             .collect();
 
+        // Only artifact entries are swept by role: the ledger anchors
+        // are a projection of the applied events and remain valid
+        // regardless of this node's roles.
         let registered: Vec<String> = match contract_register
-            .ask(ContractRegisterMessage::ListContracts)
+            .ask(ContractRegisterMessage::ListArtifacts)
             .await?
         {
             ContractRegisterResponse::Contracts(contracts) => contracts,
-            _ => Vec::new(),
+            unexpected => {
+                warn!(
+                    response = ?unexpected,
+                    "Unexpected contract register response while sweeping, treating as empty"
+                );
+                Vec::new()
+            }
         };
 
         for contract_name in registered {
@@ -1142,7 +2882,7 @@ impl Governance {
                 && !allowed.contains(&contract_name)
             {
                 contract_register
-                    .tell(ContractRegisterMessage::DeleteMetadata {
+                    .tell(ContractRegisterMessage::DeleteArtifact {
                         contract_name: contract_name.clone(),
                     })
                     .await?;
@@ -1151,47 +2891,57 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path;
-        if !contracts_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not read contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
+        // Official artifacts live under `contracts/` while staging
+        // happens at the root: both directories must be swept (the
+        // root-only scan left retired official artifacts on disk
+        // forever). Same predicate in both: temp staging always goes,
+        // anything else only when no longer allowed.
+        for contracts_dir in [
+            config.contracts_path.clone(),
+            config.contracts_path.join("contracts"),
+        ] {
+            if !contracts_dir.exists() {
+                continue;
             }
-        })?;
 
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|e| ActorError::Functional {
+            let mut entries =
+                fs::read_dir(&contracts_dir).await.map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not read contracts directory {}: {}",
+                            contracts_dir.display(),
+                            e
+                        ),
+                    }
+                })?;
+
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ActorError::Functional {
                     description: format!(
                         "Can not iterate contracts directory {}: {}",
                         contracts_dir.display(),
                         e
                     ),
-                })?
-        {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if !file_name.starts_with(&prefix) {
-                continue;
-            }
+                }
+            })? {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if !file_name.starts_with(&prefix) {
+                    continue;
+                }
 
-            let is_temp = file_name.starts_with(&format!(
-                "{}_temp_",
-                self.subject_metadata.subject_id
-            ));
-            if is_temp || !allowed.contains(&file_name) {
-                let path = entry.path();
-                let _ = fs::remove_dir_all(path).await;
-                if !is_temp {
-                    allowed.remove(&file_name);
+                let is_temp = file_name.starts_with(&format!(
+                    "{}_temp_",
+                    self.subject_metadata.subject_id
+                ));
+                if is_temp || !allowed.contains(&file_name) {
+                    let path = entry.path();
+                    if let Err(e) = fs::remove_dir_all(path).await {
+                        debug!(
+                            error = %e,
+                            file_name = %file_name,
+                            "Failed to remove swept contracts entry"
+                        );
+                    }
                 }
             }
         }
@@ -1228,7 +2978,13 @@ impl Governance {
             .await?
         {
             ContractRegisterResponse::Contracts(contracts) => contracts,
-            _ => Vec::new(),
+            unexpected => {
+                warn!(
+                    response = ?unexpected,
+                    "Unexpected contract register response while sweeping, treating as empty"
+                );
+                Vec::new()
+            }
         };
 
         for contract_name in registered {
@@ -1243,45 +2999,50 @@ impl Governance {
             }
         }
 
-        let contracts_dir = config.contracts_path;
-        if !contracts_dir.exists() {
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(&contracts_dir).await.map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not read contracts directory {}: {}",
-                    contracts_dir.display(),
-                    e
-                ),
+        // Official artifacts live under `contracts/` and staging dirs
+        // at the root: both must be swept (iterating only the
+        // root left official artifacts on disk forever).
+        for contracts_dir in [
+            config.contracts_path.join("contracts"),
+            config.contracts_path.clone(),
+        ] {
+            if !contracts_dir.exists() {
+                continue;
             }
-        })?;
 
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|e| ActorError::Functional {
+            let mut entries =
+                fs::read_dir(&contracts_dir).await.map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not read contracts directory {}: {}",
+                            contracts_dir.display(),
+                            e
+                        ),
+                    }
+                })?;
+
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ActorError::Functional {
                     description: format!(
                         "Can not iterate contracts directory {}: {}",
                         contracts_dir.display(),
                         e
                     ),
-                })?
-        {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if file_name.starts_with(&prefix) {
-                let path = entry.path();
-                fs::remove_dir_all(&path).await.map_err(|e| {
-                    ActorError::Functional {
-                        description: format!(
-                            "Can not remove contract directory {}: {}",
-                            path.display(),
-                            e
-                        ),
-                    }
-                })?;
+                }
+            })? {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.starts_with(&prefix) {
+                    let path = entry.path();
+                    fs::remove_dir_all(&path).await.map_err(|e| {
+                        ActorError::Functional {
+                            description: format!(
+                                "Can not remove contract directory {}: {}",
+                                path.display(),
+                                e
+                            ),
+                        }
+                    })?;
+                }
             }
         }
 
@@ -1316,14 +3077,72 @@ impl Governance {
             let schemas = self
                 .properties
                 .schemas(ProtocolTypes::Evaluation, &self.our_key);
-            self.sweep_contract_artifacts(ctx, &schemas).await?;
-            Self::up_compilers_schemas(
+            let artifact_schemas = if self.is_compiler() {
+                self.properties.schemas.clone()
+            } else {
+                schemas.clone()
+            };
+
+            // Anchors are a rebuildable projection of the ledger: a
+            // crash between the event persistence and their recording
+            // is repaired here, before any artifact recovery reads them.
+            self.recover_missing_compile_anchors(ctx).await?;
+
+            self.sweep_contract_artifacts(ctx, &artifact_schemas)
+                .await?;
+
+            // Schemas with a deferred acquisition pending (the
+            // node crashed mid-catch-up) are NOT acquired here —
+            // building the local-tip version could be blind work if the
+            // network has moved on. The first completed sync round (or
+            // an idle version-sync round when already at tip) runs the
+            // acquisition pass for them.
+            let pending: std::collections::BTreeSet<String> =
+                Self::list_acquisition_pending(ctx)
+                    .await?
+                    .into_iter()
+                    .collect();
+            let not_pending = |schema_id: &SchemaType| {
+                !pending.contains(&format!(
+                    "{}_{}",
+                    self.subject_metadata.subject_id, schema_id
+                ))
+            };
+
+            if self.is_compiler() {
+                // The standing compiler must not serve until every official
+                // artifact has been validated against its ledger anchor.
+                self.set_artifact_serving_blocked(ctx, true).await;
+                let to_recover: BTreeMap<SchemaType, Schema> = artifact_schemas
+                    .iter()
+                    .filter(|(schema_id, _)| not_pending(schema_id))
+                    .map(|(schema_id, schema)| {
+                        (schema_id.clone(), schema.clone())
+                    })
+                    .collect();
+                self.recover_compiler_artifacts(ctx, &to_recover, hash)
+                    .await?;
+            }
+            let to_up: BTreeMap<SchemaType, Schema> = schemas
+                .iter()
+                .filter(|(schema_id, _)| not_pending(schema_id))
+                .map(|(schema_id, schema)| (schema_id.clone(), schema.clone()))
+                .collect();
+            self.up_compilers_schemas(
                 ctx,
-                &schemas,
+                &to_up,
                 self.subject_metadata.subject_id.clone(),
                 hash,
             )
             .await?;
+
+            // Schemas with a deferred acquisition still hold the previous
+            // bytes under the new anchor: unblocking now would serve
+            // them as current until the deferred pass runs — stay
+            // blocked, the pass unblocks when it completes.
+            if pending.is_empty() {
+                self.set_artifact_serving_blocked(ctx, false).await;
+            }
 
             schemas
                 .iter()
@@ -1398,6 +3217,7 @@ impl Governance {
                 network: network.clone(),
                 current_roles: crate::validation::worker::CurrentWorkerRoles {
                     approval: current_roles.approval,
+                    compilation: current_roles.compilation,
                     evaluation:
                         crate::governance::role_register::RoleDataRegister {
                             workers: current_roles
@@ -1408,8 +3228,20 @@ impl Governance {
                                 .collect(),
                             quorum: current_roles.schema.evaluation_quorum,
                         },
+                    validation:
+                        crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .validation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.validation_quorum,
+                        },
                 },
                 stop: false,
+                pending: None,
+                approvals: std::collections::HashMap::new(),
             };
             ctx.create_child("validator", validator).await?;
         }
@@ -1425,50 +3257,41 @@ impl Governance {
                 our_key: self.our_key.clone(),
                 governance_id: self.subject_metadata.subject_id.clone(),
                 gov_version: self.properties.version,
-                sn: self.subject_metadata.sn,
                 context: EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain: self.properties.toolchain.clone(),
                 },
                 init_state: None,
                 hash: *hash,
                 network: network.clone(),
                 stop: false,
+                pending: None,
             };
             ctx.create_child("evaluator", evaluator).await?;
         }
 
         if self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        }) {
+            self.up_compile_worker(ctx, node_key.clone(), hash, network)
+                .await?;
+        }
+
+        if self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         }) {
-            let always_accept = if let Some(config) =
-                ctx.system().get_helper::<ConfigHelper>("config")
-            {
-                config.always_accept
-            } else {
-                return Err(ActorError::Helper {
-                    name: "config".to_owned(),
-                    reason: "Not found".to_owned(),
-                });
-            };
-
-            let pass_votation = if always_accept {
-                VotationType::AlwaysAccept
-            } else {
-                VotationType::Manual
-            };
-
-            let init_approver = InitApprPersist {
-                our_key: self.our_key.clone(),
-                node_key: node_key.clone(),
-                subject_id: self.subject_metadata.subject_id.clone(),
-                pass_votation,
-                helpers: (*hash, network.clone()),
-            };
-
-            ctx.create_child("approver", ApprPersist::initial(init_approver))
-                .await?;
+            // A draining predecessor may still hold the name (async
+            // teardown never blocks for it): retry instead of failing
+            // the update.
+            self.spawn_approver(
+                ctx,
+                node_key.clone(),
+                MAX_APPROVER_CREATE_ATTEMPTS,
+            )
+            .await?;
         }
 
         Ok(())
@@ -1517,6 +3340,7 @@ impl Governance {
                     network: network.clone(),
                     current_roles: crate::validation::worker::CurrentWorkerRoles {
                         approval: current_roles.approval,
+                        compilation: current_roles.compilation,
                         evaluation: crate::governance::role_register::RoleDataRegister {
                             workers: current_roles
                                 .schema
@@ -1526,8 +3350,19 @@ impl Governance {
                                 .collect(),
                             quorum: current_roles.schema.evaluation_quorum,
                         },
+                        validation: crate::governance::role_register::RoleDataRegister {
+                            workers: current_roles
+                                .schema
+                                .validation
+                                .iter()
+                                .map(|role| role.key.clone())
+                                .collect(),
+                            quorum: current_roles.schema.validation_quorum,
+                        },
                     },
                     stop: false,
+                    pending: None,
+                    approvals: std::collections::HashMap::new(),
                 };
                 ctx.create_child("validator", validator).await?;
             }
@@ -1558,17 +3393,41 @@ impl Governance {
                     our_key: self.our_key.clone(),
                     governance_id: self.subject_metadata.subject_id.clone(),
                     gov_version: self.properties.version,
-                    sn: self.subject_metadata.sn,
                     context: EvalWorkerContext::Governance {
                         issuers,
                         issuer_any,
+                        toolchain: self.properties.toolchain.clone(),
                     },
                     init_state: None,
                     hash: *hash,
                     network: network.clone(),
                     stop: false,
+                    pending: None,
                 };
                 ctx.create_child("evaluator", evaluator).await?;
+            }
+            _ => {}
+        };
+
+        let old_comp = old_gov.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        });
+
+        let new_comp = self.properties.has_this_role(HashThisRole::Gov {
+            who: (*self.our_key).clone(),
+            role: RoleTypes::Compiler,
+        });
+
+        match (old_comp, new_comp) {
+            (true, false) => {
+                let actor = ctx.get_child::<CompileWorker>("compiler").await?;
+
+                actor.ask_stop().await?;
+            }
+            (false, true) => {
+                self.up_compile_worker(ctx, node_key.clone(), hash, network)
+                    .await?;
             }
             _ => {}
         };
@@ -1577,7 +3436,6 @@ impl Governance {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
         });
-
         let new_appr = self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
@@ -1585,39 +3443,17 @@ impl Governance {
 
         match (old_appr, new_appr) {
             (true, false) => {
-                let actor = ctx.get_child::<ApprPersist>("approver").await?;
-
-                actor.ask_stop().await?;
+                // Role lost: votes must not survive. Never wait on
+                // the child here (see `retire_approver`).
+                Self::retire_approver(ctx).await?;
             }
             (false, true) => {
-                let always_accept = if let Some(config) =
-                    ctx.system().get_helper::<ConfigHelper>("config")
-                {
-                    config.always_accept
-                } else {
-                    return Err(ActorError::Helper {
-                        name: "config".to_owned(),
-                        reason: "Not found".to_owned(),
-                    });
-                };
-
-                let pass_votation = if always_accept {
-                    VotationType::AlwaysAccept
-                } else {
-                    VotationType::Manual
-                };
-
-                let init_approver = InitApprPersist {
-                    our_key: self.our_key.clone(),
-                    node_key: node_key.clone(),
-                    subject_id: self.subject_metadata.subject_id.clone(),
-                    pass_votation,
-                    helpers: (*hash, network.clone()),
-                };
-
-                ctx.create_child(
-                    "approver",
-                    ApprPersist::initial(init_approver),
+                // Role gained: a draining predecessor may still hold
+                // the name (async teardown never blocks for it).
+                self.spawn_approver(
+                    ctx,
+                    node_key.clone(),
+                    MAX_APPROVER_CREATE_ATTEMPTS,
                 )
                 .await?;
             }
@@ -1652,11 +3488,20 @@ impl Governance {
 
         if gov.has_this_role(HashThisRole::Gov {
             who: (*our_key).clone(),
-            role: RoleTypes::Approver,
+            role: RoleTypes::Compiler,
         }) {
-            let actor = ctx.get_child::<ApprPersist>("approver").await?;
+            let actor = ctx.get_child::<CompileWorker>("compiler").await?;
 
             actor.ask_stop().await?;
+        }
+
+        if gov.has_this_role(HashThisRole::Gov {
+            who: (*our_key).clone(),
+            role: RoleTypes::Approver,
+        }) {
+            // Same as the role-diff path: no surviving votes, and
+            // never wait on the child (see `retire_approver`).
+            Self::retire_approver(ctx).await?;
         }
 
         Ok(())
@@ -1668,44 +3513,63 @@ impl Governance {
         hash: &HashAlgorithm,
         network: &Arc<NetworkSender>,
     ) -> Result<(), ActorError> {
-        let always_accept = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
-        {
-            config.always_accept
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_string(),
-                reason: "Not Found".to_string(),
-            });
-        };
-        let pass_votation = if always_accept {
-            VotationType::AlwaysAccept
-        } else {
-            VotationType::Manual
-        };
+        // A draining predecessor may still hold the name (async
+        // teardown never blocks for it): retry instead of failing
+        // the update.
+        self.spawn_approver(
+            ctx,
+            (*self.our_key).clone(),
+            MAX_APPROVER_CREATE_ATTEMPTS,
+        )
+        .await?;
 
-        let init_approver = InitApprPersist {
-            our_key: self.our_key.clone(),
-            node_key: (*self.our_key).clone(),
-            subject_id: self.subject_metadata.subject_id.clone(),
-            pass_votation,
-            helpers: (*hash, network.clone()),
-        };
-
-        ctx.create_child("approver", ApprPersist::initial(init_approver))
-            .await?;
+        if self.is_compiler() {
+            self.up_compile_worker(ctx, (*self.our_key).clone(), hash, network)
+                .await?;
+        }
 
         Ok(())
     }
 
-    async fn down_owner(ctx: &ActorContext<Self>) -> Result<(), ActorError> {
-        let actor = ctx.get_child::<ApprPersist>("approver").await?;
-        actor.ask_stop().await?;
+    async fn down_owner(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        // Same as the other down paths: no surviving votes, and never
+        // wait on the child (see `retire_approver`).
+        Self::retire_approver(ctx).await?;
+
+        if !self.is_compiler()
+            && let Ok(compiler) =
+                ctx.get_child::<CompileWorker>("compiler").await
+        {
+            compiler.ask_stop().await?;
+        }
 
         Ok(())
+    }
+
+    /// Asks a ContractCompiler actor once, without in-actor retry:
+    /// sleeping with backoff here would block the whole Governance
+    /// actor (sync, queries) on every error storm. Recovery lives
+    /// where it belongs — the compiler's own heal/fetch cycles keep
+    /// retrying out of band. Returns the terminal error, if any, so
+    /// the caller formats its own message.
+    async fn ask_compile_once<F, Fut>(
+        mut attempt: F,
+    ) -> Result<Option<CompilerError>, ActorError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<CompilerResponse, ActorError>>,
+    {
+        match attempt().await? {
+            CompilerResponse::Ok => Ok(None),
+            CompilerResponse::Error(error) => Ok(Some(error)),
+        }
     }
 
     async fn up_compilers_schemas(
+        &self,
         ctx: &mut ActorContext<Self>,
         schemas: &BTreeMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
@@ -1722,11 +3586,23 @@ impl Governance {
             });
         };
 
+        let is_compiler = self.is_compiler();
+        let (whitelist_compilers, whitelist_evaluators) =
+            self.artifact_whitelists();
+
         for (id, schema) in schemas {
             let actor_name = format!("{}_contract_compiler", id);
 
             let compiler = ctx
-                .create_child(&actor_name, ContractCompiler::new(*hash))
+                .create_child(
+                    &actor_name,
+                    ContractCompiler::new(*hash, self.our_key.clone()),
+                )
+                .await?;
+            // This actor can be created after the apply started, so it
+            // did not receive the initial governance-wide serving block.
+            compiler
+                .tell(ContractCompilerMessage::ServingBlocked { blocked: true })
                 .await?;
 
             let Schema {
@@ -1735,24 +3611,89 @@ impl Governance {
                 ..
             } = schema;
 
-            let response = compiler
-                .ask(ContractCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", subject_id, id),
-                    contract: contract.clone(),
-                    initial_value: initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_{}", subject_id, id)),
+            let contract_name = format!("{}_{}", subject_id, id);
+            let Some(contract_path) = join_contained(
+                &contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "CompilerArtifacts",
+                    schema_id = %id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
+
+            if is_compiler {
+                // Compiler role: the node builds the artifact itself.
+                let reconcile = ContractCompilerMessage::Reconcile {
+                    gov_version: self.properties.version,
+                    compilers: whitelist_compilers.clone(),
+                    evaluators: whitelist_evaluators
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    action: ContractCompilerAction::Compile {
+                        contract_name: contract_name.clone(),
+                        contract: contract.clone(),
+                        initial_value: initial_value.0.clone(),
+                        contract_path: contract_path.clone(),
+                        toolchain_pin: self.properties.toolchain.clone(),
+                    },
+                };
+                let terminal_error = Self::ask_compile_once(|| {
+                    let reconcile = reconcile.clone();
+                    async { compiler.ask(reconcile).await }
                 })
                 .await?;
 
-            if let CompilerResponse::Error(error) = response {
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "Can not compile schema contract {}: {}",
-                        id, error
-                    ),
-                });
+                if let Some(error) = terminal_error {
+                    // Fatal local problems (disk, register, helpers,
+                    // engine) are never degraded: the node is broken and
+                    // must fail like before the degraded mode existed.
+                    if is_local_fatal_compiler_error(&error) {
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not compile schema contract {}: {}",
+                                id, error
+                            ),
+                        });
+                    }
+                    // Degraded mode: this schema has no usable local
+                    // artifact and the compiler pool could not provide
+                    // one. That is not a fatal node problem — keep the
+                    // governance running and leave the contract out of
+                    // the local cache, so evaluations of this schema
+                    // answer `Unavailable` until the artifacts are
+                    // restored.
+                    error!(
+                        schema_id = %id,
+                        error = %error,
+                        "Contract artifacts unavailable; evaluations of this schema will be unavailable"
+                    );
+                }
+            } else {
+                // No compiler role: the node fetches the official
+                // artifact from the network (message-driven; the fetch
+                // cycle is self-managed by the contract compiler).
+                compiler
+                    .tell(ContractCompilerMessage::Reconcile {
+                        gov_version: self.properties.version,
+                        compilers: whitelist_compilers.clone(),
+                        evaluators: whitelist_evaluators
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        action: ContractCompilerAction::Fetch {
+                            contract: contract.clone(),
+                            contract_name,
+                            initial_value: initial_value.0.clone(),
+                            contract_path,
+                            gov_id: subject_id.clone(),
+                            schema_id: id.clone(),
+                        },
+                    })
+                    .await?;
             }
         }
 
@@ -1764,14 +3705,6 @@ impl Governance {
         schemas: &BTreeSet<SchemaType>,
         subject_id: &DigestIdentifier,
     ) -> Result<(), ActorError> {
-        let Some(config) = ctx.system().get_helper::<ConfigHelper>("config")
-        else {
-            return Err(ActorError::Helper {
-                name: "config".to_string(),
-                reason: "Not Found".to_string(),
-            });
-        };
-
         let Some(contracts) = ctx.system().get_helper::<Arc<
             RwLock<HashMap<String, Arc<CompiledModule>>>,
         >>("contracts") else {
@@ -1781,40 +3714,33 @@ impl Governance {
             });
         };
 
-        let contract_register = ctx
-            .get_child::<ContractRegister>("contract_register")
-            .await?;
-
         for schema_id in schemas.iter() {
-            let actor = ctx
+            // The actor may not exist: deferred catch-up applies
+            // never created it. The module eviction below is
+            // unconditional — residency follows the evaluator role,
+            // with or without actor.
+            if let Ok(actor) = ctx
                 .get_child::<ContractCompiler>(&format!(
                     "{}_contract_compiler",
                     schema_id
                 ))
-                .await?;
-
-            actor.ask_stop().await?;
+                .await
+            {
+                actor.ask_stop().await?;
+            }
 
             let contract_name = format!("{}_{}", subject_id, schema_id);
-            contract_register
-                .tell(ContractRegisterMessage::DeleteMetadata {
-                    contract_name: contract_name.clone(),
-                })
-                .await?;
-
             {
                 let mut contracts = contracts.write().await;
                 contracts.remove(&contract_name);
             }
-
-            let contract_path = config.contracts_path.join(&contract_name);
-            let _ = fs::remove_dir_all(contract_path).await;
         }
 
         Ok(())
     }
 
     async fn compile_schemas(
+        &self,
         ctx: &ActorContext<Self>,
         schemas: HashMap<SchemaType, Schema>,
         subject_id: DigestIdentifier,
@@ -1830,6 +3756,19 @@ impl Governance {
             });
         };
 
+        let Some(contracts) = ctx.system().get_helper::<Arc<
+            RwLock<HashMap<String, Arc<CompiledModule>>>,
+        >>("contracts") else {
+            return Err(ActorError::Helper {
+                name: "contracts".to_owned(),
+                reason: "Not Found".to_owned(),
+            });
+        };
+
+        let is_compiler = self.is_compiler();
+        let (whitelist_compilers, whitelist_evaluators) =
+            self.artifact_whitelists();
+
         for (id, schema) in schemas {
             let actor = ctx
                 .get_child::<ContractCompiler>(&format!(
@@ -1838,24 +3777,91 @@ impl Governance {
                 ))
                 .await?;
 
-            let response = actor
-                .ask(ContractCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", subject_id, id),
-                    contract: schema.contract.clone(),
-                    initial_value: schema.initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_{}", subject_id, id)),
+            let contract_name = format!("{}_{}", subject_id, id);
+            let Some(contract_path) = join_contained(
+                &contracts_path.join("contracts"),
+                &contract_name,
+            ) else {
+                warn!(
+                    msg_type = "CompilerArtifacts",
+                    schema_id = %id,
+                    "Refusing to read artifact path outside contracts root"
+                );
+                continue;
+            };
+
+            if is_compiler {
+                // Compiler role: the node builds the artifact itself.
+                let reconcile = ContractCompilerMessage::Reconcile {
+                    gov_version: self.properties.version,
+                    compilers: whitelist_compilers.clone(),
+                    evaluators: whitelist_evaluators
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    action: ContractCompilerAction::Compile {
+                        contract_name: contract_name.clone(),
+                        contract: schema.contract.clone(),
+                        initial_value: schema.initial_value.0.clone(),
+                        contract_path: contract_path.clone(),
+                        toolchain_pin: self.properties.toolchain.clone(),
+                    },
+                };
+                let terminal_error = Self::ask_compile_once(|| {
+                    let reconcile = reconcile.clone();
+                    async { actor.ask(reconcile).await }
                 })
                 .await?;
 
-            if let CompilerResponse::Error(error) = response {
-                return Err(ActorError::Functional {
-                    description: format!(
-                        "Can not refresh schema contract {}: {}",
-                        id, error
-                    ),
-                });
+                if let Some(error) = terminal_error {
+                    // Fatal local problems (disk, register, helpers,
+                    // engine) are never degraded: the node is broken and
+                    // must fail like before the degraded mode existed.
+                    if is_local_fatal_compiler_error(&error) {
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not refresh schema contract {}: {}",
+                                id, error
+                            ),
+                        });
+                    }
+                    // Degraded mode (same policy as
+                    // `up_compilers_schemas`): the refreshed artifact
+                    // could not be obtained, so evict the previous
+                    // module from the local cache — evaluating with a
+                    // stale contract would diverge from the rest of the
+                    // network. Evaluations of this schema answer
+                    // `Unavailable` until the artifacts are restored.
+                    error!(
+                        schema_id = %id,
+                        error = %error,
+                        "Contract refresh failed, stale artifact evicted; evaluations of this schema will be unavailable"
+                    );
+                    contracts.write().await.remove(&contract_name);
+                }
+            } else {
+                // No compiler role: the node never compiles — it fetches
+                // the official artifact from the network (same policy as
+                // `up_compilers_schemas`; message-driven, the fetch
+                // cycle is self-managed by the contract compiler).
+                actor
+                    .tell(ContractCompilerMessage::Reconcile {
+                        gov_version: self.properties.version,
+                        compilers: whitelist_compilers.clone(),
+                        evaluators: whitelist_evaluators
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default(),
+                        action: ContractCompilerAction::Fetch {
+                            contract: schema.contract.clone(),
+                            contract_name,
+                            initial_value: schema.initial_value.0.clone(),
+                            contract_path,
+                            gov_id: subject_id.clone(),
+                            schema_id: id.clone(),
+                        },
+                    })
+                    .await?;
             }
         }
 
@@ -1864,6 +3870,7 @@ impl Governance {
 
     fn build_creators_register_fact(
         &self,
+        version: u64,
         new_creator: HashMap<
             (SchemaType, String, PublicKey),
             (CreatorQuantity, Vec<WitnessesType>),
@@ -2044,11 +4051,11 @@ impl Governance {
 
         (
             SubjectRegisterMessage::RegisterData {
-                gov_version: self.properties.version,
+                gov_version: version,
                 data,
             },
             WitnessesRegisterMessage::UpdateCreatorsWitnessesFact {
-                version: self.properties.version,
+                version,
                 new_creator: new_creator_data,
                 remove_creator,
                 update_creator_witnesses: update_creator_witnesses_data,
@@ -2092,32 +4099,41 @@ impl Governance {
         &self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        self.first_role_register_with(ctx, &self.subject_metadata.owner)
+            .await
+    }
+
+    /// Seeds the role register with the genesis owner grants.
+    /// Takes the owner explicitly so boot reconciliation replays
+    /// genesis with era state instead of tip state.
+    async fn first_role_register_with(
+        &self,
+        ctx: &ActorContext<Self>,
+        owner: &PublicKey,
+    ) -> Result<(), ActorError> {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
 
         actor
             .tell(RoleRegisterMessage::UpdateFact {
                 version: 0,
                 appr_quorum: Some(Quorum::Majority),
+                comp_quorum: Some(Quorum::Majority),
                 eval_quorum: HashMap::from([(
                     SchemaType::Governance,
                     Quorum::Majority,
                 )]),
-                new_approvers: vec![self.subject_metadata.owner.clone()],
+                new_approvers: vec![owner.clone()],
+                new_compilers: vec![owner.clone()],
                 new_evaluators: HashMap::from([(
-                    (
-                        SchemaType::Governance,
-                        self.subject_metadata.owner.clone(),
-                    ),
+                    (SchemaType::Governance, owner.clone()),
                     vec![Namespace::new()],
                 )]),
                 new_validators: HashMap::from([(
-                    (
-                        SchemaType::Governance,
-                        self.subject_metadata.owner.clone(),
-                    ),
+                    (SchemaType::Governance, owner.clone()),
                     vec![Namespace::new()],
                 )]),
                 remove_approvers: vec![],
+                remove_compilers: vec![],
                 remove_evaluators: HashMap::new(),
                 remove_validators: HashMap::new(),
                 vali_quorum: HashMap::from([(
@@ -2144,6 +4160,7 @@ impl Governance {
     async fn update_registers_fact(
         &self,
         ctx: &ActorContext<Self>,
+        version: u64,
         update: RolesUpdate,
         creator_update: CreatorRoleUpdate,
     ) -> Result<(), ActorError> {
@@ -2151,6 +4168,9 @@ impl Governance {
             appr_quorum,
             new_approvers,
             remove_approvers,
+            comp_quorum,
+            new_compilers,
+            remove_compilers,
             eval_quorum,
             new_evaluators,
             remove_evaluators,
@@ -2166,10 +4186,13 @@ impl Governance {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
         actor
             .tell(RoleRegisterMessage::UpdateFact {
-                version: self.properties.version,
+                version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 new_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 new_validators,
                 remove_approvers,
@@ -2180,6 +4203,7 @@ impl Governance {
             .await?;
 
         let (subj_msg, wit_msg) = self.build_creators_register_fact(
+            version,
             new_creator,
             remove_creator,
             creator_update,
@@ -2202,11 +4226,14 @@ impl Governance {
     async fn update_registers_confirm(
         &self,
         ctx: &ActorContext<Self>,
+        version: u64,
         update: RolesUpdateConfirm,
     ) -> Result<(), ActorError> {
         let RolesUpdateConfirm {
             new_approver,
             remove_approver,
+            new_compiler,
+            remove_compiler,
             new_evaluator,
             remove_evaluators,
             new_validator,
@@ -2218,9 +4245,11 @@ impl Governance {
         let actor = ctx.get_child::<RoleRegister>("role_register").await?;
         actor
             .tell(RoleRegisterMessage::UpdateConfirm {
-                version: self.properties.version,
+                version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -2331,6 +4360,15 @@ impl Governance {
             let last_data = LastData {
                 gov_version: last_ledger.gov_version,
                 vali_data: last_ledger.protocols.get_validation_data(),
+                approval_data_hash: last_ledger
+                    .protocols
+                    .approval_data_hash(hash)
+                    .map_err(|e| ActorError::Functional {
+                        description: format!(
+                            "Can not create approval data hash: {}",
+                            e
+                        ),
+                    })?,
             };
 
             let last_event_is_ok = match Self::verify_new_ledger_event(
@@ -2350,8 +4388,22 @@ impl Governance {
                 Ok(last_event_is_ok) => last_event_is_ok,
                 Err(e) => {
                     // Check if it's a sequence number error
-                    if matches!(e, SubjectError::InvalidSequenceNumber { .. }) {
-                        // El evento que estamos aplicando no es el siguiente.
+                    if let SubjectError::InvalidSequenceNumber {
+                        expected,
+                        actual,
+                    } = &e
+                    {
+                        // El evento que estamos aplicando no es el
+                        // siguiente: se salta en este batch (el sync lo
+                        // re-entrega mientras siga pendiente) pero se
+                        // registra — un salto silencioso es un evento
+                        // perdido sin rastro.
+                        warn!(
+                            subject_id = %self.subject_metadata.subject_id,
+                            expected_sn = expected,
+                            event_sn = actual,
+                            "Skipping out-of-order ledger event in batch"
+                        );
                         continue;
                     } else {
                         return Err(ActorError::Functional {
@@ -2375,8 +4427,38 @@ impl Governance {
             };
 
             let (update_fact, update_confirm) = if last_event_is_ok {
+                // Failed events only leave their ledger record: every
+                // derived write below mirrors exactly what `apply`
+                // mutates (eval-ok, and approval for facts). Anything
+                // else would store state the properties never had.
+                let transfer_ok = matches!(
+                    &event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
+                let confirm_ok = matches!(
+                    &event.protocols,
+                    Protocols::GovConfirm { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some()
+                );
+                let fact_ok = matches!(
+                    &event.protocols,
+                    Protocols::GovFact {
+                        evaluation,
+                        approval,
+                        ..
+                    }
+                    if evaluation
+                        .as_ref()
+                        .and_then(|evaluation| evaluation
+                            .evaluator_response_ok())
+                        .is_some()
+                        && approval.as_ref().is_some_and(|approval| {
+                            approval.approved
+                        })
+                );
                 match &event_request {
-                    EventRequest::Transfer(transfer_request) => {
+                    EventRequest::Transfer(transfer_request) if transfer_ok => {
                         self.transfer(
                             ctx,
                             transfer_request.new_owner.clone(),
@@ -2386,8 +4468,9 @@ impl Governance {
 
                         self.update_gov_version(ctx).await?;
                     }
+                    EventRequest::Transfer(..) => {}
                     EventRequest::Reject(..) => {
-                        self.reject(ctx, 0).await?;
+                        self.reject(ctx, event.sn, 0).await?;
 
                         self.update_gov_version(ctx).await?;
                     }
@@ -2405,40 +4488,64 @@ impl Governance {
                         )
                         .await?;
 
+                        Self::clear_acquisition_pending(ctx).await?;
+
                         self.update_gov_version(ctx).await?;
                     }
                     _ => {}
                 };
+                let update_confirm = if let EventRequest::Confirm(..) =
+                    &event_request
+                    && confirm_ok
+                {
+                    self.confirm(
+                        ctx,
+                        event.ledger_seal_signature.signer.clone(),
+                        self.subject_metadata.owner.clone(),
+                        event.sn,
+                        0,
+                    )
+                    .await?;
 
-                let update_confirm =
-                    if let EventRequest::Confirm(..) = &event_request {
-                        self.confirm(
-                            ctx,
-                            event.ledger_seal_signature.signer.clone(),
-                            0,
-                        )
-                        .await?;
-
-                        if let Some(new_owner_key) =
-                            &self.subject_metadata.new_owner
-                        {
-                            Some(self.properties.roles_update_remove_confirm(
-                                &self.subject_metadata.owner,
-                                new_owner_key,
-                            ))
-                        } else {
-                            None
-                        }
+                    if let Some(new_owner_key) =
+                        &self.subject_metadata.new_owner
+                    {
+                        Some(self.properties.roles_update_remove_confirm(
+                            &self.subject_metadata.owner,
+                            new_owner_key,
+                        ))
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
                 let update_fact = if let EventRequest::Fact(fact_request) =
                     &event_request
+                    && fact_ok
                 {
-                    let governance_event = serde_json::from_value::<GovernanceEvent>(fact_request.payload.0.clone()).map_err(|e| {
-                            ActorError::FunctionalCritical{description: format!("Can not convert payload into governance event in governance fact event: {}", e)}
-                        })?;
+                    // A committed payload that does not deserialize is
+                    // local corruption: fail loud instead of returning a
+                    // critical error for a tell handler to discard.
+                    let governance_event = match serde_json::from_value::<
+                        GovernanceEvent,
+                    >(
+                        fact_request.payload.0.clone(),
+                    ) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            return Err(crash_system(
+                                    ctx,
+                                    ActorError::FunctionalCritical {
+                                        description: format!(
+                                            "Can not convert payload into governance event in governance fact event: {e}"
+                                        ),
+                                    },
+                                )
+                                .await);
+                        }
+                    };
 
                     let rm_members = governance_event
                         .members
@@ -2512,12 +4619,22 @@ impl Governance {
                     rm_roles,
                 );
 
-                self.update_registers_fact(ctx, update, creator_update)
-                    .await?;
+                self.update_registers_fact(
+                    ctx,
+                    self.properties.version,
+                    update,
+                    creator_update,
+                )
+                .await?;
             }
 
             if let Some(update_confirm) = update_confirm {
-                self.update_registers_confirm(ctx, update_confirm).await?;
+                self.update_registers_confirm(
+                    ctx,
+                    self.properties.version,
+                    update_confirm,
+                )
+                .await?;
             }
 
             // Acutalizar último evento.
@@ -2620,10 +4737,7 @@ impl Governance {
         }
 
         let witnesses_register = match ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
-            )
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
             .await
         {
             Ok(actor) => Some(actor),
@@ -2744,78 +4858,19 @@ impl Governance {
     ) -> Result<(), ActorError> {
         let mut cleanup_errors = Vec::new();
 
+        // Phase 1 — stop every store-backed child. A missing
+        // child is already gone: nothing to stop, and the atomic
+        // purge below covers orphaned data without recreating
+        // anyone. Orphan-data recreation (up_approver_only) is gone
+        // with it.
         if self.properties.has_this_role(HashThisRole::Gov {
             who: (*self.our_key).clone(),
             role: RoleTypes::Approver,
-        }) {
-            let hash = self.hash.map_or_else(
-                || {
-                    cleanup_errors
-                        .push("approver init: missing hash".to_owned());
-                    None
-                },
-                Some,
-            );
-
-            let network = ctx
-                .system()
-                .get_helper::<Arc<NetworkSender>>("network")
-                .map_or_else(
-                    || {
-                        cleanup_errors.push(
-                            "approver init: missing network helper".to_owned(),
-                        );
-                        None
-                    },
-                    Some,
-                );
-
-            if let (Some(hash), Some(network)) = (hash, network) {
-                let approver = match ctx
-                    .get_child::<ApprPersist>("approver")
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(_) => match self
-                        .up_approver_only(ctx, &hash, &network)
-                        .await
-                    {
-                        Ok(()) => match ctx
-                            .get_child::<ApprPersist>("approver")
-                            .await
-                        {
-                            Ok(actor) => Some(actor),
-                            Err(error) => {
-                                cleanup_errors
-                                    .push(format!("approver lookup: {error}"));
-                                None
-                            }
-                        },
-                        Err(error) => {
-                            cleanup_errors.push(format!("approver: {error}"));
-                            None
-                        }
-                    },
-                };
-
-                if let Some(approver) = approver {
-                    match approver
-                        .ask(crate::approval::persist::ApprPersistMessage::PurgeStorage)
-                        .await
-                    {
-                        Ok(crate::approval::persist::ApprPersistResponse::Ok) => {}
-                        Ok(_) => cleanup_errors
-                            .push("approver: unexpected response".to_owned()),
-                        Err(error) => {
-                            cleanup_errors.push(format!("approver: {error}"))
-                        }
-                    }
-
-                    if let Err(error) = approver.ask_stop().await {
-                        cleanup_errors.push(format!("approver stop: {error}"));
-                    }
-                }
-            }
+        }) && let Ok(approver) =
+            ctx.get_child::<ApprPersist>("approver").await
+            && let Err(error) = approver.ask_stop().await
+        {
+            cleanup_errors.push(format!("approver stop: {error}"));
         }
 
         let contract_register = match ctx
@@ -2850,245 +4905,93 @@ impl Governance {
                 cleanup_errors.push(format!("contract_artifacts: {error}"));
             }
 
-            match contract_register
-                .ask(ContractRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(ContractRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "contract_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("contract_register: {error}"))
-                }
-            }
-
             if let Err(error) = contract_register.ask_stop().await {
                 cleanup_errors.push(format!("contract_register stop: {error}"));
             }
         }
 
-        let role_register = match ctx
-            .create_child("role_register", RoleRegister::initial(()))
-            .await
+        if let Ok(role_register) =
+            ctx.get_child::<RoleRegister>("role_register").await
+            && let Err(error) = role_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<RoleRegister>("role_register").await {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("role_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("role_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(role_register) = role_register {
-            match role_register.ask(RoleRegisterMessage::PurgeStorage).await {
-                Ok(RoleRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "role_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("role_register: {error}"))
-                }
-            }
-
-            if let Err(error) = role_register.ask_stop().await {
-                cleanup_errors.push(format!("role_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("role_register stop: {error}"));
         }
 
-        let subject_register = match ctx
-            .create_child("subject_register", SubjectRegister::initial(()))
-            .await
+        if let Ok(subject_register) =
+            ctx.get_child::<SubjectRegister>("subject_register").await
+            && let Err(error) = subject_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<SubjectRegister>("subject_register").await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("subject_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("subject_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(subject_register) = subject_register {
-            match subject_register
-                .ask(SubjectRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(SubjectRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "subject_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("subject_register: {error}"))
-                }
-            }
-
-            if let Err(error) = subject_register.ask_stop().await {
-                cleanup_errors.push(format!("subject_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("subject_register stop: {error}"));
         }
 
-        let sn_register = match ctx
-            .create_child("sn_register", SnRegister::initial(()))
-            .await
+        if let Ok(sn_register) =
+            ctx.get_child::<SnRegister>("sn_register").await
+            && let Err(error) = sn_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx.get_child::<SnRegister>("sn_register").await {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors
-                            .push(format!("sn_register lookup: {error}"));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("sn_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(sn_register) = sn_register {
-            match sn_register.ask(SnRegisterMessage::PurgeStorage).await {
-                Ok(SnRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "sn_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!("sn_register: {error}"))
-                }
-            }
-
-            if let Err(error) = sn_register.ask_stop().await {
-                cleanup_errors.push(format!("sn_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("sn_register stop: {error}"));
         }
 
-        let witnesses_register = match ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
-            )
+        if let Ok(witnesses_register) = ctx
+            .get_child::<WitnessesRegister>("witnesses_register")
             .await
+            && let Err(error) = witnesses_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx
-                    .get_child::<WitnessesRegister>("witnesses_register")
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors.push(format!(
-                            "witnesses_register lookup: {error}"
-                        ));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors.push(format!("witnesses_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(witnesses_register) = witnesses_register {
-            match witnesses_register
-                .ask(WitnessesRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(WitnessesRegisterResponse::Ok) => {}
-                Ok(_) => cleanup_errors
-                    .push("witnesses_register: unexpected response".to_owned()),
-                Err(error) => {
-                    cleanup_errors.push(format!("witnesses_register: {error}"))
-                }
-            }
-
-            if let Err(error) = witnesses_register.ask_stop().await {
-                cleanup_errors
-                    .push(format!("witnesses_register stop: {error}"));
-            }
+            cleanup_errors.push(format!("witnesses_register stop: {error}"));
         }
 
-        let transfer_verification_register = match ctx
-            .create_child(
+        if let Ok(transfer_verification_register) = ctx
+            .get_child::<TransferVerificationRegister>(
                 "transfer_verification_register",
-                TransferVerificationRegister::initial(()),
             )
             .await
+            && let Err(error) = transfer_verification_register.ask_stop().await
         {
-            Ok(actor) => Some(actor),
-            Err(ActorError::Exists { .. }) => {
-                match ctx
-                    .get_child::<TransferVerificationRegister>(
-                        "transfer_verification_register",
-                    )
-                    .await
-                {
-                    Ok(actor) => Some(actor),
-                    Err(error) => {
-                        cleanup_errors.push(format!(
-                            "transfer_verification_register lookup: {error}"
-                        ));
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                cleanup_errors
-                    .push(format!("transfer_verification_register: {error}"));
-                None
-            }
-        };
-
-        if let Some(transfer_verification_register) =
-            transfer_verification_register
-        {
-            match transfer_verification_register
-                .ask(TransferVerificationRegisterMessage::PurgeStorage)
-                .await
-            {
-                Ok(TransferVerificationRegisterResponse::Ok) => {}
-                Ok(other) => cleanup_errors.push(format!(
-                    "transfer_verification_register: unexpected response {other:?}"
-                )),
-                Err(error) => {
-                    cleanup_errors.push(format!(
-                        "transfer_verification_register: {error}"
-                    ))
-                }
-            }
-
-            if let Err(error) = transfer_verification_register.ask_stop().await
-            {
-                cleanup_errors.push(format!(
-                    "transfer_verification_register stop: {error}"
-                ));
-            }
+            cleanup_errors
+                .push(format!("transfer_verification_register stop: {error}"));
         }
 
-        if let Err(error) = purge_storage(ctx).await {
-            cleanup_errors.push(format!("governance: {error}"));
+        if let Ok(manager) = ctx.get_child::<SinkManager>("sink_manager").await
+            && let Err(error) = manager.ask_stop().await
+        {
+            cleanup_errors.push(format!("sink_manager stop: {error}"));
+        }
+
+        // Phase 2 — one atomic purge for the whole subtree (children
+        // above plus this actor): all rows go in a single backend
+        // transaction, so a crash leaves either everything or
+        // nothing — never a half-deleted governance. Child prefixes
+        // are the governance name, like at creation; ours is the
+        // store default for this path.
+        let prefix = ctx.path().key().to_string();
+        let mut scopes: Vec<ave_actors::PurgeScope<'_>> = [
+            "approver",
+            "contract_register",
+            "role_register",
+            "subject_register",
+            "sn_register",
+            "witnesses_register",
+            "transfer_verification_register",
+            "sink",
+        ]
+        .iter()
+        .map(|store| ave_actors::PurgeScope {
+            store,
+            prefix: prefix.as_str(),
+        })
+        .collect();
+        let gov_prefix = ave_actors::default_store_prefix(ctx.path());
+        scopes.push(ave_actors::PurgeScope {
+            store: "governance",
+            prefix: gov_prefix.as_str(),
+        });
+        let Some(db) = ctx.system().get_helper::<Arc<Database>>("store") else {
+            cleanup_errors.push("store helper missing".to_owned());
+            return Err(ActorError::Functional {
+                description: cleanup_errors.join("; "),
+            });
+        };
+        if let Err(error) = db.purge_scopes(&scopes) {
+            cleanup_errors.push(format!("atomic purge: {error}"));
         }
 
         if cleanup_errors.is_empty() {
@@ -3116,9 +5019,34 @@ pub enum GovernanceMessage {
     DeleteGovernanceStorage,
     UpdateLedger {
         events: Vec<Ledger>,
+        /// The events arrive from a catch-up distribution round:
+        /// artifact acquisition is deferred — intermediate contract
+        /// versions of the window are never built — and a single
+        /// acquisition pass runs when the round reaches the
+        /// witness-certified tip (`RunDeferredAcquisition`).
+        defer_acquisition: bool,
     },
+    /// The catch-up round reached the certified tip: run the deferred
+    /// artifact acquisition pass over the current schemas.
+    RunDeferredAcquisition,
+    /// A governance version-sync round completed and no peer is ahead:
+    /// the node is at the tip, so any deferred artifact acquisition
+    /// is due now — covers a reboot with pending markers where no
+    /// distribution round will ever fire.
+    SyncRoundIdle,
     GetGovernance,
     GetVersion,
+    /// A contract compiler could not obtain an artifact from anyone:
+    /// force a manual governance update round in case this node is so
+    /// outdated that it is asking nodes that no longer serve it.
+    TriggerGovUpdate,
+    /// Retry an approver creation that collided with a draining
+    /// predecessor (async teardown never blocks for the name to
+    /// free). Carries no identity: the handler recomputes from
+    /// current state whether an approver is still wanted.
+    RetryApproverCreate {
+        attempts_left: usize,
+    },
     HasRole {
         governance_id: DigestIdentifier,
         role_query: HashThisRole,
@@ -3349,10 +5277,7 @@ impl Actor for Governance {
         }
 
         if let Err(e) = ctx
-            .create_child(
-                "witnesses_register",
-                WitnessesRegister::initial(Self::ledger_batch_size(ctx).await?),
-            )
+            .create_child("witnesses_register", WitnessesRegister::initial(()))
             .await
         {
             error!(
@@ -3397,6 +5322,91 @@ impl Actor for Governance {
             return Err(e);
         }
 
+        // Boot reconciliation: replay register updates from the
+        // ledger so derived state catches up to the persisted tip
+        // before this actor processes anything (race-free: the
+        // mailbox is still closed) and before sync actors start
+        // below. A failure here is a broken node, not a degraded
+        // one: fail the boot loud.
+        if let Err(e) = self.reconcile_registers(ctx).await {
+            error!(
+                error = %e,
+                "Failed to reconcile registers at boot"
+            );
+            return Err(e);
+        }
+
+        // Crash backstop: replay ledger events the query projection
+        // missed between persist and projection write, and refresh
+        // the subject state row. Dirty boots only (clean runs
+        // project live); once per boot like the reconcile above.
+        if !self.skip_reconcile {
+            let state = SubjectDB::from(&*self);
+            if let Err(e) = crate::model::common::fill_projection_gap(
+                ctx,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+                state,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to fill projection gap at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for register-table tails: re-emit this
+        // governance's registration (upsert, idempotent). Dirty
+        // boots only; deleted governances stay deleted.
+        if !self.skip_reconcile && self.subject_metadata.active {
+            use crate::node::register::RegisterMessage;
+            if let Err(e) = Self::reemit_registration(
+                ctx,
+                RegisterMessage::RegisterGov {
+                    gov_id: self.subject_metadata.subject_id.to_string(),
+                    name: self.subject_metadata.name.clone(),
+                    description: self.subject_metadata.description.clone(),
+                },
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to re-emit governance registration at boot"
+                );
+                return Err(e);
+            }
+        }
+
+        // Crash backstop for quiet subjects: report the ledger tip to
+        // the node sink manager so undelivered past events are caught
+        // up even without fresh traffic. Map reads only.
+        // Dirty boots only (same reason as above). Ledgers without
+        // history report nothing: with no tip a missing cursor must
+        // not read as behind.
+        if !self.skip_reconcile && get_last_event(ctx).await?.is_some() {
+            let node_path = ctx.path().parent().parent();
+            let manager_path =
+                ActorPath::from(format!("{}/node_sink_manager", node_path));
+            if let Err(e) = crate::model::common::review_sink_cursor(
+                ctx.system(),
+                manager_path,
+                &self.subject_metadata.subject_id,
+                self.subject_metadata.sn,
+            )
+            .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to review sink cursor at boot"
+                );
+                return Err(e);
+            }
+        }
+
         if self.service {
             let Some(config): Option<ConfigHelper> =
                 ctx.system().get_helper("config")
@@ -3423,7 +5433,7 @@ impl Actor for Governance {
                 config.sync_tracker.update_timeout_secs.max(1),
             );
 
-            if let Err(e) = ctx
+            match ctx
                 .create_child(
                     "tracker_sync",
                     TrackerSync::new(
@@ -3444,26 +5454,54 @@ impl Actor for Governance {
                 )
                 .await
             {
-                error!(
-                    error = %e,
-                    subject_id = %self.subject_metadata.subject_id,
-                    "Failed to create tracker_sync child"
-                );
-                return Err(e);
+                Ok(_) => {
+                    // Newborn children start with empty peer sets: push
+                    // the current ones at once, same as RefreshGovernance
+                    // below does for the version sync.
+                    if let Err(e) = self.push_tracker_sync_peers(ctx).await {
+                        error!(
+                            error = %e,
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Failed to push initial peers to tracker_sync"
+                        );
+                        return Err(e);
+                    }
+                }
+                Err(ActorError::Exists { .. }) => {
+                    // Restart with a live child: it already syncs, just
+                    // bring its peer set current.
+                    if let Err(e) = self.push_tracker_sync_peers(ctx).await {
+                        error!(
+                            error = %e,
+                            subject_id = %self.subject_metadata.subject_id,
+                            "Failed to refresh tracker_sync peers"
+                        );
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        subject_id = %self.subject_metadata.subject_id,
+                        "Failed to create tracker_sync child"
+                    );
+                    return Err(e);
+                }
             }
 
             let version_sync = ctx
                 .create_child(
                     "version_sync",
-                    GovernanceVersionSync::new(
-                        self.subject_metadata.subject_id.clone(),
-                        self.our_key.clone(),
-                        network.clone(),
-                        self.properties.version,
-                        config.sync_governance.sample_size,
-                        version_sync_tick_interval,
-                        version_sync_response_timeout,
-                    ),
+                    GovernanceVersionSync::new(GovernanceVersionSyncConfig {
+                        governance_id: self.subject_metadata.subject_id.clone(),
+                        our_key: self.our_key.clone(),
+                        network: network.clone(),
+                        local_version: self.properties.version,
+                        sample_size: config.sync_governance.sample_size,
+                        tick_interval: version_sync_tick_interval,
+                        response_timeout: version_sync_response_timeout,
+                        has_boot_nodes: config.has_boot_nodes,
+                    }),
                 )
                 .await?;
 
@@ -3497,6 +5535,14 @@ impl Handler<Self> for Governance {
         match msg {
             GovernanceMessage::GetVersion => {
                 Ok(GovernanceResponse::Version(self.properties.version))
+            }
+            GovernanceMessage::TriggerGovUpdate => {
+                self.trigger_gov_update(ctx).await?;
+                Ok(GovernanceResponse::Ok)
+            }
+            GovernanceMessage::RetryApproverCreate { attempts_left } => {
+                self.retry_approver_create(ctx, attempts_left).await?;
+                Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::GetLedger { lo_sn, hi_sn } => {
                 let (ledger, is_all) =
@@ -3536,10 +5582,14 @@ impl Handler<Self> for Governance {
 
                 Ok(GovernanceResponse::Ok)
             }
-            GovernanceMessage::UpdateLedger { events } => {
+            GovernanceMessage::UpdateLedger {
+                events,
+                defer_acquisition,
+            } => {
                 let events_count = events.len();
-                if let Err(e) =
-                    self.manager_new_ledger_events(ctx, events).await
+                if let Err(e) = self
+                    .manager_new_ledger_events(ctx, events, defer_acquisition)
+                    .await
                 {
                     warn!(
                         msg_type = "UpdateLedger",
@@ -3564,6 +5614,24 @@ impl Handler<Self> for Governance {
                     self.subject_metadata.owner.clone(),
                     self.subject_metadata.new_owner.clone(),
                 ))
+            }
+            GovernanceMessage::RunDeferredAcquisition
+            | GovernanceMessage::SyncRoundIdle => {
+                // The certified tip was reached (the catch-up round
+                // completed, or a version-sync round proved no peer is
+                // ahead): the deferred artifact acquisition pass is due.
+                // No-op when no markers are pending. A failure is
+                // logged, not propagated: these triggers are tells, so
+                // an error would vanish silently — and the next trigger
+                // retries the pass anyway.
+                if let Err(e) = self.run_deferred_acquisition(ctx).await {
+                    error!(
+                        error = %e,
+                        "Deferred artifact acquisition failed, retrying on next trigger"
+                    );
+                }
+
+                Ok(GovernanceResponse::Ok)
             }
             GovernanceMessage::GetGovernance => {
                 Ok(GovernanceResponse::Governance(Box::new(
@@ -3666,8 +5734,11 @@ impl Handler<Self> for Governance {
                 sn = self.subject_metadata.sn,
                 "Failed to persist event"
             );
+            // Stop here: publishing an unpersisted event would confirm
+            // a phantom to sinks before the crash lands.
             crash_system(ctx, e).await;
-        };
+            return;
+        }
 
         ctx.publish_all(SubjectSinkEvent::Ledger(Box::new(event_for_publish)));
         debug!(
@@ -3680,14 +5751,22 @@ impl Handler<Self> for Governance {
 
 #[async_trait]
 impl PersistentActor for Governance {
-    type Persistence = FullPersistence;
     type InitParams = (
         Option<(SubjectMetadata, GovernanceData)>,
         Arc<PublicKey>,
         HashAlgorithm,
         bool,
+        bool,
     );
     type State = GovernanceState;
+
+    /// Wide cadence, like Tracker: gov events are rare, so snapshots
+    /// are infrequent anyway; replay stays trivially bounded. The
+    /// event log itself is never pruned: it doubles as the servable
+    /// ledger.
+    fn snapshot_every() -> Option<u64> {
+        Some(1000)
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         let (subject_metadata, properties) =
@@ -3700,6 +5779,7 @@ impl PersistentActor for Governance {
             hash: Some(params.2),
             our_key: params.1,
             service: params.3,
+            skip_reconcile: params.4,
             state: Arc::new(GovernanceState {
                 subject_metadata,
                 properties,
@@ -3736,6 +5816,49 @@ impl PersistentActor for Governance {
                 if let ValidationMetadata::Metadata(metadata) =
                     &validation.validation_metadata
                 {
+                    // Same genesis gates as the first-event verification:
+                    // state adopted here must match node-constructed
+                    // defaults, never blind-synced bytes.
+                    if let Some(name) = &metadata.name
+                        && (name.is_empty() || name.len() > 100)
+                    {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis name is invalid"
+                                    .to_owned(),
+                        });
+                    }
+                    if let Some(description) = &metadata.description
+                        && (description.is_empty() || description.len() > 200)
+                    {
+                        return Err(ActorError::Functional { description: "In create event, genesis description is invalid".to_owned() });
+                    }
+                    if metadata.governance_id != metadata.subject_id {
+                        return Err(ActorError::Functional { description: "In create event, genesis governance_id must match subject_id".to_owned() });
+                    }
+                    if !metadata.namespace.is_empty() {
+                        return Err(ActorError::Functional { description: "In create event, genesis namespace must be empty".to_owned() });
+                    }
+                    if !metadata.schema_id.is_valid_in_request() {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis schema_id is invalid"
+                                    .to_owned(),
+                        });
+                    }
+                    if metadata.creator != metadata.owner {
+                        return Err(ActorError::Functional { description: "In create event, genesis creator must match owner".to_owned() });
+                    }
+                    if metadata.new_owner.is_some() {
+                        return Err(ActorError::Functional { description: "In create event, genesis new_owner must be empty".to_owned() });
+                    }
+                    if !metadata.active {
+                        return Err(ActorError::Functional {
+                            description:
+                                "In create event, genesis must be active"
+                                    .to_owned(),
+                        });
+                    }
                     inner.subject_metadata = SubjectMetadata::new(metadata);
                     inner.properties = serde_json::from_value::<GovernanceData>(
                         metadata.properties.0.clone(),
@@ -3749,6 +5872,40 @@ impl PersistentActor for Governance {
                         );
                         ActorError::Functional { description: format!("In create event, can not convert properties into GovernanceData: {e}")}
                     })?;
+                    // Genesis toolchain is node-constructed (DEFAULT_PIN):
+                    // reject smuggled pins at state adoption, same as the
+                    // first-event verification.
+                    if inner.properties.toolchain
+                        != ave_common::governance::DEFAULT_PIN
+                    {
+                        error!(
+                            event_type = "Create",
+                            subject_id = %inner.subject_metadata.subject_id,
+                            toolchain = %inner.properties.toolchain,
+                            "Genesis toolchain pin is not the default"
+                        );
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "In create event, genesis toolchain pin is not the default: {}",
+                                inner.properties.toolchain
+                            ),
+                        });
+                    }
+                    // Whole-state backstop: genesis properties are fully
+                    // node-constructed, so any deviation left is smuggled
+                    // data regardless of which field carries it.
+                    if inner.properties
+                        != GovernanceData::new(
+                            inner.subject_metadata.owner.clone(),
+                        )
+                    {
+                        error!(
+                            event_type = "Create",
+                            subject_id = %inner.subject_metadata.subject_id,
+                            "Genesis properties do not match node-constructed defaults"
+                        );
+                        return Err(ActorError::Functional { description: "In create event, genesis properties do not match node-constructed defaults".to_owned() });
+                    }
 
                     debug!(
                         event_type = "Create",
@@ -3787,7 +5944,10 @@ impl PersistentActor for Governance {
                     });
                 };
 
-                if let Some(eval_res) = evaluation.evaluator_response_ok() {
+                if let Some(eval_res) = evaluation
+                    .as_ref()
+                    .and_then(|evaluation| evaluation.evaluator_response_ok())
+                {
                     if let Some(appr_res) = approval {
                         if appr_res.approved {
                             inner.apply_patch_inner(eval_res.patch)?;
@@ -3813,6 +5973,15 @@ impl PersistentActor for Governance {
                         );
                         return Err(ActorError::Functional { description: "The evaluation event was successful, but there is no approval".to_owned() });
                     }
+                } else {
+                    // No successful evaluation: the compilation phase
+                    // rejected the contracts or the evaluation failed —
+                    // the event commits as failed, nothing to apply.
+                    debug!(
+                        event_type = "Fact",
+                        subject_id = %inner.subject_metadata.subject_id,
+                        "Governance fact without successful evaluation, nothing to apply"
+                    );
                 }
             }
 

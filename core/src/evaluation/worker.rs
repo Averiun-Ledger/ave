@@ -1,11 +1,10 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeSet, HashSet},
     sync::Arc,
 };
 
 use crate::{
     evaluation::{
-        compiler::{CompilerResponse, error::CompilerError},
         request::{EvalWorkerContext, EvaluateData},
         response::{
             EvalRunnerError, EvaluationResult, EvaluatorError,
@@ -13,25 +12,37 @@ use crate::{
         },
         runner::types::EvaluateInfo,
     },
-    governance::{data::GovernanceData, model::Schema},
-    helpers::network::{NetworkMessage, service::NetworkSender},
+    helpers::network::{NetworkMessage, delivery_of, service::NetworkSender},
     model::common::{
-        crash_system,
+        GovVersionSync, crash_system, gov_version_sync,
         node::{SignTypesNode, get_sign},
     },
     subject::RequestSubjectData,
-    system::ConfigHelper,
 };
 
 use crate::helpers::network::ActorMessage;
 
 use async_trait::async_trait;
 use ave_common::{
-    SchemaType, ValueWrapper,
+    ValueWrapper,
+    governance::GovernanceEvent,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
+    request::EventRequest,
 };
+
+use crate::model::{
+    common::check_quorum_signers,
+    event::{
+        EvaluationData, EvaluationDataOpaque, EvaluationResponse,
+        EvaluationResponseOpaque,
+    },
+};
+
+use crate::{governance::role_register::RoleDataRegister, validation::Check};
+
+use anyhow::{Result, bail};
 
 use ave_network::ComunicateInfo;
 use json_patch::diff;
@@ -46,7 +57,6 @@ use tracing::{Span, debug, error, info_span, warn};
 
 use super::{
     Evaluation, EvaluationMessage,
-    compiler::{TempCompiler, TempCompilerMessage},
     request::EvaluationReq,
     response::EvaluationRes,
     runner::{Runner, RunnerMessage, RunnerResponse, types::RunnerResult},
@@ -59,15 +69,73 @@ pub struct EvalWorker {
     pub our_key: Arc<PublicKey>,
     pub governance_id: DigestIdentifier,
     pub gov_version: u64,
-    pub sn: u64,
     pub context: EvalWorkerContext,
     pub init_state: Option<ValueWrapper>,
     pub hash: HashAlgorithm,
     pub network: Arc<NetworkSender>,
     pub stop: bool,
+    /// In-flight network evaluation request, if any (see `pre_stop`).
+    pub pending: Option<PendingEvaluation>,
+}
+
+/// A network evaluation request being processed.
+///
+/// `pre_stop` uses it to
+/// notify the requester that this evaluator is going down mid-evaluation
+/// (`EvaluationRes::Unavailable`) instead of letting it burn the
+/// coordinator retries on a dead node.
+#[derive(Clone, Debug)]
+pub struct PendingEvaluation {
+    /// Requester node key (response receiver).
+    pub sender: PublicKey,
+    /// Request identifier of the in-flight evaluation.
+    pub request_id: String,
+    /// Evaluation request version.
+    pub version: u64,
+    /// Subject the evaluation belongs to (response actor path).
+    pub subject_id: DigestIdentifier,
 }
 
 impl EvalWorker {
+    /// Best-effort `Unavailable` notification for the in-flight network
+    /// evaluation request: the node is going down before answering, so
+    /// the requester can replace this evaluator immediately instead of
+    /// waiting for the coordinator retries and timeout. Errors are
+    /// logged and swallowed — the coordinator timeout is the fallback.
+    async fn notify_unavailable(&self) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+
+        let info = ComunicateInfo {
+            receiver: pending.sender.clone(),
+            request_id: pending.request_id.clone(),
+            version: pending.version,
+            receiver_actor: format!(
+                "/user/request/{}/evaluation/{}",
+                pending.subject_id, self.our_key
+            ),
+        };
+
+        let message = ActorMessage::EvaluationRes {
+            res: EvaluationRes::Unavailable,
+        };
+        if let Err(error) = self
+            .network
+            .send_command(ave_network::CommandHelper::SendMessage {
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(info, message),
+            })
+            .await
+        {
+            debug!(
+                error = %error,
+                request_id = %pending.request_id,
+                "Could not notify evaluator unavailability while stopping"
+            );
+        }
+    }
+
     async fn execute_contract(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -88,87 +156,16 @@ impl EvalWorker {
         response
     }
 
-    async fn compile_contracts(
-        &self,
-        ctx: &mut ActorContext<Self>,
-        ids: &[SchemaType],
-        schemas: BTreeMap<SchemaType, Schema>,
-    ) -> Result<Option<CompilerError>, ActorError> {
-        let contracts_path = if let Some(config) =
-            ctx.system().get_helper::<ConfigHelper>("config")
-        {
-            config.contracts_path
-        } else {
-            return Err(ActorError::Helper {
-                name: "config".to_owned(),
-                reason: "Not found".to_owned(),
-            });
-        };
-
-        let compiler = ctx
-            .create_child("temp_compiler", TempCompiler::new(self.hash))
-            .await?;
-
-        for id in ids {
-            let Some(schema) = schemas.get(id) else {
-                return Err(ActorError::Functional { description: "There is a contract that requires compilation but its scheme could not be found".to_owned()});
-            };
-
-            let response = compiler
-                .ask(TempCompilerMessage::Compile {
-                    contract_name: format!("{}_{}", self.governance_id, id),
-                    contract: schema.contract.clone(),
-                    initial_value: schema.initial_value.0.clone(),
-                    contract_path: contracts_path
-                        .join("contracts")
-                        .join(format!("{}_temp_{}", self.governance_id, id)),
-                })
-                .await?;
-
-            if let CompilerResponse::Error(e) = response {
-                compiler.ask_stop().await?;
-                return Ok(Some(e));
-            }
-        }
-
-        compiler.ask_stop().await?;
-        Ok(None)
-    }
-
-    async fn check_governance(
-        &self,
-        gov_version: u64,
-    ) -> Result<bool, ActorError> {
-        match self.gov_version.cmp(&gov_version) {
-            std::cmp::Ordering::Less => {
-                warn!(
-                    local_gov_version = self.gov_version,
-                    request_gov_version = gov_version,
-                    governance_id = %self.governance_id,
-                    sender = %self.node_key,
-                    "Received request with a higher governance version; ignoring request"
-                );
-                Err(ActorError::Functional {
-                    description:
-                        "Abort evaluation, request governance version is higher than local"
-                            .to_owned(),
-                })
-            }
-            std::cmp::Ordering::Equal => {
-                // If it is the same it means that we have the latest version of governance, we are up to date.
-                Ok(false)
-            }
-            std::cmp::Ordering::Greater => Ok(true),
-        }
-    }
-
     async fn evaluate(
         &self,
         ctx: &mut ActorContext<Self>,
         evaluation_req: &EvaluationReq,
     ) -> Result<RunnerResult, EvaluatorError> {
-        let runner_data = evaluation_req
-            .build_evaluate_info(&self.init_state, &self.context)?;
+        let runner_data = crate::evaluation::request::build_evaluate_info(
+            evaluation_req,
+            &self.init_state,
+            &self.context,
+        )?;
 
         // Mirar la parte final de execute contract.
         let response = self
@@ -176,38 +173,15 @@ impl EvalWorker {
             .await
             .map_err(|e| EvaluatorError::InternalError(e.to_string()))?;
 
-        let (result, compilations) = match response {
-            RunnerResponse::Ok {
-                result,
-                compilations,
-            } => (result, compilations),
+        // The init check of new or changed schema contracts is done by the
+        // compilation phase (with quorum) BEFORE evaluation, so the runner
+        // result is final here.
+        match response {
+            RunnerResponse::Ok { result } => Ok(result),
             RunnerResponse::Error(runner_error) => {
-                return Err(EvaluatorError::from(runner_error));
+                Err(EvaluatorError::from(runner_error))
             }
-        };
-
-        if self.init_state.is_none() && !compilations.is_empty() {
-            let governance_data = GovernanceData::try_from(
-                result.final_state.clone(),
-            )
-            .map_err(|e| {
-                let e = format!(
-                    "can not convert GovernanceData from properties: {}",
-                    e
-                );
-                EvaluatorError::InternalError(e)
-            })?;
-
-            if let Some(error) = self
-                .compile_contracts(ctx, &compilations, governance_data.schemas)
-                .await
-                .map_err(|e| EvaluatorError::InternalError(e.to_string()))?
-            {
-                return Err(EvaluatorError::from(error));
-            };
         }
-
-        Ok(result)
     }
 
     fn generate_json_patch(
@@ -377,8 +351,13 @@ impl EvalWorker {
             | EvaluatorError::InvalidEventRequest(..) => {
                 return Ok(EvaluationRes::Abort(evaluator_error.to_string()));
             }
-            EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..)) => {
-                return Ok(EvaluationRes::Reboot);
+            // The evaluator can not evaluate (its local artifacts are
+            // missing or its own resources are not enough): not the
+            // request's fault, cast no verdict. The requester replaces
+            // this evaluator from its pending pool.
+            EvaluatorError::Runner(EvalRunnerError::ContractNotFound(..))
+            | EvaluatorError::ResourceUnavailable(..) => {
+                return Ok(EvaluationRes::Unavailable);
             }
             _ => {}
         };
@@ -398,12 +377,18 @@ impl EvalWorker {
     async fn create_res(
         &self,
         ctx: &mut ActorContext<Self>,
-        reboot: bool,
         evaluation_req: &Signed<EvaluationReq>,
     ) -> Result<EvaluationRes, EvaluatorError> {
-        let evaluation = if reboot {
-            EvaluationRes::Reboot
-        } else {
+        // The pin gate runs here too, not only in `check_data` (the
+        // network path): a node evaluating its own request locally must
+        // reach the same verdict as the network evaluators, or the
+        // requester outvotes them with a divergent patch.
+        if let Err(error) = self.check_toolchain_pin(evaluation_req) {
+            return self
+                .build_response_error(ctx, error, evaluation_req.clone())
+                .await;
+        }
+        let evaluation =
             match self.evaluate(ctx, evaluation_req.content()).await {
                 Ok(evaluation) => {
                     self.build_response(ctx, evaluation, evaluation_req.clone())
@@ -421,8 +406,7 @@ impl EvalWorker {
                         .await?
                     }
                 }
-            }
-        };
+            };
 
         Ok(evaluation)
     }
@@ -495,6 +479,59 @@ impl EvalWorker {
             }
         }
 
+        // Toolchain pin intake gate (governance facts only): unknown
+        // pins and no-op switches vote a deterministic `Error`, never
+        // `Abort`. It lives in its own check so both the network path
+        // (`check_data`) and the local path (`create_res`) enforce it.
+        self.check_toolchain_pin(evaluation_req)?;
+
+        Ok(())
+    }
+
+    /// Governance toolchain pin gate shared by the network and the
+    /// local evaluation paths. Both checks run against committed data,
+    /// so every honest evaluator reaches the same verdict.
+    fn check_toolchain_pin(
+        &self,
+        evaluation_req: &Signed<EvaluationReq>,
+    ) -> Result<(), EvaluatorError> {
+        let Some(committed_pin) = self.context.toolchain() else {
+            return Ok(());
+        };
+        let EventRequest::Fact(fact_request) =
+            evaluation_req.content().event_request.content()
+        else {
+            return Ok(());
+        };
+        let event: GovernanceEvent = serde_json::from_value(
+            fact_request.payload.0.clone(),
+        )
+        .map_err(|e| {
+            EvaluatorError::InvalidEventRequest(format!(
+                "Governance fact payload is not a governance event: {e}"
+            ))
+        })?;
+        let Some(new_pin) = &event.toolchain else {
+            return Ok(());
+        };
+        if ave_common::governance::toolchain_info(new_pin).is_none() {
+            return Err(EvaluatorError::InvalidToolchainPin(format!(
+                "unknown toolchain pin: {new_pin}"
+            )));
+        }
+        // A switch to the current pin with no other change is a no-op:
+        // `is_empty` counts the toolchain itself, so the four non-pin
+        // concerns are checked directly.
+        if new_pin == committed_pin
+            && event.members.is_none()
+            && event.roles.is_none()
+            && event.schemas.is_none()
+            && event.policies.is_none()
+        {
+            return Err(EvaluatorError::InvalidToolchainPin(
+                "toolchain pin switch to the current pin".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -503,8 +540,10 @@ impl EvalWorker {
 pub enum EvalWorkerMessage {
     Update {
         gov_version: u64,
+        node_key: PublicKey,
         issuers: BTreeSet<PublicKey>,
         issuer_any: bool,
+        toolchain: String,
     },
     LocalEvaluation {
         evaluation_req: Signed<EvaluationReq>,
@@ -533,6 +572,18 @@ impl Actor for EvalWorker {
             |parent_span| info_span!(parent: parent_span, "EvalWorker", id),
         )
     }
+
+    /// On any stop (graceful shutdown, controlled crash or fault) with a
+    /// network evaluation still in flight, tell the requester this
+    /// evaluator is unavailable so it can replace it without waiting for
+    /// the coordinator retries.
+    async fn pre_stop(
+        &mut self,
+        _ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        self.notify_unavailable().await;
+        Ok(())
+    }
 }
 
 impl NotPersistentActor for EvalWorker {}
@@ -548,18 +599,22 @@ impl Handler<Self> for EvalWorker {
         match msg {
             EvalWorkerMessage::Update {
                 gov_version,
+                node_key,
                 issuers,
                 issuer_any,
+                toolchain,
             } => {
                 self.gov_version = gov_version;
+                self.node_key = node_key;
                 self.context = EvalWorkerContext::Governance {
                     issuers,
                     issuer_any,
+                    toolchain,
                 };
             }
             EvalWorkerMessage::LocalEvaluation { evaluation_req } => {
                 let evaluation =
-                    match self.create_res(ctx, false, &evaluation_req).await {
+                    match self.create_res(ctx, &evaluation_req).await {
                         Ok(eval) => eval,
                         Err(e) => {
                             error!(
@@ -586,26 +641,29 @@ impl Handler<Self> for EvalWorker {
                             })
                             .await
                         {
-                            error!(
+                            // The phase was torn down (abort, reboot or
+                            // quorum already closed) while this response
+                            // was in flight: it is moot, drop it.
+                            debug!(
                                 msg_type = "LocalEvaluation",
                                 error = %e,
-                                "Failed to send response to evaluation actor"
+                                "Evaluation actor gone, dropping response"
                             );
-                            return Err(crash_system(ctx, e).await);
+                        } else {
+                            debug!(
+                                msg_type = "LocalEvaluation",
+                                "Local evaluation completed successfully"
+                            );
                         }
-
-                        debug!(
-                            msg_type = "LocalEvaluation",
-                            "Local evaluation completed successfully"
-                        );
                     }
                     Err(e) => {
-                        error!(
+                        // Same teardown race: the phase actor is gone.
+                        debug!(
                             msg_type = "LocalEvaluation",
                             path = %ctx.path().parent(),
-                            "Evaluation actor not found"
+                            error = %e,
+                            "Evaluation actor not found, dropping response"
                         );
-                        return Err(e);
                     }
                 }
 
@@ -633,27 +691,16 @@ impl Handler<Self> for EvalWorker {
                     return Ok(());
                 }
 
-                let reboot = match self
-                    .check_governance(evaluation_req.content().gov_version)
-                    .await
-                {
-                    Ok(reboot) => reboot,
-                    Err(e) => {
-                        warn!(
-                            msg_type = "NetworkRequest",
-                            error = %e,
-                            "Failed to check governance"
-                        );
-                        if let ActorError::Functional { .. } = e {
-                            if self.stop {
-                                ctx.stop(None).await;
-                            }
-                            return Err(e);
-                        } else {
-                            return Err(crash_system(ctx, e).await);
-                        }
-                    }
-                };
+                self.pending = Some(PendingEvaluation {
+                    sender: sender.clone(),
+                    request_id: info.request_id.clone(),
+                    version: info.version,
+                    subject_id: evaluation_req
+                        .content()
+                        .event_request
+                        .content()
+                        .get_subject_id(),
+                });
 
                 let evaluation = if let Err(error) =
                     self.check_data(&evaluation_req)
@@ -683,21 +730,66 @@ impl Handler<Self> for EvalWorker {
                         }
                     }
                 } else {
-                    match self.create_res(ctx, reboot, &evaluation_req).await {
-                        Ok(eval) => eval,
-                        Err(e) => {
-                            error!(
+                    match gov_version_sync(
+                        self.gov_version,
+                        evaluation_req.content().gov_version,
+                    ) {
+                        // This node is behind the request's governance
+                        // version and can not evaluate it: say so instead
+                        // of staying silent — the requester replaces this
+                        // evaluator from its pending pool.
+                        GovVersionSync::NodeBehind => {
+                            warn!(
                                 msg_type = "NetworkRequest",
-                                error = %e,
-                                "Internal error during evaluation"
+                                local_gov_version = self.gov_version,
+                                request_gov_version = evaluation_req.content().gov_version,
+                                governance_id = %self.governance_id,
+                                sender = %self.node_key,
+                                "Request governance version is higher than local; answering unavailable"
                             );
-                            return Err(crash_system(
-                                ctx,
-                                ActorError::FunctionalCritical {
-                                    description: e.to_string(),
-                                },
-                            )
-                            .await);
+                            EvaluationRes::Unavailable
+                        }
+                        // The requester is behind: on tracker subjects
+                        // it must sync its governance and retry the
+                        // request; on the governance itself it must
+                        // abort instead, so no stale governance intent
+                        // commits or reboot-loops (fork prevention in
+                        // small quorums).
+                        GovVersionSync::RequesterBehind => {
+                            if evaluation_req
+                                .content()
+                                .event_request
+                                .content()
+                                .get_subject_id()
+                                == self.governance_id
+                            {
+                                EvaluationRes::Abort(format!(
+                                    "requester governance is behind: local={}, request={}",
+                                    self.gov_version,
+                                    evaluation_req.content().gov_version
+                                ))
+                            } else {
+                                EvaluationRes::Reboot
+                            }
+                        }
+                        GovVersionSync::Current => {
+                            match self.create_res(ctx, &evaluation_req).await {
+                                Ok(eval) => eval,
+                                Err(e) => {
+                                    error!(
+                                        msg_type = "NetworkRequest",
+                                        error = %e,
+                                        "Internal error during evaluation"
+                                    );
+                                    return Err(crash_system(
+                                        ctx,
+                                        ActorError::FunctionalCritical {
+                                            description: e.to_string(),
+                                        },
+                                    )
+                                    .await);
+                                }
+                            }
                         }
                     }
                 };
@@ -717,15 +809,12 @@ impl Handler<Self> for EvalWorker {
                     ),
                 };
 
+                let message = ActorMessage::EvaluationRes { res: evaluation };
                 if let Err(e) = self
                     .network
                     .send_command(ave_network::CommandHelper::SendMessage {
-                        message: NetworkMessage {
-                            info: new_info,
-                            message: ActorMessage::EvaluationRes {
-                                res: evaluation,
-                            },
-                        },
+                        delivery: delivery_of(&message),
+                        message: NetworkMessage::new(new_info, message),
                     })
                     .await
                 {
@@ -736,6 +825,8 @@ impl Handler<Self> for EvalWorker {
                     );
                     return Err(crash_system(ctx, e).await);
                 };
+
+                self.pending = None;
 
                 debug!(
                     msg_type = "NetworkRequest",
@@ -753,4 +844,77 @@ impl Handler<Self> for EvalWorker {
 
         Ok(())
     }
+}
+
+/// Evaluator signatures over the stored result hash plus
+/// their quorum.
+///
+/// Without rebuilding the evaluation request (which binds
+/// pre-state a diverged witness replay can not reproduce). Same
+/// shape as the opaque evaluation check: it proves the evaluators
+/// stood behind the stored result, while the validator quorum
+/// above vouches for the bundle itself.
+pub fn check_witness_evaluation(
+    evaluation: &EvaluationData,
+    eval_roles: &RoleDataRegister,
+) -> Result<Check> {
+    let result_hash = match &evaluation.response {
+        EvaluationResponse::Ok { result_hash, .. }
+        | EvaluationResponse::Error { result_hash, .. } => result_hash,
+    };
+    for signature in evaluation.evaluators_signatures.iter() {
+        if signature.verify(result_hash).is_err() {
+            bail!("witness evaluator signature invalid");
+        }
+    }
+    let signers: HashSet<PublicKey> = evaluation
+        .evaluators_signatures
+        .iter()
+        .map(|signature| signature.signer.clone())
+        .collect();
+    if signers.is_empty() {
+        bail!("no witness evaluator signatures");
+    }
+    if !check_quorum_signers(&signers, &eval_roles.quorum, &eval_roles.workers)
+    {
+        bail!("witness evaluator quorum not reached");
+    }
+    Ok(Check {
+        name: "witness-evaluation-quorum",
+        detail: "evaluator signatures verify with quorum".to_owned(),
+    })
+}
+
+/// Evaluator signatures over an opaque stored result hash plus
+/// their quorum. Same shape as the witness check, under opaque
+/// report names so an opaque event never passes as fully rebuilt.
+pub fn check_opaque_evaluation(
+    evaluation: &EvaluationDataOpaque,
+    eval_roles: &RoleDataRegister,
+) -> Result<Check> {
+    let result_hash = match &evaluation.response {
+        EvaluationResponseOpaque::Ok { result_hash }
+        | EvaluationResponseOpaque::Error { result_hash } => result_hash,
+    };
+    for signature in evaluation.evaluators_signatures.iter() {
+        if signature.verify(result_hash).is_err() {
+            bail!("opaque evaluator signature invalid");
+        }
+    }
+    let signers: HashSet<PublicKey> = evaluation
+        .evaluators_signatures
+        .iter()
+        .map(|signature| signature.signer.clone())
+        .collect();
+    if signers.is_empty() {
+        bail!("no opaque evaluator signatures");
+    }
+    if !check_quorum_signers(&signers, &eval_roles.quorum, &eval_roles.workers)
+    {
+        bail!("opaque evaluator quorum not reached");
+    }
+    Ok(Check {
+        name: "opaque-evaluation-quorum",
+        detail: "evaluator signatures verify with quorum".to_owned(),
+    })
 }

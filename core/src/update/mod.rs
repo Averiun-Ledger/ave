@@ -20,7 +20,7 @@ use crate::{
     governance::witnesses_register::{
         TrackerDeliveryMode, TrackerDeliveryRange,
     },
-    helpers::network::{ActorMessage, service::NetworkSender},
+    helpers::network::{ActorMessage, delivery_of, service::NetworkSender},
     model::common::{
         crash_system, get_verified_transfer_sn, node::get_subject_data,
         subject::get_local_subject_sn,
@@ -276,17 +276,16 @@ impl Update {
             ),
         };
 
+        let message = ActorMessage::DistributionLedgerReq {
+            actual_sn: self.our_sn,
+            target_sn,
+            subject_id: self.subject_id.clone(),
+            already_verified_transfer_sn,
+        };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
-                message: NetworkMessage {
-                    info,
-                    message: ActorMessage::DistributionLedgerReq {
-                        actual_sn: self.our_sn,
-                        target_sn,
-                        subject_id: self.subject_id.clone(),
-                        already_verified_transfer_sn,
-                    },
-                },
+                delivery: delivery_of(&message),
+                message: NetworkMessage::new(info, message),
             })
             .await
     }
@@ -341,6 +340,43 @@ impl Update {
         }
     }
 
+    /// Stops on an empty updater set: a request-driven update still
+    /// wakes its manager, or the request hangs in reboot forever.
+    async fn stop_empty(&self, ctx: &ActorContext<Self>) {
+        if let UpdateType::Request { id, subject_id } = &self.update_type {
+            let request_path =
+                ActorPath::from(format!("/user/request/{}", subject_id));
+            match ctx
+                .system()
+                .get_actor::<RequestManager>(&request_path)
+                .await
+            {
+                Ok(request_actor) => {
+                    if let Err(e) = request_actor
+                        .tell(RequestManagerMessage::FinishReboot {
+                            request_id: id.clone(),
+                        })
+                        .await
+                    {
+                        warn!(
+                            subject_id = %self.subject_id,
+                            error = %e,
+                            "Failed to wake request manager on empty update"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        subject_id = %self.subject_id,
+                        error = %e,
+                        "Request manager gone on empty update"
+                    );
+                }
+            }
+        }
+        ctx.stop(None).await;
+    }
+
     fn schedule_retry(
         &mut self,
         ctx: &ActorContext<Self>,
@@ -371,7 +407,6 @@ impl Update {
 #[derive(Debug, Clone)]
 pub enum UpdateMessage {
     Run,
-    Continue,
     RetryRound {
         expected_target_sn: u64,
         round: u64,
@@ -431,8 +466,12 @@ impl Handler<Self> for Update {
                 };
 
                 match start_mode {
-                    UpdateStartMode::Direct | UpdateStartMode::Empty => {
+                    UpdateStartMode::Direct => {
                         ctx.stop(None).await;
+                        return Ok(());
+                    }
+                    UpdateStartMode::Empty => {
+                        self.stop_empty(ctx).await;
                         return Ok(());
                     }
                     UpdateStartMode::Sweep => {}
@@ -443,36 +482,6 @@ impl Handler<Self> for Update {
                     witnesses_count = self.witnesses.len(),
                     "Updates created successfully"
                 );
-            }
-            UpdateMessage::Continue => {
-                let current_sn =
-                    get_local_subject_sn(ctx, &self.subject_id).await?;
-                self.our_sn = current_sn;
-                self.retry_round = self.retry_round.saturating_add(1);
-                self.retry_attempt = 0;
-                self.reset_round();
-
-                let start_mode = match self.create_updates(ctx).await {
-                    Ok(start_mode) => start_mode,
-                    Err(e) => {
-                        error!(
-                            msg_type = "Continue",
-                            subject_id = %self.subject_id,
-                            current_sn = ?current_sn,
-                            error = %e,
-                            "Failed to continue update round"
-                        );
-                        return Err(crash_system(ctx, e).await);
-                    }
-                };
-
-                match start_mode {
-                    UpdateStartMode::Direct | UpdateStartMode::Empty => {
-                        ctx.stop(None).await;
-                        return Ok(());
-                    }
-                    UpdateStartMode::Sweep => {}
-                }
             }
             UpdateMessage::RetryRound {
                 expected_target_sn,
@@ -535,8 +544,12 @@ impl Handler<Self> for Update {
                 };
 
                 match start_mode {
-                    UpdateStartMode::Direct | UpdateStartMode::Empty => {
+                    UpdateStartMode::Direct => {
                         ctx.stop(None).await;
+                        return Ok(());
+                    }
+                    UpdateStartMode::Empty => {
+                        self.stop_empty(ctx).await;
                         return Ok(());
                     }
                     UpdateStartMode::Sweep => {}
@@ -561,11 +574,18 @@ impl Handler<Self> for Update {
                         if let Some((better_node, offer, target_sn)) =
                             selected_request.clone()
                         {
+                            // Only offers covering our next sn count:
+                            // a stale witness must not inflate the
+                            // target beyond the selected peer's reach.
                             let expected_target_sn = self
                                 .offers
                                 .values()
                                 .filter(|offer| {
                                     offer.kind == UpdateSubjectKind::Tracker
+                                })
+                                .filter(|offer| {
+                                    self.next_tracker_range(&offer.ranges)
+                                        .is_some()
                                 })
                                 .map(|offer| offer.sn)
                                 .max()
@@ -605,6 +625,10 @@ impl Handler<Self> for Update {
                                 && self.should_retry_auth_rounds()
                             {
                                 keep_running = true;
+                                // A running actor without its retry timer
+                                // waits for a round that never comes: timer
+                                // scheduling is local infrastructure, fail
+                                // loud instead of leaking the actor.
                                 if let Err(e) = self.schedule_retry(
                                     ctx,
                                     expected_target_sn,
@@ -616,6 +640,7 @@ impl Handler<Self> for Update {
                                         error = %e,
                                         "Failed to schedule update retry"
                                     );
+                                    return Err(crash_system(ctx, e).await);
                                 }
                             }
                         }

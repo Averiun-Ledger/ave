@@ -111,6 +111,45 @@ impl SchemaType {
         }
     }
 
+    /// Returns `true` when the identifier is safe to embed in
+    /// filesystem paths and derived names (staging dirs, artifact
+    /// names). The compiler enforces it before building, and every
+    /// filesystem join re-checks containment, so a hostile id can
+    /// never reach the filesystem: no separators, no parent
+    /// references, no control characters. Dots are allowed (actor
+    /// names are a separate concern).
+    pub fn is_safe_path_segment(&self) -> bool {
+        match self {
+            Self::Governance | Self::TrackerSchemas => true,
+            Self::Type(schema_id) => {
+                !schema_id.is_empty()
+                    && schema_id != "."
+                    && schema_id != ".."
+                    && !schema_id
+                        .chars()
+                        .any(|c| c == '/' || c == '\\' || c.is_control())
+            }
+        }
+    }
+
+    /// Returns `true` when the identifier can be embedded in
+    /// actor names (`{id}_contract_compiler`, `{id}_evaluation`,
+    /// `{id}_validation`). Mirrors `ActorPath::validate_segment`
+    /// (ASCII alphanumeric, `_`, `-`; ave-common cannot depend on
+    /// ave-actors): dots and other `is_valid` characters are
+    /// rejected here even though they are safe path segments.
+    pub fn is_valid_actor_segment(&self) -> bool {
+        match self {
+            Self::Governance | Self::TrackerSchemas => true,
+            Self::Type(schema_id) => {
+                !schema_id.is_empty()
+                    && schema_id.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || c == '_' || c == '-'
+                    })
+            }
+        }
+    }
+
     /// Returns `true` when the schema identifier is valid in incoming requests.
     pub fn is_valid_in_request(&self) -> bool {
         match self {
@@ -212,6 +251,46 @@ mod tests {
         assert!(!SchemaType::Type("governance".to_string()).is_valid());
         assert!(!SchemaType::Type("tracker_schemas".to_string()).is_valid());
         assert!(!SchemaType::Type(" spaced ".to_string()).is_valid());
+    }
+
+    #[test]
+    fn test_schema_type_is_safe_path_segment() {
+        assert!(SchemaType::Governance.is_safe_path_segment());
+        assert!(SchemaType::TrackerSchemas.is_safe_path_segment());
+        assert!(
+            SchemaType::Type("orders.v1".to_string()).is_safe_path_segment()
+        );
+        assert!(
+            !SchemaType::Type("x/../../outside".to_string())
+                .is_safe_path_segment()
+        );
+        assert!(!SchemaType::Type("../x".to_string()).is_safe_path_segment());
+        assert!(!SchemaType::Type("..".to_string()).is_safe_path_segment());
+        assert!(!SchemaType::Type(".".to_string()).is_safe_path_segment());
+        assert!(!SchemaType::Type("a\\b".to_string()).is_safe_path_segment());
+        assert!(
+            !SchemaType::Type("a\u{0}b".to_string()).is_safe_path_segment()
+        );
+        assert!(!SchemaType::Type("".to_string()).is_safe_path_segment());
+    }
+
+    #[test]
+    fn test_schema_type_is_valid_actor_segment() {
+        assert!(SchemaType::Governance.is_valid_actor_segment());
+        assert!(SchemaType::TrackerSchemas.is_valid_actor_segment());
+        assert!(
+            SchemaType::Type("orders-v1_x".to_string())
+                .is_valid_actor_segment()
+        );
+        assert!(
+            !SchemaType::Type("orders.v1".to_string()).is_valid_actor_segment()
+        );
+        assert!(
+            !SchemaType::Type("x/../../outside".to_string())
+                .is_valid_actor_segment()
+        );
+        assert!(!SchemaType::Type("".to_string()).is_valid_actor_segment());
+        assert!(!SchemaType::Type("a b".to_string()).is_valid_actor_segment());
     }
 
     #[test]

@@ -24,13 +24,10 @@ pub enum RunnerError {
     },
 
     #[error("serialization error [{context}]: {details}")]
-    SerializationError {
-        context: &'static str,
-        details: String,
-    },
+    SerializationError { context: String, details: String },
 
-    #[error("memory error [{operation}]: {details}")]
-    MemoryError {
+    #[error("resource limit [{operation}]: {details}")]
+    ResourceLimit {
         operation: &'static str,
         details: String,
     },

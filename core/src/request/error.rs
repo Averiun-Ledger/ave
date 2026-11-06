@@ -7,6 +7,11 @@ use crate::{
     model::error::{LedgerError, ProtocolsError},
 };
 
+/// Machine-readable prefix for stale manual votes: the pending
+/// request changed between consult and vote. Api maps it to a 409
+/// instead of a 500.
+pub const APPROVAL_CONFLICT_PREFIX: &str = "approval conflict";
+
 #[derive(Debug, Error, Clone)]
 pub enum RequestHandlerError {
     /// Helpers (hash algorithm, network sender) are not initialized.
@@ -15,6 +20,9 @@ pub enum RequestHandlerError {
 
     #[error("the payload cannot be deserialized as a governance event")]
     GovFactInvalidEvent,
+
+    #[error("fact payload exceeds collection limits: {0}")]
+    InvalidFactPayload(String),
 
     #[error("governance fact events cannot define viewpoints")]
     GovFactViewpointsNotAllowed,
@@ -31,7 +39,7 @@ pub enum RequestHandlerError {
     #[error("a user cannot mark a request approval as obsolete")]
     ObsoleteApproval,
 
-    /// Approval actor not found for a subject.
+    /// No approval state found for a subject.
     #[error(
         "no approval found for subject '{0}', node likely no longer has approver role"
     )]
@@ -40,6 +48,19 @@ pub enum RequestHandlerError {
     /// Failed to change approval state.
     #[error("failed to change approval state")]
     ApprovalChangeFailed,
+
+    /// The pending approval changed between consult and vote: no vote
+    /// was cast.
+    #[error(
+        "approval conflict for subject '{subject}': expected request '{expected_request_id}' version {expected_version}, stored request '{stored_request_id}' version {stored_version}"
+    )]
+    ApprovalConflict {
+        subject: String,
+        expected_request_id: String,
+        expected_version: u64,
+        stored_request_id: String,
+        stored_version: u64,
+    },
 
     /// Failed to get approval state.
     #[error("failed to get approval state")]
@@ -154,6 +175,9 @@ pub enum RequestManagerError {
         "the subject could not be created; the maximum limit has been reached."
     )]
     CheckLimit,
+
+    #[error("the subject could not be created: {details}")]
+    CreateRejected { details: String },
     // Internal state errors
     #[error("request is not set")]
     RequestNotSet,
@@ -183,6 +207,12 @@ pub enum RequestManagerError {
 
     #[error("no approvers available for schema '{schema_id}'")]
     NoApproversAvailable {
+        schema_id: String,
+        governance_id: DigestIdentifier,
+    },
+
+    #[error("no compilers available for schema '{schema_id}'")]
+    NoCompilersAvailable {
         schema_id: String,
         governance_id: DigestIdentifier,
     },
@@ -236,14 +266,3 @@ pub enum RequestManagerError {
     #[error("In create tracker events, the signer has to be a creator")]
     NotCreator,
 }
-
-/*
-Abort:
-Governance
-
-//////////////////////
-reboot:
-NoEvaluatorsAvailable
-NoApproversAvailable
-NoValidatorsAvailable
-*/

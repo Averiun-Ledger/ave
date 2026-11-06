@@ -59,6 +59,16 @@ struct DistributionFailureLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NetworkIngressDropLabels {
+    cause: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NetworkWireVersionLabels {
+    peer: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct DistributionDurationLabels {
     kind: &'static str,
 }
@@ -74,9 +84,40 @@ struct ContractPrepareLabels {
     result: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct FetchFailoverLabels {
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CompilerBuildLabels {
+    // Registry pin IDs only (closed set): bounded cardinality. The
+    // missing-toolchain alert hooks here.
+    pin: String,
+    result: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct HttpRequestLabels {
+    // Route template (`/subjects/{subject_id}/events`): one series per
+    // route, never per id. Unmatched paths collapse into `unmatched`.
+    route: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct BuildInfoLabels {
+    version: String,
+}
+
 #[derive(Debug)]
 pub struct CoreMetrics {
     requests: Family<RequestResultLabels, Counter>,
+    http_requests: Family<HttpRequestLabels, Counter>,
+    http_request_duration_seconds:
+        Family<HttpRequestLabels, Histogram, fn() -> Histogram>,
+    node_build_info: Family<BuildInfoLabels, Gauge>,
+    node_safe_mode: Gauge,
     request_duration_seconds:
         Family<RequestResultLabels, Histogram, fn() -> Histogram>,
     request_phase_duration_seconds:
@@ -84,6 +125,9 @@ pub struct CoreMetrics {
     contract_preparations: Family<ContractPrepareLabels, Counter>,
     contract_prepare_seconds:
         Family<ContractPrepareLabels, Histogram, fn() -> Histogram>,
+    contract_fetch_failovers: Family<FetchFailoverLabels, Counter>,
+    contract_fetch_cycles_exhausted: Counter,
+    compiler_builds: Family<CompilerBuildLabels, Counter>,
     tracker_sync_rounds: Family<TrackerSyncRoundLabels, Counter>,
     tracker_sync_updates: Family<TrackerSyncUpdateLabels, Counter>,
     protocol_events: Family<ProtocolEventLabels, Counter>,
@@ -113,7 +157,8 @@ pub struct CoreMetrics {
     external_db_critical_errors: Counter,
     governance_version_sync_failures:
         Family<GovernanceVersionSyncFailureLabels, Counter>,
-    http_server_errors: Counter,
+    network_ingress_drops: Family<NetworkIngressDropLabels, Counter>,
+    network_wire_versions: Family<NetworkWireVersionLabels, Counter>,
 }
 
 static CORE_METRICS: OnceLock<Arc<CoreMetrics>> = OnceLock::new();
@@ -122,6 +167,15 @@ impl CoreMetrics {
     fn new() -> Self {
         Self {
             requests: Family::default(),
+            http_requests: Family::default(),
+            http_request_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(vec![
+                    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                    10.0,
+                ])
+            }),
+            node_build_info: Family::default(),
+            node_safe_mode: Gauge::default(),
             request_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
                     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
@@ -143,6 +197,9 @@ impl CoreMetrics {
                     60.0, 120.0,
                 ])
             }),
+            contract_fetch_failovers: Family::default(),
+            contract_fetch_cycles_exhausted: Counter::default(),
+            compiler_builds: Family::default(),
             tracker_sync_rounds: Family::default(),
             tracker_sync_updates: Family::default(),
             protocol_events: Family::default(),
@@ -187,7 +244,8 @@ impl CoreMetrics {
             reboot_max_retries_reached: Counter::default(),
             external_db_critical_errors: Counter::default(),
             governance_version_sync_failures: Family::default(),
-            http_server_errors: Counter::default(),
+            network_ingress_drops: Family::default(),
+            network_wire_versions: Family::default(),
         }
     }
 
@@ -196,6 +254,26 @@ impl CoreMetrics {
             "core_requests",
             "Core request lifecycle counters labeled by result.",
             self.requests.clone(),
+        );
+        registry.register(
+            "http_requests",
+            "HTTP responses served, labeled by route template and status code.",
+            self.http_requests.clone(),
+        );
+        registry.register(
+            "http_request_duration_seconds",
+            "HTTP response latency in seconds, labeled by route and status.",
+            self.http_request_duration_seconds.clone(),
+        );
+        registry.register(
+            "node_build_info",
+            "Node build version (always 1).",
+            self.node_build_info.clone(),
+        );
+        registry.register(
+            "node_safe_mode",
+            "Whether the node runs in safe mode (1) or not (0).",
+            self.node_safe_mode.clone(),
         );
         registry.register(
             "core_request_duration_seconds",
@@ -216,6 +294,21 @@ impl CoreMetrics {
             "core_contract_prepare_seconds",
             "Contract preparation duration labeled by kind and result.",
             self.contract_prepare_seconds.clone(),
+        );
+        registry.register(
+            "core_contract_fetch_failovers",
+            "Artifact fetch attempts that failed against a peer, labeled by reason.",
+            self.contract_fetch_failovers.clone(),
+        );
+        registry.register(
+            "core_contract_fetch_cycles_exhausted",
+            "Fetch cycles that found no peer able to serve (governance update plus timeoff before the next cycle).",
+            self.contract_fetch_cycles_exhausted.clone(),
+        );
+        registry.register(
+            "core_compiler_builds",
+            "Local contract builds labeled by toolchain pin and result (`built`, `cached`, `failed`, `stood_down`).",
+            self.compiler_builds.clone(),
         );
         registry.register(
             "core_tracker_sync_rounds",
@@ -308,7 +401,7 @@ impl CoreMetrics {
             self.grpc_ack_roundtrip_seconds.clone(),
         );
         registry.register(
-            "core_distribution_failures_total",
+            "core_distribution_failures",
             "Total distribution failures by reason.",
             self.distribution_failures.clone(),
         );
@@ -318,29 +411,29 @@ impl CoreMetrics {
             self.distribution_duration_seconds.clone(),
         );
         registry.register(
-            "core_update_retries_exceeded_total",
+            "core_update_retries_exceeded",
             "Total update processes that exceeded the retry threshold.",
             self.update_retries_exceeded.clone(),
         );
         registry.register(
-            "core_reboot_max_retries_reached_total",
+            "core_reboot_max_retries_reached",
             "Total reboot processes that reached the maximum stability checks.",
             self.reboot_max_retries_reached.clone(),
         );
         registry.register(
-            "core_external_db_critical_errors_total",
-            "Total critical external database errors reported to DBManager.",
-            self.external_db_critical_errors.clone(),
-        );
-        registry.register(
-            "core_governance_version_sync_failures_total",
+            "core_governance_version_sync_failures",
             "Total governance version sync failures by reason.",
             self.governance_version_sync_failures.clone(),
         );
         registry.register(
-            "core_http_server_errors_total",
-            "Total HTTP 5xx server errors.",
-            self.http_server_errors.clone(),
+            "core_network_ingress_drops",
+            "Total inbound network messages dropped after libp2p delivery, labeled by cause.",
+            self.network_ingress_drops.clone(),
+        );
+        registry.register(
+            "core_network_wire_versions",
+            "Total inbound network messages by sender wire version relative to ours, labeled by peer (older/newer).",
+            self.network_wire_versions.clone(),
         );
     }
 
@@ -358,6 +451,49 @@ impl CoreMetrics {
         self.requests
             .get_or_create(&RequestResultLabels { result: "invalid" })
             .inc();
+    }
+
+    /// A newcomer arrived while the previous subject child was still
+    /// stopping (name taken, maps free) and waited out the release
+    /// instead of failing on `Exists`. Pre-fix every hit was a lost
+    /// request (HTTP 500); counting hits proves the save in the next
+    /// campaign.
+    pub fn observe_request_handler_child_collision(&self) {
+        self.requests
+            .get_or_create(&RequestResultLabels {
+                result: "handler_child_collision",
+            })
+            .inc();
+    }
+
+    pub fn observe_http_request(
+        &self,
+        route: &str,
+        status: u16,
+        duration: Duration,
+    ) {
+        let labels = HttpRequestLabels {
+            route: route.to_owned(),
+            status: status.to_string(),
+        };
+        self.http_requests.get_or_create(&labels).inc();
+        self.http_request_duration_seconds
+            .get_or_create(&labels)
+            .observe(Self::seconds(duration));
+    }
+
+    /// Pin the running build version. Call once at startup.
+    pub fn set_build_info(&self, version: &str) {
+        self.node_build_info
+            .get_or_create(&BuildInfoLabels {
+                version: version.to_owned(),
+            })
+            .set(1);
+    }
+
+    /// Track safe-mode state. Call once at startup.
+    pub fn set_safe_mode(&self, enabled: bool) {
+        self.node_safe_mode.set(i64::from(enabled));
     }
 
     pub fn observe_request_terminal(
@@ -394,6 +530,36 @@ impl CoreMetrics {
         self.contract_prepare_seconds
             .get_or_create(&labels)
             .observe(Self::seconds(duration));
+    }
+
+    /// A fetch attempt against a peer failed (`corrupt`, `not_served`,
+    /// `timeout`) and the fetch moved on to the next option.
+    pub fn observe_fetch_failover(&self, reason: &'static str) {
+        self.contract_fetch_failovers
+            .get_or_create(&FetchFailoverLabels { reason })
+            .inc();
+    }
+
+    /// A fetch cycle found no peer able to serve: governance update
+    /// triggered and timeoff armed before the next cycle.
+    pub fn observe_fetch_cycle_exhausted(&self) {
+        self.contract_fetch_cycles_exhausted.inc();
+    }
+
+    /// A local build finished under a toolchain pin (`built` fresh,
+    /// `cached` from a valid artifact, `failed` contract-side,
+    /// `stood_down` without a local toolchain for the pin). The pin
+    /// label is clamped to registry IDs: request pins are network
+    /// input and must never expand metric cardinality.
+    pub fn observe_compiler_build(&self, pin: &str, result: &'static str) {
+        let pin = if ave_common::governance::toolchain_info(pin).is_some() {
+            pin.to_owned()
+        } else {
+            "unknown".to_owned()
+        };
+        self.compiler_builds
+            .get_or_create(&CompilerBuildLabels { pin, result })
+            .inc();
     }
 
     pub fn observe_tracker_sync_round(&self, result: &'static str) {
@@ -621,8 +787,16 @@ impl CoreMetrics {
             .inc();
     }
 
-    pub fn observe_http_server_error(&self) {
-        self.http_server_errors.inc();
+    pub fn observe_network_ingress_drop(&self, cause: &'static str) {
+        self.network_ingress_drops
+            .get_or_create(&NetworkIngressDropLabels { cause })
+            .inc();
+    }
+
+    pub fn observe_network_wire_version(&self, peer: &'static str) {
+        self.network_wire_versions
+            .get_or_create(&NetworkWireVersionLabels { peer })
+            .inc();
     }
 }
 
@@ -636,6 +810,56 @@ pub fn register(registry: &mut Registry) -> Arc<CoreMetrics> {
 
 pub fn try_core_metrics() -> Option<&'static Arc<CoreMetrics>> {
     CORE_METRICS.get()
+}
+
+#[cfg(test)]
+mod http_metrics_tests {
+    use super::*;
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+
+    #[test]
+    fn observe_emits_counter_and_histogram() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+        metrics.observe_http_request(
+            "/subjects/{subject_id}/events",
+            200,
+            Duration::from_millis(5),
+        );
+        let mut buf = String::new();
+        encode(&mut buf, &registry).unwrap();
+        assert!(
+            buf.contains(concat!(
+                "http_requests_total{route=\"/subjects/{subject_id}/events\",",
+                "status=\"200\"} 1"
+            )),
+            "count missing:\n{buf}"
+        );
+        assert!(
+            buf.contains("http_request_duration_seconds"),
+            "histogram missing:\n{buf}"
+        );
+    }
+
+    #[test]
+    fn build_info_and_safe_mode_expose_gauges() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+        metrics.set_build_info("1.2.3");
+        metrics.set_safe_mode(true);
+        let mut buf = String::new();
+        encode(&mut buf, &registry).unwrap();
+        assert!(
+            buf.contains("node_build_info{version=\"1.2.3\"} 1"),
+            "build info missing:\n{buf}"
+        );
+        assert!(
+            buf.contains("node_safe_mode 1"),
+            "safe mode missing:\n{buf}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -714,6 +938,59 @@ mod tests {
             metric_value(
                 &text,
                 "core_schema_events_total{actor=\"validation_schema\",result=\"delegated\"}"
+            ),
+            1.0
+        );
+    }
+
+    // MET-01: per-pin build counters expose (the missing-toolchain
+    // alert hooks here — if this goes blind, the alert is born blind).
+    #[test]
+    fn core_metrics_compiler_builds_by_pin() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
+        metrics.observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "built");
+        metrics
+            .observe_compiler_build("rust-1.95.0_sdk-0.8.0_wasm32", "cached");
+        metrics.observe_compiler_build(
+            "rust-1.98.1_sdk-0.8.0_wasm32",
+            "stood_down",
+        );
+        // Unknown pins collapse into one series: request pins are
+        // network input and must never expand cardinality.
+        metrics.observe_compiler_build("rust-9.99-ficticio", "stood_down");
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"rust-1.95.0_sdk-0.8.0_wasm32\",result=\"built\"}"
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"rust-1.95.0_sdk-0.8.0_wasm32\",result=\"cached\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"rust-1.98.1_sdk-0.8.0_wasm32\",result=\"stood_down\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_compiler_builds_total{pin=\"unknown\",result=\"stood_down\"}"
             ),
             1.0
         );
@@ -863,6 +1140,55 @@ mod tests {
                 "core_sink_lag_max_distance{sink=\"schema-sink\"}"
             ),
             17.0
+        );
+    }
+
+    #[test]
+    fn core_metrics_expose_fetch_failover_series() {
+        let metrics = CoreMetrics::new();
+        let mut registry = Registry::default();
+        metrics.register_into(&mut registry);
+
+        metrics.observe_fetch_failover("corrupt");
+        metrics.observe_fetch_failover("not_served");
+        metrics.observe_fetch_failover("timeout");
+        metrics.observe_fetch_failover("timeout");
+
+        metrics.observe_fetch_cycle_exhausted();
+        metrics.observe_fetch_cycle_exhausted();
+
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode metrics");
+
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"corrupt\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"not_served\"}"
+            ),
+            1.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_contract_fetch_failovers_total{reason=\"timeout\"}"
+            ),
+            2.0
+        );
+        // Exact-line match: the exposed counter name is the alerting
+        // contract, so a rename or a doubled `_total` suffix must break
+        // this test.
+        assert!(
+            text.lines()
+                .any(|line| line
+                    == "core_contract_fetch_cycles_exhausted_total 2"),
+            "expected `core_contract_fetch_cycles_exhausted_total 2` in:\n{text}"
         );
     }
 

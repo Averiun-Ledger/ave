@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use ave_actors::PersistentActor;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
     Response,
 };
-use ave_actors::{LightPersistence, PersistentActor};
 use ave_common::Namespace;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{Span, debug, error, info, info_span, warn};
+use tracing::{Span, debug, error, info_span, warn};
 
 use crate::helpers::network::service::NetworkSender;
 use crate::model::common::node::get_subject_data;
@@ -248,6 +248,7 @@ impl Actor for SubjectAccess {
     ) -> Result<(), ActorError> {
         if let Err(e) = self.init_store("auth", None, false, ctx).await {
             error!(
+                msg_type = "Init",
                 error = %e,
                 "Failed to initialize subject_access store"
             );
@@ -596,6 +597,7 @@ impl Handler<Self> for SubjectAccess {
                                                 .await
                                                 .map_err(|e| {
                                                     error!(
+                                                        msg_type = "Witnesses",
                                                         subject_id = %subject_id,
                                                         governance_id = %governance_id,
                                                         error = %e,
@@ -697,11 +699,19 @@ impl Handler<Self> for SubjectAccess {
                             "Update process initiated with multiple witnesses"
                         );
                     } else {
-                        info!(
+                        // A second update with possibly different
+                        // witnesses can not merge into the running one:
+                        // surface it instead of dropping it silently.
+                        warn!(
                             msg_type = "Update",
                             subject_id = %subject_id,
                             "An update is already in progress."
                         );
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Update already in progress for subject {subject_id}"
+                            ),
+                        });
                     };
                 }
             }
@@ -717,6 +727,7 @@ impl Handler<Self> for SubjectAccess {
     ) {
         if let Err(e) = self.persist(event, ctx).await {
             error!(
+                msg_type = "Persist",
                 error = %e,
                 "Failed to persist subject_access event"
             );
@@ -727,9 +738,15 @@ impl Handler<Self> for SubjectAccess {
 
 #[async_trait]
 impl PersistentActor for SubjectAccess {
-    type Persistence = LightPersistence;
     type InitParams = SubjectAccessInitParams;
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(params: Self::InitParams) -> Self {
         Self {

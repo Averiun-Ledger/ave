@@ -2,18 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    governance::model::Quorum,
-    model::common::{
-        CeilingMap, Interval, IntervalSet, crash_system, purge_storage,
-    },
+    governance::{data::GovernanceData, model::Quorum},
+    model::common::{CeilingMap, IntervalSet, crash_system, purge_storage},
 };
+use anyhow::Result;
 use async_trait::async_trait;
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, Handler,
-    LightPersistence, Message, PersistentActor, Response,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, Message,
+    PersistentActor, Response,
 };
 
-use ave_common::{Namespace, SchemaType, identity::PublicKey};
+use ave_common::{
+    Namespace, SchemaType, ValueWrapper, governance::ProtocolTypes,
+    identity::PublicKey,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use tracing::{Span, debug, error, info_span};
@@ -59,6 +61,9 @@ pub struct RoleRegister {
     appr_quorum: Quorum,
     approvers: HashSet<PublicKey>,
 
+    comp_quorum: Quorum,
+    compilers: HashSet<PublicKey>,
+
     eval_quorum: HashMap<SchemaType, Quorum>,
     evaluators: HashMap<SchemaType, HashSet<(PublicKey, Namespace)>>,
 
@@ -70,11 +75,30 @@ pub struct RoleRegister {
 type IntervalData = (IntervalSet, Option<u64>);
 
 #[derive(
-    Debug, Clone, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct RoleDataRegister {
     pub workers: HashSet<PublicKey>,
     pub quorum: Quorum,
+}
+
+/// Role sets for one event: phase sets plus the outer validator
+/// attestation set.
+#[derive(Debug, Clone)]
+pub struct RolesAtVersion {
+    pub evaluation: RoleDataRegister,
+    pub approval: Option<RoleDataRegister>,
+    pub compilation: Option<RoleDataRegister>,
+    pub validators: RoleDataRegister,
+}
+
+/// Single-owner attestation set (governance genesis shape): the
+/// owner alone with Majority, never the register.
+pub fn lone_owner_roles(owner: &PublicKey) -> RoleDataRegister {
+    RoleDataRegister {
+        workers: HashSet::from([owner.clone()]),
+        quorum: Quorum::Majority,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,12 +112,15 @@ pub struct CurrentSchemaRoles {
 #[derive(Debug, Clone)]
 pub struct CurrentValidationRoles {
     pub approval: RoleDataRegister,
+    pub compilation: RoleDataRegister,
     pub schema: CurrentSchemaRoles,
 }
 
 #[derive(Debug, Clone)]
 pub enum RoleRegisterMessage {
     PurgeStorage,
+    /// Read-only tip marker for boot reconciliation tail bounding.
+    GetVersion,
     GetCurrentValidationRoles {
         schema_id: SchemaType,
     },
@@ -101,6 +128,7 @@ pub enum RoleRegisterMessage {
         version: u64,
         evaluation: SearchRole,
         approval: bool,
+        compilation: bool,
     },
     SearchValidators {
         search: SearchRole,
@@ -113,11 +141,15 @@ pub enum RoleRegisterMessage {
         version: u64,
 
         appr_quorum: Option<Quorum>,
+        comp_quorum: Option<Quorum>,
         eval_quorum: HashMap<SchemaType, Quorum>,
         vali_quorum: HashMap<SchemaType, Quorum>,
 
         new_approvers: Vec<PublicKey>,
         remove_approvers: Vec<PublicKey>,
+
+        new_compilers: Vec<PublicKey>,
+        remove_compilers: Vec<PublicKey>,
 
         new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -130,6 +162,9 @@ pub enum RoleRegisterMessage {
 
         new_approver: Option<PublicKey>,
         remove_approver: PublicKey,
+
+        new_compiler: Option<PublicKey>,
+        remove_compiler: PublicKey,
 
         new_evaluator: Option<PublicKey>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -156,10 +191,12 @@ pub enum RoleRegisterResponse {
     ActualRoles {
         evaluation: RoleDataRegister,
         approval: Option<RoleDataRegister>,
+        compilation: Option<RoleDataRegister>,
     },
     Validation(RoleDataRegister),
     MissingData,
     OutOfVersion,
+    Version(u64),
     Ok,
 }
 
@@ -176,11 +213,15 @@ pub enum RoleRegisterEvent {
         version: u64,
 
         appr_quorum: Option<Quorum>,
+        comp_quorum: Option<Quorum>,
         eval_quorum: HashMap<SchemaType, Quorum>,
         vali_quorum: HashMap<SchemaType, Quorum>,
 
         new_approvers: Vec<PublicKey>,
         remove_approvers: Vec<PublicKey>,
+
+        new_compilers: Vec<PublicKey>,
+        remove_compilers: Vec<PublicKey>,
 
         new_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
@@ -194,12 +235,261 @@ pub enum RoleRegisterEvent {
         new_approver: Option<PublicKey>,
         remove_approver: PublicKey,
 
+        new_compiler: Option<PublicKey>,
+        remove_compiler: PublicKey,
+
         new_evaluator: Option<PublicKey>,
         remove_evaluators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
 
         new_validator: Option<PublicKey>,
         remove_validators: HashMap<(SchemaType, PublicKey), Vec<Namespace>>,
     },
+}
+
+impl RoleRegister {
+    /// Current version (read-only accessor shared with the
+    /// off-chain verification tool, which reads register
+    /// snapshots straight from staged database copies).
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Read-only role lookup shared by the actor and the
+    /// off-chain verification tool: validators holding a role
+    /// at a ledger version, with quorum.
+    /// Read-only role lookup shared by the actor and the
+    /// off-chain verification tool: evaluation/approval/
+    /// compilation roles holding at a ledger version.
+    pub fn search_actual_roles(
+        &self,
+        version: u64,
+        evaluation: &SearchRole,
+        approval: bool,
+        compilation: bool,
+    ) -> Result<RoleRegisterResponse, ActorError> {
+        if version != self.version {
+            debug!(
+                msg_type = "SearchActualRoles",
+                version = version,
+                current_version = self.version,
+                schema_id = %evaluation.schema_id,
+                namespace = %evaluation.namespace,
+                "Request version exceeds current version"
+            );
+            return Ok(RoleRegisterResponse::OutOfVersion);
+        }
+
+        'data: {
+            let approvers = if approval {
+                if self.approvers.is_empty() {
+                    break 'data;
+                } else {
+                    Some(RoleDataRegister {
+                        workers: self.approvers.clone(),
+                        quorum: self.appr_quorum.clone(),
+                    })
+                }
+            } else {
+                None
+            };
+
+            let compilers = if compilation {
+                if self.compilers.is_empty() {
+                    break 'data;
+                } else {
+                    Some(RoleDataRegister {
+                        workers: self.compilers.clone(),
+                        quorum: self.comp_quorum.clone(),
+                    })
+                }
+            } else {
+                None
+            };
+
+            let mut all_eval = if !evaluation.schema_id.is_gov()
+                && let Some(evaluators) =
+                    self.evaluators.get(&SchemaType::TrackerSchemas)
+            {
+                let mut schema_eval = vec![];
+                for (key, namespace) in evaluators {
+                    if namespace.is_ancestor_or_equal_of(&evaluation.namespace)
+                    {
+                        schema_eval.push(key.clone());
+                    }
+                }
+
+                schema_eval
+            } else {
+                vec![]
+            };
+
+            let mut schema_eval = self
+                .evaluators
+                .get(&evaluation.schema_id)
+                .map_or_else(Vec::new, |evaluators| {
+                    let mut schema_eval = vec![];
+                    for (key, namespace) in evaluators {
+                        if namespace
+                            .is_ancestor_or_equal_of(&evaluation.namespace)
+                        {
+                            schema_eval.push(key.clone());
+                        }
+                    }
+
+                    schema_eval
+                });
+
+            let quorum = if let Some(quorum_schema) =
+                self.eval_quorum.get(&evaluation.schema_id)
+            {
+                quorum_schema.clone()
+            } else {
+                break 'data;
+            };
+
+            if schema_eval.is_empty() && all_eval.is_empty() {
+                break 'data;
+            }
+
+            let mut evaluators = vec![];
+            evaluators.append(&mut schema_eval);
+            evaluators.append(&mut all_eval);
+
+            debug!(
+                msg_type = "SearchActualRoles",
+                version = version,
+                schema_id = %evaluation.schema_id,
+                namespace = %evaluation.namespace,
+                evaluators_count = evaluators.len(),
+                has_approvers = approvers.is_some(),
+                "Found actual roles successfully"
+            );
+
+            return Ok(RoleRegisterResponse::ActualRoles {
+                evaluation: RoleDataRegister {
+                    workers: evaluators.iter().cloned().collect(),
+                    quorum,
+                },
+                approval: approvers,
+                compilation: compilers,
+            });
+        }
+
+        debug!(
+            msg_type = "SearchActualRoles",
+            version = version,
+            schema_id = %evaluation.schema_id,
+            namespace = %evaluation.namespace,
+            "Missing role data for version"
+        );
+        Ok(RoleRegisterResponse::MissingData)
+    }
+    pub fn search_validators(
+        &self,
+        search: &SearchRole,
+        version: u64,
+    ) -> Result<RoleRegisterResponse, ActorError> {
+        if version > self.version {
+            debug!(
+                msg_type = "SearchValidators",
+                version = version,
+                current_version = self.version,
+                schema_id = %search.schema_id,
+                namespace = %search.namespace,
+                "Request version exceeds current version"
+            );
+            return Ok(RoleRegisterResponse::OutOfVersion);
+        }
+
+        let mut all_val = if !search.schema_id.is_gov()
+            && let Some(validators) =
+                self.validators.get(&SchemaType::TrackerSchemas)
+        {
+            // PublicKey, Namespace), (IntervalSet, Option<u64>
+            let mut schema_val = vec![];
+            for ((key, namespace), (interval, last)) in validators {
+                if namespace.is_ancestor_or_equal_of(&search.namespace) {
+                    if let Some(last) = last
+                        && last <= &version
+                    {
+                        schema_val.push(key.clone());
+                    } else if interval.contains(version) {
+                        schema_val.push(key.clone());
+                    }
+                }
+            }
+
+            schema_val
+        } else {
+            vec![]
+        };
+
+        let mut schema_val = self
+            .validators
+            .get(&search.schema_id)
+            .map_or_else(Vec::new, |validators| {
+                let mut schema_val = vec![];
+                for ((key, namespace), (interval, last)) in validators {
+                    if namespace.is_ancestor_or_equal_of(&search.namespace) {
+                        if let Some(last) = last
+                            && last <= &version
+                        {
+                            schema_val.push(key.clone());
+                        } else if interval.contains(version) {
+                            schema_val.push(key.clone());
+                        }
+                    }
+                }
+
+                schema_val
+            });
+
+        'data: {
+            let quorum = if let Some(quorum_schema) =
+                self.vali_quorum.get(&search.schema_id)
+            {
+                let Some(quorum) = quorum_schema.get_prev_or_equal(version)
+                else {
+                    break 'data;
+                };
+
+                quorum
+            } else {
+                break 'data;
+            };
+
+            if schema_val.is_empty() && all_val.is_empty() {
+                break 'data;
+            }
+
+            let mut validators = vec![];
+            validators.append(&mut schema_val);
+            validators.append(&mut all_val);
+
+            debug!(
+                msg_type = "SearchValidators",
+                version = version,
+                schema_id = %search.schema_id,
+                namespace = %search.namespace,
+                validators_count = validators.len(),
+                "Found validators successfully"
+            );
+
+            return Ok(RoleRegisterResponse::Validation(RoleDataRegister {
+                workers: validators.iter().cloned().collect(),
+                quorum,
+            }));
+        }
+
+        debug!(
+            msg_type = "SearchValidators",
+            version = version,
+            schema_id = %search.schema_id,
+            namespace = %search.namespace,
+            "Missing validator data for version"
+        );
+        Ok(RoleRegisterResponse::MissingData)
+    }
 }
 
 impl Event for RoleRegisterEvent {}
@@ -262,10 +552,18 @@ impl Handler<Self> for RoleRegister {
 
                 Ok(RoleRegisterResponse::Ok)
             }
+            RoleRegisterMessage::GetVersion => {
+                Ok(RoleRegisterResponse::Version(self.version))
+            }
             RoleRegisterMessage::GetCurrentValidationRoles { schema_id } => {
                 let approval = RoleDataRegister {
                     workers: self.approvers.clone(),
                     quorum: self.appr_quorum.clone(),
+                };
+
+                let compilation = RoleDataRegister {
+                    workers: self.compilers.clone(),
+                    quorum: self.comp_quorum.clone(),
                 };
 
                 let Some(evaluation_quorum) =
@@ -337,6 +635,7 @@ impl Handler<Self> for RoleRegister {
                 Ok(RoleRegisterResponse::CurrentValidationRoles(
                     CurrentValidationRoles {
                         approval,
+                        compilation,
                         schema: CurrentSchemaRoles {
                             evaluation,
                             evaluation_quorum,
@@ -350,219 +649,17 @@ impl Handler<Self> for RoleRegister {
                 version,
                 evaluation,
                 approval,
+                compilation,
             } => {
-                if version != self.version {
-                    debug!(
-                        msg_type = "SearchActualRoles",
-                        version = version,
-                        current_version = self.version,
-                        schema_id = %evaluation.schema_id,
-                        namespace = %evaluation.namespace,
-                        "Request version exceeds current version"
-                    );
-                    return Ok(RoleRegisterResponse::OutOfVersion);
-                }
-
-                'data: {
-                    let approvers = if approval {
-                        if self.approvers.is_empty() {
-                            break 'data;
-                        } else {
-                            Some(RoleDataRegister {
-                                workers: self.approvers.clone(),
-                                quorum: self.appr_quorum.clone(),
-                            })
-                        }
-                    } else {
-                        None
-                    };
-
-                    let mut all_eval = if !evaluation.schema_id.is_gov()
-                        && let Some(evaluators) =
-                            self.evaluators.get(&SchemaType::TrackerSchemas)
-                    {
-                        let mut schema_eval = vec![];
-                        for (key, namespace) in evaluators {
-                            if namespace
-                                .is_ancestor_or_equal_of(&evaluation.namespace)
-                            {
-                                schema_eval.push(key.clone());
-                            }
-                        }
-
-                        schema_eval
-                    } else {
-                        vec![]
-                    };
-
-                    let mut schema_eval = if let Some(evaluators) =
-                        self.evaluators.get(&evaluation.schema_id)
-                    {
-                        let mut schema_eval = vec![];
-                        for (key, namespace) in evaluators {
-                            if namespace
-                                .is_ancestor_or_equal_of(&evaluation.namespace)
-                            {
-                                schema_eval.push(key.clone());
-                            }
-                        }
-
-                        schema_eval
-                    } else {
-                        vec![]
-                    };
-
-                    let quorum = if let Some(quorum_schema) =
-                        self.eval_quorum.get(&evaluation.schema_id)
-                    {
-                        quorum_schema.clone()
-                    } else {
-                        break 'data;
-                    };
-
-                    if schema_eval.is_empty() && all_eval.is_empty() {
-                        break 'data;
-                    }
-
-                    let mut evaluators = vec![];
-                    evaluators.append(&mut schema_eval);
-                    evaluators.append(&mut all_eval);
-
-                    debug!(
-                        msg_type = "SearchActualRoles",
-                        version = version,
-                        schema_id = %evaluation.schema_id,
-                        namespace = %evaluation.namespace,
-                        evaluators_count = evaluators.len(),
-                        has_approvers = approvers.is_some(),
-                        "Found actual roles successfully"
-                    );
-
-                    return Ok(RoleRegisterResponse::ActualRoles {
-                        evaluation: RoleDataRegister {
-                            workers: evaluators.iter().cloned().collect(),
-                            quorum,
-                        },
-                        approval: approvers,
-                    });
-                }
-
-                debug!(
-                    msg_type = "SearchActualRoles",
-                    version = version,
-                    schema_id = %evaluation.schema_id,
-                    namespace = %evaluation.namespace,
-                    "Missing role data for version"
+                return self.search_actual_roles(
+                    version,
+                    &evaluation,
+                    approval,
+                    compilation,
                 );
-                Ok(RoleRegisterResponse::MissingData)
             }
             RoleRegisterMessage::SearchValidators { search, version } => {
-                if version > self.version {
-                    debug!(
-                        msg_type = "SearchValidators",
-                        version = version,
-                        current_version = self.version,
-                        schema_id = %search.schema_id,
-                        namespace = %search.namespace,
-                        "Request version exceeds current version"
-                    );
-                    return Ok(RoleRegisterResponse::OutOfVersion);
-                }
-
-                let mut all_val = if !search.schema_id.is_gov()
-                    && let Some(validators) =
-                        self.validators.get(&SchemaType::TrackerSchemas)
-                {
-                    // PublicKey, Namespace), (IntervalSet, Option<u64>
-                    let mut schema_val = vec![];
-                    for ((key, namespace), (interval, last)) in validators {
-                        if namespace.is_ancestor_or_equal_of(&search.namespace)
-                        {
-                            if let Some(last) = last
-                                && last <= &version
-                            {
-                                schema_val.push(key.clone());
-                            } else if interval.contains(version) {
-                                schema_val.push(key.clone());
-                            }
-                        }
-                    }
-
-                    schema_val
-                } else {
-                    vec![]
-                };
-
-                let mut schema_val = if let Some(validators) =
-                    self.validators.get(&search.schema_id)
-                {
-                    let mut schema_val = vec![];
-                    for ((key, namespace), (interval, last)) in validators {
-                        if namespace.is_ancestor_or_equal_of(&search.namespace)
-                        {
-                            if let Some(last) = last
-                                && last <= &version
-                            {
-                                schema_val.push(key.clone());
-                            } else if interval.contains(version) {
-                                schema_val.push(key.clone());
-                            }
-                        }
-                    }
-
-                    schema_val
-                } else {
-                    vec![]
-                };
-
-                'data: {
-                    let quorum = if let Some(quorum_schema) =
-                        self.vali_quorum.get(&search.schema_id)
-                    {
-                        let Some(quorum) =
-                            quorum_schema.get_prev_or_equal(version)
-                        else {
-                            break 'data;
-                        };
-
-                        quorum
-                    } else {
-                        break 'data;
-                    };
-
-                    if schema_val.is_empty() && all_val.is_empty() {
-                        break 'data;
-                    }
-
-                    let mut validators = vec![];
-                    validators.append(&mut schema_val);
-                    validators.append(&mut all_val);
-
-                    debug!(
-                        msg_type = "SearchValidators",
-                        version = version,
-                        schema_id = %search.schema_id,
-                        namespace = %search.namespace,
-                        validators_count = validators.len(),
-                        "Found validators successfully"
-                    );
-
-                    return Ok(RoleRegisterResponse::Validation(
-                        RoleDataRegister {
-                            workers: validators.iter().cloned().collect(),
-                            quorum,
-                        },
-                    ));
-                }
-
-                debug!(
-                    msg_type = "SearchValidators",
-                    version = version,
-                    schema_id = %search.schema_id,
-                    namespace = %search.namespace,
-                    "Missing validator data for version"
-                );
-                Ok(RoleRegisterResponse::MissingData)
+                return self.search_validators(&search, version);
             }
             RoleRegisterMessage::UpdateVersion { version } => {
                 if version > self.version || self.version == 0 {
@@ -592,6 +689,8 @@ impl Handler<Self> for RoleRegister {
                 version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -603,6 +702,8 @@ impl Handler<Self> for RoleRegister {
                             version,
                             new_approver,
                             remove_approver,
+                            new_compiler,
+                            remove_compiler,
                             new_evaluator,
                             remove_evaluators,
                             new_validator,
@@ -631,10 +732,13 @@ impl Handler<Self> for RoleRegister {
             RoleRegisterMessage::UpdateFact {
                 version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 vali_quorum,
                 new_approvers,
                 remove_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 remove_evaluators,
                 new_validators,
@@ -645,10 +749,13 @@ impl Handler<Self> for RoleRegister {
                         RoleRegisterEvent::UpdateFact {
                             version,
                             appr_quorum,
+                            comp_quorum,
                             eval_quorum,
                             vali_quorum,
                             new_approvers,
                             remove_approvers,
+                            new_compilers,
+                            remove_compilers,
                             new_evaluators,
                             remove_evaluators,
                             new_validators,
@@ -700,9 +807,15 @@ impl Handler<Self> for RoleRegister {
 
 #[async_trait]
 impl PersistentActor for RoleRegister {
-    type Persistence = LightPersistence;
     type InitParams = ();
     type State = Self;
+
+    /// Pruned event log: only the latest snapshot plus pending
+    /// events touch disk. History nobody replays is deleted with
+    /// every snapshot instead of accumulating forever.
+    fn prune_events_on_snapshot() -> bool {
+        true
+    }
 
     fn create_initial(_params: Self::InitParams) -> Self {
         Self::default()
@@ -722,6 +835,8 @@ impl PersistentActor for RoleRegister {
                 version,
                 new_approver,
                 remove_approver,
+                new_compiler,
+                remove_compiler,
                 new_evaluator,
                 remove_evaluators,
                 new_validator,
@@ -730,6 +845,10 @@ impl PersistentActor for RoleRegister {
                 inner.version = *version;
                 if let Some(approver) = new_approver {
                     inner.approvers.insert(approver.clone());
+                }
+
+                if let Some(compiler) = new_compiler {
+                    inner.compilers.insert(compiler.clone());
                 }
 
                 if let Some(evaluator) = new_evaluator {
@@ -751,6 +870,8 @@ impl PersistentActor for RoleRegister {
                 }
 
                 inner.approvers.remove(remove_approver);
+
+                inner.compilers.remove(remove_compiler);
 
                 for ((schema_id, evaluator), namespaces) in
                     remove_evaluators.iter()
@@ -775,10 +896,7 @@ impl PersistentActor for RoleRegister {
                             .entry((validator.clone(), ns.clone()))
                             .or_default();
                         if let Some(last) = last.take() {
-                            interval.insert(Interval {
-                                lo: last,
-                                hi: *version - 1,
-                            });
+                            interval.close_open(last, *version);
                         }
                     }
                 }
@@ -798,10 +916,13 @@ impl PersistentActor for RoleRegister {
             RoleRegisterEvent::UpdateFact {
                 version,
                 appr_quorum,
+                comp_quorum,
                 eval_quorum,
                 vali_quorum,
                 new_approvers,
                 remove_approvers,
+                new_compilers,
+                remove_compilers,
                 new_evaluators,
                 remove_evaluators,
                 new_validators,
@@ -811,6 +932,10 @@ impl PersistentActor for RoleRegister {
 
                 if let Some(appr_quorum) = appr_quorum {
                     inner.appr_quorum = appr_quorum.clone();
+                }
+
+                if let Some(comp_quorum) = comp_quorum {
+                    inner.comp_quorum = comp_quorum.clone();
                 }
 
                 for (schema_id, quorum) in vali_quorum.iter() {
@@ -831,6 +956,14 @@ impl PersistentActor for RoleRegister {
 
                 for approver in remove_approvers.iter() {
                     inner.approvers.remove(approver);
+                }
+
+                for compiler in new_compilers.iter() {
+                    inner.compilers.insert(compiler.clone());
+                }
+
+                for compiler in remove_compilers.iter() {
+                    inner.compilers.remove(compiler);
                 }
 
                 for ((schema_id, evaluator), namespaces) in
@@ -882,10 +1015,7 @@ impl PersistentActor for RoleRegister {
                             .entry((validator.clone(), ns.clone()))
                             .or_default();
                         if let Some(last) = last.take() {
-                            interval.insert(Interval {
-                                lo: last,
-                                hi: *version - 1,
-                            });
+                            interval.close_open(last, *version);
                         }
                     }
                 }
@@ -916,3 +1046,39 @@ impl PersistentActor for RoleRegister {
 }
 
 impl Storable for RoleRegister {}
+
+/// Phase and validator sets for a governance event.
+///
+/// Read off its pre-event properties: the node commits gov events
+/// against the historical governance state, never against a later
+/// register. Mirrors the subject verifier exactly.
+pub fn gov_roles_from_pre(
+    pre_properties: &ValueWrapper,
+    need_approval: bool,
+    need_compilation: bool,
+) -> Result<RolesAtVersion> {
+    let gov = GovernanceData::try_from(pre_properties.clone())
+        .map_err(|e| anyhow::anyhow!("governance state: {e}"))?;
+    let set = |role: ProtocolTypes| {
+        gov.get_quorum_and_signers(
+            role,
+            &SchemaType::Governance,
+            Namespace::new(),
+        )
+        .map(|(workers, quorum)| RoleDataRegister {
+            workers: workers.into_iter().collect::<HashSet<_>>(),
+            quorum,
+        })
+        .map_err(|e| anyhow::anyhow!("gov roles: {e}"))
+    };
+    Ok(RolesAtVersion {
+        evaluation: set(ProtocolTypes::Evaluation)?,
+        approval: need_approval
+            .then(|| set(ProtocolTypes::Approval))
+            .transpose()?,
+        compilation: need_compilation
+            .then(|| set(ProtocolTypes::Compilation))
+            .transpose()?,
+        validators: set(ProtocolTypes::Validation)?,
+    })
+}

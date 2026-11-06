@@ -17,6 +17,7 @@ use futures::StreamExt;
 pub use manager::{
     SendResult, SinkManager, SinkManagerDetailedStatus, SinkManagerEvent,
     SinkManagerInitParams, SinkManagerMessage, SinkManagerResponse, SinkStatus,
+    SubjectDeliveryCursor, SubjectSinkReview,
 };
 pub use registry::{
     SinkRegistration, SinkRegistry, SinkRegistryEvent, SinkRegistryMessage,
@@ -35,6 +36,15 @@ use ave_common::{
     DataToSink,
     sink::{OAuth2GrantType, SinkAuthConfig},
 };
+
+/// Shutdown grace for sink actors (`SinkManager`, `SinkWorker`,
+/// `SinkSubjectWorker`).
+///
+/// External deliveries retry with backoff on top of per-attempt
+/// timeouts, so the 5 s framework default can cut an in-flight
+/// batch short on slow machines. These are deadlines, not fixed
+/// waits: an idle actor still stops immediately.
+pub const SINK_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Parse the `Retry-After` header of a 429 / 5xx response. The value may be
 /// a number of seconds or an HTTP-date; the result is milliseconds from now.
@@ -279,25 +289,27 @@ pub async fn obtain_token(
     auth: &SinkAuthConfig,
     password_or_secret: &str,
 ) -> Result<TokenResponse, SinkError> {
-    let mut body = match auth.grant_type {
-        OAuth2GrantType::Password => serde_json::json!({
-            "grant_type": auth.grant_type.as_str(),
-            "username": auth.username,
-            "password": password_or_secret,
-        }),
-        OAuth2GrantType::ClientCredentials => serde_json::json!({
-            "grant_type": auth.grant_type.as_str(),
-            "client_id": auth.client_id,
-            "client_secret": password_or_secret,
-        }),
+    // RFC 6749 §4.3.2/§4.4.2: token requests are form-encoded, not
+    // JSON. A strict IdP rejects any other body for these grants.
+    let mut params: Vec<(&str, &str)> = match auth.grant_type {
+        OAuth2GrantType::Password => vec![
+            ("grant_type", auth.grant_type.as_str()),
+            ("username", &auth.username),
+            ("password", password_or_secret),
+        ],
+        OAuth2GrantType::ClientCredentials => vec![
+            ("grant_type", auth.grant_type.as_str()),
+            ("client_id", &auth.client_id),
+            ("client_secret", password_or_secret),
+        ],
     };
     if !auth.scope.is_empty() {
-        body["scope"] = serde_json::Value::String(auth.scope.clone());
+        params.push(("scope", &auth.scope));
     }
 
     let res = client
         .post(&auth.auth_url)
-        .json(&body)
+        .form(&params)
         .send()
         .await
         .map_err(|e| SinkError::Auth {
@@ -334,30 +346,35 @@ pub async fn obtain_token(
     Ok(token)
 }
 
-/// Obtain an OAuth2 token with retry/backoff, running entirely outside any
-/// cache lock so other deliveries are not blocked while the auth endpoint is
-/// down.
+/// Obtain an OAuth2 token with retry/backoff.
+///
+/// Runs entirely outside any cache lock so other deliveries are not
+/// blocked while the auth endpoint is down. The server-provided
+/// `Retry-After` hint is honored but capped at `retry_max_delay_ms`,
+/// like delivery retries: a hostile or broken IdP must not retain
+/// every consumer for the hint's duration.
 pub async fn obtain_token_with_retry(
     client: &reqwest::Client,
     auth: &SinkAuthConfig,
     password_or_secret: &str,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
 ) -> Result<TokenResponse, SinkError> {
     let mut last_err = None;
     for attempt in 0..=TOKEN_OBTAIN_MAX_RETRIES {
         if attempt > 0 {
-            // Same saturation as the delivery backoff: avoid shift overflow
-            // with a large configured base delay.
-            let exp = (attempt - 1).min(63);
-            let base_delay = retry_base_delay_ms.saturating_mul(1_u64 << exp);
-            let mut delay = add_jitter(base_delay);
-            // Honor a server-provided Retry-After hint when it exceeds the
-            // computed backoff.
-            if let Some(SinkError::Auth { retry_after_ms, .. }) = &last_err
-                && let Some(hint) = retry_after_ms
-            {
-                delay = delay.max(*hint);
-            }
+            // Same shared policy as deliveries: exponential backoff
+            // with jitter, hint honored, result capped at max_ms.
+            let hint = match &last_err {
+                Some(SinkError::Auth { retry_after_ms, .. }) => *retry_after_ms,
+                _ => None,
+            };
+            let delay = retry_delay_ms(
+                retry_base_delay_ms,
+                retry_max_delay_ms,
+                attempt as usize,
+                hint,
+            );
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
         match obtain_token(client, auth, password_or_secret).await {
@@ -389,6 +406,7 @@ pub struct OAuth2TokenCache {
     secret: String,
     margin_secs: u64,
     retry_base_delay_ms: u64,
+    retry_max_delay_ms: u64,
     /// `pub(crate)` so transport tests can seed an expired token.
     pub(crate) cached: tokio::sync::RwLock<Option<TokenResponse>>,
     /// Serializes token fetches (single-flight); never held across a cache
@@ -403,6 +421,7 @@ impl OAuth2TokenCache {
         secret: String,
         margin_secs: u64,
         retry_base_delay_ms: u64,
+        retry_max_delay_ms: u64,
     ) -> Self {
         Self {
             client,
@@ -410,6 +429,7 @@ impl OAuth2TokenCache {
             secret,
             margin_secs,
             retry_base_delay_ms,
+            retry_max_delay_ms,
             cached: tokio::sync::RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
         }
@@ -445,6 +465,7 @@ impl OAuth2TokenCache {
             &self.auth,
             &self.secret,
             self.retry_base_delay_ms,
+            self.retry_max_delay_ms,
         )
         .await?;
         let access_token = token.access_token.clone();
@@ -650,9 +671,10 @@ mod tests {
             ..SinkAuthConfig::default()
         };
 
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10)
-            .await
-            .expect("token should be obtained after retries");
+        let token =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
+                .await
+                .expect("token should be obtained after retries");
 
         assert_eq!(token.access_token, "ok-token");
         assert_eq!(
@@ -707,9 +729,10 @@ mod tests {
         };
 
         let start = Instant::now();
-        let token = obtain_token_with_retry(&client, &auth, "test-secret", 10)
-            .await
-            .expect("token should be obtained after retry");
+        let token =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 30_000)
+                .await
+                .expect("token should be obtained after retry");
         let elapsed = start.elapsed();
 
         assert_eq!(token.access_token, "ok-token");
@@ -725,12 +748,108 @@ mod tests {
         );
     }
 
-    /// Starts a minimal HTTP OAuth2 token endpoint that captures the JSON body
-    /// of the token request and returns it through the oneshot sender.
+    /// Item 46: a `Retry-After` hint longer than the configured cap
+    /// must not stall the refresh. The IdP always answers 503 with a
+    /// 60s hint and the cap is 50ms: all attempts fail fast instead
+    /// of sleeping a minute between tries.
+    #[tokio::test]
+    async fn obtain_token_with_retry_caps_retry_after_hint() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener has local address");
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("test listener should accept");
+                request_count_server.fetch_add(1, Ordering::SeqCst);
+                let response = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let auth = SinkAuthConfig {
+            auth_url: format!("http://{}/token", addr),
+            username: "test-user".to_owned(),
+            ..SinkAuthConfig::default()
+        };
+
+        let start = Instant::now();
+        let err =
+            obtain_token_with_retry(&client, &auth, "test-secret", 10, 50)
+                .await
+                .expect_err("token fetch must fail while the IdP 503s");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, SinkError::Auth { .. }),
+            "expected an auth error, got {err:?}"
+        );
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            3,
+            "all attempts must run (initial + 2 retries)"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "refresh must be capped at retry_max_delay_ms instead of sleeping 60s per hint; took {elapsed:?}"
+        );
+    }
+
+    /// Starts a minimal HTTP OAuth2 token endpoint that captures the
+    /// form-encoded body of the token request and returns it through
+    /// the oneshot sender.
     async fn start_oauth2_server_that_captures_body(
         access_token: &str,
     ) -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+        /// Minimal `application/x-www-form-urlencoded` decoder for the
+        /// ASCII values these tests send (plus for space, %XX escapes).
+        fn decode_form(body: &[u8]) -> serde_json::Value {
+            fn decode(component: &str) -> String {
+                let mut out = String::with_capacity(component.len());
+                let mut bytes = component.as_bytes().iter();
+                while let Some(&b) = bytes.next() {
+                    match b {
+                        b'+' => out.push(' '),
+                        b'%' => {
+                            let hex = |c: u8| {
+                                (c as char).to_digit(16).unwrap_or(0) as u8
+                            };
+                            let hi = bytes.next().copied().unwrap_or(b'0');
+                            let lo = bytes.next().copied().unwrap_or(b'0');
+                            out.push((hex(hi) << 4 | hex(lo)) as char);
+                        }
+                        _ => out.push(b as char),
+                    }
+                }
+                out
+            }
+            let mut map = serde_json::Map::new();
+            let text = std::str::from_utf8(body).expect("form body is utf8");
+            for pair in text.split('&') {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                map.insert(
+                    decode(key),
+                    serde_json::Value::String(decode(value)),
+                );
+            }
+            serde_json::Value::Object(map)
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -794,8 +913,11 @@ mod tests {
                         .expect("should read request body");
                 }
 
-                serde_json::from_slice(&body_bytes)
-                    .expect("request body should be valid JSON")
+                assert!(
+                    headers.contains("application/x-www-form-urlencoded"),
+                    "token request must be form-encoded, got: {headers}"
+                );
+                decode_form(&body_bytes)
             };
             let _ = tx.send(body);
 
@@ -941,6 +1063,7 @@ mod tests {
             "test-secret".to_owned(),
             60,
             10,
+            30_000,
         ));
 
         const CALLERS: usize = 8;

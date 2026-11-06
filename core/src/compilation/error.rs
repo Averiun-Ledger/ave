@@ -1,0 +1,172 @@
+use thiserror::Error;
+
+pub use ave_contract_sdk::runtime::InvalidModuleKind;
+
+#[derive(Debug, Error, Clone)]
+pub enum CompilerError {
+    #[error("invalid contract path [{path}]: {details}")]
+    InvalidContractPath { path: String, details: String },
+
+    #[error("base64 decode failed: {details}")]
+    Base64DecodeFailed { details: String },
+
+    #[error("contract source decompression failed: {details}")]
+    SourceDecompressionFailed { details: String },
+
+    #[error("contract source too large: {size} bytes (max {max})")]
+    ContractSourceTooLarge { size: usize, max: usize },
+
+    #[error("directory creation failed [{path}]: {details}")]
+    DirectoryCreationFailed { path: String, details: String },
+
+    #[error("file write failed [{path}]: {details}")]
+    FileWriteFailed { path: String, details: String },
+
+    #[error("file read failed [{path}] ({kind:?}): {details}")]
+    FileReadFailed {
+        path: String,
+        kind: std::io::ErrorKind,
+        details: String,
+    },
+
+    #[error("cargo build failed: {details}")]
+    CargoBuildFailed { details: String },
+
+    #[error("cargo build timed out after {secs} seconds")]
+    BuildTimeout { secs: u64 },
+
+    #[error("compilation failed")]
+    CompilationFailed,
+
+    /// Production: the node was built without the `toolchain` feature,
+    /// so it cannot compile contracts in-process. Test builds: the
+    /// embedded compiler pool is down or unreachable.
+    #[error("compilers unavailable: {details}")]
+    CompilersUnavailable { details: String },
+
+    /// A node built without the `toolchain` feature holds the compiler
+    /// role: a permanent misconfiguration, never a transient outage, so
+    /// it fails loud instead of retrying forever.
+    #[error("node built without the `toolchain` feature")]
+    NoLocalToolchain,
+
+    /// The governance pin names a toolchain the node does not know:
+    /// a permanent local misconfiguration (same family as
+    /// `NoLocalToolchain`), never a transient outage.
+    #[error("unknown toolchain pin: {pin}")]
+    UnknownToolchainPin { pin: String },
+
+    #[error("compiler toolchain mismatch: expected {expected}, got {actual}")]
+    ToolchainMismatch { expected: String, actual: String },
+
+    /// Only raised in test builds: the embedded compiler pool is the
+    /// only client that performs attestation (production nodes compile
+    /// in-process, so there is nothing to attest).
+    #[error("invalid compiler attestation signature")]
+    InvalidAttestationSignature,
+
+    /// Only raised in test builds (see `InvalidAttestationSignature`).
+    #[error(
+        "compiler attestation mismatch: known wasm hash {expected}, got {actual}"
+    )]
+    AttestationMismatch { expected: String, actual: String },
+
+    #[error("missing helper: {name}")]
+    MissingHelper { name: &'static str },
+
+    #[error("contract register failed: {details}")]
+    ContractRegisterFailed { details: String },
+
+    #[error("toolchain fingerprint failed: {details}")]
+    ToolchainFingerprintFailed { details: String },
+
+    #[error("wasm precompile failed: {details}")]
+    WasmPrecompileFailed { details: String },
+
+    #[error("wasm deserialization failed: {details}")]
+    WasmDeserializationFailed { details: String },
+
+    #[error("invalid module: {kind}")]
+    InvalidModule { kind: InvalidModuleKind },
+
+    #[error("fuel limit error: {details}")]
+    FuelLimitError { details: String },
+
+    #[error("instantiation failed: {details}")]
+    InstantiationFailed { details: String },
+
+    #[error("entry point not found: {function}")]
+    EntryPointNotFound { function: &'static str },
+
+    #[error("contract execution failed: {details}")]
+    ContractExecutionFailed { details: String },
+
+    #[error("serialization error [{context}]: {details}")]
+    SerializationError { context: String, details: String },
+
+    #[error("invalid contract output: {details}")]
+    InvalidContractOutput { details: String },
+
+    #[error("memory allocation failed: {details}")]
+    MemoryAllocationFailed { details: String },
+
+    #[error("contract check failed: {error}")]
+    ContractCheckFailed { error: String },
+
+    #[error("engine creation failed: {details}")]
+    EngineCreation { details: String },
+
+    #[error(
+        "fetched artifact hash mismatch: expected {expected}, got {actual}"
+    )]
+    FetchedArtifactMismatch { expected: String, actual: String },
+
+    #[error("fetched artifact decompression failed: {details}")]
+    FetchedArtifactDecompressionFailed { details: String },
+
+    #[error("missing ledger anchor for artifact [{contract_name}]")]
+    MissingArtifactAnchor { contract_name: String },
+
+    #[error(
+        "artifact hash does not match ledger anchor: expected {expected}, got {actual}"
+    )]
+    ArtifactAnchorMismatch { expected: String, actual: String },
+
+    #[error(
+        "toolchain drift: anchor built with {expected_fingerprint}, local build with {actual_fingerprint}"
+    )]
+    ToolchainDrift {
+        expected_fingerprint: String,
+        actual_fingerprint: String,
+    },
+}
+
+impl CompilerError {
+    pub fn file_read(path: impl Into<String>, error: std::io::Error) -> Self {
+        Self::FileReadFailed {
+            path: path.into(),
+            kind: error.kind(),
+            details: error.to_string(),
+        }
+    }
+}
+
+impl From<crate::compilation::pipeline::ContractSourceError> for CompilerError {
+    fn from(error: crate::compilation::pipeline::ContractSourceError) -> Self {
+        use crate::compilation::pipeline::ContractSourceError as Source;
+        match error {
+            Source::Base64DecodeFailed { details } => {
+                Self::Base64DecodeFailed { details }
+            }
+            Source::SourceDecompressionFailed { details } => {
+                Self::SourceDecompressionFailed { details }
+            }
+            Source::ContractSourceTooLarge { size, max } => {
+                Self::ContractSourceTooLarge { size, max }
+            }
+            Source::SerializationError { context, details } => {
+                Self::SerializationError { context, details }
+            }
+        }
+    }
+}

@@ -13,6 +13,22 @@ use ave_actors::rusqlite::{
     self, OptionalExtension, Result as SqliteResult, TransactionBehavior,
     params,
 };
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tracing::warn;
+
+/// One `last_used` bookkeeping write, queued for the background flusher.
+pub struct LastUsedTouch {
+    key_id: String,
+    ip_address: Option<String>,
+}
+
+/// Bounded touch queue: `last_used` is best-effort, so a full queue
+/// drops with a warning instead of slowing responses.
+const TOUCH_QUEUE_CAPACITY: usize = 4096;
+/// Low load: a lone touch waits at most this long before its flush.
+const TOUCH_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// High load: flush early once this many distinct keys accumulate.
+const TOUCH_BATCH_MAX: usize = 500;
 
 pub struct RotateApiKeyParams<'a> {
     pub key_id: &'a str,
@@ -22,6 +38,10 @@ pub struct RotateApiKeyParams<'a> {
     pub revoked_by: Option<i64>,
     pub reason: Option<&'a str>,
     pub audit: Option<AuditLogParams<'a>>,
+    /// `(requesting_user_id, is_superadmin)`: when present, rotation
+    /// of another user's key is rejected inside the tx. `None` skips
+    /// the check (service/internal callers).
+    pub owner_check: Option<(i64, bool)>,
 }
 
 // =============================================================================
@@ -45,6 +65,9 @@ impl AuthDatabase {
                 ttl
             )));
         }
+        // No upper-bound rejection here: oversized TTLs are clamped to the
+        // per-kind maximum at insert time (management keys must always
+        // expire within their limit; service keys within theirs).
 
         let user = Self::get_user_by_id_internal(conn, user_id)?;
         if !user.is_active {
@@ -160,9 +183,17 @@ impl AuthDatabase {
             let max_ttl = VALIDATION_LIMITS.management_key_max_ttl_seconds;
             Some(effective_ttl.map_or(max_ttl, |ttl| ttl.min(max_ttl)))
         } else {
-            effective_ttl
+            let max_ttl = VALIDATION_LIMITS.service_key_max_ttl_seconds;
+            effective_ttl.map(|ttl| ttl.min(max_ttl))
         };
-        let expires_at = effective_ttl.map(|ttl| now + ttl);
+        let expires_at = match effective_ttl {
+            None => None,
+            Some(ttl) => Some(now.checked_add(ttl).ok_or_else(|| {
+                DatabaseError::Validation(format!(
+                    "TTL expiry out of range: {now} + {ttl}"
+                ))
+            })?),
+        };
 
         // Generate UUID for id
         let key_id = generate_uuid();
@@ -432,6 +463,7 @@ impl AuthDatabase {
             revoked_by,
             reason,
             audit,
+            owner_check,
         } = params;
         let mut conn = self.lock_conn()?;
         let tx_started = std::time::Instant::now();
@@ -441,6 +473,20 @@ impl AuthDatabase {
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
             let existing = Self::get_api_key_info_internal(&tx, key_id)?;
+            if existing.revoked {
+                return Err(DatabaseError::Validation(
+                    "Cannot rotate a revoked API key".to_owned(),
+                ));
+            }
+            if let Some((owner_id, is_superadmin)) = owner_check
+                && existing.user_id != owner_id
+                && !is_superadmin
+            {
+                return Err(DatabaseError::PermissionDenied(
+                    "Only superadmin can rotate API keys of other users"
+                        .to_owned(),
+                ));
+            }
             let new_name = name.unwrap_or(existing.name.as_str());
             let new_description =
                 description.or(existing.description.as_deref());
@@ -483,6 +529,10 @@ impl AuthDatabase {
                 &key_info.id,
                 revoked_by,
             )?;
+
+            // Reload after the plan move: the info built at insert time
+            // predates the transfer and would report a stale null plan.
+            let key_info = Self::get_api_key_info_internal(&tx, &key_info.id)?;
 
             if let Some(audit) = audit {
                 Self::create_audit_log_with_conn(
@@ -574,6 +624,8 @@ impl AuthDatabase {
     pub fn list_all_api_keys(
         &self,
         include_revoked: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<ApiKeyInfo>, DatabaseError> {
         let conn = self.lock_conn()?;
 
@@ -586,7 +638,8 @@ impl AuthDatabase {
              INNER JOIN users u ON k.user_id = u.id
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              LEFT JOIN usage_plans p ON p.id = kp.plan_id
-             ORDER BY k.created_at DESC"
+             ORDER BY k.created_at DESC
+             LIMIT ?1 OFFSET ?2"
         } else {
             "SELECT k.id, k.user_id, u.username, k.key_prefix, k.name, k.description,
                     k.is_management, k.created_at, k.expires_at, k.revoked,
@@ -597,7 +650,8 @@ impl AuthDatabase {
              LEFT JOIN api_key_plans kp ON kp.api_key_id = k.id
              LEFT JOIN usage_plans p ON p.id = kp.plan_id
              WHERE k.revoked = 0
-             ORDER BY k.created_at DESC"
+             ORDER BY k.created_at DESC
+             LIMIT ?1 OFFSET ?2"
         };
 
         let mut stmt = conn
@@ -605,7 +659,7 @@ impl AuthDatabase {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let keys = stmt
-            .query_map([], |row| {
+            .query_map(params![limit, offset], |row| {
                 Ok(ApiKeyInfo {
                     id: row.get(0)?,
                     user_id: row.get(1)?,
@@ -640,11 +694,30 @@ impl AuthDatabase {
         revoked_by: Option<i64>,
         reason: Option<&str>,
         audit: Option<AuditLogParams>,
+        owner_check: Option<(i64, bool)>,
+        reject_management: bool,
     ) -> Result<(), DatabaseError> {
         let mut conn = self.lock_conn()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| DatabaseError::Update(e.to_string()))?;
+        // Ownership and management guards run inside the same write
+        // tx that revokes: no check-then-act gap between a separate
+        // lookup and this write.
+        let info = Self::get_api_key_info_internal(&tx, key_id)?;
+        if let Some((owner_id, is_superadmin)) = owner_check
+            && info.user_id != owner_id
+            && !is_superadmin
+        {
+            return Err(DatabaseError::NotFound(
+                "API key not found".to_owned(),
+            ));
+        }
+        if reject_management && info.is_management {
+            return Err(DatabaseError::Validation(
+                "Cannot revoke the management API key".to_owned(),
+            ));
+        }
         Self::revoke_api_key_internal(&tx, key_id, revoked_by, reason)?;
         if let Some(audit) = audit {
             Self::create_audit_log_with_conn(&tx, self.audit_enabled(), audit)?;
@@ -781,13 +854,6 @@ impl AuthDatabase {
         // Get user roles
         let roles = Self::get_user_roles_internal(conn, user_id)?;
 
-        let now = Self::now();
-        conn.execute(
-            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
-            params![now, ip_address, &key_id],
-        )
-        .map_err(|e| DatabaseError::Update(e.to_string()))?;
-
         let mut permissions =
             Self::get_effective_permissions_internal(conn, user_id)?;
 
@@ -866,6 +932,17 @@ impl AuthDatabase {
                 )?;
             }
 
+            // Usage bookkeeping rides the same Immediate write tx the
+            // quota consume already opened: no extra lock, and direct
+            // (non-HTTP) callers keep the authenticate-records-use
+            // contract. The middleware spawn stays as cover for paths
+            // that never reach this function.
+            tx.execute(
+                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
+                params![Self::now(), ip_address, auth_ctx.api_key_id],
+            )
+            .map_err(|e| DatabaseError::Update(e.to_string()))?;
+
             tx.commit()
                 .map_err(|e| DatabaseError::Update(e.to_string()))?;
 
@@ -876,6 +953,120 @@ impl AuthDatabase {
             tx_started.elapsed(),
         );
         result
+    }
+
+    /// Best-effort `last_used` bookkeeping, deliberately outside the
+    /// auth transaction and the request path: a failed touch must
+    /// never deny an otherwise valid request, and the write must not
+    /// serialize read-only traffic behind a write lock.
+    ///
+    /// Never blocks the caller: touches are deduplicated by key and
+    /// flushed in a single transaction by a background worker, either
+    /// every second (low load) or once the batch fills (high load).
+    pub fn touch_api_key_last_used(
+        self: &Arc<Self>,
+        key_id: &str,
+        ip_address: Option<&str>,
+    ) {
+        let sender = {
+            let mut guard = self.touch_sender.lock().unwrap_or_else(|e| {
+                warn!(
+                    target: "ave::http::auth",
+                    msg_type = "touch_poisoned",
+                    "touch sender lock poisoned, recovering"
+                );
+                e.into_inner()
+            });
+            if guard.is_none() {
+                let (sender, mut receiver) =
+                    tokio::sync::mpsc::channel::<LastUsedTouch>(
+                        TOUCH_QUEUE_CAPACITY,
+                    );
+                let db = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut pending: HashMap<String, Option<String>> =
+                        HashMap::new();
+                    loop {
+                        match tokio::time::timeout(
+                            TOUCH_FLUSH_INTERVAL,
+                            receiver.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some(job)) => {
+                                pending.insert(job.key_id, job.ip_address);
+                                if pending.len() < TOUCH_BATCH_MAX {
+                                    continue;
+                                }
+                            }
+                            Ok(None) => return,
+                            Err(_) => {
+                                if pending.is_empty() {
+                                    continue;
+                                }
+                            }
+                        }
+                        let batch = std::mem::take(&mut pending);
+                        if let Err(error) = db
+                            .run_blocking("auth_touch_flush", move |db| {
+                                db.flush_last_used_touch(batch)
+                            })
+                            .await
+                        {
+                            warn!(
+                                target: "ave::http::auth",
+                                msg_type = "touch_failed",
+                                error = %error,
+                                "touch last_used flush failed, skipped"
+                            );
+                        }
+                    }
+                });
+                guard.replace(sender);
+            }
+            guard.as_ref().expect("touch sender set above").clone()
+        };
+        if sender
+            .try_send(LastUsedTouch {
+                key_id: key_id.to_owned(),
+                ip_address: ip_address.map(str::to_owned),
+            })
+            .is_err()
+        {
+            warn!(
+                target: "ave::http::auth",
+                msg_type = "touch_dropped",
+                "touch queue full, entry dropped"
+            );
+        }
+    }
+
+    /// Writes one deduplicated batch in a single transaction with a
+    /// reused statement: write amplification is bounded by distinct
+    /// keys, not by requests.
+    fn flush_last_used_touch(
+        &self,
+        batch: HashMap<String, Option<String>>,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE id = ?3",
+                )
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let now = Self::now();
+            for (key_id, ip_address) in &batch {
+                stmt.execute(params![now, ip_address, key_id])
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 
     /// Delete expired API keys

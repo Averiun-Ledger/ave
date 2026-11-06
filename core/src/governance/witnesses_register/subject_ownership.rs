@@ -4,7 +4,7 @@ use crate::model::common::{
     Interval, TrackerEventVisibility, TrackerStoredVisibility,
     TrackerVisibilityState,
 };
-use crate::model::event::Ledger;
+use crate::model::event::{Ledger, Protocols};
 use ave_actors::ActorError;
 use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
@@ -62,8 +62,18 @@ impl WitnessesRegister {
 
             match event.get_event_request() {
                 Some(EventRequest::Transfer(transfer_request)) => {
-                    data.actual_new_owner_data =
-                        Some((transfer_request.new_owner, event.gov_version));
+                    // Mirror the live tracker path: a pending transfer
+                    // is only staged on successful evaluation, so a
+                    // failed one must not open a reception window.
+                    let ok = matches!(&event.protocols,
+                        Protocols::Transfer { evaluation, .. }
+                        if evaluation.evaluator_response_ok().is_some());
+                    if ok {
+                        data.actual_new_owner_data = Some((
+                            transfer_request.new_owner,
+                            event.gov_version,
+                        ));
+                    }
                 }
                 Some(EventRequest::Confirm(..)) => {
                     if let Some((new_owner, new_owner_gov_version)) =

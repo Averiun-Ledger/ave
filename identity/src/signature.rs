@@ -157,6 +157,12 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Signed<T> {
     pub const fn content(&self) -> &T {
         &self.content
     }
+
+    /// Splits the signed value into its owned parts, moving both
+    /// without cloning.
+    pub fn into_parts(self) -> (T, Signature) {
+        (self.content, self.signature)
+    }
 }
 
 #[cfg(test)]

@@ -76,16 +76,11 @@ pub async fn generate_self_signed_cert(
         .self_signed(&key_pair)
         .map_err(|e| CertError::Generation(e.to_string()))?;
 
-    // Write certificate and key to files
-    fs::write(cert_path, cert.pem()).await?;
-    fs::write(key_path, key_pair.serialize_pem()).await?;
-    // The private key must not be readable by other users.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
-            .await?;
-    }
+    // Publish key first so a crash leaves the old certificate behind,
+    // which already triggers renewal. Each file lands atomically.
+    write_file_atomically(key_path, key_pair.serialize_pem().as_bytes(), true)
+        .await?;
+    write_file_atomically(cert_path, cert.pem().as_bytes(), false).await?;
 
     info!(
         target: TARGET,
@@ -94,6 +89,43 @@ pub async fn generate_self_signed_cert(
     );
 
     Ok(())
+}
+
+/// Writes `contents` to `path` via a temp sibling plus rename.
+async fn write_file_atomically(
+    path: &Path,
+    contents: &[u8],
+    owner_only: bool,
+) -> Result<(), CertError> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Some(parent) = tmp.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut file = fs::File::create(&tmp).await?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(contents).await?;
+    file.sync_all().await?;
+    drop(file);
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    fs::rename(&tmp, path).await?;
+    sync_parent_dir(path).await;
+    Ok(())
+}
+
+/// Best-effort directory fsync so renames survive a crash.
+async fn sync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(file) = fs::File::open(parent).await else {
+        return;
+    };
+    let _ = file.sync_all().await;
 }
 
 /// Build the expected set of SANs from configuration.
@@ -158,7 +190,13 @@ pub async fn cert_needs_renewal(
     let pem_data = match fs::read(cert_path).await {
         Ok(data) => data,
         Err(e) => {
-            warn!(target: TARGET, "Could not read certificate file: {}, forcing renewal", e);
+            warn!(
+                target: TARGET,
+                msg_type = "cert_read_failed",
+                error = %e,
+                "Could not read certificate file,
+                forcing renewal"
+            );
             return true;
         }
     };
@@ -174,14 +212,20 @@ pub async fn cert_needs_renewal(
                 let days_until_expiry = (expiry - now).whole_days();
                 warn!(
                     target: TARGET,
-                    "Certificate expires in {} days, renewal needed",
-                    days_until_expiry
+                    msg_type = "cert_expiring",
+                    days_until_expiry = days_until_expiry,
+                    "Certificate expires soon, renewal needed"
                 );
                 return true;
             }
         }
         None => {
-            warn!(target: TARGET, "Could not parse certificate expiry, forcing renewal");
+            warn!(
+                target: TARGET,
+                msg_type = "cert_expiry_parse_failed",
+                "Could not parse certificate expiry,
+                forcing renewal"
+            );
             return true;
         }
     }
@@ -189,21 +233,43 @@ pub async fn cert_needs_renewal(
     // Check SANs match current configuration
     let expected = expected_sans(config);
     match parse_cert_sans(&pem_data) {
-        Some(current) if current == expected => false,
-        Some(current) => {
+        Some(_current) if _current == expected => {
+            if pair_loads(cert_path, key_path).await {
+                false
+            } else {
+                warn!(
+                    target: TARGET,
+                    msg_type = "cert_key_mismatch",
+                    "Certificate and key do not match, renewal needed"
+                );
+                true
+            }
+        }
+        Some(_) => {
             warn!(
                 target: TARGET,
-                "Certificate SANs do not match configuration (current: {:?}, expected: {:?}), renewal needed",
-                current,
-                expected
+                msg_type = "cert_san_mismatch",
+                "Certificate SANs do not match configuration, renewal needed"
             );
             true
         }
         None => {
-            warn!(target: TARGET, "Could not parse certificate SANs, forcing renewal");
+            warn!(
+                target: TARGET,
+                msg_type = "cert_san_parse_failed",
+                "Could not parse certificate SANs,
+                forcing renewal"
+            );
             true
         }
     }
+}
+
+/// Returns true when the stored pair loads as valid TLS material.
+async fn pair_loads(cert_path: &Path, key_path: &Path) -> bool {
+    RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .is_ok()
 }
 
 /// Parse the expiry date from a PEM certificate using x509-parser
@@ -242,8 +308,22 @@ pub async fn cert_renewal_task(
         config.check_interval_secs
     );
 
+    let mut pending_reload = false;
     loop {
         interval.tick().await;
+
+        // A failed reload stays pending: retry even when the on-disk
+        // pair already looks valid.
+        if pending_reload
+            && tls
+                .reload_from_pem_file(&paths.cert_path, &paths.key_path)
+                .await
+                .is_ok()
+        {
+            pending_reload = false;
+            info!(target: TARGET, "Certificate reload recovered");
+            continue;
+        }
 
         if cert_needs_renewal(&config, &paths.cert_path, &paths.key_path).await
         {
@@ -263,12 +343,23 @@ pub async fn cert_renewal_task(
                             info!(target: TARGET, "Certificate renewed and reloaded successfully");
                         }
                         Err(e) => {
-                            error!(target: TARGET, "Failed to reload certificate: {}", e);
+                            pending_reload = true;
+                            error!(
+                                target: TARGET,
+                                msg_type = "cert_reload_failed",
+                                error = %e,
+                                "Failed to reload certificate"
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    error!(target: TARGET, "Failed to generate new certificate: {}", e);
+                    error!(
+                        target: TARGET,
+                        msg_type = "cert_generate_failed",
+                        error = %e,
+                        "Failed to generate new certificate"
+                    );
                 }
             }
         }
@@ -362,5 +453,28 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "private key must be owner-only");
+    }
+
+    #[tokio::test]
+    async fn mismatched_key_forces_renewal() {
+        let cert_file = NamedTempFile::new().unwrap();
+        let key_file = NamedTempFile::new().unwrap();
+        let config = test_config(vec!["127.0.0.1".to_string()]);
+
+        generate_self_signed_cert(&config, cert_file.path(), key_file.path())
+            .await
+            .unwrap();
+        assert!(
+            !cert_needs_renewal(&config, cert_file.path(), key_file.path())
+                .await
+        );
+
+        tokio::fs::write(key_file.path(), b"not a private key")
+            .await
+            .unwrap();
+        assert!(
+            cert_needs_renewal(&config, cert_file.path(), key_file.path())
+                .await
+        );
     }
 }

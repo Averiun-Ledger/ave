@@ -2,6 +2,7 @@ use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
 use std::future::Future;
+use tracing::warn;
 
 use ave_common::{
     Namespace, SchemaType, ValueWrapper,
@@ -72,7 +73,7 @@ where
 }
 
 pub async fn has_role<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     role_query: HashThisRole,
 ) -> Result<bool, ActorError>
@@ -130,7 +131,7 @@ where
 }
 
 pub async fn get_schema_viewpoints<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     schema_id: SchemaType,
 ) -> Result<Option<BTreeSet<String>>, ActorError>
@@ -472,12 +473,24 @@ where
         acquire_subject(ctx, subject_id, requester, create_ledger, active)
             .await?;
     let result = operation(ctx).await;
-    lease.finish(ctx).await?;
+    // Never mask the operation error with a lease-release failure: a
+    // failed release is logged and only reported when the operation
+    // itself succeeded.
+    if let Err(finish_error) = lease.finish(ctx).await {
+        if result.is_ok() {
+            return Err(finish_error);
+        }
+        warn!(
+            subject_id = %subject_id,
+            error = %finish_error,
+            "Failed to release subject lease after operation error"
+        );
+    }
     result
 }
 
-async fn get_subject_path_and_data<A>(
-    ctx: &mut ActorContext<A>,
+pub(crate) async fn get_subject_path_and_data<A>(
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<(ActorPath, SubjectData), ActorError>
 where
@@ -533,7 +546,7 @@ where
 }
 
 pub async fn get_version<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
 ) -> Result<u64, ActorError>
 where
@@ -604,6 +617,7 @@ pub async fn update_ledger<A>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     events: Vec<Ledger>,
+    defer_acquisition: bool,
 ) -> Result<(u64, PublicKey, Option<PublicKey>), ActorError>
 where
     A: Actor + Handler<A>,
@@ -632,7 +646,10 @@ where
             let governance_actor =
                 ctx.system().get_actor::<Governance>(&path).await?;
             let response = governance_actor
-                .ask(GovernanceMessage::UpdateLedger { events })
+                .ask(GovernanceMessage::UpdateLedger {
+                    events,
+                    defer_acquisition,
+                })
                 .await?;
             match response {
                 GovernanceResponse::UpdateResult(last_sn, owner, new_owner) => {
@@ -745,7 +762,7 @@ where
 }
 
 pub async fn get_tracker_visibility_state<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
 ) -> Result<TrackerVisibilityState, ActorError>
@@ -813,7 +830,6 @@ pub async fn get_tracker_window<A>(
         Option<u64>,
         Option<u64>,
         Option<u64>,
-        bool,
         Vec<TrackerDeliveryRange>,
     ),
     ActorError,
@@ -845,65 +861,9 @@ where
             sn,
             transfer_sn,
             clear_sn,
-            is_all,
             ranges,
-        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
-        _ => Err(ActorError::UnexpectedResponse {
-            path: actor_path,
-            expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
-        }),
-    }
-}
-
-pub async fn get_tracker_window_from_ledger<A>(
-    ctx: &mut ActorContext<A>,
-    governance_id: &DigestIdentifier,
-    subject_id: &DigestIdentifier,
-    ledger: Vec<Ledger>,
-    node: PublicKey,
-    sender: PublicKey,
-    params: TrackerParams,
-) -> Result<
-    (
-        Option<u64>,
-        Option<u64>,
-        Option<u64>,
-        bool,
-        Vec<TrackerDeliveryRange>,
-    ),
-    ActorError,
->
-where
-    A: Actor + Handler<A>,
-{
-    let actor_path = ActorPath::from(format!(
-        "/user/node/subject_manager/{}/witnesses_register",
-        governance_id
-    ));
-
-    let actor: ActorRef<WitnessesRegister> =
-        ctx.system().get_actor(&actor_path).await?;
-
-    let response = actor
-        .ask(WitnessesRegisterMessage::GetTrackerWindowFromLedger {
-            subject_id: subject_id.clone(),
-            ledger,
-            node,
-            sender,
-            namespace: params.namespace,
-            schema_id: params.schema_id,
-            actual_sn: params.actual_sn,
-        })
-        .await?;
-
-    match response {
-        WitnessesRegisterResponse::TrackerWindow {
-            sn,
-            transfer_sn,
-            clear_sn,
-            is_all,
-            ranges,
-        } => Ok((sn, transfer_sn, clear_sn, is_all, ranges)),
+            ..
+        } => Ok((sn, transfer_sn, clear_sn, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::TrackerWindow".to_string(),
@@ -925,7 +885,6 @@ pub async fn check_witness_status_and_window<A>(
         Option<u64>,
         Option<u64>,
         Option<u64>,
-        bool,
         Vec<TrackerDeliveryRange>,
     ),
     ActorError,
@@ -961,9 +920,9 @@ where
             sn,
             transfer_sn,
             clear_sn,
-            is_all,
             ranges,
-        } => Ok((status, sn, transfer_sn, clear_sn, is_all, ranges)),
+            ..
+        } => Ok((status, sn, transfer_sn, clear_sn, ranges)),
         _ => Err(ActorError::UnexpectedResponse {
             path: actor_path,
             expected: "WitnessesRegisterResponse::WitnessStatusAndWindow"

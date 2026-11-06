@@ -8,21 +8,24 @@ use std::{
 };
 
 use crate::{
+    approval::verify::{ApprovalVerification, verify_approval_data},
     governance::{
-        Governance,
+        Governance, GovernanceState,
         data::GovernanceData,
-        model::Quorum,
+        model::{ProtocolTypes, Quorum},
         role_register::{RoleDataRegister, SearchRole},
     },
     model::{
         common::{
             check_quorum_signers, get_n_events, get_validation_roles_register,
         },
-        event::{Ledger, LedgerSeal, Protocols, ValidationMetadata},
+        event::{
+            ApprovalData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
+        },
         sink::SubjectSinkEvent,
     },
-    node::register::{Register, RegisterMessage},
-    tracker::Tracker,
+    node::register::{Register, RegisterMessage, RegisterResponse},
+    tracker::{Tracker, TrackerState},
     validation::{
         request::{ActualProtocols, LastData, ValidationReq},
         response::ValidationRes,
@@ -59,6 +62,19 @@ use tracing::{debug, error};
 pub mod error;
 
 impl Event for Ledger {}
+
+/// SQLite stores timestamps as signed 64-bit integers. A seal or request
+/// timestamp beyond that range is valid for the protocol but unrepresentable
+/// downstream, where it used to stop the node. Reject it here as invalid
+/// remote input instead.
+fn check_timestamp_in_sqlite_range(nanos: u64) -> Result<(), SubjectError> {
+    if nanos > i64::MAX as u64 {
+        return Err(SubjectError::Generic(format!(
+            "timestamp {nanos} out of range for SQLite INTEGER (i64)"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(
     Clone, Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize,
@@ -192,8 +208,60 @@ impl From<&Governance> for Metadata {
     }
 }
 
+/// Validation metadata view of replayed governance state, for
+/// off-chain verification over stored states.
+impl From<&GovernanceState> for Metadata {
+    fn from(value: &GovernanceState) -> Self {
+        Self {
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.subject_metadata.subject_id.clone(),
+            genesis_gov_version: 0,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: Namespace::new(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
+            active: value.subject_metadata.active,
+            properties: value.properties.to_value_wrapper(),
+        }
+    }
+}
+
 impl From<&Tracker> for Metadata {
     fn from(value: &Tracker) -> Self {
+        Self {
+            name: value.subject_metadata.name.clone(),
+            description: value.subject_metadata.description.clone(),
+            subject_id: value.subject_metadata.subject_id.clone(),
+            governance_id: value.governance_id.clone(),
+            genesis_gov_version: value.genesis_gov_version,
+            prev_ledger_event_hash: value
+                .subject_metadata
+                .prev_ledger_event_hash
+                .clone(),
+            schema_id: value.subject_metadata.schema_id.clone(),
+            namespace: value.namespace.clone(),
+            sn: value.subject_metadata.sn,
+            creator: value.subject_metadata.creator.clone(),
+            owner: value.subject_metadata.owner.clone(),
+            new_owner: value.subject_metadata.new_owner.clone(),
+            active: value.subject_metadata.active,
+            properties: value.properties.clone(),
+        }
+    }
+}
+
+/// Validation metadata view of replayed tracker state, for
+/// off-chain verification over stored states.
+impl From<&TrackerState> for Metadata {
+    fn from(value: &TrackerState) -> Self {
         Self {
             name: value.subject_metadata.name.clone(),
             description: value.subject_metadata.description.clone(),
@@ -421,11 +489,7 @@ impl SinkReplayState {
             public_key.to_owned(),
         );
 
-        Ok(build_data_to_sink(
-            data,
-            replay_parts.event_request,
-            sink_timestamp,
-        ))
+        build_data_to_sink(data, replay_parts.event_request, sink_timestamp)
     }
 
     fn apply_success(
@@ -558,8 +622,7 @@ impl EventLedgerDataForSink {
             Protocols::Create { .. } => Self::Create {
                 state: state.clone(),
             },
-            Protocols::TrackerFactFull { evaluation, .. }
-            | Protocols::GovFact { evaluation, .. } => {
+            Protocols::TrackerFactFull { evaluation, .. } => {
                 let success = protocols.is_success();
                 let (patch, error) = match &evaluation.response {
                     crate::model::event::EvaluationResponse::Ok {
@@ -574,6 +637,47 @@ impl EventLedgerDataForSink {
                         ..
                     } => (None, Some(result.to_string())),
                 };
+
+                Self::FactFull {
+                    patch,
+                    success,
+                    error,
+                }
+            }
+            Protocols::GovFact {
+                evaluation,
+                compilation,
+                ..
+            } => {
+                let success = protocols.is_success();
+                let (patch, error) = evaluation.as_ref().map_or_else(|| {
+                        let error = compilation.as_ref().and_then(|compilation| match &compilation.response {
+                                crate::model::event::CompilationResponse::Error {
+                                    result,
+                                    ..
+                                } => Some(format!(
+                                    "compilation: {}",
+                                    result
+                                )),
+                                crate::model::event::CompilationResponse::Ok {
+                                    ..
+                                } => None,
+                            });
+
+                        (None, error)
+                    }, |evaluation| match &evaluation.response {
+                        crate::model::event::EvaluationResponse::Ok {
+                            result,
+                            ..
+                        } if success => (Some(result.patch.0.clone()), None),
+                        crate::model::event::EvaluationResponse::Ok {
+                            ..
+                        } => (None, None),
+                        crate::model::event::EvaluationResponse::Error {
+                            result,
+                            ..
+                        } => (None, Some(result.to_string())),
+                    });
 
                 Self::FactFull {
                     patch,
@@ -634,8 +738,8 @@ impl EventLedgerDataForSink {
 fn data_to_sink_event(
     data: DataForSink,
     event: Option<EventRequest>,
-) -> DataToSinkEvent {
-    match (event, data.event_data_ledger) {
+) -> Result<DataToSinkEvent, ActorError> {
+    Ok(match (event, data.event_data_ledger) {
         (
             Some(EventRequest::Create(..)),
             EventLedgerDataForSink::Create { state },
@@ -736,26 +840,39 @@ fn data_to_sink_event(
                 gov_version: data.gov_version,
             }
         }
-        _ => {
-            unreachable!(
-                "EventLedgerDataForSink is created according to protocols and protocols according to EventRequest"
-            )
+        (event, ledger_data) => {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Mismatched sink event data: request {request}, ledger {ledger}",
+                    request = event.as_ref().map_or("none", |_| "present"),
+                    ledger = match ledger_data {
+                        EventLedgerDataForSink::Create { .. } => "create",
+                        EventLedgerDataForSink::FactFull { .. } => "fact-full",
+                        EventLedgerDataForSink::FactOpaque { .. } =>
+                            "fact-opaque",
+                        EventLedgerDataForSink::Transfer { .. } => "transfer",
+                        EventLedgerDataForSink::Confirm { .. } => "confirm",
+                        EventLedgerDataForSink::Reject => "reject",
+                        EventLedgerDataForSink::Eol => "eol",
+                    },
+                ),
+            });
         }
-    }
+    })
 }
 
 pub fn build_data_to_sink(
     data: DataForSink,
     event: Option<EventRequest>,
     sink_timestamp: u64,
-) -> DataToSink {
-    DataToSink {
-        payload: data_to_sink_event(data.clone(), event),
+) -> Result<DataToSink, ActorError> {
+    Ok(DataToSink {
+        payload: data_to_sink_event(data.clone(), event)?,
         public_key: data.public_key,
         event_request_timestamp: data.event_request_timestamp,
         event_ledger_timestamp: data.event_ledger_timestamp,
         sink_timestamp,
-    }
+    })
 }
 
 pub fn replay_sink_events(
@@ -788,7 +905,9 @@ pub fn replay_sink_events(
         }
 
         let Some(state) = replay_state.as_mut() else {
-            unreachable!("replay state is initialized above");
+            return Err(ActorError::Functional {
+                description: "Sink replay state is not initialized".to_owned(),
+            });
         };
 
         let sn = ledger.sn;
@@ -935,6 +1054,82 @@ where
         Ok(())
     }
 
+    /// Rebuilds the approval request anchored in the event under
+    /// verification and checks the tally evidence against the approver
+    /// set of the pre-event governance.
+    fn verify_approval_evidence(
+        hash: &HashAlgorithm,
+        appr: &ApprovalData,
+        subject_metadata: &Metadata,
+        sn: u64,
+        gov_version: u64,
+        patch: &ValueWrapper,
+        signer: &PublicKey,
+    ) -> Result<(), SubjectError> {
+        let governance_data =
+            GovernanceData::try_from(subject_metadata.properties.clone())
+                .map_err(|e| SubjectError::GovernanceDataConversionFailed {
+                    details: e.to_string(),
+                })?;
+
+        let (workers, quorum) = governance_data
+            .get_quorum_and_signers(
+                ProtocolTypes::Approval,
+                &SchemaType::Governance,
+                Namespace::new(),
+            )
+            .map_err(|e| SubjectError::SignatureVerificationFailed {
+                context: format!("approval approvers: {}", e),
+            })?;
+        let approvers = RoleDataRegister { workers, quorum };
+
+        let (workers, quorum) = governance_data
+            .get_quorum_and_signers(
+                ProtocolTypes::Validation,
+                &SchemaType::Governance,
+                Namespace::new(),
+            )
+            .map_err(|e| SubjectError::SignatureVerificationFailed {
+                context: format!("approval validators: {}", e),
+            })?;
+        let validators = RoleDataRegister { workers, quorum };
+
+        let req_subject_data_hash = hash_borsh(
+            &*hash.hasher(),
+            &RequestSubjectData {
+                subject_id: subject_metadata.subject_id.clone(),
+                governance_id: subject_metadata.governance_id.clone(),
+                namespace: Namespace::new(),
+                schema_id: SchemaType::Governance,
+                sn,
+                gov_version,
+                signer: signer.clone(),
+            },
+        )
+        .map_err(|e| SubjectError::HashCreationFailed {
+            details: e.to_string(),
+        })?;
+
+        verify_approval_data(ApprovalVerification {
+            hash,
+            approval: appr,
+            approvers: &approvers,
+            validators: &validators,
+            req_subject_data_hash: &req_subject_data_hash,
+            subject_id: &subject_metadata.subject_id,
+            sn,
+            gov_version,
+            patch,
+            signer,
+            now: TimeStamp::now(),
+        })
+        .map_err(|e| SubjectError::SignatureVerificationFailed {
+            context: format!("approval evidence: {}", e),
+        })?;
+
+        Ok(())
+    }
+
     async fn verify_new_ledger_event(
         ctx: &mut ActorContext<Self>,
         args: VerifyNewLedgerEvent<'_>,
@@ -986,6 +1181,10 @@ where
                     .to_string(),
             });
         }
+
+        check_timestamp_in_sqlite_range(
+            new_ledger_event.ledger_seal_signature.timestamp.as_nanos(),
+        )?;
 
         let signer = if let Some(new_owner) = &subject_metadata.new_owner {
             new_owner.clone()
@@ -1089,6 +1288,7 @@ where
             (
                 Protocols::GovFact {
                     event_request,
+                    compilation,
                     evaluation,
                     approval,
                     validation,
@@ -1111,37 +1311,99 @@ where
                     return Err(SubjectError::UnexpectedFactEvent);
                 }
 
-                let actual_protocols =
-                    if let Some(eval) = evaluation.evaluator_response_ok() {
-                        if let Some(appr) = approval {
-                            if appr.approved {
-                                Self::apply_patch_verify(
-                                    &mut modified_subject_metadata.properties,
-                                    eval.patch,
+                let actual_protocols = match (compilation, evaluation) {
+                    (Some(compilation), None) => ActualProtocols::Compile {
+                        compile_data: compilation.as_ref().clone(),
+                    },
+                    (Some(compilation), Some(evaluation)) => {
+                        if let Some(eval) = evaluation.evaluator_response_ok() {
+                            if let Some(appr) = approval {
+                                Self::verify_approval_evidence(
+                                    hash,
+                                    appr,
+                                    &subject_metadata,
+                                    new_ledger_event.sn,
+                                    new_ledger_event.gov_version,
+                                    &eval.patch,
+                                    &event_request.signature().signer,
                                 )?;
-                            }
 
-                            ActualProtocols::EvalApprove {
-                                eval_data: evaluation.clone(),
-                                approval_data: appr.clone(),
+                                if appr.approved {
+                                    Self::apply_patch_verify(
+                                        &mut modified_subject_metadata
+                                            .properties,
+                                        eval.patch,
+                                    )?;
+                                }
+
+                                ActualProtocols::CompileEvalApprove {
+                                    compile_data: compilation.as_ref().clone(),
+                                    eval_data: evaluation.clone(),
+                                    approval_data: Box::new(appr.clone()),
+                                }
+                            } else {
+                                return Err(
+                                    SubjectError::MissingApprovalAfterEvaluation,
+                                );
                             }
-                        } else {
+                        } else if approval.is_some() {
                             return Err(
-                                SubjectError::MissingApprovalAfterEvaluation,
+                                SubjectError::UnexpectedApprovalAfterFailedEvaluation,
                             );
+                        } else {
+                            ActualProtocols::CompileEval {
+                                compile_data: compilation.as_ref().clone(),
+                                eval_data: evaluation.clone(),
+                            }
                         }
-                    } else if approval.is_some() {
-                        return Err(
-                        SubjectError::UnexpectedApprovalAfterFailedEvaluation,
-                    );
-                    } else {
-                        ActualProtocols::Eval {
-                            eval_data: evaluation.clone(),
+                    }
+                    (None, Some(evaluation)) => {
+                        if let Some(eval) = evaluation.evaluator_response_ok() {
+                            if let Some(appr) = approval {
+                                Self::verify_approval_evidence(
+                                    hash,
+                                    appr,
+                                    &subject_metadata,
+                                    new_ledger_event.sn,
+                                    new_ledger_event.gov_version,
+                                    &eval.patch,
+                                    &event_request.signature().signer,
+                                )?;
+
+                                if appr.approved {
+                                    Self::apply_patch_verify(
+                                        &mut modified_subject_metadata
+                                            .properties,
+                                        eval.patch,
+                                    )?;
+                                }
+
+                                ActualProtocols::EvalApprove {
+                                    eval_data: evaluation.clone(),
+                                    approval_data: Box::new(appr.clone()),
+                                }
+                            } else {
+                                return Err(
+                                    SubjectError::MissingApprovalAfterEvaluation,
+                                );
+                            }
+                        } else if approval.is_some() {
+                            return Err(
+                                SubjectError::UnexpectedApprovalAfterFailedEvaluation,
+                            );
+                        } else {
+                            ActualProtocols::Eval {
+                                eval_data: evaluation.clone(),
+                            }
                         }
-                    };
+                    }
+                    (None, None) => {
+                        return Err(SubjectError::EventProtocolMismatch);
+                    }
+                };
 
                 (
-                    validation,
+                    validation.as_ref(),
                     actual_protocols,
                     Some(event_request),
                     None,
@@ -1312,6 +1574,10 @@ where
                 });
             }
 
+            check_timestamp_in_sqlite_range(
+                event_request.signature().timestamp.as_nanos(),
+            )?;
+
             let signer = event_request.signature().signer.clone();
             if !event_request.content().check_request_signature(
                 &signer,
@@ -1362,7 +1628,7 @@ where
         }
 
         if modified_subject_metadata.schema_id.is_gov()
-            && new_actual_protocols.is_success()
+            && new_ledger_event.protocols.is_success()
         {
             let mut gov_data = serde_json::from_value::<GovernanceData>(
                 modified_subject_metadata.properties.0,
@@ -1544,12 +1810,20 @@ where
             }
         };
 
+        let approval_data_hash = new_ledger_event
+            .protocols
+            .approval_data_hash(hash)
+            .map_err(|e| SubjectError::HashCreationFailed {
+                details: e.to_string(),
+            })?;
+
         let validation_res = ValidationRes::Response {
             vali_req_hash: validation.validation_req_hash.clone(),
             modified_metadata_without_propierties_hash: meta_wo_props_hash,
             propierties_hash,
             event_request_hash,
             viewpoints_hash,
+            approval_data_hash,
         };
 
         let role_data = get_validation_roles_register(
@@ -1625,6 +1899,10 @@ where
             });
         }
 
+        check_timestamp_in_sqlite_range(
+            ledger_event.ledger_seal_signature.timestamp.as_nanos(),
+        )?;
+
         if ledger_event.ledger_seal_signature.signer != subject_metadata.owner {
             return Err(SubjectError::IncorrectSigner {
                 expected: subject_metadata.owner.to_string(),
@@ -1648,6 +1926,10 @@ where
                             .to_string(),
                     });
                 }
+
+                check_timestamp_in_sqlite_range(
+                    event_request.signature().timestamp.as_nanos(),
+                )?;
 
                 let event_request_signer =
                     event_request.signature().signer.clone();
@@ -1706,8 +1988,56 @@ where
             return Err(SubjectError::MetadataMismatch);
         }
 
+        // Requester-controlled genesis fields, mirrored from the create
+        // validation gates: a blind-synced ledger is never re-validated,
+        // so anything not reconstructed here would stick.
+        if let Some(name) = &metadata.name
+            && (name.is_empty() || name.len() > 100)
+        {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "name".to_owned(),
+            });
+        }
+        if let Some(description) = &metadata.description
+            && (description.is_empty() || description.len() > 200)
+        {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "description".to_owned(),
+            });
+        }
+        if !metadata.schema_id.is_valid_in_request() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "schema_id".to_owned(),
+            });
+        }
+        if metadata.creator != metadata.owner {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "creator".to_owned(),
+            });
+        }
+        if metadata.new_owner.is_some() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "new_owner".to_owned(),
+            });
+        }
+        if !metadata.active {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "active".to_owned(),
+            });
+        }
+
         if metadata.schema_id == SchemaType::Governance {
-            serde_json::from_value::<GovernanceData>(
+            if metadata.governance_id != metadata.subject_id {
+                return Err(SubjectError::InvalidGenesisField {
+                    field: "governance_id".to_owned(),
+                });
+            }
+            if !metadata.namespace.is_empty() {
+                return Err(SubjectError::InvalidGenesisField {
+                    field: "namespace".to_owned(),
+                });
+            }
+            let gov_data = serde_json::from_value::<GovernanceData>(
                 metadata.properties.0.clone(),
             )
             .map_err(|e| {
@@ -1715,6 +2045,26 @@ where
                     details: e.to_string(),
                 }
             })?;
+            // Genesis toolchain is node-constructed (DEFAULT_PIN): the
+            // create envelope carries no pin field, so anything else
+            // here was smuggled through a blind-synced ledger.
+            if gov_data.toolchain != ave_common::governance::DEFAULT_PIN {
+                return Err(SubjectError::InvalidGenesisToolchain {
+                    expected: ave_common::governance::DEFAULT_PIN.to_owned(),
+                    actual: gov_data.toolchain,
+                });
+            }
+            // Whole-state backstop: genesis properties are fully
+            // node-constructed (version, members, roles, policies,
+            // schemas, toolchain), so any deviation left is smuggled
+            // data regardless of which field carries it.
+            if gov_data != GovernanceData::new(metadata.owner.clone()) {
+                return Err(SubjectError::InvalidGenesisState);
+            }
+        } else if metadata.governance_id.is_empty() {
+            return Err(SubjectError::InvalidGenesisField {
+                field: "governance_id".to_owned(),
+            });
         }
 
         let validation_res = ValidationRes::Create {
@@ -1778,12 +2128,17 @@ where
         let register_path = ActorPath::from("/user/node/register");
         match ctx.system().get_actor::<Register>(&register_path).await {
             Ok(register) => {
-                register.tell(message.clone()).await?;
-
-                debug!(
-                    message = ?message,
-                    "Register message sent successfully"
-                );
+                // Ask, not tell: the register journals before replying,
+                // so a reply means the write is durable and boot
+                // reconciliation never needs to replay it.
+                match register.ask(message.clone()).await? {
+                    RegisterResponse::None => {
+                        debug!(
+                            message = ?message,
+                            "Register message applied successfully"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 error!(
@@ -1797,6 +2152,26 @@ where
         Ok(())
     }
 
+    /// Re-sends a registration to the node register, skipping cleanly
+    /// when the register actor is absent (unit-test systems).
+    /// Crash backstop for register-table tails lost between publish
+    /// and projection write; rows are upserts, so re-emission is
+    /// idempotent. Callers send only for active subjects: re-emitting
+    /// a deleted one would resurrect its listing row.
+    async fn reemit_registration(
+        ctx: &mut ActorContext<Self>,
+        message: RegisterMessage,
+    ) -> Result<(), ActorError> {
+        match Self::register(ctx, message).await {
+            Ok(()) => Ok(()),
+            Err(ActorError::NotFound { .. }) => {
+                debug!("Skipping register re-emit: no register actor");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn event_to_sink(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1804,7 +2179,7 @@ where
         event: Option<EventRequest>,
     ) -> Result<(), ActorError> {
         let data_to_sink = DataToSink {
-            payload: data_to_sink_event(data.clone(), event),
+            payload: data_to_sink_event(data.clone(), event)?,
             public_key: data.public_key,
             event_request_timestamp: data.event_request_timestamp,
             event_ledger_timestamp: data.event_ledger_timestamp,
@@ -1817,11 +2192,9 @@ where
 
     async fn notify_reliable_sinks(
         &self,
-        _ctx: &mut ActorContext<Self>,
-        _data: DataToSink,
-    ) -> Result<(), ActorError> {
-        Ok(())
-    }
+        ctx: &mut ActorContext<Self>,
+        data: DataToSink,
+    ) -> Result<(), ActorError>;
 
     async fn get_ledger(
         &self,
@@ -1829,19 +2202,38 @@ where
         lo_sn: Option<u64>,
         hi_sn: u64,
     ) -> Result<(Vec<<Self as Actor>::Event>, bool), ActorError> {
-        if let Some(lo_sn) = lo_sn {
-            let actual_sn = lo_sn + 1;
-            if hi_sn < actual_sn {
-                Ok((Vec::new(), true))
-            } else {
-                Ok((
-                    get_n_events(ctx, actual_sn, hi_sn - actual_sn).await?,
-                    true,
-                ))
-            }
-        } else {
-            Ok((get_n_events(ctx, 0, hi_sn).await?, true))
+        // The store rejects single reads wider than its page limit,
+        // and the requested window grows with the absolute cursor
+        // (catch-up from a high `from_sn` builds a huge prefix read).
+        // Page internally so every store read stays within the limit;
+        // concatenated pages equal the single read, only bounded.
+        const STORE_READ_PAGE_LEN: u64 = 10_000;
+        let start = lo_sn.map_or(0, |lo| lo.saturating_add(1));
+        if hi_sn < start {
+            return Ok((Vec::new(), true));
         }
+        let mut ledgers = Vec::new();
+        let mut cursor = start;
+        loop {
+            if cursor > hi_sn {
+                break;
+            }
+            let remaining = hi_sn - cursor + 1;
+            let take = remaining.min(STORE_READ_PAGE_LEN);
+            if take == 0 {
+                break;
+            }
+            let chunk =
+                get_n_events(ctx, cursor, take.saturating_sub(1)).await?;
+            let got = chunk.len() as u64;
+            ledgers.extend(chunk);
+            if got < take {
+                // Trimmed at the tip: nothing more to read.
+                break;
+            }
+            cursor = cursor.saturating_add(got);
+        }
+        Ok((ledgers, true))
     }
 
     async fn update_sn(
@@ -1852,6 +2244,7 @@ where
     async fn reject(
         &self,
         ctx: &mut ActorContext<Self>,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError>;
 
@@ -1859,6 +2252,8 @@ where
         &self,
         ctx: &mut ActorContext<Self>,
         new_owner: PublicKey,
+        old_owner: PublicKey,
+        event_sn: u64,
         gov_version: u64,
     ) -> Result<(), ActorError>;
 
@@ -1876,6 +2271,7 @@ where
         &mut self,
         ctx: &mut ActorContext<Self>,
         events: Vec<Ledger>,
+        defer_acquisition: bool,
     ) -> Result<(), ActorError>;
 
     async fn get_last_ledger(
@@ -1892,7 +2288,11 @@ where
         batch_size: usize,
     ) -> Result<Vec<DataToSink>, ActorError> {
         let public_key = self.our_key().to_string();
-        let hi_sn = from_sn + batch_size as u64;
+        // Bounded scan from zero: starting at `from_sn` would skip the
+        // create event the replay state folds from, so pagination stays
+        // linear per page (quadratic total on long ledgers — a snapshot
+        // would be needed to do better).
+        let hi_sn = from_sn.saturating_add(batch_size as u64);
         let (ledgers, _is_all) = self.get_ledger(ctx, None, hi_sn).await?;
         let sink_timestamp = TimeStamp::now().as_nanos();
         let page = replay_sink_events(
@@ -1907,5 +2307,27 @@ where
             description: e.to_string(),
         })?;
         Ok(page.events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use borsh::BorshDeserialize;
+
+    #[test]
+    fn request_subject_data_wire_roundtrip() {
+        let value = RequestSubjectData {
+            subject_id: DigestIdentifier::default(),
+            governance_id: DigestIdentifier::default(),
+            namespace: Namespace::new(),
+            schema_id: SchemaType::Type("Example".to_owned()),
+            sn: 4,
+            gov_version: 2,
+            signer: ave_common::identity::PublicKey::default(),
+        };
+        let bytes = borsh::to_vec(&value).expect("encode");
+        let back = RequestSubjectData::try_from_slice(&bytes).expect("decode");
+        assert_eq!(borsh::to_vec(&back).expect("re-encode"), bytes);
     }
 }

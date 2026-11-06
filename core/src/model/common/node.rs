@@ -8,7 +8,7 @@ use ave_network::ComunicateInfo;
 use crate::{
     ActorMessage, NetworkMessage, Node, NodeMessage, NodeResponse,
     auth::{SubjectAccess, SubjectAccessMessage},
-    helpers::network::service::NetworkSender,
+    helpers::network::{delivery_of, service::NetworkSender},
     model::event::LedgerSeal,
     node::SubjectData,
 };
@@ -17,6 +17,7 @@ use ave_common::request::EventRequest;
 
 use crate::{
     approval::{request::ApprovalReq, response::ApprovalRes},
+    compilation::request::CompilationReq,
     evaluation::request::EvaluationReq,
     validation::{request::ValidationReq, response::ValidationRes},
 };
@@ -27,6 +28,9 @@ use serde::{Deserialize, Serialize};
 pub enum SignTypesNode {
     ApprovalReq(ApprovalReq),
     ApprovalRes(Box<ApprovalRes>),
+
+    CompilationReq(Box<CompilationReq>),
+    CompilationSignature(DigestIdentifier),
 
     EvaluationReq(Box<EvaluationReq>),
     EvaluationSignature(DigestIdentifier),
@@ -41,7 +45,7 @@ pub enum SignTypesNode {
 }
 
 pub async fn i_owner_new_owner<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<(bool, Option<bool>), ActorError>
 where
@@ -114,7 +118,7 @@ where
 }
 
 pub async fn get_subject_data<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     subject_id: &DigestIdentifier,
 ) -> Result<Option<SubjectData>, ActorError>
 where
@@ -136,6 +140,48 @@ where
     }
 }
 
+/// Whether a governance already reported boot reconciliation (false
+/// when the helper is missing). Lock-free read, no messaging.
+pub fn is_governance_ready<A>(
+    ctx: &ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> bool
+where
+    A: Actor + Handler<A>,
+{
+    ctx.system()
+        .get_helper::<crate::system::PendingReconcile>("pending_reconcile")
+        .is_none_or(|pending| !pending.is_pending(governance_id))
+}
+
+/// Bounded wait for one governance to report boot reconciliation
+/// (3000 rounds of 100 ms).
+///
+/// Reports always resolve (report, or a controlled crash elsewhere
+/// fails the boot); the bound only guards
+/// a wedged boot from hanging forever.
+pub async fn wait_governance_ready<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    for _ in 0..3000 {
+        if is_governance_ready(ctx, governance_id) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    ctx.system().crash_system();
+    Err(ActorError::FunctionalCritical {
+        description: format!("governance {governance_id} never became ready"),
+    })
+}
+
+/// Fire-and-forget subject update through the access actor (best
+/// effort: `tell` errors are returned to the caller, delivery beyond
+/// the access actor is the update actor's responsibility).
 pub async fn try_to_update<A>(
     ctx: &mut ActorContext<A>,
     subject_id: DigestIdentifier,
@@ -187,10 +233,8 @@ pub async fn update_ledger_network(
 
     network
         .send_command(ave_network::CommandHelper::SendMessage {
-            message: NetworkMessage {
-                info,
-                message: request,
-            },
+            delivery: delivery_of(&request),
+            message: NetworkMessage::new(info, request),
         })
         .await
 }
