@@ -31,7 +31,7 @@ If you need the complete node stack, use `ave-core` instead.
 
 ```toml
 [dependencies]
-ave-network = "0.10.0"
+ave-network = "0.11.0"
 ```
 
 ## Core concepts
@@ -48,7 +48,6 @@ ave-network = "0.10.0"
 
 `Config` defines:
 
-- safe mode (`safe_mode`)
 - node role (`Bootstrap`, `Addressable`, or `Ephemeral`)
 - listen and external addresses
 - boot nodes
@@ -65,8 +64,7 @@ ave-network = "0.10.0"
 
 ```toml
 [network]
-safe_mode = false
-node_type = "bootstrap"
+node_type = "Bootstrap"
 listen_addresses = ["/ip4/0.0.0.0/tcp/4001"]
 external_addresses = ["/dns4/node.example.com/tcp/4001"]
 
@@ -83,7 +81,8 @@ The memory limit policy can also be disabled or configured as an absolute MB thr
 
 ## Safe mode
 
-`Config::safe_mode` starts the networking layer in an isolated maintenance mode.
+`NetworkWorker::new` takes `safe_mode` as a separate argument and starts
+the networking layer in an isolated maintenance mode.
 
 In this mode the worker still starts, listens, and reports `Running`, but it:
 
@@ -99,7 +98,7 @@ operations without joining the peer-to-peer network.
 
 ```rust,ignore
 use ave_common::identity::{KeyPair, KeyPairAlgorithm};
-use ave_network::{Config, NetworkWorker, NodeType};
+use ave_network::{Config, NetworkWorker, NetworkWorkerRuntime, NodeType};
 use tokio_util::sync::CancellationToken;
 
 fn build_config() -> Config {
@@ -114,17 +113,18 @@ fn build_config() -> Config {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keys = KeyPair::generate(KeyPairAlgorithm::Ed25519)?;
     let config = build_config();
-    let graceful = CancellationToken::new();
-    let crash = CancellationToken::new();
 
     let _worker = NetworkWorker::<()>::new(
         &keys,
         config,
-        None,
-        graceful,
-        crash,
-        None,
-        None,
+        false,
+        NetworkWorkerRuntime {
+            monitor: None,
+            graceful_token: CancellationToken::new(),
+            crash_token: CancellationToken::new(),
+            machine_spec: None,
+            metrics: None,
+        },
     )?;
 
     Ok(())

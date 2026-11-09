@@ -35,6 +35,8 @@ If you only need to embed the runtime in another service, use `ave-bridge` or `a
 | `rocksdb` | No | Uses RocksDB-backed internal persistence via `ave-bridge` |
 | `ext-sqlite` | Yes | Enables the external SQLite integration required by the runtime |
 | `prometheus` | Yes | Exposes Prometheus metrics support |
+| `toolchain` | No | Enables in-process contract compilation via `ave-core` |
+| `test` | No | Internal development feature used by the workspace tests |
 
 ## Installation
 
@@ -42,14 +44,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-http = "0.12.0"
+ave-http = "0.13.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-http = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-http = { version = "0.13.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Running the server
@@ -89,7 +91,7 @@ The HTTP server exposes endpoints for:
 - auth subject and witness management
 - administrative auth operations such as users, roles, permissions, API keys, quotas, audit logs, and system configuration
 
-Manual update supports a `strict` query flag on `POST /update/{subject_id}`.
+Manual update supports a `strict` query flag on `POST /subjects/{subject_id}/update`.
 The default is `strict=false`, which allows the runtime to use governance-based
 witness discovery. With `strict=true`, the update only uses nodes explicitly
 configured in auth.
@@ -153,8 +155,8 @@ are included in the generated OpenAPI schema.
 - proxy-aware request metadata and forwarded-IP handling
 - CORS configuration for browser-based clients
 
-The provided Docker images run as the non-root `ave` user (`uid=10001`,
-`gid=10001`). Writable mounts for `/app/db`, `/app/logs`, or `/contracts` must
+The provided Docker images run as the non-root `65532:65532` user.
+Writable mounts for `/contracts`, `/db/*`, `/keys`, or `/logs` must
 be owned by, or writable by, that user.
 
 ## Configuration shape

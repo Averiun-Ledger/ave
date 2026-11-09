@@ -48,14 +48,14 @@ Default setup:
 
 ```toml
 [dependencies]
-ave-bridge = "0.12.0"
+ave-bridge = "0.13.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-bridge = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
+ave-bridge = { version = "0.13.0", default-features = false, features = ["rocksdb", "ext-sqlite", "prometheus"] }
 ```
 
 ## Bootstrap example
@@ -73,8 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_bridge, runners) = Bridge::build(
         &settings,
         "node-password",
-        "sink-password",
-        "",
         Some(graceful),
         Some(crash),
     )
@@ -99,7 +97,8 @@ The main configuration type is `ave_bridge::config::Config`.
 It groups:
 
 - `node`: the underlying `ave-core` runtime configuration
-- `keys_path`: the location of encrypted key material
+- `keys_path`: the location of encrypted key material (test builds only;
+  production uses the fixed `KEYS_DIR`)
 - `logging`: output and rotation settings
 - `sink`: sink routing and authentication settings
 - `auth`: application authentication settings

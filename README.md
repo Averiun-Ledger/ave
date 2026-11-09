@@ -34,6 +34,7 @@ The workspace is split into focused crates:
 | [`ave-core`](./core) | Main runtime engine for building and running Ave nodes |
 | [`ave-bridge`](./bridge) | Application-facing integration layer over the runtime |
 | [`ave-http`](./http) | Axum-based HTTP API, auth system, admin surface, and startup wiring |
+| [`ave-build`](./build) | Deterministic contract compilation (cargo→wasm) |
 
 The runtime also depends on `ave-actors` for the actor model and persistence backends.
 
@@ -43,14 +44,15 @@ Versions currently declared by this workspace:
 
 | Package | Version |
 |---|---:|
-| `ave` | `0.12.0` |
-| `ave-identity` | `0.3.0` |
-| `ave-common` | `0.9.0` |
-| `ave-network` | `0.10.0` |
-| `ave-core` | `0.12.0` |
-| `ave-bridge` | `0.12.0` |
-| `ave-http` | `0.12.0` |
-| `ave-common` (npm TypeScript package) | `0.9.0` |
+| `ave` | `0.13.0` |
+| `ave-identity` | `0.4.0` |
+| `ave-common` | `0.10.0` |
+| `ave-network` | `0.11.0` |
+| `ave-core` | `0.13.0` |
+| `ave-bridge` | `0.13.0` |
+| `ave-http` | `0.13.0` |
+| `ave-build` | `0.10.0` |
+| `ave-common` (npm TypeScript package) | `0.10.0` |
 
 ## How the pieces fit together
 
@@ -88,6 +90,7 @@ Top-level folders you will likely care about first:
 - [`core`](./core): runtime engine
 - [`bridge`](./bridge): application integration layer
 - [`http`](./http): HTTP server and Docker build flow
+- [`build`](./build): deterministic contract builds
 
 If you are browsing the code for the first time, a good reading order is:
 
@@ -115,6 +118,9 @@ cargo build --workspace
 ```bash
 cargo test --workspace
 ```
+
+> Coverage is measured crate by crate, not with `--workspace`; see
+> `coverage/README.md`.
 
 ### Check formatting and lints
 
@@ -159,9 +165,9 @@ That script supports:
 - SQLite and RocksDB variants
 - separate Cargo profiles for production and experimental builds
 
-Runtime images run as the non-root `ave` user (`uid=10001`, `gid=10001`).
-Mounted volumes that need writes, especially `/app/db`, `/app/logs`, and
-`/contracts`, must be writable by that user.
+Runtime images run as the non-root `65532:65532` user.
+Mounted volumes that need writes, especially `/contracts`, `/db/*`,
+`/keys`, and `/logs`, must be writable by that user.
 
 ## Configuration
 
@@ -208,14 +214,14 @@ If you prefer to depend on the aggregate crate instead of individual workspace c
 
 ```toml
 [dependencies]
-ave = "0.12.0"
+ave = "0.13.0"
 ```
 
 Enable the HTTP layer re-export only when you need it:
 
 ```toml
 [dependencies]
-ave = { version = "0.12.0", features = ["http"] }
+ave = { version = "0.13.0", features = ["http"] }
 ```
 
 ## Open source

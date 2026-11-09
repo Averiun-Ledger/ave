@@ -21,7 +21,8 @@ through `ave_common::build` — never from copies.
 
 ## How each file was generated (v1)
 
-Source: decoded from the `EXAMPLE_CONTRACT` fixture (proven to
+Source: decoded from the `EXAMPLE_CONTRACT` fixture in
+`core/src/test_contracts.rs` (proven to
 compile under the contract template), frozen as-is.
 
 ```bash
@@ -33,7 +34,7 @@ mkdir -p /tmp/lockgen/src
 cp <sdk>/src/runtime/contract_Cargo.toml /tmp/lockgen/Cargo.toml
 echo '// placeholder' > /tmp/lockgen/src/lib.rs
 cargo generate-lockfile --manifest-path /tmp/lockgen/Cargo.toml
-# → 28 packages, cargo 1.98.1; stored as common/pins/contract-v1.Cargo.lock
+# → 32 packages, cargo 1.98.1; stored as common/pins/contract-v1.Cargo.lock
 ```
 
 Recorded as `FrozenLockfile { version: 1, .. }` with provenance in

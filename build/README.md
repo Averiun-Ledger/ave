@@ -1,7 +1,7 @@
 # ave-build
 
 Deterministic contract compilation shared by the node (`ave-core`)
-and the off-chain pin tooling (`ave-toolchain-pins`): one
+and the off-chain pin tooling (`../ave-tools/ave-pin`): one
 implementation of materializing a contract build project
 (manifest, source, frozen lockfile, rendered cargo config),
 running the cargo build with the selected toolchain, and
@@ -44,4 +44,4 @@ Scalar rules (target, epoch, frozen inputs) stay in
   (`core/src/compilation/service.rs`, no lockfile: arbitrary test
   sources have no frozen set).
 - `ave-pin build/verify/register`
-  (`ave-contracts/ave-toolchain-pins/src/build.rs`).
+  (`../ave-tools/ave-pin/src/build.rs`).

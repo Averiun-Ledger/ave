@@ -13,7 +13,7 @@ license.
 
 ```toml
 [dependencies]
-ave-common = "0.9.0"
+ave-common = "0.10.0"
 ```
 
 ## What it includes
@@ -28,6 +28,8 @@ ave-common = "0.9.0"
 
 - `common`: enables the core domain and bridge models
 - `value-wrapper`: enables `ValueWrapper`
+- `sink-grpc`: gRPC sink protobuf types
+- `compiler-grpc`: gRPC compiler service protobuf types
 - `openapi`: derives `utoipa` schemas
 - `typescript`: derives TypeScript definitions
 

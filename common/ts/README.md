@@ -10,7 +10,7 @@ Auto-generated from Rust source code using [ts-rs](https://github.com/Aleph-Alph
 npm install ave-common
 ```
 
-Current package version: `0.9.0`.
+Current package version: `0.10.0`.
 
 ## Usage
 

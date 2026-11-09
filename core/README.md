@@ -38,6 +38,8 @@ If you only need shared types or cryptographic primitives, prefer lower-level cr
 | `sqlite` | Yes | Enables SQLite-backed internal persistence through `ave-actors` |
 | `rocksdb` | No | Enables RocksDB-backed internal persistence through `ave-actors` |
 | `ext-sqlite` | Yes | Enables the external SQLite database integration used by the runtime |
+| `toolchain` | Yes | Enables in-process contract compilation |
+| `compiler-service` | No | gRPC compiler service, test builds only |
 | `test` | No | Internal development feature used by this crate's own test suite |
 
 Constraints enforced by the crate:
@@ -51,14 +53,14 @@ Default SQLite-based runtime:
 
 ```toml
 [dependencies]
-ave-core = "0.12.0"
+ave-core = "0.13.0"
 ```
 
 RocksDB-based internal storage:
 
 ```toml
 [dependencies]
-ave-core = { version = "0.12.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
+ave-core = { version = "0.13.0", default-features = false, features = ["rocksdb", "ext-sqlite"] }
 ```
 
 ## Bootstrap example
@@ -209,11 +211,13 @@ does not die, but it does not deliver until the topic exists.
 With `transactional: true` every delivery is its own Kafka transaction
 (begin/send/commit, abort on failure) and the producer fences zombie
 instances of itself at startup. The default `transactional.id` is
-`ave-sink-{sink_name}-{node_id}`, stable and unique per node, so several
-nodes can run the same sink without fencing each other. If you set
+`ave-sink-{sink}-{node_id_12_chars}`, stable and unique per node, so several
+nodes can run the same sink without fencing each other (`ave-sink-{sink}`
+when there is no node id). If you set
 `transactional_id` explicitly in a multi-node deployment, it must differ
-per node. Transactions require `acks=all`; the configuration is rejected
-otherwise.
+per node. Idempotence requires `acks=all`; with any other `acks` the
+producer keeps running with `enable.idempotence=false` instead of being
+rejected.
 
 ### Metrics to watch
 
@@ -330,7 +334,7 @@ Connections are kept alive with TCP and HTTP/2 keepalives.
 ### Reference implementation
 
 `core/tests/common/grpc_test_sink.rs` is a complete in-process receiver
-(~250 lines): unary and stream delivery, per-message acks, TLS/mTLS, health
+(689 lines): unary and stream delivery, per-message acks, TLS/mTLS, health
 service and response-mode injection. Start there.
 
 ## Crate layout

@@ -13,7 +13,7 @@ license.
 
 ```toml
 [dependencies]
-ave-identity = "0.3.0"
+ave-identity = "0.4.0"
 ```
 
 ## What it includes
