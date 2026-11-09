@@ -753,7 +753,7 @@ mod tests {
         );
         assert_eq!(
             entry.lock_hash,
-            "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25"
+            "e4c21c871e7e7ce8a532602d5bf469f15f92a900cac6515d55881f2cc8f6e7e7"
         );
 
         let entry = super::toolchain_info("rust-1.98.1_sdk-0.8.0_wasm32")
@@ -766,7 +766,7 @@ mod tests {
         );
         assert_eq!(
             entry.lock_hash,
-            "285eed4c77b37c102d57a63b6cef1d015332f9cc264ed7ba0b707b2780caad25"
+            "e4c21c871e7e7ce8a532602d5bf469f15f92a900cac6515d55881f2cc8f6e7e7"
         );
 
         assert!(super::toolchain_info("rust-9.99-ficticio").is_none());

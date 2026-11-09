@@ -35,6 +35,11 @@ pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 pub const REQUEST_ID_HEADER: &str = "x-ave-request-id";
 /// Header marking a request as a non-persistent sink test delivery.
 pub const TEST_HEADER: &str = "x-ave-test";
+/// Header carrying the encryption key id when the delivery body is an
+/// encrypted envelope (see `encrypt`).
+pub const ENC_KEY_ID_HEADER: &str = "x-ave-enc-key-id";
+/// Header carrying the encryption suite id of an encrypted envelope.
+pub const ENC_SUITE_HEADER: &str = "x-ave-enc-suite";
 
 /// Headers reserved for internal sink use.
 ///
@@ -52,6 +57,8 @@ pub const SINK_RESERVED_HEADERS: &[&str] = &[
     IDEMPOTENCY_KEY_HEADER,
     REQUEST_ID_HEADER,
     TEST_HEADER,
+    ENC_KEY_ID_HEADER,
+    ENC_SUITE_HEADER,
 ];
 
 /// Per-event metadata threaded through the delivery pipeline so every
@@ -313,6 +320,57 @@ pub fn serialize_json_payload<T: serde::Serialize + ?Sized>(
         retryable: false,
         retry_after_ms: None,
     })
+}
+
+/// Attachment describing how a prepared body was encrypted, for
+/// transports to expose as headers/metadata next to the signature headers.
+#[derive(Debug, Clone)]
+pub struct EncryptionAttachment {
+    /// Recipient key that decrypts the envelope.
+    pub key_id: String,
+    /// Suite that produced the envelope (see `encrypt::SUITE_ID`).
+    pub suite: &'static str,
+}
+
+/// A delivery body ready for the wire: cleartext JSON, or an encrypted
+/// envelope when the sink enables payload encryption.
+#[derive(Debug)]
+pub struct PreparedBody {
+    /// Bytes to sign and send.
+    pub bytes: Vec<u8>,
+    /// `Some` when `bytes` hold an encrypted envelope.
+    pub encryption: Option<EncryptionAttachment>,
+}
+
+/// Serialize `body` to JSON and, when `encryption` enables it, replace the
+/// cleartext with its encrypted envelope. Callers must only compress when
+/// the returned `encryption` is `None`: ciphertext is already random, so
+/// compressing it only wastes CPU.
+pub fn prepare_body<T: serde::Serialize + ?Sized>(
+    body: &T,
+    sink_name: &str,
+    encryption: Option<&ave_common::sink::SinkEncryptionConfig>,
+) -> Result<PreparedBody, SinkError> {
+    let raw = serialize_json_payload(body)?;
+    let Some(config) = encryption else {
+        return Ok(PreparedBody {
+            bytes: raw,
+            encryption: None,
+        });
+    };
+    match super::encrypt::encrypt_payload(&raw, sink_name, config)? {
+        None => Ok(PreparedBody {
+            bytes: raw,
+            encryption: None,
+        }),
+        Some(encrypted) => Ok(PreparedBody {
+            bytes: encrypted.envelope_json,
+            encryption: Some(EncryptionAttachment {
+                key_id: encrypted.key_id,
+                suite: super::encrypt::SUITE_ID,
+            }),
+        }),
+    }
 }
 
 /// Map the result of a single delivery attempt to the result label of the

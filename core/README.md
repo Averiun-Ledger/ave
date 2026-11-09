@@ -150,6 +150,35 @@ The runtime includes outbound sink handling for propagating events to external s
 - bounded queues
 - timeout and retry policies
 - token bootstrap and token refresh flows
+- optional hybrid post-quantum payload encryption (see below)
+
+### Payload encryption
+
+Any sink server (HTTP, Kafka, gRPC) can encrypt every delivery body with
+HPKE Base (`HPKE-v1-hybrid12`: X25519 + ML-KEM-768 → HKDF-SHA256 →
+AES-256-GCM). The node holds only recipient **public** keys; the Ed25519
+signature goes outside, over the envelope.
+
+```toml
+[encryption]
+enabled = true
+current_key_id = "v1"
+
+[[encryption.keys]]
+key_id = "v1"
+public_key = "X:<base64url of X25519(32B) + ML-KEM-768(1184B)>"
+```
+
+Rules: `1..=8` keys with unique `key_id` values
+(`^[a-z0-9][a-z0-9-_]*$`, max 32 chars); `current_key_id` must list one
+of them. The receiver accepts every listed key, so rotation overlaps
+without downtime: add `v(n+1)`, switch `current_key_id`, then retire the
+old key. `key_id` and `suite` travel both inside the envelope and as
+transport headers/metadata (`x-ave-enc-key-id`, `x-ave-enc-suite`); the
+envelope is authoritative. Kafka and gRPC reject `compression != none`
+combined with encryption (ciphertext does not compress); the HTTP sink
+skips compression automatically for envelopes. Health checks and test
+probes are never encrypted.
 
 ## Kafka sink operations
 

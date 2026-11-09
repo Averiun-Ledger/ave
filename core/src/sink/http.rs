@@ -20,12 +20,13 @@ use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use crate::config::{HttpSinkConfig, HttpTlsVersion, SinkCompression};
 use crate::sink::SinkError;
 use crate::sink::delivery::{
-    DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
-    SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, StaticAuth, TEST_HEADER,
-    batch_group_schema_id, generate_request_id, group_events_by_type,
-    is_sink_reserved_header, load_required_secret, resolve_static_auth,
-    serialize_json_payload, sign_delivery, sink_password_env_var,
+    DeliveryMeta, ENC_KEY_ID_HEADER, ENC_SUITE_HEADER, EVENT_TYPE_HEADER,
+    EncryptionAttachment, IDEMPOTENCY_KEY_HEADER, PreparedBody,
+    REQUEST_ID_HEADER, SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER,
+    SIGNATURE_TIMESTAMP_HEADER, SN_HEADER, SUBJECT_ID_HEADER, StaticAuth,
+    TEST_HEADER, batch_group_schema_id, generate_request_id,
+    group_events_by_type, is_sink_reserved_header, load_required_secret,
+    prepare_body, resolve_static_auth, sign_delivery, sink_password_env_var,
     sink_proxy_password_env_var, test_delivery_payload, timed_sink_request,
 };
 use crate::sink::read_limited_body;
@@ -491,16 +492,22 @@ impl HttpTransport {
 
     /// Sign the delivery body with the node identity when signature is
     /// enabled. Returns `None` headers when no signer is configured.
+    /// `encrypted` tells whether the body is an encrypted envelope: then
+    /// no `content-encoding` is bound into the signature because transport
+    /// compression is skipped for ciphertext.
     async fn sign_payload(
         &self,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
+        encrypted: bool,
     ) -> Result<Option<crate::sink::delivery::SignatureHeaders>, SinkError>
     {
         let extra: &[(&str, &str)] =
             match self.config.compression.content_encoding() {
-                Some(encoding) => &[("content-encoding", encoding)],
-                None => &[],
+                Some(encoding) if !encrypted => {
+                    &[("content-encoding", encoding)]
+                }
+                _ => &[],
             };
         sign_delivery(
             self.signer.as_ref(),
@@ -523,15 +530,26 @@ impl HttpTransport {
         url: &str,
         payload: Vec<u8>,
         meta: Option<&DeliveryMeta>,
+        encryption: Option<&EncryptionAttachment>,
     ) -> Result<(), SinkError> {
-        let signature_headers = self.sign_payload(&payload, meta).await?;
+        let signature_headers = self
+            .sign_payload(&payload, meta, encryption.is_some())
+            .await?;
 
         crate::sink::deliver_with_retries(
             &self.sink_name,
             self.config.max_retries,
             self.config.retry_base_delay_ms,
             self.config.retry_max_delay_ms,
-            || self.timed_send_once(url, &payload, &signature_headers, meta),
+            || {
+                self.timed_send_once(
+                    url,
+                    &payload,
+                    &signature_headers,
+                    meta,
+                    encryption,
+                )
+            },
             || async {
                 // Auth error on the first attempt: invalidate the cached
                 // token and retry once immediately with fresh credentials.
@@ -553,9 +571,10 @@ impl HttpTransport {
         payload: &[u8],
         signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
+        encryption: Option<&EncryptionAttachment>,
     ) -> Result<(), SinkError> {
         timed_sink_request(&self.sink_name, || {
-            self.send_once(url, payload, signature_headers, meta)
+            self.send_once(url, payload, signature_headers, meta, encryption)
         })
         .await
     }
@@ -599,6 +618,7 @@ impl HttpTransport {
         payload: &[u8],
         signature_headers: &Option<crate::sink::delivery::SignatureHeaders>,
         meta: Option<&DeliveryMeta>,
+        encryption: Option<&EncryptionAttachment>,
     ) -> Result<(), SinkError> {
         let request_id = generate_request_id();
         let mut request = self.client.post(url).body(payload.to_vec());
@@ -627,8 +647,16 @@ impl HttpTransport {
                 .header(IDEMPOTENCY_KEY_HEADER, meta.idempotency_key());
         }
 
-        if let Some(encoding) = self.config.compression.content_encoding() {
+        if let Some(encoding) = self.config.compression.content_encoding()
+            && encryption.is_none()
+        {
             request = request.header("Content-Encoding", encoding);
+        }
+
+        if let Some(attachment) = encryption {
+            request = request
+                .header(ENC_KEY_ID_HEADER, &attachment.key_id)
+                .header(ENC_SUITE_HEADER, attachment.suite);
         }
 
         if self.config.auth.is_some()
@@ -710,7 +738,7 @@ impl HttpTransport {
         &self,
         event_type: &str,
         group: &[IncomingSinkEvent],
-    ) -> Result<Option<(String, Vec<u8>)>, SinkError> {
+    ) -> Result<Option<(String, PreparedBody)>, SinkError> {
         let Some(first) = group.first() else {
             return Ok(None);
         };
@@ -720,26 +748,54 @@ impl HttpTransport {
             &schema_id,
             event_type,
         );
-        let payload = self.encode_body(group).await?;
-        Ok(Some((url, payload)))
+        let prepared = self.encode_body(group).await?;
+        Ok(Some((url, prepared)))
     }
 
     /// Serialize and, when configured, compress the delivery body.
     /// Signing happens on the encoded bytes (the exact wire payload).
     /// Compression runs in `spawn_blocking` because the encoders are
-    /// CPU-bound and batches can be large.
+    /// CPU-bound and batches can be large. When payload encryption is
+    /// enabled the envelope replaces the cleartext and compression is
+    /// skipped: ciphertext is already random.
     async fn encode_body<T: serde::Serialize + Sync + ?Sized>(
         &self,
         body: &T,
-    ) -> Result<Vec<u8>, SinkError> {
-        let raw = serialize_json_payload(body)?;
+    ) -> Result<PreparedBody, SinkError> {
+        self.encode_body_with(body, true).await
+    }
 
-        let compression = self.config.compression.clone();
-        if matches!(compression, SinkCompression::None) {
-            return Ok(raw);
+    /// `encode_body` without payload encryption, for the non-persistent
+    /// sink test: health/test probes never carry envelopes.
+    async fn encode_body_clear<T: serde::Serialize + Sync + ?Sized>(
+        &self,
+        body: &T,
+    ) -> Result<PreparedBody, SinkError> {
+        self.encode_body_with(body, false).await
+    }
+
+    async fn encode_body_with<T: serde::Serialize + Sync + ?Sized>(
+        &self,
+        body: &T,
+        encrypt: bool,
+    ) -> Result<PreparedBody, SinkError> {
+        let encryption =
+            encrypt.then(|| self.config.encryption.as_ref()).flatten();
+        let prepared = prepare_body(body, &self.sink_name, encryption)?;
+        if prepared.encryption.is_some() {
+            return Ok(prepared);
         }
 
-        tokio::task::spawn_blocking(move || match compression {
+        let raw = prepared.bytes;
+        let compression = self.config.compression.clone();
+        if matches!(compression, SinkCompression::None) {
+            return Ok(PreparedBody {
+                bytes: raw,
+                encryption: None,
+            });
+        }
+
+        let bytes = tokio::task::spawn_blocking(move || match compression {
             SinkCompression::None => Ok(raw),
             SinkCompression::Gzip => {
                 let mut encoder =
@@ -766,7 +822,11 @@ impl HttpTransport {
             message: format!("compression task failed: {}", e),
             retryable: true,
             retry_after_ms: None,
-        })?
+        })??;
+        Ok(PreparedBody {
+            bytes,
+            encryption: None,
+        })
     }
 }
 
@@ -780,10 +840,12 @@ impl SinkTransport for HttpTransport {
             &schema_id,
             event_type.as_str(),
         );
-        let payload = self.encode_body(data.as_ref()).await?;
+        let prepared = self.encode_body(data.as_ref()).await?;
+        let PreparedBody { bytes, encryption } = prepared;
         let meta = DeliveryMeta::from_data(&data);
 
-        self.send_with_retry(&url, payload, Some(&meta)).await
+        self.send_with_retry(&url, bytes, Some(&meta), encryption.as_ref())
+            .await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
@@ -792,10 +854,12 @@ impl SinkTransport for HttpTransport {
             &light.schema_id,
             light.event_type.as_str(),
         );
-        let payload = self.encode_body(&light).await?;
+        let prepared = self.encode_body(&light).await?;
+        let PreparedBody { bytes, encryption } = prepared;
         let meta = DeliveryMeta::from_light(&light);
 
-        self.send_with_retry(&url, payload, Some(&meta)).await
+        self.send_with_retry(&url, bytes, Some(&meta), encryption.as_ref())
+            .await
     }
 
     /// Send a lightweight GET request to verify the sink is reachable.
@@ -874,7 +938,8 @@ impl SinkTransport for HttpTransport {
         let url = self
             .url_template
             .render_url_encoded_with_event_type("-", "-", "test");
-        let payload = self.encode_body(&test_delivery_payload()).await?;
+        let prepared = self.encode_body_clear(&test_delivery_payload()).await?;
+        let PreparedBody { bytes: payload, .. } = prepared;
         let request_id = generate_request_id();
 
         let mut request = self.client.post(&url).body(payload.clone());
@@ -884,7 +949,7 @@ impl SinkTransport for HttpTransport {
             .header(REQUEST_ID_HEADER, &request_id)
             .header(TEST_HEADER, "true");
 
-        if let Some(headers) = self.sign_payload(&payload, None).await? {
+        if let Some(headers) = self.sign_payload(&payload, None, false).await? {
             request = request
                 .header(SIGNATURE_HEADER, &headers.signature)
                 .header(SIGNATURE_TIMESTAMP_HEADER, &headers.timestamp)
@@ -953,13 +1018,15 @@ impl SinkTransport for HttpTransport {
             group_events_by_type(events, self.url_template.has_event_type())
                 .into_iter()
                 .map(|(event_type, group)| async move {
-                    let Some((url, payload)) =
+                    let Some((url, prepared)) =
                         self.prepare_group(&event_type, &group).await?
                     else {
                         return Ok(());
                     };
+                    let PreparedBody { bytes, encryption } = prepared;
 
-                    self.send_with_retry(&url, payload, None).await
+                    self.send_with_retry(&url, bytes, None, encryption.as_ref())
+                        .await
                 });
         futures::future::try_join_all(sends).await?;
 
@@ -977,14 +1044,23 @@ impl SinkTransport for HttpTransport {
         for (event_type, group) in
             group_events_by_type(events, self.url_template.has_event_type())
         {
-            let Some((url, payload)) =
+            let Some((url, prepared)) =
                 self.prepare_group(&event_type, &group).await?
             else {
                 continue;
             };
-            let signature_headers = self.sign_payload(&payload, None).await?;
-            self.timed_send_once(&url, &payload, &signature_headers, None)
+            let PreparedBody { bytes, encryption } = prepared;
+            let signature_headers = self
+                .sign_payload(&bytes, None, encryption.is_some())
                 .await?;
+            self.timed_send_once(
+                &url,
+                &bytes,
+                &signature_headers,
+                None,
+                encryption.as_ref(),
+            )
+            .await?;
         }
 
         Ok(())
@@ -1424,11 +1500,74 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
             HttpTransport::new("unit-plain".to_owned(), base_config(), None)
                 .await
                 .unwrap();
-        let body = transport
+        let prepared = transport
             .encode_body(&serde_json::json!({"a": 1}))
             .await
             .unwrap();
-        assert_eq!(body, br#"{"a":1}"#.to_vec());
+        assert_eq!(prepared.bytes, br#"{"a":1}"#.to_vec());
+        assert!(prepared.encryption.is_none());
+    }
+
+    #[tokio::test]
+    async fn broken_encryption_fails_before_wire() {
+        let mut config = base_config();
+        config.encryption = Some(ave_common::sink::SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: "v1".to_owned(),
+            keys: Vec::new(),
+        });
+        let transport =
+            HttpTransport::new("unit-broken".to_owned(), config, None)
+                .await
+                .unwrap();
+        let err = transport
+            .send_light(LightEvent {
+                subject_id: "s".to_owned(),
+                schema_id: "g".to_owned(),
+                governance_id: None,
+                sn: 1,
+                event_type: SinkTypes::Fact,
+                success: true,
+            })
+            .await
+            .expect_err("broken encryption must fail fast");
+        assert!(
+            matches!(err, crate::sink::SinkError::Rejected { .. }),
+            "broken encryption is permanent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_body_skips_compression_when_encrypted() {
+        let recipient = crate::sink::encrypt::generate_recipient_keypair("v1");
+        let mut config = base_config();
+        config.compression = SinkCompression::Zstd;
+        config.encryption = Some(ave_common::sink::SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: "v1".to_owned(),
+            keys: vec![ave_common::sink::SinkEncryptionKey {
+                key_id: "v1".to_owned(),
+                public_key: recipient.public_config_string.clone(),
+            }],
+        });
+        let transport = HttpTransport::new("unit-enc".to_owned(), config, None)
+            .await
+            .unwrap();
+        let prepared = transport
+            .encode_body(&serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
+        let attachment = prepared
+            .encryption
+            .as_ref()
+            .expect("encryption must attach");
+        assert_eq!(attachment.key_id, "v1");
+        assert_eq!(attachment.suite, crate::sink::encrypt::SUITE_ID);
+        let envelope: crate::sink::encrypt::WireEnvelope =
+            serde_json::from_slice(&prepared.bytes).expect("envelope JSON");
+        assert_eq!(envelope.key_id, "v1");
+        // Ciphertext is random: no content-encoding is bound into the
+        // signature for encrypted bodies (checked at the sign call site).
     }
 
     #[tokio::test]
@@ -1440,12 +1579,14 @@ ov1w4iaMiBWHRcL/ZZMytPQ=
                 .await
                 .unwrap();
         let raw = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
-        let body = transport
+        let prepared = transport
             .encode_body(&serde_json::json!({"a": 1}))
             .await
             .unwrap();
-        assert_ne!(body, raw);
-        let mut decoder = flate2::read::GzDecoder::new(body.as_slice());
+        assert!(prepared.encryption.is_none());
+        assert_ne!(prepared.bytes, raw);
+        let mut decoder =
+            flate2::read::GzDecoder::new(prepared.bytes.as_slice());
         let mut decoded = Vec::new();
         std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
         assert_eq!(decoded, raw);

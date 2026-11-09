@@ -133,6 +133,7 @@ pub struct CoreMetrics {
     protocol_events: Family<ProtocolEventLabels, Counter>,
     schema_events: Family<SchemaEventLabels, Counter>,
     sink_events: Family<SinkResultLabels, Counter>,
+    sink_encrypt_events: Family<SinkResultLabels, Counter>,
     sink_delivery_retries: Family<SinkNameLabels, Counter>,
     sink_request_duration_seconds:
         Family<SinkResultLabels, Histogram, fn() -> Histogram>,
@@ -205,6 +206,7 @@ impl CoreMetrics {
             protocol_events: Family::default(),
             schema_events: Family::default(),
             sink_events: Family::default(),
+            sink_encrypt_events: Family::default(),
             sink_delivery_retries: Family::default(),
             sink_request_duration_seconds: Family::new_with_constructor(|| {
                 Histogram::new(vec![
@@ -334,6 +336,11 @@ impl CoreMetrics {
             "core_sink_events",
             "Sink events delivered or failed, labeled by sink and result.",
             self.sink_events.clone(),
+        );
+        registry.register(
+            "core_sink_encrypt_events",
+            "Total sink payload encryptions, labeled by sink and result.",
+            self.sink_encrypt_events.clone(),
         );
         registry.register(
             "core_sink_delivery_retries",
@@ -616,6 +623,15 @@ impl CoreMetrics {
         self.sink_delivery_retries
             .get_or_create(&SinkNameLabels {
                 sink: sink.to_owned(),
+            })
+            .inc();
+    }
+
+    pub fn observe_sink_encrypt(&self, sink: &str, result: &'static str) {
+        self.sink_encrypt_events
+            .get_or_create(&SinkResultLabels {
+                sink: sink.to_owned(),
+                result,
             })
             .inc();
     }
@@ -1041,6 +1057,8 @@ mod tests {
         metrics.observe_sink_retry("schema-sink");
         metrics.observe_sink_retry("schema-sink");
 
+        metrics.observe_sink_encrypt("gov-sink", "success");
+
         metrics.observe_sink_request_duration(
             "gov-sink",
             "success",
@@ -1101,6 +1119,13 @@ mod tests {
                 "core_sink_delivery_retries_total{sink=\"schema-sink\"}"
             ),
             2.0
+        );
+        assert_eq!(
+            metric_value(
+                &text,
+                "core_sink_encrypt_events_total{sink=\"gov-sink\",result=\"success\"}"
+            ),
+            1.0
         );
         assert_eq!(
             metric_value(

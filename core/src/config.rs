@@ -15,7 +15,8 @@ pub use ave_common::sink::{
     KafkaCompression, KafkaKerberosConfig, KafkaKeyStrategy,
     KafkaSaslMechanism, KafkaSecurityConfig, KafkaSinkConfig, KafkaTlsConfig,
     SinkAuthConfig, SinkAuthMethod, SinkCompression, SinkConfigEntry,
-    SinkServer, SinkTarget, SinkTransportConfig,
+    SinkEncryptionConfig, SinkEncryptionKey, SinkServer, SinkTarget,
+    SinkTransportConfig,
 };
 use ave_network::Config as NetworkConfig;
 use serde::{Deserialize, Deserializer, Serialize};

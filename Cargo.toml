@@ -94,6 +94,10 @@ reqwest = { version = "0.13.5", features = ["json", "stream", "form"] }
 config = { version = "0.15.27", features = ["json", "toml", "yaml"] }
 zeroize = "1.9"
 subtle = "2.6"
+x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"] }
+ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
+hkdf = "0.13"
+aes-gcm = "0.10"
 lru = "0.18.5"
 rdkafka = { version = "0.39.0", features = ["tokio", "ssl", "zstd"] }
 testcontainers = { version = "0.28.0", default-features = false, features = ["blocking"] }

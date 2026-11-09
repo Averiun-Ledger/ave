@@ -390,6 +390,7 @@ impl From<&DataToSink> for LightEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
 
     #[test]
@@ -854,6 +855,180 @@ mod tests {
         }
     }
 
+    fn valid_encryption_config() -> SinkEncryptionConfig {
+        let raw = vec![7_u8; SINK_HYBRID_PUBLIC_KEY_LEN];
+        let public_key = format!(
+            "X:{}",
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(&raw)
+        );
+        SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: "v1".to_owned(),
+            keys: vec![
+                SinkEncryptionKey {
+                    key_id: "v1".to_owned(),
+                    public_key: public_key.clone(),
+                },
+                SinkEncryptionKey {
+                    key_id: "v2".to_owned(),
+                    public_key,
+                },
+            ],
+        }
+    }
+
+    fn encryption_config_with_keys(
+        keys: Vec<SinkEncryptionKey>,
+        current_key_id: &str,
+    ) -> SinkEncryptionConfig {
+        SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: current_key_id.to_owned(),
+            keys,
+        }
+    }
+
+    #[test]
+    fn test_encryption_config_validate_ok_when_enabled() {
+        assert!(valid_encryption_config().validate("test").is_ok());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_ok_when_disabled_empty() {
+        assert!(SinkEncryptionConfig::default().validate("test").is_ok());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_keys_when_disabled() {
+        let mut cfg = SinkEncryptionConfig::default();
+        cfg.keys = valid_encryption_config().keys;
+        assert!(cfg.validate("test").is_err());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_empty_keys_when_enabled() {
+        let cfg = encryption_config_with_keys(Vec::new(), "v1");
+        assert!(cfg.validate("test").is_err());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_nine_keys() {
+        let raw = vec![7_u8; SINK_HYBRID_PUBLIC_KEY_LEN];
+        let public_key = format!(
+            "X:{}",
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(&raw)
+        );
+        let keys = (0..9)
+            .map(|i| SinkEncryptionKey {
+                key_id: format!("v{i}"),
+                public_key: public_key.clone(),
+            })
+            .collect();
+        let cfg = encryption_config_with_keys(keys, "v0");
+        assert!(cfg.validate("test").is_err());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_bad_key_ids() {
+        for bad in [
+            "",
+            "V1",
+            "v 1",
+            "v/1",
+            "1-very-long-key-id-over-32-chars-xxxxx",
+        ] {
+            let mut cfg = valid_encryption_config();
+            cfg.keys[0].key_id = bad.to_owned();
+            cfg.current_key_id = bad.to_owned();
+            assert!(
+                cfg.validate("test").is_err(),
+                "key_id '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_unknown_current() {
+        let cfg =
+            encryption_config_with_keys(valid_encryption_config().keys, "v9");
+        assert!(cfg.validate("test").is_err());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_duplicate_key_ids() {
+        let mut keys = valid_encryption_config().keys;
+        keys[1].key_id = "v1".to_owned();
+        let cfg = encryption_config_with_keys(keys, "v1");
+        assert!(cfg.validate("test").is_err());
+    }
+
+    #[test]
+    fn test_encryption_config_validate_rejects_bad_public_keys() {
+        for bad in [
+            "no-prefix".to_owned(),
+            "X:not-base64!!!".to_owned(),
+            format!(
+                "X:{}",
+                base64::prelude::BASE64_URL_SAFE_NO_PAD.encode([7_u8; 32])
+            ),
+        ] {
+            let mut cfg = valid_encryption_config();
+            cfg.keys[0].public_key = bad.clone();
+            assert!(
+                cfg.validate("test").is_err(),
+                "public_key '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_sink_hybrid_public_key_roundtrip() {
+        let raw = vec![9_u8; SINK_HYBRID_PUBLIC_KEY_LEN];
+        let encoded = format!(
+            "X:{}",
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(&raw)
+        );
+        // 1216 bytes encode to exactly 1622 chars without padding.
+        assert_eq!(encoded.len(), 2 + 1622);
+        assert_eq!(parse_sink_hybrid_public_key(&encoded).unwrap(), raw);
+        assert!(parse_sink_hybrid_public_key("9no-prefix").is_err());
+        assert!(parse_sink_hybrid_public_key("X:!!!").is_err());
+    }
+
+    #[test]
+    fn test_parent_configs_validate_encryption_block() {
+        let mut http = valid_http_config();
+        http.encryption = Some(valid_encryption_config());
+        assert!(http.validate().is_ok());
+        http.encryption = Some(encryption_config_with_keys(Vec::new(), "v1"));
+        assert!(http.validate().is_err());
+
+        let mut kafka = valid_kafka_config();
+        kafka.encryption = Some(valid_encryption_config());
+        assert!(kafka.validate().is_ok());
+
+        let mut grpc = GrpcSinkConfig {
+            endpoint: "https://sink.example.com".to_owned(),
+            ..GrpcSinkConfig::default()
+        };
+        grpc.encryption = Some(valid_encryption_config());
+        assert!(grpc.validate().is_ok());
+        grpc.encryption = Some(encryption_config_with_keys(Vec::new(), "v1"));
+        assert!(grpc.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_validate_rejects_compression_with_encryption() {
+        let mut kafka = valid_kafka_config();
+        let mut encryption = valid_encryption_config();
+        encryption.enabled = true;
+        kafka.encryption = Some(encryption);
+        kafka.compression = KafkaCompression::Zstd;
+        assert!(kafka.validate().is_err());
+        kafka.compression = KafkaCompression::None;
+        assert!(kafka.validate().is_ok());
+    }
+
     fn valid_sink_server() -> SinkServer {
         SinkServer {
             server: "unit-sink".to_owned(),
@@ -885,6 +1060,7 @@ mod tests {
         assert_eq!(cfg.tcp_keepalive_secs, Some(60));
         assert_eq!(cfg.pool_idle_timeout_secs, 90);
         assert_eq!(cfg.pool_max_idle_per_host, 4);
+        assert!(cfg.encryption.is_none());
         assert!(cfg.validate().is_ok());
     }
 
@@ -1774,6 +1950,153 @@ impl SinkCompression {
     }
 }
 
+/// Hybrid post-quantum public key size in bytes: X25519 (32) followed by
+/// ML-KEM-768 (1184). Every recipient key in [`SinkEncryptionConfig`] must
+/// decode to exactly this length (suite `HPKE-v1-hybrid12`).
+pub const SINK_HYBRID_PUBLIC_KEY_LEN: usize = 1216;
+
+/// Maximum recipient keys per encryption block (window `N`).
+pub const SINK_ENCRYPTION_MAX_KEYS: usize = 8;
+
+/// One versioned recipient of encrypted sink deliveries.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SinkEncryptionKey {
+    /// Key identifier, referenced by `current_key_id` and sent on the wire
+    /// (`x-ave-enc-key-id` header/metadata plus inside the envelope).
+    /// Lowercase alphanumeric plus `-`/`_`, 1..=32 chars.
+    pub key_id: String,
+    /// Recipient hybrid public key: `X:` followed by URL-safe base64
+    /// (no padding) of X25519 (32 B) concatenated with ML-KEM-768
+    /// (1184 B). Never a secret: it lives in the config file.
+    pub public_key: String,
+}
+
+/// Asymmetric payload encryption of sink deliveries (HPKE hybrid
+/// post-quantum, suite `HPKE-v1-hybrid12`). The node holds only public
+/// keys; the full canonical body is encrypted and the Ed25519 signature
+/// goes outside, over the envelope.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(TS))]
+#[cfg_attr(feature = "typescript", ts(export))]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(default)]
+pub struct SinkEncryptionConfig {
+    /// Master switch. When `false` (default) deliveries go in cleartext
+    /// exactly as today; the `keys` block must then be empty.
+    pub enabled: bool,
+    /// Key used for new deliveries; must be one of `keys`.
+    pub current_key_id: String,
+    /// Versioned recipient keys (1..=8). The receiver accepts every listed
+    /// key so rotation overlaps without downtime.
+    pub keys: Vec<SinkEncryptionKey>,
+}
+
+impl SinkEncryptionConfig {
+    pub fn validate(&self, component: &str) -> Result<(), Error> {
+        if !self.enabled {
+            if !self.keys.is_empty() || !self.current_key_id.is_empty() {
+                return Err(Error::InvalidConfiguration {
+                    component: component.to_string(),
+                    reason: "encryption keys must be empty when encryption is disabled"
+                        .to_string(),
+                });
+            }
+            return Ok(());
+        }
+        if self.keys.is_empty() || self.keys.len() > SINK_ENCRYPTION_MAX_KEYS {
+            return Err(Error::InvalidConfiguration {
+                component: component.to_string(),
+                reason: format!(
+                    "must list 1..={} recipient keys when enabled",
+                    SINK_ENCRYPTION_MAX_KEYS
+                ),
+            });
+        }
+        for key in &self.keys {
+            if !is_valid_key_id(&key.key_id) {
+                return Err(Error::InvalidConfiguration {
+                    component: component.to_string(),
+                    reason: format!(
+                        "key_id '{}' must match ^[a-z0-9][a-z0-9-_]*$ (1..=32 chars)",
+                        key.key_id
+                    ),
+                });
+            }
+            parse_sink_hybrid_public_key(&key.public_key).map_err(
+                |reason| Error::InvalidConfiguration {
+                    component: component.to_string(),
+                    reason: format!("key_id '{}': {reason}", key.key_id),
+                },
+            )?;
+        }
+        if self
+            .keys
+            .iter()
+            .filter(|k| k.key_id == self.current_key_id)
+            .count()
+            != 1
+        {
+            return Err(Error::InvalidConfiguration {
+                component: component.to_string(),
+                reason: "current_key_id must match exactly one listed key"
+                    .to_string(),
+            });
+        }
+        if self
+            .keys
+            .iter()
+            .map(|k| &k.key_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != self.keys.len()
+        {
+            return Err(Error::InvalidConfiguration {
+                component: component.to_string(),
+                reason: "key_id values must be unique".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Key identifier syntax shared by every transport.
+fn is_valid_key_id(key_id: &str) -> bool {
+    if key_id.is_empty() || key_id.len() > 32 {
+        return false;
+    }
+    let mut chars = key_id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+    })
+}
+
+/// Decode a `X:` hybrid public key into its raw 1216 bytes.
+pub fn parse_sink_hybrid_public_key(
+    public_key: &str,
+) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let encoded = public_key.strip_prefix("X:").ok_or_else(|| {
+        "public_key must start with the 'X:' prefix".to_string()
+    })?;
+    let raw = base64::prelude::BASE64_URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| format!("public_key is not valid base64url: {e}"))?;
+    if raw.len() != SINK_HYBRID_PUBLIC_KEY_LEN {
+        return Err(format!(
+            "public_key must decode to {SINK_HYBRID_PUBLIC_KEY_LEN} bytes (X25519+ML-KEM-768), got {}",
+            raw.len()
+        ));
+    }
+    Ok(raw)
+}
+
 /// HTTP-specific sink configuration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
@@ -1851,6 +2174,9 @@ pub struct HttpSinkConfig {
     /// followed: they preserve the method and body, while 301/302/303 would
     /// downgrade POST to GET and silently drop the event payload.
     pub max_redirects: usize,
+    /// Optional asymmetric payload encryption (HPKE hybrid post-quantum).
+    /// When `None` or disabled, deliveries go in cleartext as today.
+    pub encryption: Option<SinkEncryptionConfig>,
 }
 
 impl Default for HttpSinkConfig {
@@ -1878,6 +2204,7 @@ impl Default for HttpSinkConfig {
             pool_idle_timeout_secs: 90,
             pool_max_idle_per_host: 4,
             max_redirects: 0,
+            encryption: None,
         }
     }
 }
@@ -1980,6 +2307,9 @@ impl HttpSinkConfig {
                 component: "HttpSinkConfig.signature_version".to_string(),
                 reason: "must be 1 or 2".to_string(),
             });
+        }
+        if let Some(encryption) = &self.encryption {
+            encryption.validate("HttpSinkConfig.encryption")?;
         }
         Ok(())
     }
@@ -2349,6 +2679,9 @@ pub struct KafkaSinkConfig {
     /// Required with that mechanism, rejected otherwise.
     #[serde(default)]
     pub kerberos: Option<KafkaKerberosConfig>,
+    /// Optional asymmetric payload encryption (HPKE hybrid post-quantum).
+    /// When `None` or disabled, deliveries go in cleartext as today.
+    pub encryption: Option<SinkEncryptionConfig>,
 }
 
 impl Default for KafkaSinkConfig {
@@ -2385,6 +2718,7 @@ impl Default for KafkaSinkConfig {
             oauth_token_url: None,
             oauth_scope: None,
             kerberos: None,
+            encryption: None,
         }
     }
 }
@@ -2544,6 +2878,17 @@ impl KafkaSinkConfig {
                     .to_string(),
             });
         }
+        if let Some(encryption) = &self.encryption {
+            encryption.validate("KafkaSinkConfig.encryption")?;
+            if encryption.enabled
+                && !matches!(self.compression, KafkaCompression::None)
+            {
+                return Err(Error::InvalidConfiguration {
+                    component: "KafkaSinkConfig.compression".to_string(),
+                    reason: "must be 'none' when encryption is enabled (ciphertext does not compress)".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -2645,6 +2990,9 @@ pub struct GrpcSinkConfig {
     pub http2_keepalive_interval_secs: u64,
     /// Time without a PING ack after which the connection is declared dead.
     pub http2_keepalive_timeout_secs: u64,
+    /// Optional asymmetric payload encryption (HPKE hybrid post-quantum).
+    /// When `None` or disabled, deliveries go in cleartext as today.
+    pub encryption: Option<SinkEncryptionConfig>,
 }
 
 impl Default for GrpcSinkConfig {
@@ -2670,6 +3018,7 @@ impl Default for GrpcSinkConfig {
             tcp_keepalive_secs: Some(60),
             http2_keepalive_interval_secs: 30,
             http2_keepalive_timeout_secs: 10,
+            encryption: None,
         }
     }
 }
@@ -2771,6 +3120,17 @@ impl GrpcSinkConfig {
         )?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
+        }
+        if let Some(encryption) = &self.encryption {
+            encryption.validate("GrpcSinkConfig.encryption")?;
+            if encryption.enabled
+                && !matches!(self.compression, SinkCompression::None)
+            {
+                return Err(Error::InvalidConfiguration {
+                    component: "GrpcSinkConfig.compression".to_string(),
+                    reason: "must be 'none' when encryption is enabled (ciphertext does not compress)".to_string(),
+                });
+            }
         }
         Ok(())
     }

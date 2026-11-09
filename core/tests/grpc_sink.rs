@@ -3797,3 +3797,290 @@ async fn grpc_node_mtls_missing_client_cert_lags() {
         "the pending events must arrive after fixing the client identity; got {sns:?}"
     );
 }
+
+/// Encrypted gRPC deliveries (unary): the envelope carries key_id/suite
+/// both in per-RPC metadata and inside the body, decrypts with the
+/// recipient key, and preserves full/light shapes. Unary-only server so
+/// per-RPC metadata is exact (the stream hint is covered by construction
+/// in `stream_handle`).
+#[test(tokio::test)]
+async fn grpc_encrypted_unary_roundtrip() {
+    use ave_core::sink::encrypt::{
+        SUITE_ID, decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = GrpcTestSink::start_unary_only().await;
+    let mut config = grpc_config(&sink.endpoint());
+    config.encryption = Some(ave_core::config::SinkEncryptionConfig {
+        enabled: true,
+        current_key_id: "v1".to_owned(),
+        keys: vec![ave_core::config::SinkEncryptionKey {
+            key_id: "v1".to_owned(),
+            public_key: recipient.public_config_string.clone(),
+        }],
+    });
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send_light(example_light_event(SUBJECT_ID, SCHEMA_ID))
+        .await
+        .unwrap();
+
+    sink.wait_for_deliveries(2).await;
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 2);
+
+    for (delivery, light) in deliveries.iter().zip([false, true]) {
+        assert_eq!(
+            delivery
+                .metadata
+                .get("x-ave-enc-key-id")
+                .map(String::as_str),
+            Some("v1"),
+            "key id travels as metadata"
+        );
+        assert_eq!(
+            delivery.metadata.get("x-ave-enc-suite").map(String::as_str),
+            Some(SUITE_ID),
+            "suite travels as metadata"
+        );
+        let body = delivery.body.as_ref().expect("delivery carries a body");
+        let clear =
+            decrypt_envelope(&body.payload, std::slice::from_ref(&recipient))
+                .expect("receiver decrypts");
+        if light {
+            let event: ave_common::LightEvent =
+                serde_json::from_slice(&clear).expect("light JSON");
+            assert_eq!(event.subject_id, SUBJECT_ID);
+            assert!(delivery.meta.as_ref().expect("meta").light);
+        } else {
+            let data: ave_common::sink::DataToSink =
+                serde_json::from_slice(&clear).expect("full JSON");
+            crate::common::sink_setup::assert_data_to_sink_is_create(
+                &data, SUBJECT_ID, 0,
+            );
+        }
+    }
+}
+
+/// Encrypted gRPC over the persistent stream plus best-effort batch: the
+/// envelope stays authoritative on the stream (metadata hint set at open)
+/// and one best-effort batch delivers a decryptable array.
+#[test(tokio::test)]
+async fn grpc_encrypted_stream_and_best_effort_batch() {
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = GrpcTestSink::start().await;
+    let mut config = grpc_config(&sink.endpoint());
+    config.batch_delivery = true;
+    config.encryption = Some(ave_core::config::SinkEncryptionConfig {
+        enabled: true,
+        current_key_id: "v1".to_owned(),
+        keys: vec![ave_core::config::SinkEncryptionKey {
+            key_id: "v1".to_owned(),
+            public_key: recipient.public_config_string.clone(),
+        }],
+    });
+    let transport = GrpcTransport::new("test".to_owned(), config, None)
+        .await
+        .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send_batch_best_effort(vec![
+            ave_common::sink::IncomingSinkEvent::Full(Arc::new(
+                example_data_to_sink(SUBJECT_ID, SCHEMA_ID),
+            )),
+            ave_common::sink::IncomingSinkEvent::Light(example_light_event(
+                SUBJECT_ID, SCHEMA_ID,
+            )),
+        ])
+        .await
+        .unwrap();
+
+    sink.wait_for_deliveries(2).await;
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 2);
+    for delivery in &deliveries {
+        let body = delivery.body.as_ref().expect("delivery carries a body");
+        let clear =
+            decrypt_envelope(&body.payload, std::slice::from_ref(&recipient))
+                .expect("receiver decrypts stream deliveries");
+        // Unit delivery is a single object, the best-effort batch an array.
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&clear).is_ok(),
+            "envelope decrypts to JSON"
+        );
+    }
+    let batch: Vec<serde_json::Value> = {
+        let body = deliveries[1].body.as_ref().expect("batch body");
+        let clear =
+            decrypt_envelope(&body.payload, std::slice::from_ref(&recipient))
+                .expect("receiver decrypts the batch");
+        serde_json::from_slice(&clear).expect("batch JSON array")
+    };
+    assert_eq!(batch.len(), 2, "best-effort batch carries both events");
+}
+
+/// Encrypted gRPC rotation, isolation and compat (transport level): v1
+/// delivers, then the config switches to current v2 and both decrypt with
+/// the window keys; a decoy recipient opens nothing; with encryption
+/// disabled the delivery stays cleartext without enc metadata.
+#[test(tokio::test)]
+async fn grpc_encrypted_rotation_isolation_compat() {
+    use ave_core::sink::encrypt::{
+        SUITE_ID, decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let v1 = generate_recipient_keypair("v1");
+    let v2 = generate_recipient_keypair("v2");
+    let decoy = generate_recipient_keypair("decoy");
+    let sink = GrpcTestSink::start_unary_only().await;
+    let encrypted_config = |current: &str| {
+        let mut config = grpc_config(&sink.endpoint());
+        config.encryption = Some(ave_core::config::SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: current.to_owned(),
+            keys: vec![
+                ave_core::config::SinkEncryptionKey {
+                    key_id: "v1".to_owned(),
+                    public_key: v1.public_config_string.clone(),
+                },
+                ave_core::config::SinkEncryptionKey {
+                    key_id: "v2".to_owned(),
+                    public_key: v2.public_config_string.clone(),
+                },
+            ],
+        });
+        config
+    };
+
+    for current in ["v1", "v2"] {
+        let transport =
+            build_transport(&sink.endpoint(), encrypted_config(current)).await;
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .unwrap();
+    }
+
+    sink.wait_for_deliveries(2).await;
+    let deliveries = sink.deliveries();
+    assert_eq!(deliveries.len(), 2);
+    for (delivery, expected) in
+        deliveries.iter().zip([(&v1, "v1"), (&v2, "v2")])
+    {
+        let (recipient, expected_key) = expected;
+        assert_eq!(
+            delivery
+                .metadata
+                .get("x-ave-enc-key-id")
+                .map(String::as_str),
+            Some(expected_key)
+        );
+        assert_eq!(
+            delivery.metadata.get("x-ave-enc-suite").map(String::as_str),
+            Some(SUITE_ID)
+        );
+        let body = delivery.body.as_ref().expect("delivery carries a body");
+        assert!(
+            decrypt_envelope(&body.payload, std::slice::from_ref(&decoy))
+                .is_err(),
+            "a decoy recipient must not open any delivery"
+        );
+        let clear =
+            decrypt_envelope(&body.payload, std::slice::from_ref(recipient))
+                .expect("window decrypts");
+        let data: ave_common::sink::DataToSink =
+            serde_json::from_slice(&clear).expect("full JSON");
+        crate::common::sink_setup::assert_data_to_sink_is_create(
+            &data, SUBJECT_ID, 0,
+        );
+    }
+
+    // Compat: the same sink with encryption disabled stays cleartext and
+    // carries no enc metadata.
+    let transport =
+        build_transport(&sink.endpoint(), grpc_config(&sink.endpoint())).await;
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    sink.wait_for_deliveries(3).await;
+    let deliveries = sink.deliveries();
+    let body = deliveries[2]
+        .body
+        .as_ref()
+        .expect("delivery carries a body");
+    assert!(
+        deliveries[2].metadata.get("x-ave-enc-key-id").is_none(),
+        "no enc metadata without encryption"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body.payload).expect("cleartext JSON");
+    assert_eq!(payload["payload"]["event"], "create");
+}
+
+/// A broken encryption config fails before any RPC: the delivery future
+/// resolves to a permanent rejection. Runs without a server.
+#[test(tokio::test)]
+async fn grpc_invalid_encryption_fails_before_wire() {
+    let mut config = grpc_config("http://127.0.0.1:9");
+    config.encryption = Some(ave_core::config::SinkEncryptionConfig {
+        enabled: true,
+        current_key_id: "v1".to_owned(),
+        keys: Vec::new(),
+    });
+    let transport = build_transport("http://127.0.0.1:9", config).await;
+    let err = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .expect_err("broken encryption must fail fast");
+    assert!(
+        matches!(err, ave_core::sink::SinkError::Rejected { .. }),
+        "broken encryption is permanent, got: {err:?}"
+    );
+}
+
+/// The gRPC `Test` RPC stays cleartext when encryption is enabled: probes
+/// never carry envelopes.
+#[test(tokio::test)]
+async fn grpc_test_rpc_stays_cleartext_when_encrypted() {
+    use ave_core::sink::encrypt::generate_recipient_keypair;
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = GrpcTestSink::start_unary_only().await;
+    let mut config = grpc_config(&sink.endpoint());
+    config.encryption = Some(ave_core::config::SinkEncryptionConfig {
+        enabled: true,
+        current_key_id: "v1".to_owned(),
+        keys: vec![ave_core::config::SinkEncryptionKey {
+            key_id: "v1".to_owned(),
+            public_key: recipient.public_config_string.clone(),
+        }],
+    });
+    let transport = build_transport(&sink.endpoint(), config).await;
+
+    transport.test().await.unwrap();
+
+    sink.wait_for_tests(1).await;
+    let tests = sink.tests();
+    assert_eq!(tests.len(), 1);
+    let body = tests[0].body.as_ref().expect("test carries a body");
+    assert_eq!(
+        body.payload.as_slice(),
+        br#"{"test":true}"#,
+        "test probes stay cleartext"
+    );
+}

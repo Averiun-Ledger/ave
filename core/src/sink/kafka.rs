@@ -19,12 +19,14 @@ use crate::config::{
 use crate::metrics::try_core_metrics;
 use crate::sink::SinkError;
 use crate::sink::delivery::{
-    DeliveryMeta, EVENT_TYPE_HEADER, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
-    SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER, SIGNATURE_TIMESTAMP_HEADER,
-    SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER, batch_group_schema_id,
-    generate_request_id, group_events_by_type, is_sink_reserved_header,
-    load_required_secret, serialize_json_payload, sign_delivery,
-    sink_password_env_var, test_delivery_payload, timed_sink_request,
+    DeliveryMeta, ENC_KEY_ID_HEADER, ENC_SUITE_HEADER, EVENT_TYPE_HEADER,
+    EncryptionAttachment, IDEMPOTENCY_KEY_HEADER, PreparedBody,
+    REQUEST_ID_HEADER, SIGNATURE_HEADER, SIGNATURE_PUBLIC_KEY_HEADER,
+    SIGNATURE_TIMESTAMP_HEADER, SN_HEADER, SUBJECT_ID_HEADER, TEST_HEADER,
+    batch_group_schema_id, generate_request_id, group_events_by_type,
+    is_sink_reserved_header, load_required_secret, prepare_body,
+    serialize_json_payload, sign_delivery, sink_password_env_var,
+    test_delivery_payload, timed_sink_request,
 };
 use crate::sink::template::CompiledTemplate;
 use crate::sink::transport::{NodeSigner, SinkTransport};
@@ -233,9 +235,9 @@ fn default_transactional_id(sink_name: &str, node_id: Option<&str>) -> String {
     )
 }
 
-/// Topic, optional message key, JSON payload and request id of a batch
-/// group ready to be produced.
-type PreparedGroup = (String, Option<String>, Vec<u8>, String);
+/// Topic, optional message key, prepared (optionally encrypted) payload
+/// and request id of a batch group ready to be produced.
+type PreparedGroup = (String, Option<String>, PreparedBody, String);
 
 /// Build the reqwest client that fetches OAUTHBEARER tokens from the OIDC
 /// endpoint. Honors the sink's TLS configuration (`ca_certificate` as an
@@ -304,6 +306,7 @@ struct ProduceMessage<'a> {
     meta: Option<&'a DeliveryMeta>,
     additional_headers: Option<OwnedHeaders>,
     signature_headers: &'a Option<crate::sink::delivery::SignatureHeaders>,
+    encryption: Option<EncryptionAttachment>,
     request_id: &'a str,
 }
 
@@ -572,6 +575,7 @@ impl KafkaTransport {
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
         additional_headers: Option<OwnedHeaders>,
+        encryption: Option<EncryptionAttachment>,
         request_id: &str,
     ) -> Result<(), SinkError> {
         let signature_headers = self.sign_payload(payload, meta).await?;
@@ -589,6 +593,7 @@ impl KafkaTransport {
                     meta,
                     additional_headers: additional_headers.clone(),
                     signature_headers: &signature_headers,
+                    encryption: encryption.clone(),
                     request_id,
                 })
             },
@@ -647,6 +652,7 @@ impl KafkaTransport {
             meta,
             additional_headers,
             signature_headers,
+            encryption,
             request_id,
         } = message;
         let transactional = self.config.transactional;
@@ -698,6 +704,17 @@ impl KafkaTransport {
                 .insert(Header {
                     key: SIGNATURE_PUBLIC_KEY_HEADER,
                     value: Some(&sig.public_key),
+                });
+        }
+        if let Some(attachment) = &encryption {
+            headers = headers
+                .insert(Header {
+                    key: ENC_KEY_ID_HEADER,
+                    value: Some(&attachment.key_id),
+                })
+                .insert(Header {
+                    key: ENC_SUITE_HEADER,
+                    value: Some(attachment.suite),
                 });
         }
 
@@ -773,10 +790,10 @@ impl KafkaTransport {
         }
     }
 
-    /// Prepare one batch group for production: topic, message key, JSON
-    /// array payload and request id. Returns `None` for an empty group
-    /// (groups are never empty by construction, but the caller continues
-    /// instead of failing the whole batch).
+    /// Prepare one batch group for production: topic, message key,
+    /// encrypted-or-plain JSON array payload and request id. Returns `None`
+    /// for an empty group (groups are never empty by construction, but the
+    /// caller continues instead of failing the whole batch).
     fn prepare_group(
         &self,
         event_type: &str,
@@ -791,10 +808,14 @@ impl KafkaTransport {
             &schema_id,
             event_type,
         );
-        let payload = serialize_json_payload(group)?;
+        let prepared = prepare_body(
+            group,
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
         let request_id = generate_request_id();
         let key = self.compute_key(first.subject_id(), &schema_id);
-        Ok(Some((topic, key, payload, request_id)))
+        Ok(Some((topic, key, prepared, request_id)))
     }
 
     async fn fetch_metadata(&self) -> Result<(), SinkError> {
@@ -880,7 +901,11 @@ impl SinkTransport for KafkaTransport {
             &schema_id,
             event_type.as_str(),
         );
-        let payload = serialize_json_payload(data.as_ref())?;
+        let prepared = prepare_body(
+            data.as_ref(),
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
 
         let request_id = generate_request_id();
         let meta = DeliveryMeta::from_data(&data);
@@ -889,9 +914,10 @@ impl SinkTransport for KafkaTransport {
         self.produce(
             &topic,
             key.as_deref(),
-            &payload,
+            &prepared.bytes,
             Some(&meta),
             None,
+            prepared.encryption,
             &request_id,
         )
         .await
@@ -903,7 +929,11 @@ impl SinkTransport for KafkaTransport {
             &light.schema_id,
             light.event_type.as_str(),
         );
-        let payload = serialize_json_payload(&light)?;
+        let prepared = prepare_body(
+            &light,
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
 
         let request_id = generate_request_id();
         let meta = DeliveryMeta::from_light(&light);
@@ -912,9 +942,10 @@ impl SinkTransport for KafkaTransport {
         self.produce(
             &topic,
             key.as_deref(),
-            &payload,
+            &prepared.bytes,
             Some(&meta),
             None,
+            prepared.encryption,
             &request_id,
         )
         .await
@@ -942,7 +973,7 @@ impl SinkTransport for KafkaTransport {
             group_events_by_type(events, self.topic_template.has_event_type())
                 .into_iter()
                 .map(|(event_type, group)| async move {
-                    let Some((topic, key, payload, request_id)) =
+                    let Some((topic, key, prepared, request_id)) =
                         self.prepare_group(&event_type, &group)?
                     else {
                         return Ok(());
@@ -950,9 +981,10 @@ impl SinkTransport for KafkaTransport {
                     self.produce(
                         &topic,
                         key.as_deref(),
-                        &payload,
+                        &prepared.bytes,
                         None,
                         None,
+                        prepared.encryption,
                         &request_id,
                     )
                     .await
@@ -973,19 +1005,21 @@ impl SinkTransport for KafkaTransport {
         for (event_type, group) in
             group_events_by_type(events, self.topic_template.has_event_type())
         {
-            let Some((topic, key, payload, request_id)) =
+            let Some((topic, key, prepared, request_id)) =
                 self.prepare_group(&event_type, &group)?
             else {
                 continue;
             };
-            let signature_headers = self.sign_payload(&payload, None).await?;
+            let signature_headers =
+                self.sign_payload(&prepared.bytes, None).await?;
             self.produce_once(ProduceMessage {
                 topic: &topic,
                 key: key.as_deref(),
-                payload: &payload,
+                payload: &prepared.bytes,
                 meta: None,
                 additional_headers: None,
                 signature_headers: &signature_headers,
+                encryption: prepared.encryption,
                 request_id: &request_id,
             })
             .await?;
@@ -1015,6 +1049,7 @@ impl SinkTransport for KafkaTransport {
             &payload,
             None,
             Some(headers),
+            None,
             &request_id,
         )
         .await

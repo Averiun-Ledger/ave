@@ -1,6 +1,7 @@
 //! Reliable sink managers and workers.
 
 pub mod delivery;
+pub mod encrypt;
 pub mod error;
 pub mod grpc;
 pub mod http;

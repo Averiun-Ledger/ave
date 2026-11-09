@@ -16,12 +16,15 @@ use ave_common::{
     },
     schematype::SchemaType,
     sink::{
-        DataToSinkEvent, HttpProxyConfig, HttpTlsConfig, IncomingSinkEvent,
-        OAuth2GrantType, SinkAuthConfig, SinkAuthMethod, SinkCompression,
-        SinkTransportConfig,
+        DataToSink, DataToSinkEvent, HttpProxyConfig, HttpTlsConfig,
+        IncomingSinkEvent, OAuth2GrantType, SinkAuthConfig, SinkAuthMethod,
+        SinkCompression, SinkTransportConfig,
     },
 };
-use ave_core::{Api, auth::AuthWitness, config::SinkConfigEntry, error::Error};
+use ave_core::{
+    Api, auth::AuthWitness, config::SinkConfigEntry, error::Error,
+    sink::SinkTransport,
+};
 use ave_network::NodeType;
 use futures::future::join_all;
 use serde_json::json;
@@ -50,14 +53,15 @@ use crate::common::{
         assert_sink_lagging, assert_sink_not_lagging, assert_sink_running,
         assert_sink_unblocked, assert_subject_sn_sequence,
         count_events_for_subject, deduplicate_events_by_sn,
+        example_data_to_sink, example_light_event,
         example_schema_governance_fact, example_sink_config,
         flapping_sink_config, governance_sink_config,
         governance_with_transfer_roles_fact, governance_with_viewpoints_fact,
         make_governance_sink_entry, make_sink_entry, make_sink_entry_batch,
         make_sink_entry_with_auth, make_sink_entry_with_auth_and_retry_policy,
-        make_sink_entry_with_concurrency, make_sink_entry_with_headers,
-        make_sink_entry_with_proxy, make_sink_entry_with_retry_policy,
-        make_sink_entry_with_signature,
+        make_sink_entry_with_concurrency, make_sink_entry_with_encryption,
+        make_sink_entry_with_headers, make_sink_entry_with_proxy,
+        make_sink_entry_with_retry_policy, make_sink_entry_with_signature,
         make_sink_entry_with_signature_and_retries, make_sink_entry_with_tls,
         restart_config, restart_config_safe_mode, restart_config_with_peers,
         sample_sinks, short_idle_sink_config, short_timeout_sink_config,
@@ -12733,4 +12737,891 @@ async fn sink_credential_name_collision_rejected_at_boot() {
     })
     .await
     .expect("colliding sink names must fail boot fast");
+}
+
+/// Encrypted HTTP deliveries (E2): the envelope carries key_id/suite next
+/// to the signature, decrypts with the recipient key, and the signature
+/// verifies over the envelope bytes actually received.
+///
+/// **Flow:** boot, governance + schema, restart with an encrypted+signed
+/// sink, create subject, catch-up delivers the create event.
+///
+/// **Verifications:** `x-ave-enc-key-id`/`x-ave-enc-suite` present, the
+/// wire body does not parse as a cleartext event, it decrypts to the
+/// create event for the subject, and the Ed25519 signature verifies over
+/// the envelope.
+#[traced_test]
+#[tokio::test]
+async fn sink_encrypted_deliveries_decrypt_with_recipient_key() {
+    use ave_common::identity::{
+        BLAKE3_HASHER, Hash as _, PublicKey, SignatureIdentifier, TimeStamp,
+    };
+    use ave_core::sink::encrypt::{
+        SUITE_ID, decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let expected_public_key = keys.public_key();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            "v1",
+            &[("v1", recipient.public_config_string.clone())],
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    // Facts do not match the `Create` filter: they arrive as lightweight
+    // events, exercising the encrypted light path end to end.
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(3, true).await;
+
+    assert_eq!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.as_deref(),
+        Some("v1")
+    );
+
+    assert_eq!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.as_deref(),
+        Some("v1")
+    );
+    assert_eq!(
+        sink.last_header("X-Ave-Enc-Suite").await.as_deref(),
+        Some(SUITE_ID)
+    );
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 3);
+    assert!(
+        serde_json::from_slice::<IncomingSinkEvent>(&bodies[0]).is_err(),
+        "the envelope must not parse as a cleartext event"
+    );
+
+    let clear = decrypt_envelope(&bodies[0], std::slice::from_ref(&recipient))
+        .expect("receiver decrypts with v1");
+    let data: DataToSink =
+        serde_json::from_slice(&clear).expect("cleartext is DataToSink");
+    assert_data_to_sink_is_create(&data, &subject_id.to_string(), 0);
+
+    // Light events travel the same encrypted path with their own shape.
+    for (body, sn) in bodies[1..].iter().zip([1, 2]) {
+        let clear = decrypt_envelope(body, std::slice::from_ref(&recipient))
+            .expect("receiver decrypts light events");
+        let light: ave_common::LightEvent =
+            serde_json::from_slice(&clear).expect("cleartext is LightEvent");
+        assert_eq!(light.subject_id, subject_id.to_string());
+        assert_eq!(light.sn, sn);
+    }
+
+    let headers = sink.signature_headers().await;
+    let signature = headers[0].signature.as_ref().expect("signed");
+    let timestamp = headers[0].timestamp.as_ref().expect("timestamp");
+    let public_key = headers[0].public_key.as_ref().expect("pubkey");
+    assert_eq!(public_key, &expected_public_key.to_string());
+    let timestamp =
+        TimeStamp::from_nanos(timestamp.parse::<u64>().expect("nanos"));
+    let payload_bytes = borsh::to_vec(&(&bodies[0], &timestamp)).unwrap();
+    let hash = BLAKE3_HASHER.hash(&payload_bytes);
+    let signer = PublicKey::from_str(public_key).unwrap();
+    let signature = SignatureIdentifier::from_str(signature).unwrap();
+    signer
+        .verify(hash.hash_bytes(), &signature)
+        .expect("delivery signature must verify over the envelope");
+}
+
+/// Encryption rotation across restarts (E4): v1 delivers, then the config
+/// moves to current v2. Both envelopes decrypt with the receiver's window.
+#[traced_test]
+#[tokio::test]
+async fn sink_encryption_rotation_across_restarts() {
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let v1 = generate_recipient_keypair("v1");
+    let v2 = generate_recipient_keypair("v2");
+    let keys_config = || {
+        vec![
+            ("v1", v1.public_config_string.clone()),
+            ("v2", v2.public_config_string.clone()),
+        ]
+    };
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let keys_again = keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db.clone(),
+        ext_db.clone(),
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            "v1",
+            &keys_config(),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(1, true).await;
+
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys_again,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            "v2",
+            &keys_config(),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    emit_fact(
+        &node.api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(2, true).await;
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let recipients = [&v1, &v2];
+    let first: ave_core::sink::encrypt::WireEnvelope =
+        serde_json::from_slice(&bodies[0]).expect("envelope JSON");
+    let second: ave_core::sink::encrypt::WireEnvelope =
+        serde_json::from_slice(&bodies[1]).expect("envelope JSON");
+    assert_eq!(first.key_id, "v1");
+    assert_eq!(second.key_id, "v2");
+    for (body, recipient) in bodies.iter().zip([recipients[0], recipients[1]]) {
+        decrypt_envelope(body, std::slice::from_ref(recipient))
+            .expect("window decrypts both generations");
+    }
+    let _ = subject_id;
+}
+
+/// Key isolation (E5): a receiver holding only another key cannot read the
+/// delivery, while the configured recipient can.
+#[traced_test]
+#[tokio::test]
+async fn sink_encryption_key_isolation() {
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let recipient = generate_recipient_keypair("v1");
+    let decoy = generate_recipient_keypair("v2");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+            "v1",
+            &[("v1", recipient.public_config_string.clone())],
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    create_subject(&node.api, governance_id, "Example", "", true)
+        .await
+        .unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(1, true).await;
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    assert!(
+        decrypt_envelope(&bodies[0], std::slice::from_ref(&decoy)).is_err(),
+        "a wrong receiver must not read the delivery"
+    );
+    decrypt_envelope(&bodies[0], std::slice::from_ref(&recipient))
+        .expect("the configured recipient reads it");
+}
+
+/// Compat without encryption (E6): with `encryption` unset the delivery
+/// stays cleartext JSON exactly as before.
+#[traced_test]
+#[tokio::test]
+async fn sink_unencrypted_deliveries_stay_cleartext() {
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry(
+            "clear-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::Create]),
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    wait_for_sink_caught_up(&node.api, "clear-sink").await;
+    sink.wait_for_count(1, true).await;
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let data: DataToSink =
+        serde_json::from_slice(&bodies[0]).expect("cleartext DataToSink");
+    assert_data_to_sink_is_create(&data, &subject_id.to_string(), 0);
+    assert!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.is_none(),
+        "no encryption headers without encryption"
+    );
+}
+
+/// Three-key rotation with retirement (E9): v1 delivers, the config moves
+/// to [v2, v3] with current v3, and both generations still decrypt.
+#[traced_test]
+#[tokio::test]
+async fn sink_encryption_three_key_rotation_with_retirement() {
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let v1 = generate_recipient_keypair("v1");
+    let v2 = generate_recipient_keypair("v2");
+    let v3 = generate_recipient_keypair("v3");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let keys_again = keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db.clone(),
+        ext_db.clone(),
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            "v1",
+            &[
+                ("v1", v1.public_config_string.clone()),
+                ("v2", v2.public_config_string.clone()),
+                ("v3", v3.public_config_string.clone()),
+            ],
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(1, true).await;
+
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    // Retire v1: it leaves the config while v2/v3 stay in the window.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys_again,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            "v3",
+            &[
+                ("v2", v2.public_config_string.clone()),
+                ("v3", v3.public_config_string.clone()),
+            ],
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    emit_fact(&node.api, subject_id, json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+    sink.wait_for_raw_count(2, true).await;
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let fence = [&v1, &v2, &v3];
+    let first: ave_core::sink::encrypt::WireEnvelope =
+        serde_json::from_slice(&bodies[0]).expect("envelope JSON");
+    let second: ave_core::sink::encrypt::WireEnvelope =
+        serde_json::from_slice(&bodies[1]).expect("envelope JSON");
+    assert_eq!(first.key_id, "v1");
+    assert_eq!(second.key_id, "v3");
+    for (body, recipient) in bodies.iter().zip([fence[0], fence[2]]) {
+        decrypt_envelope(body, std::slice::from_ref(recipient))
+            .expect("retired and current generations decrypt");
+    }
+}
+
+/// The sink test probe stays cleartext with encryption on (E8): health
+/// and test RPCs never carry envelopes.
+#[traced_test]
+#[tokio::test]
+async fn sink_test_probe_stays_cleartext() {
+    use ave_core::sink::encrypt::generate_recipient_keypair;
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![make_sink_entry_with_encryption(
+            "enc-sink",
+            sink.url(),
+            Some(governance_id.to_string()),
+            BTreeSet::from([SinkTypes::All]),
+            "v1",
+            &[("v1", recipient.public_config_string.clone())],
+        )],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+    wait_for_sink_caught_up(&node.api, "enc-sink").await;
+
+    node.api.test_sink("enc-sink".to_owned()).await.unwrap();
+    sink.wait_for_raw_count(1, true).await;
+
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0], br#"{"test":true}"#.to_vec());
+    assert!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.is_none(),
+        "probes carry no encryption headers"
+    );
+}
+
+/// Encrypted HTTP batch (E7): two creates travel in a single envelope
+/// array and decrypt together.
+#[traced_test]
+#[tokio::test]
+async fn sink_encrypted_batch_roundtrip() {
+    use ave_common::sink::{SinkEncryptionConfig, SinkEncryptionKey};
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut entry = make_sink_entry_batch(
+        "enc-batch-sink",
+        sink.url(),
+        Some(governance_id.to_string()),
+        BTreeSet::from([SinkTypes::All]),
+        SinkCompression::None,
+    );
+    let SinkTransportConfig::Http(config) = &mut entry.servers[0].transport
+    else {
+        panic!("expected an HTTP transport");
+    };
+    config.encryption = Some(SinkEncryptionConfig {
+        enabled: true,
+        current_key_id: "v1".to_owned(),
+        keys: vec![SinkEncryptionKey {
+            key_id: "v1".to_owned(),
+            public_key: recipient.public_config_string.clone(),
+        }],
+    });
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![entry],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    // One subject, one create + two facts: the exact flush split depends
+    // on batch timing (as the cleartext batch tests document), so the
+    // test sums decrypted events across all envelopes instead of
+    // asserting a single request.
+    let (subject_id, _) =
+        create_subject(&node.api, governance_id, "Example", "", true)
+            .await
+            .unwrap();
+    for i in 1..=2 {
+        emit_fact(
+            &node.api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    wait_for_sink_caught_up(&node.api, "enc-batch-sink").await;
+    // Bounded poll: envelopes do not parse as events, so count decrypted
+    // elements instead of waiting on a fixed request count.
+    let mut attempts = 0;
+    let bodies = loop {
+        let bodies = sink.raw_bodies().await;
+        let mut total = 0;
+        let mut ok = true;
+        for body in &bodies {
+            match decrypt_envelope(body, std::slice::from_ref(&recipient)) {
+                Ok(clear) => {
+                    if let Ok(batch) =
+                        serde_json::from_slice::<Vec<DataToSink>>(&clear)
+                    {
+                        total += batch.len();
+                    } else if serde_json::from_slice::<DataToSink>(&clear)
+                        .is_ok()
+                    {
+                        total += 1;
+                    } else {
+                        ok = false;
+                    }
+                }
+                Err(_) => ok = false,
+            }
+        }
+        if ok && total == 3 {
+            break bodies;
+        }
+        attempts += 1;
+        assert!(
+            attempts <= 100,
+            "encrypted batch did not converge, got {total}/3 events"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    assert!(!bodies.is_empty(), "at least one batch request must arrive");
+    assert_eq!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.as_deref(),
+        Some("v1")
+    );
+    for body in &bodies {
+        let envelope: ave_core::sink::encrypt::WireEnvelope =
+            serde_json::from_slice(body).expect("envelope JSON");
+        assert_eq!(envelope.key_id, "v1");
+        decrypt_envelope(body, std::slice::from_ref(&recipient))
+            .expect("receiver decrypts every batch");
+    }
+}
+
+/// HTTP best-effort batch with encryption (transport level): the teardown
+/// path encrypts exactly like the live path; the envelope decrypts to the
+/// full batch array.
+#[traced_test]
+#[tokio::test]
+async fn sink_encrypted_best_effort_batch_roundtrip() {
+    use ave_common::sink::{SinkEncryptionConfig, SinkEncryptionKey};
+    use ave_core::config::HttpSinkConfig;
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+    use ave_core::sink::http::HttpTransport;
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = TestSink::start().await;
+    let transport = HttpTransport::new(
+        "enc-best-effort".to_owned(),
+        HttpSinkConfig {
+            url: sink.url(),
+            batch_delivery: true,
+            encryption: Some(SinkEncryptionConfig {
+                enabled: true,
+                current_key_id: "v1".to_owned(),
+                keys: vec![SinkEncryptionKey {
+                    key_id: "v1".to_owned(),
+                    public_key: recipient.public_config_string.clone(),
+                }],
+            }),
+            ..HttpSinkConfig::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    transport
+        .send_batch_best_effort(vec![
+            IncomingSinkEvent::Full(std::sync::Arc::new(example_data_to_sink(
+                "BEST-EFFORT-SUBJECT",
+                "Example",
+            ))),
+            IncomingSinkEvent::Light(example_light_event(
+                "BEST-EFFORT-SUBJECT",
+                "Example",
+            )),
+        ])
+        .await
+        .unwrap();
+
+    sink.wait_for_raw_count(1, true).await;
+    let bodies = sink.raw_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(
+        sink.last_header("X-Ave-Enc-Key-Id").await.as_deref(),
+        Some("v1")
+    );
+    let clear = decrypt_envelope(&bodies[0], std::slice::from_ref(&recipient))
+        .expect("receiver decrypts the best-effort batch");
+    let batch: Vec<serde_json::Value> =
+        serde_json::from_slice(&clear).expect("batch JSON array");
+    assert_eq!(batch.len(), 2, "full + light in one envelope");
+    assert_eq!(batch[0]["payload"]["event"], "create");
+    assert_eq!(
+        batch[0]["payload"]["data"]["subject_id"],
+        "BEST-EFFORT-SUBJECT"
+    );
+    assert_eq!(batch[1]["event_type"], "fact");
+}
+
+/// Broken encryption config fails loud at delivery (E11): enabled with no
+/// keys never delivers; the sink blocks with a misconfiguration reason
+/// instead of dropping events silently. (File-loaded configs are rejected
+/// even earlier, by `Bridge::validate` at startup.)
+#[traced_test]
+#[tokio::test]
+async fn sink_invalid_encryption_config_blocks_at_delivery() {
+    use ave_core::sink::encrypt::generate_recipient_keypair;
+
+    let recipient = generate_recipient_keypair("v1");
+    let sink = TestSink::start().await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, mut dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{}", port),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&node.api, vec![]).await;
+    emit_fact(
+        &node.api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let keys = node.keys.clone();
+    let local_db = dirs[0].path().to_path_buf();
+    let ext_db = dirs[1].path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut entry = make_sink_entry_with_encryption(
+        "bad-enc",
+        sink.url(),
+        Some(governance_id.to_string()),
+        BTreeSet::from([SinkTypes::Create]),
+        "v1",
+        &[("v1", recipient.public_config_string.clone())],
+    );
+    let SinkTransportConfig::Http(config) = &mut entry.servers[0].transport
+    else {
+        panic!("expected an HTTP transport");
+    };
+    config.encryption.as_mut().expect("encryption").keys.clear();
+    let (node, mut new_dirs) = create_node(restart_config(
+        keys,
+        local_db,
+        ext_db,
+        format!("/memory/{}", port),
+        vec![entry],
+    ))
+    .await;
+    dirs.append(&mut new_dirs);
+    node_running(&node.api).await.unwrap();
+
+    create_subject(&node.api, governance_id, "Example", "", true)
+        .await
+        .unwrap();
+
+    let reason = wait_for_sink_blocked(&node.api, "bad-enc").await;
+    assert!(
+        reason.contains("misconfigured"),
+        "blocked reason must name the misconfiguration, got: {reason}"
+    );
 }

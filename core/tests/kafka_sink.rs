@@ -14,7 +14,7 @@ use ave_common::{
         BLAKE3_HASHER, Hash as _, PublicKey, SignatureIdentifier, TimeStamp,
         keys::KeyPair,
     },
-    sink::{DataToSinkEvent, IncomingSinkEvent},
+    sink::{DataToSink, DataToSinkEvent, IncomingSinkEvent},
 };
 use ave_core::config::{
     KafkaAcks, KafkaCompression, KafkaKeyStrategy, KafkaSaslMechanism,
@@ -72,6 +72,24 @@ fn kafka_sink_config_with(
     let mut cfg = kafka_sink_config(bootstrap_servers, topic);
     f(&mut cfg);
     cfg
+}
+
+fn kafka_sink_config_encrypted(
+    bootstrap_servers: &str,
+    topic: &str,
+    recipient: &ave_core::sink::encrypt::RecipientKeyPair,
+) -> KafkaSinkConfig {
+    use ave_core::config::{SinkEncryptionConfig, SinkEncryptionKey};
+    kafka_sink_config_with(bootstrap_servers, topic, |cfg| {
+        cfg.encryption = Some(SinkEncryptionConfig {
+            enabled: true,
+            current_key_id: "v1".to_owned(),
+            keys: vec![SinkEncryptionKey {
+                key_id: "v1".to_owned(),
+                public_key: recipient.public_config_string.clone(),
+            }],
+        });
+    })
 }
 
 fn kafka_sink_config_sasl(
@@ -3153,4 +3171,281 @@ async fn kafka_node_transactional_delivers() {
     for (key, _) in &messages {
         assert_eq!(key, &subject_id_str);
     }
+}
+
+/// Encrypted Kafka roundtrip (E3): full + light events decrypt with the
+/// recipient key and carry the enc headers next to the signature.
+#[tokio::test]
+async fn kafka_encrypted_roundtrip() {
+    use ave_core::sink::encrypt::{
+        SUITE_ID, decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let env = RedpandaEnv::start().await;
+    let recipient = generate_recipient_keypair("v1");
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config_encrypted(
+            &env.bootstrap_servers,
+            "ave-enc",
+            &recipient,
+        ),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    transport
+        .send_light(example_light_event(SUBJECT_ID, SCHEMA_ID))
+        .await
+        .unwrap();
+
+    let messages = env.consume_with_headers("ave-enc", 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2, "full + light events");
+
+    for (key, _, headers) in &messages {
+        assert_eq!(key, SUBJECT_ID);
+        let header_value = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header_value("x-ave-enc-key-id"), Some("v1"));
+        assert_eq!(header_value("x-ave-enc-suite"), Some(SUITE_ID));
+    }
+
+    let clear_full = decrypt_envelope(
+        messages[0].1.as_bytes(),
+        std::slice::from_ref(&recipient),
+    )
+    .expect("receiver decrypts the full event");
+    let full: DataToSink =
+        serde_json::from_slice(&clear_full).expect("full JSON");
+    assert!(
+        matches!(full.payload, DataToSinkEvent::Create { .. }),
+        "expected a create event"
+    );
+
+    let clear_light = decrypt_envelope(
+        messages[1].1.as_bytes(),
+        std::slice::from_ref(&recipient),
+    )
+    .expect("receiver decrypts the light event");
+    let light: LightEvent =
+        serde_json::from_slice(&clear_light).expect("light JSON");
+    assert_eq!(light.subject_id, SUBJECT_ID);
+}
+
+/// Encrypted Kafka batch (E7): one array message carries a single envelope;
+/// every element decrypts together.
+#[tokio::test]
+async fn kafka_encrypted_batch_roundtrip() {
+    use ave_core::sink::encrypt::{
+        decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let env = RedpandaEnv::start().await;
+    let recipient = generate_recipient_keypair("v1");
+    let mut config = kafka_sink_config_encrypted(
+        &env.bootstrap_servers,
+        "ave-enc-batch",
+        &recipient,
+    );
+    config.batch_delivery = true;
+    let transport = KafkaTransport::new("test".to_string(), config, None, None)
+        .await
+        .unwrap();
+
+    transport
+        .send_batch(vec![
+            IncomingSinkEvent::Full(Arc::new(example_data_to_sink(
+                SUBJECT_ID, SCHEMA_ID,
+            ))),
+            IncomingSinkEvent::Light(example_light_event(
+                SUBJECT_ID, SCHEMA_ID,
+            )),
+        ])
+        .await
+        .unwrap();
+
+    let messages = env.consume_string("ave-enc-batch", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1, "one batch message");
+    let clear = decrypt_envelope(
+        messages[0].1.as_bytes(),
+        std::slice::from_ref(&recipient),
+    )
+    .expect("receiver decrypts the batch");
+    let batch: Vec<serde_json::Value> =
+        serde_json::from_slice(&clear).expect("batch JSON array");
+    assert_eq!(batch.len(), 2, "full + light in one envelope");
+}
+
+/// The Kafka `test` message stays cleartext when encryption is enabled:
+/// probes never carry envelopes.
+#[tokio::test]
+async fn kafka_test_message_stays_cleartext_when_encrypted() {
+    use ave_core::sink::encrypt::generate_recipient_keypair;
+
+    let env = RedpandaEnv::start().await;
+    let recipient = generate_recipient_keypair("v1");
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config_encrypted(
+            &env.bootstrap_servers,
+            "ave-enc-test",
+            &recipient,
+        ),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    transport.test().await.unwrap();
+
+    let messages = env.consume_string("ave-enc-test", 1, TIMEOUT).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].1, "{\"test\":true}",
+        "test probes stay cleartext"
+    );
+}
+
+/// Encrypted Kafka rotation, isolation and compat (E3 full matrix):
+/// v1 then v2 decrypt with the window keys, a decoy opens nothing, and
+/// with encryption disabled the delivery stays cleartext without enc
+/// headers. Requires a broker (testcontainers); compile-checked here.
+#[tokio::test]
+async fn kafka_encrypted_rotation_isolation_compat() {
+    use ave_core::sink::encrypt::{
+        SUITE_ID, decrypt_envelope, generate_recipient_keypair,
+    };
+
+    let env = RedpandaEnv::start().await;
+    let v1 = generate_recipient_keypair("v1");
+    let v2 = generate_recipient_keypair("v2");
+    let decoy = generate_recipient_keypair("decoy");
+    let encrypted_config = |current: &str| {
+        kafka_sink_config_with(
+            &env.bootstrap_servers,
+            "ave-enc-matrix",
+            |cfg| {
+                cfg.encryption = Some(ave_core::config::SinkEncryptionConfig {
+                    enabled: true,
+                    current_key_id: current.to_owned(),
+                    keys: vec![
+                        ave_core::config::SinkEncryptionKey {
+                            key_id: "v1".to_owned(),
+                            public_key: v1.public_config_string.clone(),
+                        },
+                        ave_core::config::SinkEncryptionKey {
+                            key_id: "v2".to_owned(),
+                            public_key: v2.public_config_string.clone(),
+                        },
+                    ],
+                });
+            },
+        )
+    };
+
+    for current in ["v1", "v2"] {
+        let transport = KafkaTransport::new(
+            "test".to_string(),
+            encrypted_config(current),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        transport
+            .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+            .await
+            .unwrap();
+    }
+
+    let messages = env.consume_with_headers("ave-enc-matrix", 2, TIMEOUT).await;
+    assert_eq!(messages.len(), 2);
+    for ((_, payload, headers), expected_key) in
+        messages.iter().zip(["v1", "v2"])
+    {
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("x-ave-enc-key-id"), Some(expected_key));
+        assert_eq!(header("x-ave-enc-suite"), Some(SUITE_ID));
+        assert!(
+            decrypt_envelope(payload.as_bytes(), std::slice::from_ref(&decoy))
+                .is_err(),
+            "a decoy recipient must not open any delivery"
+        );
+        let recipient = if expected_key == "v1" { &v1 } else { &v2 };
+        let clear = decrypt_envelope(
+            payload.as_bytes(),
+            std::slice::from_ref(recipient),
+        )
+        .expect("window decrypts");
+        let full: DataToSink =
+            serde_json::from_slice(&clear).expect("full JSON");
+        assert!(
+            matches!(full.payload, DataToSinkEvent::Create { .. }),
+            "expected a create event"
+        );
+    }
+
+    // Compat: a separate topic with encryption disabled stays cleartext and
+    // carries no enc headers. Separate topic because the consumer reads
+    // from the beginning: reusing the matrix topic would replay the old
+    // encrypted messages.
+    let transport = KafkaTransport::new(
+        "test".to_string(),
+        kafka_sink_config(&env.bootstrap_servers, "ave-enc-clear"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .unwrap();
+    let messages = env.consume_with_headers("ave-enc-clear", 1, TIMEOUT).await;
+    assert!(
+        messages[0].2.iter().all(|(k, _)| k != "x-ave-enc-key-id"),
+        "no enc headers without encryption"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&messages[0].1).expect("cleartext JSON");
+    assert_eq!(payload["payload"]["event"], "create");
+}
+
+/// A broken encryption config fails before touching the broker: the send
+/// future resolves to a permanent rejection. Runs without a broker.
+#[tokio::test]
+async fn kafka_invalid_encryption_fails_before_wire() {
+    use ave_core::sink::encrypt::generate_recipient_keypair;
+
+    let recipient = generate_recipient_keypair("v1");
+    let mut config =
+        kafka_sink_config_encrypted("127.0.0.1:1", "unused", &recipient);
+    config.encryption.as_mut().expect("encryption").keys.clear();
+    let transport = KafkaTransport::new("test".to_string(), config, None, None)
+        .await
+        .unwrap();
+    let err = transport
+        .send(Arc::new(example_data_to_sink(SUBJECT_ID, SCHEMA_ID)))
+        .await
+        .expect_err("broken encryption must fail fast");
+    assert!(
+        matches!(err, ave_core::sink::SinkError::Rejected { .. }),
+        "broken encryption is permanent, got: {err:?}"
+    );
 }

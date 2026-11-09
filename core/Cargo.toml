@@ -49,6 +49,13 @@ tonic-health = { workspace = true }
 tonic-types = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 subtle = { workspace = true, optional = true }
+sha2 = { workspace = true }
+x25519-dalek = { workspace = true }
+ml-kem = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+getrandom = { workspace = true }
 config = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 

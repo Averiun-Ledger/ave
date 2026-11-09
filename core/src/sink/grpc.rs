@@ -20,10 +20,11 @@ use tonic::{Code, Request, Status};
 
 use crate::metrics::try_core_metrics;
 use crate::sink::delivery::{
-    DeliveryMeta, SignatureHeaders, StaticAuth, generate_request_id,
-    is_sink_reserved_header, load_required_secret, resolve_static_auth,
-    serialize_json_payload, sign_delivery, sink_password_env_var,
-    test_delivery_payload, timed_sink_request,
+    DeliveryMeta, ENC_KEY_ID_HEADER, ENC_SUITE_HEADER, EncryptionAttachment,
+    PreparedBody, SignatureHeaders, StaticAuth, generate_request_id,
+    is_sink_reserved_header, load_required_secret, prepare_body,
+    resolve_static_auth, serialize_json_payload, sign_delivery,
+    sink_password_env_var, test_delivery_payload, timed_sink_request,
 };
 use crate::sink::error::SinkError;
 use crate::sink::read_tls_file;
@@ -209,29 +210,67 @@ impl GrpcTransport {
 
     /// Sign the delivery body with the node identity when configured.
     /// gRPC signs the canonical v2 payload only (there is no legacy v1; see
-    /// the MVP plan), mirroring the HTTP sink byte for byte.
+    /// the MVP plan), mirroring the HTTP sink byte for byte. Encrypted
+    /// envelopes never bind `content-encoding`: transport compression is
+    /// rejected with encryption in `validate()`, and a misconfigured
+    /// programmatic config must still sign the exact wire bytes.
     async fn sign_payload(
         &self,
         payload: &[u8],
         meta: Option<&DeliveryMeta>,
     ) -> Result<Option<SignatureHeaders>, SinkError> {
-        let extra: &[(&str, &str)] =
-            match self.config.compression.content_encoding() {
-                Some(encoding) => &[("content-encoding", encoding)],
-                None => &[],
-            };
+        let content_encoding = self
+            .config
+            .encryption
+            .as_ref()
+            .is_none_or(|encryption| !encryption.enabled)
+            .then(|| self.config.compression.content_encoding())
+            .flatten();
+        let extra: &[(&str, &str)] = match content_encoding {
+            Some(encoding) => &[("content-encoding", encoding)],
+            None => &[],
+        };
         sign_delivery(self.signer.as_ref(), payload, 2, extra, meta).await
     }
 
     /// Attach authentication and user metadata to an outgoing RPC. With
     /// OAuth2 the cached token is used (refreshing it when expired).
+    /// `encryption` adds the `x-ave-enc-*` hint headers (public key id and
+    /// suite); the envelope itself stays authoritative for receivers.
     async fn apply_metadata<T>(
         &self,
         request: &mut Request<T>,
+        encryption: Option<&EncryptionAttachment>,
     ) -> Result<(), SinkError> {
         let metadata = request.metadata_mut();
         for (key, value) in &self.custom_metadata {
             metadata.insert(key.clone(), value.clone());
+        }
+        if let Some(attachment) = encryption {
+            metadata.insert(
+                ENC_KEY_ID_HEADER,
+                MetadataValue::try_from(&attachment.key_id).map_err(|e| {
+                    SinkError::Delivery {
+                        message: format!(
+                            "sink metadata has invalid enc key id: {e}"
+                        ),
+                        retryable: false,
+                        retry_after_ms: None,
+                    }
+                })?,
+            );
+            metadata.insert(
+                ENC_SUITE_HEADER,
+                MetadataValue::try_from(attachment.suite).map_err(|e| {
+                    SinkError::Delivery {
+                        message: format!(
+                            "sink metadata has invalid enc suite: {e}"
+                        ),
+                        retryable: false,
+                        retry_after_ms: None,
+                    }
+                })?,
+            );
         }
         if let Some(auth) = &self.auth {
             let (key, value) = match auth {
@@ -248,6 +287,20 @@ impl GrpcTransport {
             metadata.insert(key, value);
         }
         Ok(())
+    }
+
+    /// Encryption hint for stream-level metadata, from the current config
+    /// key. The envelope stays authoritative: a rotation between stream
+    /// opens only lags the hint until the stream reopens.
+    fn current_encryption_attachment(&self) -> Option<EncryptionAttachment> {
+        let config = self.config.encryption.as_ref()?;
+        if !config.enabled {
+            return None;
+        }
+        Some(EncryptionAttachment {
+            key_id: config.current_key_id.clone(),
+            suite: crate::sink::encrypt::SUITE_ID,
+        })
     }
 
     /// Resolve a valid OAuth2 access token through the shared cache (the
@@ -304,18 +357,25 @@ impl GrpcTransport {
     /// with jitter between attempts, permanent errors abort immediately.
     async fn deliver_with_retry(
         &self,
-        payload: Vec<u8>,
+        prepared: PreparedBody,
         meta: Option<pb::EventMeta>,
         sign_meta: Option<&DeliveryMeta>,
     ) -> Result<(), SinkError> {
-        let body = self.build_signed_payload(payload, sign_meta).await?;
+        let PreparedBody { bytes, encryption } = prepared;
+        let body = self.build_signed_payload(bytes, sign_meta).await?;
 
         crate::sink::deliver_with_retries(
             &self.sink_name,
             self.config.max_retries,
             self.config.retry_base_delay_ms,
             self.config.retry_max_delay_ms,
-            || self.deliver_once(body.clone(), meta.clone()),
+            || {
+                self.deliver_once(
+                    body.clone(),
+                    meta.clone(),
+                    encryption.clone(),
+                )
+            },
             || async {
                 // Auth error on the first attempt with OAuth2: drop the
                 // stale token (and the stream, which carries it) and retry
@@ -337,6 +397,7 @@ impl GrpcTransport {
         &self,
         body: pb::SignedPayload,
         meta: Option<pb::EventMeta>,
+        encryption: Option<EncryptionAttachment>,
     ) -> Result<(), SinkError> {
         let request_id = generate_request_id();
         if !self.unary_only.load(Ordering::Acquire) {
@@ -350,7 +411,8 @@ impl GrpcTransport {
                 Err(StreamFailure::Delivery(e)) => return Err(e),
             }
         }
-        self.deliver_unary(request_id, body, meta).await
+        self.deliver_unary(request_id, body, meta, encryption.as_ref())
+            .await
     }
 
     /// One unary `Deliver` RPC attempt (MVP contract and fallback for
@@ -360,6 +422,7 @@ impl GrpcTransport {
         request_id: String,
         body: pb::SignedPayload,
         meta: Option<pb::EventMeta>,
+        encryption: Option<&EncryptionAttachment>,
     ) -> Result<(), SinkError> {
         let mut client = self.client.clone();
         timed_sink_request(&self.sink_name, || async {
@@ -369,7 +432,7 @@ impl GrpcTransport {
                 body: Some(body),
             });
             request.set_timeout(self.request_timeout());
-            self.apply_metadata(&mut request).await?;
+            self.apply_metadata(&mut request, encryption).await?;
             client
                 .deliver(request)
                 .await
@@ -516,7 +579,8 @@ impl GrpcTransport {
 
         let (tx, rx) = mpsc::channel(self.config.max_in_flight_batches.max(1));
         let mut request = Request::new(ReceiverStream::new(rx));
-        self.apply_metadata(&mut request)
+        let stream_encryption = self.current_encryption_attachment();
+        self.apply_metadata(&mut request, stream_encryption.as_ref())
             .await
             .map_err(StreamFailure::Delivery)?;
         // Bound only the stream establishment (the await resolves when the
@@ -598,7 +662,7 @@ impl GrpcTransport {
             service: HEALTH_SERVICE_NAME.to_owned(),
         });
         request.set_timeout(self.request_timeout());
-        self.apply_metadata(&mut request).await?;
+        self.apply_metadata(&mut request, None).await?;
         match client.check(request).await {
             Ok(response) => {
                 match response.into_inner().status() {
@@ -632,7 +696,7 @@ impl GrpcTransport {
                 body: Some(body),
             });
             request.set_timeout(self.request_timeout());
-            self.apply_metadata(&mut request).await?;
+            self.apply_metadata(&mut request, None).await?;
             client
                 .test(request)
                 .await
@@ -650,7 +714,11 @@ impl SinkTransport for GrpcTransport {
         let governance_id =
             data.payload.get_governance_id().unwrap_or_default();
         let meta = DeliveryMeta::from_data(&data);
-        let payload = serialize_json_payload(data.as_ref())?;
+        let prepared = prepare_body(
+            data.as_ref(),
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
         let pb_meta = pb::EventMeta {
             subject_id,
             sn: meta.sn,
@@ -660,13 +728,17 @@ impl SinkTransport for GrpcTransport {
             idempotency_key: meta.idempotency_key(),
             light: false,
         };
-        self.deliver_with_retry(payload, Some(pb_meta), Some(&meta))
+        self.deliver_with_retry(prepared, Some(pb_meta), Some(&meta))
             .await
     }
 
     async fn send_light(&self, light: LightEvent) -> Result<(), SinkError> {
         let meta = DeliveryMeta::from_light(&light);
-        let payload = serialize_json_payload(&light)?;
+        let prepared = prepare_body(
+            &light,
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
         let pb_meta = pb::EventMeta {
             subject_id: light.subject_id.clone(),
             sn: meta.sn,
@@ -676,7 +748,7 @@ impl SinkTransport for GrpcTransport {
             idempotency_key: meta.idempotency_key(),
             light: true,
         };
-        self.deliver_with_retry(payload, Some(pb_meta), Some(&meta))
+        self.deliver_with_retry(prepared, Some(pb_meta), Some(&meta))
             .await
     }
 
@@ -686,8 +758,12 @@ impl SinkTransport for GrpcTransport {
     ) -> Result<(), SinkError> {
         // Mirror the HTTP sink: one request with a JSON array payload and no
         // per-event metadata (the array elements carry subject/sn/type).
-        let payload = serialize_json_payload(&events)?;
-        self.deliver_with_retry(payload, None, None).await
+        let prepared = prepare_body(
+            &events,
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
+        self.deliver_with_retry(prepared, None, None).await
     }
 
     async fn health_check(&self) -> Result<(), SinkError> {
@@ -760,9 +836,14 @@ impl SinkTransport for GrpcTransport {
         // guarantees re-delivery via catch-up. When the worker stops, the
         // transport is dropped and the stream half-closes naturally, letting
         // the server drain the in-flight messages.
-        let payload = serialize_json_payload(&events)?;
-        let body = self.build_signed_payload(payload, None).await?;
-        self.deliver_once(body, None).await
+        let prepared = prepare_body(
+            &events,
+            &self.sink_name,
+            self.config.encryption.as_ref(),
+        )?;
+        let PreparedBody { bytes, encryption } = prepared;
+        let body = self.build_signed_payload(bytes, None).await?;
+        self.deliver_once(body, None, encryption).await
     }
 }
 

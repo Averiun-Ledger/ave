@@ -57,6 +57,8 @@ mod tests {
 
     use crate::{config::Config as BridgeConfig, settings::build_config};
 
+    const ENCRYPTION_FIXTURE_KEY: &str = "X:13KBi99Z7B8pkDanwHR7wy4UcX1Tlz74C8-Jw3d0kWNYOMAefDxvKG27DJ7mgSyojDQ0uMkoVk-9SV1m0E2fB4j9WZS3gWcX5X8SZlF1BEA2QkYNWJvwBATIqYGKwibtY8hz2gdKNhc1BByrRFazp1NAYI_0on15EcI9tBAJIUxle23Q0ogOyra3HB7MtCG4S3Nm1ZpRw38hUAWnGcm8ZkpyGXWphhlweX5q1qwRykoq4CbRwqtbO00N6U-1wgduGomPVk1PmCrNJMO58WskJmODB8Xyuq_GIiIHKrE3Kxl6FCaFDK7o1J6VJpu7A8aqapmEOonytFx3sz50hlQeB7TA7EW7gImQCl_TFLV3knMlMJEhRTTlYjuiA3EqEC2zkyue10wXBU59qiHyGTLLomX4gAgkuwZMFlD19VYDfDCb2Z-95knCLAK_CCzdWVPKppFIA2gAYKjt9TisUpTS1sVWh3Q1ZTjoyZHLYlzpBQ8-lIYTWrfA-ck6ZqwPTLKDp7g-lkv13CN6SUESeaRFbJCOlyZvbHHzXK291WAtI04U06JhCMLk00mB8Jui8jtVOymsAApx0JEGEUspURfqajVuzFYzEi_Bikxu0AhylGEBeQRXN0TPcZPDZ2x0RQ09sCTuWBZwhTfV9HBoN3LrKHoiFpt8tsdZE7a4e1KMAr4SK7U_WyCcEVT8YQxR8nv_yjWkYEzaGCBJur4guD-26HRMTLrpyosqCIUBsKG9tZhO1H1QeLDFYwt_uK2pGi9m45H6C2a9oH1RImFfkizQckp_aw6VHELIV4i_U3jCGgmC0VriOwRKTIk9oatlVswAe0wM7JsGUbm2d3UYhKXXYWQi85_Rq5m1dWvhcE1HQkagwi22F7QKSo8GIDy5VIGAszvwIc2sBxekUVKJVjnhUY1j6CIQ97HjEy7uyEJJlLirYUtUEVJeoHV1_Gg4Qx3uciW6V8-e_AxiVoxrNsOw53kqxTkHArUx82OoQEwAIBnHaxQleE00og3CaR2dDJDj0jtdERBYJCx8Kj5LWBisJ8CMSwEikzbr2jxzRgj_LD3xk0wftBrQEUGvWxQ_iasJwlxWRhGTG7g2pH6waUUAsyvwXBhjhbKgpTIiUYvxeLTHeDclZXpiCxa9qGhFEU1X8EeHJmAL4HXmc5x8KDx2jFTH66fQFquLs0n708AmzLfLFZT1EUKeVp5O4rABMw5RZgvN-zTv2chZtSCp9SUC2nH3OcpuJoRQOLqF7BLg-KRPdGo_B1h-AYDSzEr-I476oMLLjHK72ynEpVVMFMA6M4y4Gm0UZjeb3II3Zb0bRxE-GU1m0BWNsKOaM1ASq0e3cM55aQjleL6QNFQEq85LGS8guGlOa4tatImFQFfRISbRiqh9q6j3FQ-82irSUyaj8krokDJOWD54mXFox3DwQXM4OLUeVzR4RHt71SfOci1lDMgzgh2EB0LZe1xk60xG0DkyE2JczEcaBIRgkSHJt2b1O4CrNZ8Ip4To-CKFoau1xQ9Y-6-oMcvB-yaphF1TkBRcDE1gQLNkaoi4wcfIyQvydnIqJ22Ru0HZ2bsQ-TI_bWVbPr1UUDkdSa-iPPsOaxfWJETBl7FkmySJWhILTg";
+
     const FULL_TOML: &str = r#"
 keys_path = "/custom/keys"
 
@@ -154,6 +156,14 @@ auth = { type = "oauth2", auth_url = "https://auth.service", username = "sink-us
 connect_timeout_ms = 5000
 request_timeout_ms = 30000
 max_retries = 5
+
+[sinks.servers.transport.encryption]
+enabled = true
+current_key_id = "v1"
+
+[[sinks.servers.transport.encryption.keys]]
+key_id = "v1"
+public_key = "X:13KBi99Z7B8pkDanwHR7wy4UcX1Tlz74C8-Jw3d0kWNYOMAefDxvKG27DJ7mgSyojDQ0uMkoVk-9SV1m0E2fB4j9WZS3gWcX5X8SZlF1BEA2QkYNWJvwBATIqYGKwibtY8hz2gdKNhc1BByrRFazp1NAYI_0on15EcI9tBAJIUxle23Q0ogOyra3HB7MtCG4S3Nm1ZpRw38hUAWnGcm8ZkpyGXWphhlweX5q1qwRykoq4CbRwqtbO00N6U-1wgduGomPVk1PmCrNJMO58WskJmODB8Xyuq_GIiIHKrE3Kxl6FCaFDK7o1J6VJpu7A8aqapmEOonytFx3sz50hlQeB7TA7EW7gImQCl_TFLV3knMlMJEhRTTlYjuiA3EqEC2zkyue10wXBU59qiHyGTLLomX4gAgkuwZMFlD19VYDfDCb2Z-95knCLAK_CCzdWVPKppFIA2gAYKjt9TisUpTS1sVWh3Q1ZTjoyZHLYlzpBQ8-lIYTWrfA-ck6ZqwPTLKDp7g-lkv13CN6SUESeaRFbJCOlyZvbHHzXK291WAtI04U06JhCMLk00mB8Jui8jtVOymsAApx0JEGEUspURfqajVuzFYzEi_Bikxu0AhylGEBeQRXN0TPcZPDZ2x0RQ09sCTuWBZwhTfV9HBoN3LrKHoiFpt8tsdZE7a4e1KMAr4SK7U_WyCcEVT8YQxR8nv_yjWkYEzaGCBJur4guD-26HRMTLrpyosqCIUBsKG9tZhO1H1QeLDFYwt_uK2pGi9m45H6C2a9oH1RImFfkizQckp_aw6VHELIV4i_U3jCGgmC0VriOwRKTIk9oatlVswAe0wM7JsGUbm2d3UYhKXXYWQi85_Rq5m1dWvhcE1HQkagwi22F7QKSo8GIDy5VIGAszvwIc2sBxekUVKJVjnhUY1j6CIQ97HjEy7uyEJJlLirYUtUEVJeoHV1_Gg4Qx3uciW6V8-e_AxiVoxrNsOw53kqxTkHArUx82OoQEwAIBnHaxQleE00og3CaR2dDJDj0jtdERBYJCx8Kj5LWBisJ8CMSwEikzbr2jxzRgj_LD3xk0wftBrQEUGvWxQ_iasJwlxWRhGTG7g2pH6waUUAsyvwXBhjhbKgpTIiUYvxeLTHeDclZXpiCxa9qGhFEU1X8EeHJmAL4HXmc5x8KDx2jFTH66fQFquLs0n708AmzLfLFZT1EUKeVp5O4rABMw5RZgvN-zTv2chZtSCp9SUC2nH3OcpuJoRQOLqF7BLg-KRPdGo_B1h-AYDSzEr-I476oMLLjHK72ynEpVVMFMA6M4y4Gm0UZjeb3II3Zb0bRxE-GU1m0BWNsKOaM1ASq0e3cM55aQjleL6QNFQEq85LGS8guGlOa4tatImFQFfRISbRiqh9q6j3FQ-82irSUyaj8krokDJOWD54mXFox3DwQXM4OLUeVzR4RHt71SfOci1lDMgzgh2EB0LZe1xk60xG0DkyE2JczEcaBIRgkSHJt2b1O4CrNZ8Ip4To-CKFoau1xQ9Y-6-oMcvB-yaphF1TkBRcDE1gQLNkaoi4wcfIyQvydnIqJ22Ru0HZ2bsQ-TI_bWVbPr1UUDkdSa-iPPsOaxfWJETBl7FkmySJWhILTg"
 
 [[sinks.servers]]
 server = "SinkTwo"
@@ -322,6 +332,12 @@ sinks:
           connect_timeout_ms: 5000
           request_timeout_ms: 30000
           max_retries: 5
+          encryption:
+            enabled: true
+            current_key_id: v1
+            keys:
+              - key_id: v1
+                public_key: "X:13KBi99Z7B8pkDanwHR7wy4UcX1Tlz74C8-Jw3d0kWNYOMAefDxvKG27DJ7mgSyojDQ0uMkoVk-9SV1m0E2fB4j9WZS3gWcX5X8SZlF1BEA2QkYNWJvwBATIqYGKwibtY8hz2gdKNhc1BByrRFazp1NAYI_0on15EcI9tBAJIUxle23Q0ogOyra3HB7MtCG4S3Nm1ZpRw38hUAWnGcm8ZkpyGXWphhlweX5q1qwRykoq4CbRwqtbO00N6U-1wgduGomPVk1PmCrNJMO58WskJmODB8Xyuq_GIiIHKrE3Kxl6FCaFDK7o1J6VJpu7A8aqapmEOonytFx3sz50hlQeB7TA7EW7gImQCl_TFLV3knMlMJEhRTTlYjuiA3EqEC2zkyue10wXBU59qiHyGTLLomX4gAgkuwZMFlD19VYDfDCb2Z-95knCLAK_CCzdWVPKppFIA2gAYKjt9TisUpTS1sVWh3Q1ZTjoyZHLYlzpBQ8-lIYTWrfA-ck6ZqwPTLKDp7g-lkv13CN6SUESeaRFbJCOlyZvbHHzXK291WAtI04U06JhCMLk00mB8Jui8jtVOymsAApx0JEGEUspURfqajVuzFYzEi_Bikxu0AhylGEBeQRXN0TPcZPDZ2x0RQ09sCTuWBZwhTfV9HBoN3LrKHoiFpt8tsdZE7a4e1KMAr4SK7U_WyCcEVT8YQxR8nv_yjWkYEzaGCBJur4guD-26HRMTLrpyosqCIUBsKG9tZhO1H1QeLDFYwt_uK2pGi9m45H6C2a9oH1RImFfkizQckp_aw6VHELIV4i_U3jCGgmC0VriOwRKTIk9oatlVswAe0wM7JsGUbm2d3UYhKXXYWQi85_Rq5m1dWvhcE1HQkagwi22F7QKSo8GIDy5VIGAszvwIc2sBxekUVKJVjnhUY1j6CIQ97HjEy7uyEJJlLirYUtUEVJeoHV1_Gg4Qx3uciW6V8-e_AxiVoxrNsOw53kqxTkHArUx82OoQEwAIBnHaxQleE00og3CaR2dDJDj0jtdERBYJCx8Kj5LWBisJ8CMSwEikzbr2jxzRgj_LD3xk0wftBrQEUGvWxQ_iasJwlxWRhGTG7g2pH6waUUAsyvwXBhjhbKgpTIiUYvxeLTHeDclZXpiCxa9qGhFEU1X8EeHJmAL4HXmc5x8KDx2jFTH66fQFquLs0n708AmzLfLFZT1EUKeVp5O4rABMw5RZgvN-zTv2chZtSCp9SUC2nH3OcpuJoRQOLqF7BLg-KRPdGo_B1h-AYDSzEr-I476oMLLjHK72ynEpVVMFMA6M4y4Gm0UZjeb3II3Zb0bRxE-GU1m0BWNsKOaM1ASq0e3cM55aQjleL6QNFQEq85LGS8guGlOa4tatImFQFfRISbRiqh9q6j3FQ-82irSUyaj8krokDJOWD54mXFox3DwQXM4OLUeVzR4RHt71SfOci1lDMgzgh2EB0LZe1xk60xG0DkyE2JczEcaBIRgkSHJt2b1O4CrNZ8Ip4To-CKFoau1xQ9Y-6-oMcvB-yaphF1TkBRcDE1gQLNkaoi4wcfIyQvydnIqJ22Ru0HZ2bsQ-TI_bWVbPr1UUDkdSa-iPPsOaxfWJETBl7FkmySJWhILTg"
       - server: SinkTwo
         events: [transfer]
         transport:
@@ -504,7 +520,12 @@ http:
             "connect_timeout_ms": 5000,
             "request_timeout_ms": 30000,
             "max_retries": 5
-          }
+,
+            "encryption": {
+              "enabled": true,
+              "current_key_id": "v1",
+              "keys": [{ "key_id": "v1", "public_key": "X:13KBi99Z7B8pkDanwHR7wy4UcX1Tlz74C8-Jw3d0kWNYOMAefDxvKG27DJ7mgSyojDQ0uMkoVk-9SV1m0E2fB4j9WZS3gWcX5X8SZlF1BEA2QkYNWJvwBATIqYGKwibtY8hz2gdKNhc1BByrRFazp1NAYI_0on15EcI9tBAJIUxle23Q0ogOyra3HB7MtCG4S3Nm1ZpRw38hUAWnGcm8ZkpyGXWphhlweX5q1qwRykoq4CbRwqtbO00N6U-1wgduGomPVk1PmCrNJMO58WskJmODB8Xyuq_GIiIHKrE3Kxl6FCaFDK7o1J6VJpu7A8aqapmEOonytFx3sz50hlQeB7TA7EW7gImQCl_TFLV3knMlMJEhRTTlYjuiA3EqEC2zkyue10wXBU59qiHyGTLLomX4gAgkuwZMFlD19VYDfDCb2Z-95knCLAK_CCzdWVPKppFIA2gAYKjt9TisUpTS1sVWh3Q1ZTjoyZHLYlzpBQ8-lIYTWrfA-ck6ZqwPTLKDp7g-lkv13CN6SUESeaRFbJCOlyZvbHHzXK291WAtI04U06JhCMLk00mB8Jui8jtVOymsAApx0JEGEUspURfqajVuzFYzEi_Bikxu0AhylGEBeQRXN0TPcZPDZ2x0RQ09sCTuWBZwhTfV9HBoN3LrKHoiFpt8tsdZE7a4e1KMAr4SK7U_WyCcEVT8YQxR8nv_yjWkYEzaGCBJur4guD-26HRMTLrpyosqCIUBsKG9tZhO1H1QeLDFYwt_uK2pGi9m45H6C2a9oH1RImFfkizQckp_aw6VHELIV4i_U3jCGgmC0VriOwRKTIk9oatlVswAe0wM7JsGUbm2d3UYhKXXYWQi85_Rq5m1dWvhcE1HQkagwi22F7QKSo8GIDy5VIGAszvwIc2sBxekUVKJVjnhUY1j6CIQ97HjEy7uyEJJlLirYUtUEVJeoHV1_Gg4Qx3uciW6V8-e_AxiVoxrNsOw53kqxTkHArUx82OoQEwAIBnHaxQleE00og3CaR2dDJDj0jtdERBYJCx8Kj5LWBisJ8CMSwEikzbr2jxzRgj_LD3xk0wftBrQEUGvWxQ_iasJwlxWRhGTG7g2pH6waUUAsyvwXBhjhbKgpTIiUYvxeLTHeDclZXpiCxa9qGhFEU1X8EeHJmAL4HXmc5x8KDx2jFTH66fQFquLs0n708AmzLfLFZT1EUKeVp5O4rABMw5RZgvN-zTv2chZtSCp9SUC2nH3OcpuJoRQOLqF7BLg-KRPdGo_B1h-AYDSzEr-I476oMLLjHK72ynEpVVMFMA6M4y4Gm0UZjeb3II3Zb0bRxE-GU1m0BWNsKOaM1ASq0e3cM55aQjleL6QNFQEq85LGS8guGlOa4tatImFQFfRISbRiqh9q6j3FQ-82irSUyaj8krokDJOWD54mXFox3DwQXM4OLUeVzR4RHt71SfOci1lDMgzgh2EB0LZe1xk60xG0DkyE2JczEcaBIRgkSHJt2b1O4CrNZ8Ip4To-CKFoau1xQ9Y-6-oMcvB-yaphF1TkBRcDE1gQLNkaoi4wcfIyQvydnIqJ22Ru0HZ2bsQ-TI_bWVbPr1UUDkdSa-iPPsOaxfWJETBl7FkmySJWhILTg" }]
+            }          }
         },
         {
           "server": "SinkTwo",
@@ -802,7 +823,10 @@ http:
         assert_eq!(logging.max_files, 5);
         assert_eq!(logging.level, "debug");
 
-        use ave_common::sink::{SinkAuthConfig, SinkAuthMethod};
+        use ave_common::sink::{
+            SinkAuthConfig, SinkAuthMethod, SinkEncryptionConfig,
+            SinkEncryptionKey,
+        };
         let expected_sinks = vec![SinkConfigEntry {
             target: SinkTarget::Schema {
                 schema_id: "primary".to_owned(),
@@ -831,6 +855,15 @@ http:
                             tls: None,
                             signature: false,
                             proxy: None,
+                            encryption: Some(SinkEncryptionConfig {
+                                enabled: true,
+                                current_key_id: "v1".to_owned(),
+                                keys: vec![SinkEncryptionKey {
+                                    key_id: "v1".to_owned(),
+                                    public_key: ENCRYPTION_FIXTURE_KEY
+                                        .to_owned(),
+                                }],
+                            }),
                             retry_max_delay_ms: 30_000,
                             batch_delivery: true,
                             batch_max_delay_ms: 100,

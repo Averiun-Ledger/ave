@@ -989,6 +989,57 @@ impl From<ave_bridge::ave_common::sink::SinkCompression>
     }
 }
 
+/// One versioned recipient of encrypted sink deliveries (public key only,
+/// never a secret).
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
+pub struct SinkEncryptionKeyHttp {
+    /// Key identifier, referenced by `current_key_id` and sent on the wire.
+    pub key_id: String,
+    /// Recipient hybrid public key (`X:` + URL-safe base64, no padding).
+    pub public_key: String,
+}
+
+impl From<ave_bridge::ave_common::sink::SinkEncryptionKey>
+    for SinkEncryptionKeyHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::SinkEncryptionKey) -> Self {
+        let ave_bridge::ave_common::sink::SinkEncryptionKey {
+            key_id,
+            public_key,
+        } = value;
+        Self { key_id, public_key }
+    }
+}
+
+/// Asymmetric payload encryption of sink deliveries (public keys only).
+#[derive(Debug, Serialize, Clone, ToSchema, Deserialize, Default)]
+#[serde(default)]
+pub struct SinkEncryptionConfigHttp {
+    /// Master switch for payload encryption.
+    pub enabled: bool,
+    /// Key used for new deliveries.
+    pub current_key_id: String,
+    /// Versioned recipient keys.
+    pub keys: Vec<SinkEncryptionKeyHttp>,
+}
+
+impl From<ave_bridge::ave_common::sink::SinkEncryptionConfig>
+    for SinkEncryptionConfigHttp
+{
+    fn from(value: ave_bridge::ave_common::sink::SinkEncryptionConfig) -> Self {
+        let ave_bridge::ave_common::sink::SinkEncryptionConfig {
+            enabled,
+            current_key_id,
+            keys,
+        } = value;
+        Self {
+            enabled,
+            current_key_id,
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
 #[serde(default)]
 pub struct HttpSinkConfigHttp {
@@ -1040,6 +1091,8 @@ pub struct HttpSinkConfigHttp {
     /// Internal sink headers (Authorization, X-Ave-*, etc.) take precedence.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// Optional asymmetric payload encryption (public keys only).
+    pub encryption: Option<SinkEncryptionConfigHttp>,
 }
 
 impl Default for HttpSinkConfigHttp {
@@ -1067,6 +1120,7 @@ impl Default for HttpSinkConfigHttp {
             pool_max_idle_per_host: 4,
             max_redirects: 0,
             headers: std::collections::HashMap::new(),
+            encryption: None,
         }
     }
 }
@@ -1326,6 +1380,8 @@ pub struct KafkaSinkConfigHttp {
     /// Kerberos configuration used with the `GSSAPI` SASL mechanism.
     #[serde(default)]
     pub kerberos: Option<KafkaKerberosConfigHttp>,
+    /// Optional asymmetric payload encryption (public keys only).
+    pub encryption: Option<SinkEncryptionConfigHttp>,
 }
 
 #[derive(Debug, Default, Serialize, Clone, ToSchema, Deserialize)]
@@ -1384,6 +1440,8 @@ pub struct GrpcSinkConfigHttp {
     pub http2_keepalive_interval_secs: u64,
     /// Time without a PING ack after which the connection is declared dead.
     pub http2_keepalive_timeout_secs: u64,
+    /// Optional asymmetric payload encryption (public keys only).
+    pub encryption: Option<SinkEncryptionConfigHttp>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema, Deserialize)]
@@ -1502,6 +1560,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     pool_idle_timeout_secs,
                     pool_max_idle_per_host,
                     max_redirects,
+                    encryption,
                 } = *http;
                 SinkTransportConfigHttp::Http(Box::new(HttpSinkConfigHttp {
                     url,
@@ -1552,6 +1611,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     pool_max_idle_per_host,
                     max_redirects,
                     headers: redact_sensitive_headers(headers),
+                    encryption: encryption.map(Into::into),
                 }))
             }
             ave_bridge::SinkTransportConfig::Kafka(kafka) => {
@@ -1587,6 +1647,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     oauth_token_url,
                     oauth_scope,
                     kerberos,
+                    encryption,
                 } = *kafka;
                 SinkTransportConfigHttp::Kafka(Box::new(KafkaSinkConfigHttp {
                     bootstrap_servers,
@@ -1631,6 +1692,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     oauth_token_url,
                     oauth_scope,
                     kerberos: kerberos.map(Into::into),
+                    encryption: encryption.map(Into::into),
                 }))
             }
             ave_bridge::SinkTransportConfig::Grpc(grpc) => {
@@ -1655,6 +1717,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     tcp_keepalive_secs,
                     http2_keepalive_interval_secs,
                     http2_keepalive_timeout_secs,
+                    encryption,
                 } = *grpc;
                 SinkTransportConfigHttp::Grpc(Box::new(GrpcSinkConfigHttp {
                     endpoint,
@@ -1688,6 +1751,7 @@ impl From<ave_bridge::SinkServer> for SinkServerHttp {
                     tcp_keepalive_secs,
                     http2_keepalive_interval_secs,
                     http2_keepalive_timeout_secs,
+                    encryption: encryption.map(Into::into),
                 }))
             }
         };

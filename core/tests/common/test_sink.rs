@@ -251,6 +251,32 @@ pub struct TestSink {
     cancel: CancellationToken,
 }
 
+/// Whether `body` is the shared non-persistent sink test probe
+/// (`{"test": true}`): a compliant receiver accepts it with 200 without
+/// treating it as an event.
+fn is_test_probe(body: &[u8]) -> bool {
+    body == br#"{"test":true}"#
+}
+
+/// Whether `body` is an encrypted sink envelope (HPKE hybrid): an object
+/// carrying the envelope fields instead of event fields. Used to accept
+/// encrypted deliveries with 200 while keeping strict 400s for garbage.
+fn is_encrypted_envelope(body: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_slice::<serde_json::Value>(body)
+    else {
+        return false;
+    };
+    let get_str = |key: &str| {
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+    };
+    !get_str("suite").is_empty()
+        && !get_str("key_id").is_empty()
+        && !get_str("ciphertext").is_empty()
+}
+
 impl TestSink {
     fn new_state() -> Arc<Mutex<TestSinkState>> {
         Arc::new(Mutex::new(TestSinkState {
@@ -686,8 +712,11 @@ impl TestSink {
             _ => &body,
         };
 
-        // A delivery is either a single event object or a JSON array of
-        // events (batch delivery).
+        // A delivery is either a single event object, a JSON array of
+        // events (batch delivery), or an encrypted envelope (HPKE hybrid):
+        // envelopes are opaque to this sink (a real encrypted receiver
+        // decrypts offline), so they are accepted without parsed events
+        // and asserted through `raw_bodies` plus the `x-ave-enc-*` headers.
         let received_events: Vec<IncomingSinkEvent> =
             match serde_json::from_slice::<Vec<IncomingSinkEvent>>(json_bytes) {
                 Ok(events) => events,
@@ -696,6 +725,12 @@ impl TestSink {
                         json_bytes,
                     ) {
                         Ok(event) => vec![event],
+                        Err(_)
+                            if is_test_probe(json_bytes)
+                                || is_encrypted_envelope(json_bytes) =>
+                        {
+                            Vec::new()
+                        }
                         Err(e) => {
                             return (
                                 StatusCode::BAD_REQUEST,
