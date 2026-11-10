@@ -10,7 +10,9 @@ use ave_common::identity::DigestIdentifier;
 use ave_common::request::EventRequest;
 use tracing::{debug, warn};
 
-use super::{TransferData, WitnessesRegister};
+use super::{
+    OwnershipStint, OwnershipStintOutcome, TransferData, WitnessesRegister,
+};
 
 impl WitnessesRegister {
     pub(crate) fn transfer_data_from_ledger(
@@ -39,6 +41,7 @@ impl WitnessesRegister {
             sn: first_ledger.sn,
             gov_version: first_ledger.gov_version,
             old_owners: HashMap::new(),
+            ownership_transitions: Vec::new(),
             visibility_state: TrackerVisibilityState::default(),
         };
         data.visibility_state.record_event(
@@ -89,6 +92,17 @@ impl WitnessesRegister {
                             hi: event.gov_version,
                         });
 
+                        // Mirrors the live path: no tracker event can
+                        // commit between Transfer and Confirm while a new
+                        // owner is pending, so the transfer is the
+                        // immediately preceding SN.
+                        data.ownership_transitions.push(OwnershipStint {
+                            owner: data.actual_owner.clone(),
+                            incoming_transfer_sn: event.sn.saturating_sub(1),
+                            exit_sn: event.sn,
+                            outcome: OwnershipStintOutcome::Confirmed,
+                        });
+
                         data.actual_owner = new_owner;
                         data.gov_version = new_owner_gov_version;
                     } else {
@@ -104,12 +118,24 @@ impl WitnessesRegister {
                     if let Some((new_owner, new_owner_gov_version)) =
                         data.actual_new_owner_data.take()
                     {
-                        let entry =
-                            data.old_owners.entry(new_owner).or_default();
+                        let entry = data
+                            .old_owners
+                            .entry(new_owner.clone())
+                            .or_default();
                         entry.sn = event.sn;
                         entry.interval_gov_version.insert(Interval {
                             lo: new_owner_gov_version,
                             hi: event.gov_version,
+                        });
+
+                        // Mirrors the live path: the rejected proposal is
+                        // logged so the rejected node can copy, marked as
+                        // rejected so it never links another owner's chain.
+                        data.ownership_transitions.push(OwnershipStint {
+                            owner: new_owner,
+                            incoming_transfer_sn: event.sn.saturating_sub(1),
+                            exit_sn: event.sn,
+                            outcome: OwnershipStintOutcome::Rejected,
                         });
                     } else {
                         warn!(

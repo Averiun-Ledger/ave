@@ -137,6 +137,11 @@ pub struct CreateNodesAndConnectionsConfig {
     /// Uniform toolchain map for every node; per-node differences need
     /// `create_node` directly.
     pub toolchains: Option<std::collections::BTreeMap<String, String>>,
+    /// Explicit tracker sync timing; `None` uses the default test
+    /// values. Tests that assert per-event visibility pin the serving
+    /// projection to explicit updates: a background tick racing a
+    /// mid-transition copy can apply a stale projection first.
+    pub tracker_sync: Option<TrackerSyncConfig>,
 }
 
 #[derive(Default)]
@@ -342,6 +347,7 @@ pub async fn create_nodes_and_connections(
         only_clear_events,
         ledger_batch_size,
         toolchains,
+        tracker_sync,
     } = config;
 
     let mut nodes: Vec<NodeData> = Vec::new();
@@ -373,6 +379,7 @@ pub async fn create_nodes_and_connections(
             only_clear_events,
             ledger_batch_size,
             toolchains: toolchains.clone(),
+            tracker_sync: tracker_sync.clone(),
             ..Default::default()
         })
         .await;
@@ -403,6 +410,7 @@ pub async fn create_nodes_and_connections(
             only_clear_events,
             ledger_batch_size,
             toolchains: toolchains.clone(),
+            tracker_sync: tracker_sync.clone(),
             ..Default::default()
         })
         .await;
@@ -433,6 +441,7 @@ pub async fn create_nodes_and_connections(
             only_clear_events,
             ledger_batch_size,
             toolchains: toolchains.clone(),
+            tracker_sync: tracker_sync.clone(),
             ..Default::default()
         })
         .await;

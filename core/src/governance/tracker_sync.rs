@@ -445,6 +445,12 @@ impl TrackerSync {
                 .await
                 .ok()
                 .flatten()
+                // Only reuse a verification attributed to this exact peer:
+                // the receiver drops any transfer proof from another
+                // sender, so advertising it would make the sender omit the
+                // transfer event the receiver still needs (same filter as
+                // request_ledger_from_sender and Update).
+                .filter(|(_, verified_sender)| verified_sender == peer)
                 .map(|(sn, _)| sn);
 
         let message = ActorMessage::DistributionLedgerReq {

@@ -37,12 +37,14 @@ impl SnRegister {
         subject_id: &DigestIdentifier,
         gov_version: u64,
     ) -> SnLimit {
-        if let Some(gov_version_register) = self.register.get(subject_id)
-            && let Some(last) = gov_version_register.last()
-        {
-            if gov_version > *last.0 {
-                SnLimit::LastSn
-            } else if let Some(sn) =
+        if let Some(gov_version_register) = self.register.get(subject_id) {
+            // Serve the mapped prefix only: the previous mapped SN at or
+            // below the requested version. A version newer than anything
+            // recorded resolves to the last mapped SN instead of the tip
+            // (the map may lag behind the ledger: independent tells, no
+            // barrier, and claiming tip coverage would invent
+            // authorization). Callers retry once the register catches up.
+            if let Some(sn) =
                 gov_version_register.get_prev_or_equal(gov_version)
             {
                 SnLimit::Sn(sn)
@@ -268,7 +270,6 @@ impl Handler<Self> for SnRegister {
 
                 if let Some(register) = self.register.get(&subject_id) {
                     let mut prev_end_sn: Option<u64> = None;
-                    let mut last_gov_version = None;
 
                     for (gov_version, end_sn) in register.iter() {
                         let start_sn = prev_end_sn
@@ -284,7 +285,6 @@ impl Handler<Self> for SnRegister {
                             });
                         }
 
-                        last_gov_version = Some(*gov_version);
                         if *end_sn >= to_sn {
                             break;
                         }
@@ -292,25 +292,10 @@ impl Handler<Self> for SnRegister {
                         prev_end_sn = Some(*end_sn);
                     }
 
-                    // No newer gov version recorded: later sns share
-                    // the last one, so extend the window to the
-                    // requested tip instead of leaving a gap.
-                    if let Some(gov_version) = last_gov_version {
-                        let covered_to = ranges.last().map(|r| r.to_sn);
-                        let extend_from = covered_to
-                            .map_or(from_sn, |covered| {
-                                covered.saturating_add(1).max(from_sn)
-                            });
-                        if extend_from <= to_sn
-                            && covered_to.is_none_or(|c| c < to_sn)
-                        {
-                            ranges.push(SnGovVersionRange {
-                                from_sn: extend_from,
-                                to_sn,
-                                gov_version,
-                            });
-                        }
-                    }
+                    // Deliberately no tail extension: a gov version with
+                    // no recorded SNs proves nothing about the suffix.
+                    // Callers cap their window at the last covered SN and
+                    // retry once the register catches up.
                 }
 
                 Ok(SnRegisterResponse::GovVersionWindow(ranges))

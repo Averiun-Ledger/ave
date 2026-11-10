@@ -244,6 +244,7 @@ impl Update {
     async fn already_verified_transfer_sn(
         &self,
         ctx: &mut ActorContext<Self>,
+        peer: &PublicKey,
     ) -> Option<u64> {
         let data = get_subject_data(ctx, &self.subject_id)
             .await
@@ -253,10 +254,15 @@ impl Update {
             SubjectData::Tracker { governance_id, .. } => governance_id,
             SubjectData::Governance { .. } => self.subject_id.clone(),
         };
+        // Only reuse a verification attributed to this exact peer: the
+        // receiver drops any transfer proof from another sender, so
+        // advertising it would make the sender omit the transfer event
+        // the receiver still needs (same filter as request_ledger_from_sender).
         get_verified_transfer_sn(ctx, &governance_id, &self.subject_id)
             .await
             .ok()
             .flatten()
+            .filter(|(_, verified_sender)| verified_sender == peer)
             .map(|(sn, _)| sn)
     }
 
@@ -299,7 +305,8 @@ impl Update {
                 return Ok(UpdateStartMode::Direct);
             };
 
-            let verified_sn = self.already_verified_transfer_sn(ctx).await;
+            let verified_sn =
+                self.already_verified_transfer_sn(ctx, &witness).await;
             self.request_distribution(witness.clone(), None, verified_sn)
                 .await?;
             return Ok(UpdateStartMode::Direct);
@@ -591,8 +598,9 @@ impl Handler<Self> for Update {
                                 .max()
                                 .unwrap_or(target_sn);
 
-                            let verified_sn =
-                                self.already_verified_transfer_sn(ctx).await;
+                            let verified_sn = self
+                                .already_verified_transfer_sn(ctx, &better_node)
+                                .await;
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),

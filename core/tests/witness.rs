@@ -6,7 +6,7 @@ use ave_core::auth::AuthWitness;
 use common::{
     EXAMPLE_CONTRACT, create_and_authorize_governance,
     create_nodes_and_connections, create_subject, emit_confirm, emit_fact,
-    emit_reject, emit_transfer, get_subject,
+    emit_reject, emit_transfer, get_events, get_subject,
 };
 
 use ave_core::{
@@ -8632,4 +8632,959 @@ async fn test_distribution_pushed_create_without_request() {
             .is_err(),
         "unprompted push must not create a tracker"
     );
+}
+
+// T-B: auxiliary-transfer provenance (F5) + direct-right floor (F4).
+//
+// s1 (A->B, single transfer): N is B's explicit witness through a
+// grant closed right after the transfer era. N's first copy runs
+// with batch size 1, so the Create batch must carry the installing
+// transfer as auxiliary, attributed to B. Without that provenance
+// the copy stalls at Create.
+//
+// s4 (kept by Alice): Alice's creator-Witnesses grant is closed
+// early, leaving a finite witness candidate below her direct right
+// as actual owner. A fresh node with her keys (new device) must
+// still copy up to the tip via the ownership floor.
+#[test(tokio::test)]
+async fn test_witness_copy_transfer_aux_second_owner() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = &nodes[1].api;
+    let bob = nodes[2].api.clone();
+    let nadia = &nodes[3].api;
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![alice, &bob, nadia]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": bob.public_key()
+                },
+                {
+                    "name": "Nadia",
+                    "key": nadia.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Nadia"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Witnesses", "viewpoints": ["AllViewpoints"]}, {"name": "Nadia", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Nadia", "viewpoints": ["AllViewpoints"]}],
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // s1: Alice creates, transfers to Bob, Bob confirms and emits.
+    let (subject_id_1, ..) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_transfer(
+        alice,
+        subject_id_1.clone(),
+        PublicKey::from_str(bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    bob.authorize_governance(
+        subject_id_1.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id_1.clone()).await.unwrap();
+    let _state = get_subject(&bob, subject_id_1.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&bob, subject_id_1.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &bob,
+        subject_id_1.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // s4: Alice creates and keeps; used later for the new-device copy.
+    let (subject_id_4, ..) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact(
+        alice,
+        subject_id_4.clone(),
+        json!({
+            "ModOne": {
+                "data": 301
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        alice,
+        subject_id_4.clone(),
+        json!({
+            "ModOne": {
+                "data": 302
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Close Nadia's grant under Bob (finite second-owner witness).
+    // Nadia keeps her grant under Alice: she is the designated
+    // server for s4 later, so her access there must stay open.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Close Alice's creator-Witnesses grant (finite candidate for
+    // the actual owner). Nadia's explicit grant stays.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [{"name": "Nadia", "viewpoints": ["AllViewpoints"]}]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(nadia, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        alice,
+        subject_id_4.clone(),
+        json!({
+            "ModOne": {
+                "data": 303
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The serving Bob must be current before a one-shot copy: he
+    // emitted the whole subject, so his register is current by
+    // construction. (One-shot updates complete short on a lagging
+    // server with no retry, so a synced-but-lagging server must not
+    // be the only source.)
+    nadia
+        .authorize_governance(
+            subject_id_1.clone(),
+            AuthWitness::One(PublicKey::from_str(bob.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    nadia.update_subject(subject_id_1.clone()).await.unwrap();
+
+    let nadia_state = get_subject(nadia, subject_id_1.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        nadia_state.properties,
+        json!({
+            "one": 300,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let _events = get_events(nadia, subject_id_1.clone(), 4, true)
+        .await
+        .unwrap();
+
+    // F4: new device with Alice's keys copies s4 up to the tip even
+    // though her witness candidate ended at SN 2. Nadia synced the
+    // whole subject straight from Alice, so her register is current
+    // by construction and she can serve it after Alice is gone.
+    nadia
+        .authorize_governance(
+            subject_id_4.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    nadia.update_subject(subject_id_4.clone()).await.unwrap();
+    let _state = get_subject(nadia, subject_id_4.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = nadia
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id_4.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 3),
+        "nadia register never mapped s4 tip, got {window:?}"
+    );
+    let nadia_pk = nadia.public_key().to_owned();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen_address = format!("/memory/{}", port);
+    let peers = vec![RoutingNode {
+        peer_id: nodes[0].api.peer_id().to_string(),
+        address: vec![nodes[0].listen_address.clone()],
+    }];
+
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address,
+        peers,
+        always_accept: true,
+        ledger_batch_size: Some(1),
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_alice = node_new_alice.api;
+    node_running(&new_alice).await.unwrap();
+
+    new_alice
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_alice
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    let _state = get_subject(&new_alice, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    new_alice
+        .authorize_governance(
+            subject_id_4.clone(),
+            AuthWitness::One(PublicKey::from_str(&nadia_pk).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_alice
+        .update_subject(subject_id_4.clone())
+        .await
+        .unwrap();
+
+    let new_state =
+        get_subject(&new_alice, subject_id_4.clone(), Some(3), true)
+            .await
+            .unwrap();
+    assert_eq!(
+        new_state.properties,
+        json!({
+            "one": 303,
+            "two": 0,
+            "three": 0
+        })
+    );
+}
+
+// T-C: stint-chained auxiliary transfer (F6).
+//
+// A->B->A->C with Nb as B's witness through a grant closed early:
+// the copy caps at SN 3 while Bob's aggregated exit moved on to
+// SN 5. Sorting exits would pick transfer SN 4 (above the cap) and
+// drop the auxiliary; the stint log attributes SN 1, the transfer
+// that opens the first incomplete stint, and the copy proceeds.
+#[test(tokio::test)]
+async fn test_witness_copy_transfer_aux_stint_chain() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = &nodes[1].api;
+    let bob = nodes[2].api.clone();
+    let carol = nodes[3].api.clone();
+    let nadia_b = &nodes[4].api;
+
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![alice, &bob, &carol, nadia_b],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Alice",
+                    "key": alice.public_key()
+                },
+                {
+                    "name": "Bob",
+                    "key": bob.public_key()
+                },
+                {
+                    "name": "Carol",
+                    "key": carol.public_key()
+                },
+                {
+                    "name": "Nb",
+                    "key": nadia_b.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Alice", "Bob", "Carol", "Nb"
+                    ]
+                }
+            },
+            "schema":
+                [
+                {
+                    "schema_id": "Example",
+                        "add": {
+                            "evaluator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "witness": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "validator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": []
+                                }
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [{"name": "Nb", "viewpoints": ["AllViewpoints"]}],
+                                },
+                                {
+                                    "name": "Carol",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                },
+                            ],
+                            "issuer": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": []
+                                },
+                                {
+                                    "name": "Carol",
+                                    "namespace": []
+                                }
+                            ]
+                        }
+
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_transfer(
+        alice,
+        subject_id.clone(),
+        PublicKey::from_str(bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    let _state = get_subject(&bob, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 300
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Close Nb's grant while Bob's era is still open; later exits
+    // must not move the auxiliary above this cap.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(nadia_b, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        &bob,
+        subject_id.clone(),
+        PublicKey::from_str(alice.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    alice
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    alice.update_subject(subject_id.clone()).await.unwrap();
+    let _state = get_subject(alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    emit_confirm(alice, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_transfer(
+        alice,
+        subject_id.clone(),
+        PublicKey::from_str(carol.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    carol
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    carol.update_subject(subject_id.clone()).await.unwrap();
+    let _state = get_subject(&carol, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    emit_confirm(&carol, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    emit_fact(
+        &carol,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 700
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The serving owner must be current before a one-shot copy.
+    let _state = get_subject(&owner, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 8) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 8),
+        "owner register never mapped s2 tip, got {window:?}"
+    );
+
+    nadia_b
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    nadia_b.update_subject(subject_id.clone()).await.unwrap();
+
+    let nb_state = get_subject(nadia_b, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        nb_state.properties,
+        json!({
+            "one": 300,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let _events = get_events(nadia_b, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+}
+
+// T-E: stale-register window (F3).
+//
+// Advancing governance without tracker events must not invent
+// mappings: the version window ends at the last mapped SN instead
+// of extending to the requested tip. The witness copy is unaffected
+// and grows again once real tracker evidence lands.
+#[test(tokio::test)]
+async fn test_witness_copy_stale_register_window() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "W",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    }
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "W"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "W",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    for data in 1..=3 {
+        emit_fact(
+            owner,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Governance moves on with no tracker events behind it.
+    let dummy_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Dummy",
+                    "key": dummy_keys.public_key()
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The window must end at the last mapped SN (3), never extend an
+    // unmapped suffix to the requested tip (100).
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 == 3),
+        "unmapped suffix must not be invented, got {window:?}"
+    );
+    assert!(window.iter().all(|range| range.1 <= 3));
+
+    // The copy itself is unaffected by the empty gov version.
+    witness
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(witness, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 3,
+            "two": 0,
+            "three": 0
+        })
+    );
+
+    // Real tracker evidence under the next version extends the copy.
+    emit_fact(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 4
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    witness.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(witness, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 4,
+            "two": 0,
+            "three": 0
+        })
+    );
+
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 4) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(window.last().is_some_and(|range| range.1 == 4));
 }

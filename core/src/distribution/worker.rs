@@ -1014,6 +1014,13 @@ impl DistriWorker {
                         &data,
                     )
                     .await?;
+                // The updater only ever consults the range covering its
+                // next SN (next_tracker_range): shipping the whole suffix
+                // wastes the 1 MiB wire budget on ranges no one reads.
+                // Ranges are contiguous from from_sn, so the head always
+                // covers the requester's next event; a stale offer simply
+                // stops matching and the next sweep re-offers.
+                let ranges = ranges.into_iter().take(1).collect();
                 Ok(UpdateWitnessOffer {
                     kind: UpdateSubjectKind::Tracker,
                     sn,

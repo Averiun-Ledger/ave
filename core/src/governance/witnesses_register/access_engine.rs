@@ -13,8 +13,8 @@ use tracing::debug;
 
 use super::{
     ActualSearch, CreatorWitnessGrant, GovVersionLimit, HiSnLimit,
-    OldOwnerData, TrackerDeliveryMode, TrackerDeliveryRange, TransferData,
-    WitnessesRegister, WitnessesType,
+    OldOwnerData, OwnershipStintOutcome, TrackerDeliveryMode,
+    TrackerDeliveryRange, TransferData, WitnessesRegister, WitnessesType,
 };
 
 type OldOwnerCandidate =
@@ -269,26 +269,33 @@ impl WitnessesRegister {
             "Starting build_tracker_window_from_data"
         );
 
-        let access_limit = match sn_limit {
+        let mut access_limit = match sn_limit {
             SnLimit::Sn(sn) => Some(sn),
             SnLimit::LastSn => Some(data.sn),
-            SnLimit::NotSn => {
-                if data.actual_owner == *node {
-                    effective_owner = Some(data.actual_owner.clone());
-                    Some(data.sn)
-                } else if let Some((new_owner, _)) = &data.actual_new_owner_data
-                    && new_owner == node
-                {
-                    effective_owner = Some(new_owner.clone());
-                    Some(data.sn)
-                } else {
-                    data.old_owners.get(node).map(|old_owner| {
-                        effective_owner = Some(node.clone());
-                        old_owner.sn
-                    })
-                }
-            }
+            SnLimit::NotSn => None,
         };
+
+        // Direct rights are a floor, not a substitute: the actual owner,
+        // the pending new owner and old owners (up to their last sn)
+        // always keep at least that, even when a finite witness candidate
+        // says less. The floor carries its owner so the aux transfer
+        // below is attributed correctly.
+        let (direct_limit, direct_owner) = if data.actual_owner == *node {
+            (Some(data.sn), Some(data.actual_owner.clone()))
+        } else if let Some((new_owner, _)) = &data.actual_new_owner_data
+            && new_owner == node
+        {
+            (Some(data.sn), Some(new_owner.clone()))
+        } else if let Some(old_owner) = data.old_owners.get(node) {
+            (Some(old_owner.sn), Some(node.clone()))
+        } else {
+            (None, None)
+        };
+
+        if direct_limit > access_limit {
+            access_limit = direct_limit;
+            effective_owner = direct_owner;
+        }
 
         debug!(
             msg_type = "BuildTrackerWindow",
@@ -298,17 +305,20 @@ impl WitnessesRegister {
             "Access limit computed"
         );
 
-        let Some(access_limit) = access_limit else {
+        let Some(mut access_limit) = access_limit else {
             return Ok((None, None, None, Vec::new()));
         };
 
-        let mut sorted_old_owners: Vec<(PublicKey, u64)> = data
-            .old_owners
-            .iter()
-            .map(|(k, v)| (k.clone(), v.sn))
-            .collect();
-        sorted_old_owners.sort_by_key(|(_, sn)| *sn);
-
+        // The aux transfer is the first boundary the receiver has not
+        // crossed: for the actual owner it installed the current reign
+        // (the latest confirmed stint); otherwise it opens the first
+        // incomplete stint at or after the receiver's position, whoever
+        // owned it. Stints chain chronologically, so the earliest
+        // unfinished one carries the crossing the receiver needs next;
+        // filtering by owner would return that stint's outgoing transfer
+        // instead (useless when the receiver is still behind) and repeat
+        // ownership would skew it again. Rejected proposals only serve
+        // their own node: they must never link another owner's chain.
         let transfer_sn = effective_owner
             .and_then(|owner| {
                 if data
@@ -316,35 +326,30 @@ impl WitnessesRegister {
                     .as_ref()
                     .is_some_and(|(new_owner, _)| new_owner == &owner)
                 {
-                    // Es el new_owner pendiente: necesita ver la transferencia actual
                     Some(data.sn)
-                } else if data.actual_owner == owner {
-                    // Es el owner actual: su incoming transfer es el outgoing del
-                    // último old_owner. Solo lo necesita si su acceso cruza ese transfer.
-                    sorted_old_owners
-                        .last()
-                        .map(|(_, sn)| sn.saturating_sub(1))
-                        .filter(|transfer_sn| access_limit >= *transfer_sn)
-                } else if let Some(idx) =
-                    sorted_old_owners.iter().position(|(o, _)| o == &owner)
-                {
-                    // Es un old_owner: su incoming transfer es el outgoing del owner
-                    // anterior. Para idx==0, el owner anterior es el creador original
-                    // (que no está en old_owners); su outgoing transfer está justo
-                    // antes del Confirm del primer old_owner.
-                    let candidate = if idx == 0 {
-                        sorted_old_owners[0].1.saturating_sub(1)
-                    } else {
-                        sorted_old_owners[idx - 1].1.saturating_sub(1)
-                    };
-                    // Solo necesita el transfer_event si su access_limit lo cruza
-                    if access_limit >= candidate {
-                        Some(candidate)
-                    } else {
-                        None
-                    }
                 } else {
-                    None
+                    let candidate = if data.actual_owner == owner {
+                        data.ownership_transitions
+                            .iter()
+                            .rev()
+                            .find(|stint| {
+                                stint.outcome
+                                    == OwnershipStintOutcome::Confirmed
+                            })
+                            .map(|stint| stint.incoming_transfer_sn)
+                    } else {
+                        let from_sn = params.actual_sn.map_or(0, |sn| sn);
+                        data.ownership_transitions
+                            .iter()
+                            .find(|stint| {
+                                stint.exit_sn > from_sn
+                                    && (stint.owner == owner
+                                        || stint.outcome
+                                            == OwnershipStintOutcome::Confirmed)
+                            })
+                            .map(|stint| stint.incoming_transfer_sn)
+                    };
+                    candidate.filter(|transfer_sn| access_limit >= *transfer_sn)
                 }
             })
             .filter(|transfer_sn| {
@@ -360,6 +365,21 @@ impl WitnessesRegister {
         let gov_versions = self
             .get_gov_version_window(ctx, subject_id, from_sn, access_limit)
             .await?;
+
+        // The register may lag behind the ledger (independent tells, no
+        // barrier): serve only the mapped prefix. Without this cap,
+        // unmapped SNs would be evaluated under a guessed gov version.
+        // An empty map means no evidence at all (fresh subject whose
+        // RegisterSn has not landed yet); keep serving it so bootstrap
+        // is not wedged, and let the next round catch up.
+        if let Some(covered_to) =
+            gov_versions.last().map(|(interval, _)| interval.hi)
+        {
+            if covered_to < from_sn {
+                return Ok((None, transfer_sn, None, Vec::new()));
+            }
+            access_limit = access_limit.min(covered_to);
+        }
 
         let mut ranges: Vec<TrackerDeliveryRange> = Vec::new();
         let mut clear_sn = None;
@@ -383,10 +403,11 @@ impl WitnessesRegister {
                 gv_idx += 1;
             }
 
-            // Stale SnRegister (e.g. constant gov_version only
-            // records sn 0): fall back to the tip version so a
-            // missing map entry degrades to a possibly wider grant
-            // instead of a delivery gap that wedges sync.
+            // Unreachable with a non-empty map: every window lies within
+            // the covered prefix by construction, so a gov range always
+            // contains range_from. Only an empty map (no evidence at all,
+            // e.g. fresh subject) reaches the fallback, which keeps the
+            // previous behavior so bootstrap is not wedged.
             let gov_version = if gv_idx < gov_versions.len()
                 && gov_versions[gv_idx].0.contains(range_from)
             {
@@ -776,6 +797,7 @@ impl WitnessesRegister {
         subject_id: DigestIdentifier,
     ) -> Result<(SnLimit, Option<PublicKey>), ActorError> {
         let mut better_gov_version: Option<u64> = None;
+        let mut better_owner: Option<PublicKey> = None;
         let mut better_sn: Option<u64> = None;
         let mut effective_owner: Option<PublicKey> = None;
         let parse_namespace = Namespace::from(namespace.clone());
@@ -800,7 +822,12 @@ impl WitnessesRegister {
                     return Ok((sn_limit, Some(data.actual_owner.clone())));
                 }
                 ActualSearch::Continue { gov_version } => {
-                    better_gov_version = gov_version;
+                    if better_gov_version.is_none_or(|best| {
+                        gov_version.is_some_and(|gov| gov > best)
+                    }) {
+                        better_gov_version = gov_version;
+                        better_owner = Some(data.actual_owner.clone());
+                    }
                 }
             }
         }
@@ -827,7 +854,12 @@ impl WitnessesRegister {
                     return Ok((sn_limit, Some(new_owner.clone())));
                 }
                 ActualSearch::Continue { gov_version } => {
-                    better_gov_version = gov_version;
+                    if better_gov_version.is_none_or(|best| {
+                        gov_version.is_some_and(|gov| gov > best)
+                    }) {
+                        better_gov_version = gov_version;
+                        better_owner = Some(new_owner.clone());
+                    }
                 }
             }
         }
@@ -957,10 +989,17 @@ impl WitnessesRegister {
                 .cloned()
                 .unwrap_or(SnLimit::NotSn)
             {
-                SnLimit::Sn(sn) => better_sn
-                    .map_or(SnLimit::Sn(sn), |better_sn| {
-                        SnLimit::Sn(sn.max(better_sn))
-                    }),
+                SnLimit::Sn(sn) => match better_sn {
+                    // Tie or old-owner win: keep the per-stint owner from
+                    // phase 3, whose transfer_sn is already attributed.
+                    Some(bs) if bs >= sn => SnLimit::Sn(bs),
+                    // The gov-derived candidate wins: the access comes from
+                    // the witness/owner tracked alongside it.
+                    _ => {
+                        effective_owner = better_owner.clone();
+                        SnLimit::Sn(sn)
+                    }
+                },
                 SnLimit::LastSn => SnLimit::Sn(data.sn),
                 SnLimit::NotSn => better_sn.map_or(SnLimit::NotSn, SnLimit::Sn),
             },

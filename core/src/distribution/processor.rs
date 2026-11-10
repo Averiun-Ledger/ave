@@ -414,6 +414,10 @@ impl DistriWorker {
     /// in an Opaque range are masked locally (the same bytes an
     /// honest sender would deliver); everything else passes through
     /// (missing ranges must not stall legit sync).
+    ///
+    /// Ranges come out of build_tracker_window_from_data sorted and
+    /// non-overlapping, and the ledger arrives in SN order, so a single
+    /// forward index replaces the per-event linear scan.
     fn reproject_receipt_visibility(
         ledger: &mut [Ledger],
         ranges: &[TrackerDeliveryRange],
@@ -423,16 +427,22 @@ impl DistriWorker {
         if ranges.is_empty() {
             return Ok(());
         }
+        let mut range_idx = 0;
         for event in ledger.iter_mut() {
             if !matches!(event.protocols, Protocols::TrackerFactFull { .. }) {
                 continue;
             }
-            let mode = ranges
-                .iter()
-                .find(|range| {
-                    range.from_sn <= event.sn && event.sn <= range.to_sn
-                })
-                .map(|range| &range.mode);
+            while range_idx < ranges.len() && ranges[range_idx].to_sn < event.sn
+            {
+                range_idx += 1;
+            }
+            let mode = if range_idx < ranges.len()
+                && ranges[range_idx].from_sn <= event.sn
+            {
+                Some(&ranges[range_idx].mode)
+            } else {
+                None
+            };
             match mode {
                 Some(TrackerDeliveryMode::Clear) => {}
                 Some(TrackerDeliveryMode::Opaque) => {

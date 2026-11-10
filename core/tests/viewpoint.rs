@@ -1,6 +1,8 @@
 mod common;
 
-use std::{collections::BTreeSet, str::FromStr, sync::atomic::Ordering};
+use std::{
+    collections::BTreeSet, str::FromStr, sync::atomic::Ordering, time::Duration,
+};
 
 use ave_common::{
     Namespace, SchemaType,
@@ -16,6 +18,7 @@ use ave_common::{
     response::RequestEventDB,
 };
 use ave_core::auth::AuthWitness;
+use ave_core::config::TrackerSyncConfig;
 use ave_core::governance::{
     data::GovernanceData,
     model::{CreatorWitness, RoleCreator},
@@ -10286,4 +10289,790 @@ async fn test_viewpoints_opaque_tracker_cannot_confirm_transfer() {
             .await
             .is_err()
     );
+}
+
+// T-A: late, withdrawn and re-added witness grants, plus a closed
+// creator-Witnesses membership.
+// Grants are capabilities over the ownership, not per-event tickets:
+// a witness trusted at any point of it reads its viewpoints across
+// it (B01/B05 pin pre-grant facts arriving Full; the exact version
+// is consulted first, then any grant overlapping the ownership).
+// The numeric copy, in contrast, IS capped: a closed
+// creator-Witnesses membership caps the generic schema-witness path
+// instead of reaching the tip.
+//
+// Setup: Wgen holds the schema-witness role (open throughout);
+// Wuser only gets explicit creator grants. The owner serves every
+// copy, so its register is current and no stale-server effect can
+// mask the grant logic.
+//
+// Phases:
+//   P1: private fact under open Witnesses -> Wgen gets it Full.
+//   P2: Witnesses closed -> Wgen stays capped (no LastSn invention).
+//   P3: Wuser granted late -> pre-grant facts still arrive Full
+//       (retroactive capability, B05-shaped pin).
+//   P4: fact under a strictly later version -> Wuser gets it Full.
+//   P5: grant withdrawn -> the numeric copy caps at the closure,
+//       so the gap fact is not served at all (F2).
+//   P6: grant re-added -> the gap fact and the new fact arrive Full.
+//
+// NOTE: background tracker sync is silenced for this test so every
+// copy below is update-driven; a racing tick must never apply a
+// stale projection while grants transition.
+#[test(tokio::test)]
+async fn test_witness_copy_grant_intervals_and_witnesses_closure() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            tracker_sync: Some(TrackerSyncConfig {
+                interval_secs: 3600,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+
+    let owner = &nodes[0].api;
+    let wgen = &nodes[1].api;
+    let wuser = &nodes[2].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![wgen, wuser]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Wgen",
+                    "key": wgen.public_key()
+                },
+                {
+                    "name": "Wuser",
+                    "key": wuser.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "Wgen",
+                        "Wuser"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "witness": [
+                            {
+                                "name": "Wgen",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 1
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // P1: open Witnesses membership + open schema role -> Full.
+    wgen.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    wgen.update_subject(subject_id.clone()).await.unwrap();
+
+    let wgen_state = get_subject(wgen, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wgen_state.properties,
+        json!({
+            "one": 1,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let wgen_events =
+        get_events(wgen, subject_id.clone(), 2, true).await.unwrap();
+    assert_tracker_fact_full(
+        &wgen_events[1].event,
+        json!({
+            "ModOne": {
+                "data": 1
+            }
+        }),
+        &["agua"],
+    );
+
+    // P2: close the creator-Witnesses membership; the schema role
+    // alone must not extend the copy to the tip.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(wgen, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let _state = get_subject(wuser, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 2
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wgen.update_subject(subject_id.clone()).await.unwrap();
+    let _state = get_subject(wgen, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // P3: late explicit grant for Wuser; earlier private facts
+    // arrive Opaque, never retroactively Clear.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Wuser",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(wgen, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let _state = get_subject(wuser, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // Fixture invariant: the late grant really landed on the serving
+    // owner. A silent no-op change would make every later assert
+    // vacuous, so fail loud here instead.
+    {
+        let governance_state =
+            get_subject(owner, governance_id.clone(), Some(3), true)
+                .await
+                .unwrap();
+        let governance: GovernanceData =
+            from_value(governance_state.properties.clone()).unwrap();
+        let schema_id = SchemaType::Type("Example".to_owned());
+        let expected_creator_witnesses = BTreeSet::from([CreatorWitness {
+            name: "Wuser".to_owned(),
+            viewpoints: BTreeSet::from(["agua".to_owned()]),
+        }]);
+        let creator = governance
+            .roles_schema
+            .get(&schema_id)
+            .unwrap()
+            .creator
+            .get(&RoleCreator::create("Owner", Namespace::new()))
+            .unwrap();
+        assert_eq!(creator.witnesses, expected_creator_witnesses);
+    }
+
+    wuser
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    wuser.update_subject(subject_id.clone()).await.unwrap();
+
+    let wuser_state = get_subject(wuser, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wuser_state.properties,
+        json!({
+            "one": 2,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let wuser_events = get_events(wuser, subject_id.clone(), 3, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &wuser_events[1].event,
+        json!({
+            "ModOne": {
+                "data": 1
+            }
+        }),
+        &["agua"],
+    );
+    assert_tracker_fact_full(
+        &wuser_events[2].event,
+        json!({
+            "ModOne": {
+                "data": 2
+            }
+        }),
+        &["agua"],
+    );
+
+    // P4: a fact under a strictly later version is Full.
+    let dummy_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "Dummy",
+                    "key": dummy_keys.public_key()
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(wuser, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 3
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The serving window must map SN3 before the copy: otherwise the
+    // offer falls back to the tip version and the serving projection
+    // is decided by a guessed gov version.
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                3,
+                3,
+            )
+            .await
+            .unwrap();
+        if window
+            .iter()
+            .any(|range| range.0 == 3 && range.1 == 3 && range.2 == 4)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window
+            .iter()
+            .any(|range| { range.0 == 3 && range.1 == 3 && range.2 == 4 }),
+        "owner register never mapped SN3 under v4, got {window:?}"
+    );
+
+    wuser.update_subject(subject_id.clone()).await.unwrap();
+
+    let wuser_state = get_subject(wuser, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wuser_state.properties,
+        json!({
+            "one": 3,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let wuser_events = get_events(wuser, subject_id.clone(), 4, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &wuser_events[3].event,
+        json!({
+            "ModOne": {
+                "data": 3
+            }
+        }),
+        &["agua"],
+    );
+
+    // P5: grant withdrawn; the numeric copy caps at the closure
+    // (the closed grant covers up to v4), so the gap fact is not
+    // served at all.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(wuser, governance_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 4
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wuser.update_subject(subject_id.clone()).await.unwrap();
+
+    // The tip moved to SN4 on the owner, but the capped copy stays.
+    let _state = get_subject(owner, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let wuser_state = get_subject(wuser, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wuser_state.properties,
+        json!({
+            "one": 3,
+            "two": 0,
+            "three": 0
+        })
+    );
+
+    // P6: grant re-added; the new fact is Full, as was the gap one.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Owner",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Wuser",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let _state = get_subject(wuser, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    emit_fact_viewpoints(
+        owner,
+        subject_id.clone(),
+        json!({
+            "ModOne": {
+                "data": 5
+            }
+        }),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    wuser.update_subject(subject_id.clone()).await.unwrap();
+
+    let wuser_state = get_subject(wuser, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wuser_state.properties,
+        json!({
+            "one": 5,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let wuser_events = get_events(wuser, subject_id.clone(), 6, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &wuser_events[4].event,
+        json!({
+            "ModOne": {
+                "data": 4
+            }
+        }),
+        &["agua"],
+    );
+    assert_tracker_fact_full(
+        &wuser_events[5].event,
+        json!({
+            "ModOne": {
+                "data": 5
+            }
+        }),
+        &["agua"],
+    );
+}
+
+// T-F: many alternating grant cuts with small batches still converge
+// in a single update, with per-event clarity matching each grant.
+//
+// Six gov versions alternate W between [agua] and [basura]; each
+// private fact is emitted under its matching grant and must arrive
+// Full with its viewpoints. Guards the minimal-offer path: every
+// sweep re-offers only the head range, so multi-batch sync must
+// keep making progress without the full suffix on the wire.
+#[test(tokio::test)]
+async fn test_witness_copy_many_cuts_converge() {
+    // Same silenced background sync as T-A: convergence must come
+    // from explicit updates with the minimal head-only offer.
+    let idle_sync = Some(TrackerSyncConfig {
+        interval_secs: 3600,
+        ..Default::default()
+    });
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            tracker_sync: idle_sync,
+            ..Default::default()
+        })
+        .await;
+
+    let owner = &nodes[0].api;
+    let witness = &nodes[1].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![witness]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "W",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "W"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "W",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let viewpoints = ["agua", "basura"];
+    for (i, viewpoint) in viewpoints.iter().cycle().take(6).enumerate() {
+        let data = (i + 1) as i32;
+        let json = json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Owner",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "W",
+                                            "viewpoints": [viewpoint]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        emit_fact(owner, governance_id.clone(), json, true)
+            .await
+            .unwrap();
+
+        let _state = get_subject(
+            witness,
+            governance_id.clone(),
+            Some((i + 2) as u64),
+            true,
+        )
+        .await
+        .unwrap();
+
+        emit_fact_viewpoints(
+            owner,
+            subject_id.clone(),
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            BTreeSet::from([viewpoint.to_string()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    witness
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(witness, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 6,
+            "two": 0,
+            "three": 0
+        })
+    );
+
+    let events = get_events(witness, subject_id.clone(), 7, true)
+        .await
+        .unwrap();
+    for (i, viewpoint) in viewpoints.iter().cycle().take(6).enumerate() {
+        let data = (i + 1) as i32;
+        assert_tracker_fact_full(
+            &events[i + 1].event,
+            json!({
+                "ModOne": {
+                    "data": data
+                }
+            }),
+            &[*viewpoint],
+        );
+    }
 }

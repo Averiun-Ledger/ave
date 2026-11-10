@@ -164,6 +164,7 @@ pub struct TransferData {
     pub(crate) sn: u64,
     pub(crate) gov_version: u64,
     pub(crate) old_owners: HashMap<PublicKey, OldOwnerData>,
+    pub(crate) ownership_transitions: Vec<OwnershipStint>,
     pub(crate) visibility_state: TrackerVisibilityState,
 }
 
@@ -179,6 +180,42 @@ pub struct TransferData {
 pub struct OldOwnerData {
     pub(crate) sn: u64,
     pub(crate) interval_gov_version: IntervalSet,
+}
+
+/// One confirmed ownership stint: who owned the subject, the transfer
+/// that closed the stint (the event right before its end, which
+/// installed the successor), and where the stint ended. For the latest
+/// confirmed stint this closing transfer coincides with the current
+/// owner's own installing transfer. Rejected proposals are logged too,
+/// marked as such: the rejected node still needs its own transfer to
+/// copy, but a rejection must never serve as another owner's link.
+/// The log is append-only; stints are identified by position, so
+/// repeated ownership keeps every stint.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct OwnershipStint {
+    pub(crate) owner: PublicKey,
+    pub(crate) incoming_transfer_sn: u64,
+    pub(crate) exit_sn: u64,
+    pub(crate) outcome: OwnershipStintOutcome,
+}
+
+/// How a stint ended: installed successor or rejected proposal.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub enum OwnershipStintOutcome {
+    Confirmed,
+    Rejected,
 }
 
 #[derive(
@@ -718,6 +755,11 @@ impl WitnessesRegister {
         event_gov_version: u64,
         owner_from_gov_version: u64,
     ) -> Option<CreatorWitnessGrant> {
+        // Grants are capabilities over the ownership, not per-event
+        // tickets: a witness trusted at any point of the ownership
+        // keeps reading its viewpoints across it. The exact version
+        // is consulted first; the fallback covers the whole ownership
+        // the grant overlaps.
         self.creator_grant_for_owner_interval(
             node,
             creator,
@@ -840,19 +882,34 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         gov_version: u64,
         mut better_gov_version: Option<u64>,
+        witnesses_hi: Option<u64>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
                 // Currently witnessing for the owner
                 if actual_lo.is_some() {
-                    return ActualSearch::End(SnLimit::LastSn);
+                    // LastSn only when the creator-Witnesses side is open
+                    // too: an open schema role alone must not extend a
+                    // closed witnesses membership up to the tip.
+                    match witnesses_hi {
+                        None => {
+                            return ActualSearch::End(SnLimit::LastSn);
+                        }
+                        Some(hi) => {
+                            better_gov_version =
+                                better_gov_version.max(Some(hi));
+                        }
+                    }
                 }
 
                 if let Some(range) = interval.iter().last()
                     && gov_version <= range.hi
                 {
-                    // range.hi is the top reachable gov_version; resolve its sn
-                    better_gov_version = better_gov_version.max(Some(range.hi));
+                    // range.hi is the top reachable gov_version; resolve
+                    // its sn.
+                    // The witnesses side caps it when it closed earlier.
+                    let hi = witnesses_hi.map_or(range.hi, |w| w.min(range.hi));
+                    better_gov_version = better_gov_version.max(Some(hi));
                 }
             }
         }
@@ -869,6 +926,7 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         gov_version: u64,
         better_gov_version: Option<u64>,
+        witnesses_hi: Option<u64>,
     ) -> ActualSearch {
         // el esquema específico
         let better_gov_version = if let Some(witness_data) =
@@ -879,6 +937,7 @@ impl WitnessesRegister {
                 parse_namespace,
                 gov_version,
                 better_gov_version,
+                witnesses_hi,
             )
             .await
             {
@@ -901,6 +960,7 @@ impl WitnessesRegister {
                 parse_namespace,
                 gov_version,
                 better_gov_version,
+                witnesses_hi,
             )
             .await;
         }
@@ -978,19 +1038,16 @@ impl WitnessesRegister {
             }
         }
 
-        // Si el rol Witnesses está activo actualmente, los testigos de schema pueden
-        // pedir el tracker actual. Para intervalos cerrados sí hay que comprobar que
-        // cubrieron el momento en que este owner pasó a ser owner.
+        // When the Witnesses role is currently active, schema witnesses
+        // may request the current tracker. For closed intervals the
+        // covering of the moment this owner became owner must still
+        // hold. The intersection only reaches the tip while both sides
+        // stay open; otherwise the Witnesses closure is propagated so
+        // the schema side cannot extend it.
         if let Some((interval, actual_lo)) =
             witnesses_creator.get(&WitnessesType::Witnesses)
         {
-            let witnesses_active = actual_lo.is_some()
-                || interval
-                    .iter()
-                    .last()
-                    .is_some_and(|range| owner_gov_version <= range.hi);
-
-            if witnesses_active {
+            if actual_lo.is_some() {
                 return self
                     .search_schemas_actual(
                         node,
@@ -998,6 +1055,22 @@ impl WitnessesRegister {
                         parse_namespace,
                         owner_gov_version,
                         better_gov_version,
+                        None,
+                    )
+                    .await;
+            }
+
+            if let Some(range) = interval.iter().last()
+                && owner_gov_version <= range.hi
+            {
+                return self
+                    .search_schemas_actual(
+                        node,
+                        schema_id,
+                        parse_namespace,
+                        owner_gov_version,
+                        better_gov_version,
+                        Some(range.hi),
                     )
                     .await;
             }
@@ -1458,6 +1531,7 @@ impl Handler<Self> for WitnessesRegister {
                         sn: transfer_event.sn,
                         gov_version,
                         old_owners: HashMap::new(),
+                        ownership_transitions: Vec::new(),
                         visibility_state: TrackerVisibilityState::default(),
                     }
                 };
@@ -1873,6 +1947,17 @@ impl PersistentActor for WitnessesRegister {
                             hi: *gov_version,
                         });
 
+                        // The incoming transfer is the immediately preceding
+                        // event: with a pending new owner the request layer
+                        // rejects every Fact/Transfer/EOL, so no tracker
+                        // event can interleave between Transfer and Confirm.
+                        data.ownership_transitions.push(OwnershipStint {
+                            owner: data.actual_owner.clone(),
+                            incoming_transfer_sn: sn.saturating_sub(1),
+                            exit_sn: *sn,
+                            outcome: OwnershipStintOutcome::Confirmed,
+                        });
+
                         data.actual_owner = new_owner;
                         data.gov_version = new_owner_gov_version;
 
@@ -1923,12 +2008,28 @@ impl PersistentActor for WitnessesRegister {
 
                     if let Some((new_owner, new_owner_gov_version)) = new_owner
                     {
-                        let entry =
-                            data.old_owners.entry(new_owner).or_default();
+                        let entry = data
+                            .old_owners
+                            .entry(new_owner.clone())
+                            .or_default();
                         entry.sn = *sn;
                         entry.interval_gov_version.insert(Interval {
                             lo: new_owner_gov_version,
                             hi: *gov_version,
+                        });
+
+                        // The rejected proposal still needs its own
+                        // transfer to copy, so it is logged, marked as
+                        // rejected: it must never serve as another
+                        // owner's link. No tracker event can interleave
+                        // between Transfer and Reject while a new owner
+                        // is pending, so the rejected transfer is the
+                        // immediately preceding SN.
+                        data.ownership_transitions.push(OwnershipStint {
+                            owner: new_owner,
+                            incoming_transfer_sn: sn.saturating_sub(1),
+                            exit_sn: *sn,
+                            outcome: OwnershipStintOutcome::Rejected,
                         });
 
                         debug!(
