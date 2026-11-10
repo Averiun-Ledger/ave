@@ -833,6 +833,212 @@ async fn remote_failed_transfer_does_not_open_reception() {
     drop(rita_dirs);
 }
 
+/// First-copy batches with a foreign or cryptographically invalid
+/// inline transfer must be rejected before any local write: a mixed
+/// batch (Create of B plus an authentic transfer of A) and a batch
+/// whose inline transfer reuses another event quorum block. Neither
+/// may register the subject nor leave a transfer proof behind; the
+/// genuine flow must still complete afterwards.
+#[test(tokio::test)]
+async fn remote_mixed_and_forged_inline_batches_rejected() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+    let rita = nodes[3].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+
+    let governance_id = setup_transfer_gov(
+        &owner,
+        vec![(&alice, "Alice"), (&bob, "Bob"), (&rita, "Rita")],
+    )
+    .await;
+
+    let (subject_a, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_a.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    emit_transfer(&alice, subject_a.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    let history_a = alice
+        .test_get_tracker_ledger(subject_a.clone(), 2)
+        .await
+        .unwrap();
+    let transfer_a = history_a
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer of A")
+        .clone();
+
+    let (subject_b, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_b.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_b.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    let history_b = alice
+        .test_get_tracker_ledger(subject_b.clone(), 2)
+        .await
+        .unwrap();
+    let create_b = history_b
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create of B")
+        .clone();
+    let fact_b = history_b
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact of B")
+        .clone();
+    let genuine_b = history_b
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer of B")
+        .clone();
+    let (genuine_eval_b, genuine_val_b) = match &genuine_b.protocols {
+        Protocols::Transfer {
+            evaluation,
+            validation,
+            ..
+        } => (evaluation.clone(), validation.clone()),
+        _ => panic!("expected a transfer event"),
+    };
+
+    // Mixed-subject batch: authentic events, wrong subject mix.
+    inject_ledger_batch(
+        &rita,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        vec![create_b.clone(), transfer_a],
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(subject_b.clone()).await.is_err(),
+            "mixed batch must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Inline forgery: same quorum block, different request (Rita as
+    // new owner), freshly sealed by the previous owner. The request
+    // hash no longer matches the attested one.
+    let rita_key = PublicKey::from_str(rita.public_key()).unwrap();
+    let forged_content = EventRequest::Transfer(TransferRequest {
+        subject_id: subject_b.clone(),
+        new_owner: rita_key,
+    });
+    let forged_sig = Signature::new(&forged_content, &alice_keys).unwrap();
+    let forged_request = Signed::from_parts(forged_content, forged_sig);
+    let forged_protocols = Protocols::Transfer {
+        event_request: Arc::new(forged_request),
+        evaluation: genuine_eval_b,
+        validation: genuine_val_b,
+    };
+    let protocols_hash = forged_protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    let forged_seal = LedgerSeal {
+        gov_version: genuine_b.gov_version,
+        sn: genuine_b.sn,
+        prev_ledger_event_hash: genuine_b.prev_ledger_event_hash.clone(),
+        protocols_hash,
+    };
+    let forged = Ledger {
+        gov_version: genuine_b.gov_version,
+        sn: genuine_b.sn,
+        prev_ledger_event_hash: genuine_b.prev_ledger_event_hash.clone(),
+        ledger_seal_signature: Signature::new(&forged_seal, &alice_keys)
+            .unwrap(),
+        protocols: forged_protocols,
+    };
+    inject_ledger_batch(
+        &rita,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        vec![create_b, fact_b, forged],
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(subject_b.clone()).await.is_err(),
+            "forged inline transfer must not admit the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&rita).await.unwrap();
+
+    // Control: the genuine flow still works after both rejections.
+    bob.authorize_governance(
+        subject_b.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_b.clone()).await.unwrap();
+    get_subject(&bob, subject_b.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_b.clone(), None, true)
+        .await
+        .unwrap();
+    emit_transfer(
+        &bob,
+        subject_b.clone(),
+        PublicKey::from_str(rita.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    rita.authorize_governance(
+        subject_b.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(subject_b.clone()).await.unwrap();
+    get_subject(&rita, subject_b.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+    drop(nodes);
+    drop(dirs);
+}
+
 /// SLOW: governance recovery must not replay the page-boundary event.
 /// With 257 events the second page overlaps the first under the old
 /// cursor; the duplicate apply used to fail the boot.

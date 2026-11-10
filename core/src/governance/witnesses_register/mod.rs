@@ -307,6 +307,13 @@ pub enum WitnessesRegisterMessage {
     GetTrackerVisibilityState {
         subject_id: DigestIdentifier,
     },
+    GetTrackerDeliveryModes {
+        subject_id: DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        ledger: Vec<Ledger>,
+    },
     GetTrackerWindow {
         subject_id: DigestIdentifier,
         node: PublicKey,
@@ -441,6 +448,9 @@ pub enum WitnessesRegisterResponse {
     },
     TrackerVisibilityState {
         state: TrackerVisibilityState,
+    },
+    TrackerDeliveryModes {
+        modes: Vec<TrackerDeliveryMode>,
     },
     TrackerWindow {
         sn: Option<u64>,
@@ -1455,6 +1465,28 @@ impl Handler<Self> for WitnessesRegister {
 
                 return Ok(WitnessesRegisterResponse::TrackerVisibilityState {
                     state,
+                });
+            }
+            WitnessesRegisterMessage::GetTrackerDeliveryModes {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+                ledger,
+            } => {
+                let ns = Namespace::from(namespace);
+                let modes = self
+                    .tracker_delivery_modes_for_receipt(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        &ns,
+                        &schema_id,
+                        &ledger,
+                    )
+                    .await?;
+                return Ok(WitnessesRegisterResponse::TrackerDeliveryModes {
+                    modes,
                 });
             }
             WitnessesRegisterMessage::GetTrackerWindow {

@@ -17,10 +17,12 @@ use crate::{
     },
     model::{
         common::{
-            check_quorum_signers, get_n_events, get_validation_roles_register,
+            check_quorum_signers, get_actual_roles_register, get_n_events,
+            get_validation_roles_register,
         },
         event::{
-            ApprovalData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
+            ApprovalData, EvaluationData, Ledger, LedgerSeal, Protocols,
+            ValidationData, ValidationMetadata,
         },
         sink::SubjectSinkEvent,
     },
@@ -29,13 +31,14 @@ use crate::{
     validation::{
         request::{ActualProtocols, LastData, ValidationReq},
         response::ValidationRes,
+        worker::{EventAnchor, check_evaluation},
     },
 };
 
 use error::SubjectError;
 
 use ave_actors::{
-    Actor, ActorContext, ActorError, ActorPath, Event, PersistentActor,
+    Actor, ActorContext, ActorError, ActorPath, Event, Handler, PersistentActor,
 };
 use ave_common::{
     DataToSink, DataToSinkEvent, Namespace, SchemaType, ValueWrapper,
@@ -73,6 +76,130 @@ fn check_timestamp_in_sqlite_range(nanos: u64) -> Result<(), SubjectError> {
             "timestamp {nanos} out of range for SQLite INTEGER (i64)"
         )));
     }
+    Ok(())
+}
+
+/// Whether the local pre-state properties reproduce the owner's:
+// full tracker view plus no opaque span in the prefix. Opaque
+// facts carry no patch, so any `None` span (or a non-full view)
+// means the local properties diverge and evaluation evidence,
+// which commits to those properties, can not be rechecked here.
+async fn prefix_properties_complete<A>(
+    ctx: &mut ActorContext<A>,
+    metadata: &Metadata,
+) -> bool
+where
+    A: Actor + Handler<A>,
+{
+    use crate::governance::witnesses_register::{
+        WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
+    };
+    let path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/witnesses_register",
+        metadata.governance_id
+    ));
+    let Ok(actor) = ctx.system().get_actor::<WitnessesRegister>(&path).await
+    else {
+        return false;
+    };
+    let Ok(response) = actor
+        .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+            subject_id: metadata.subject_id.clone(),
+        })
+        .await
+    else {
+        return false;
+    };
+    let WitnessesRegisterResponse::TrackerVisibilityState { state } = response
+    else {
+        return false;
+    };
+    if !state.is_full() {
+        return false;
+    }
+    for range in &state.stored_ranges {
+        if range.from_sn > metadata.sn {
+            break;
+        }
+        if matches!(
+            range.visibility,
+            crate::model::common::TrackerStoredVisibility::None
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Evaluation evidence for a transfer, checked against the pre-event
+/// state: request binding, evaluator quorum and result hash must all
+/// reproduce, otherwise a re-sealed transfer could smuggle a forged
+/// patch through reception. Missing roles (the register only serves
+/// the current governance version) mean the evidence can not be
+/// judged here: skip instead of rejecting, the seal and validation
+/// quorum still apply.
+async fn verify_transfer_evaluation<A>(
+    ctx: &mut ActorContext<A>,
+    subject_metadata: &Metadata,
+    event_request: &Arc<Signed<EventRequest>>,
+    evaluation: &EvaluationData,
+    validation: &ValidationData,
+    gov_version: u64,
+    hash: &HashAlgorithm,
+) -> Result<(), SubjectError>
+where
+    A: Actor + Handler<A>,
+{
+    let Ok((eval_data, _, _)) = get_actual_roles_register(
+        ctx,
+        &subject_metadata.governance_id,
+        SearchRole {
+            schema_id: subject_metadata.schema_id.clone(),
+            namespace: subject_metadata.namespace.clone(),
+        },
+        false,
+        false,
+        gov_version,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    // The anchor signer is the validation request signer, the same
+    // key the validators saw: check_evaluation requires it to match
+    // the evaluation request signer.
+    let signer = validation.validation_req_signature.signer.clone();
+    let req_hash = hash_borsh(
+        &*hash.hasher(),
+        &RequestSubjectData {
+            subject_id: subject_metadata.subject_id.clone(),
+            governance_id: subject_metadata.governance_id.clone(),
+            namespace: subject_metadata.namespace.clone(),
+            schema_id: subject_metadata.schema_id.clone(),
+            sn: subject_metadata.sn.saturating_add(1),
+            gov_version,
+            signer: signer.clone(),
+        },
+    )
+    .map_err(|e| SubjectError::EvaluationEvidenceInvalid {
+        details: format!("req hash failed: {e}"),
+    })?;
+    check_evaluation(
+        hash,
+        evaluation.clone(),
+        eval_data,
+        subject_metadata.properties.clone(),
+        EventAnchor {
+            event_request,
+            metadata: subject_metadata,
+            gov_version,
+            req_subject_data_hash: req_hash,
+            signer,
+        },
+    )
+    .map_err(|e| SubjectError::EvaluationEvidenceInvalid {
+        details: e.to_string(),
+    })?;
     Ok(())
 }
 
@@ -1427,6 +1554,23 @@ where
                     return Err(SubjectError::UnexpectedTransferEvent);
                 }
 
+                // Only with a complete pre-state: an opaque prefix
+                // diverges from the owner's properties, where this
+                // evidence can not be reproduced.
+                if full_view
+                    && prefix_properties_complete(ctx, &subject_metadata).await
+                {
+                    verify_transfer_evaluation(
+                        ctx,
+                        &subject_metadata,
+                        event_request,
+                        evaluation,
+                        validation,
+                        new_ledger_event.gov_version,
+                        hash,
+                    )
+                    .await?;
+                }
                 if let Some(eval) = evaluation.evaluator_response_ok() {
                     Self::apply_patch_verify(
                         &mut modified_subject_metadata.properties,

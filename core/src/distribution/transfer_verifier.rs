@@ -11,10 +11,16 @@ use ave_common::{
 };
 
 use crate::governance::role_register::SearchRole;
-use crate::model::common::{check_quorum_signers, node::get_subject_data};
+use crate::model::common::{
+    check_quorum_signers, get_actual_roles_register, node::get_subject_data,
+    subject::get_local_subject_sn,
+};
 use crate::model::event::{Ledger, LedgerSeal, Protocols, ValidationMetadata};
 use crate::node::SubjectData;
+use crate::subject::Metadata;
+use crate::subject::RequestSubjectData;
 use crate::validation::response::ValidationRes;
+use crate::validation::worker::{EventAnchor, check_evaluation};
 
 use super::error::DistributorError;
 
@@ -275,6 +281,57 @@ impl TransferVerifier {
         Ok((governance_id, is_register, subject_data))
     }
 
+    /// Whether the local pre-state reproduces the owner's: full
+    /// visibility mode plus no opaque span in the prefix. Opaque
+    /// facts carry no patch, so any `None` span means the local
+    /// properties diverge and the evidence can not be rechecked.
+    async fn prefix_complete(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        meta: &Metadata,
+    ) -> bool {
+        use crate::governance::witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        };
+        let path = ave_actors::ActorPath::from(format!(
+            "/user/node/subject_manager/{governance_id}/witnesses_register"
+        ));
+        let Ok(actor) =
+            ctx.system().get_actor::<WitnessesRegister>(&path).await
+        else {
+            return false;
+        };
+        let Ok(response) = actor
+            .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
+                subject_id: meta.subject_id.clone(),
+            })
+            .await
+        else {
+            return false;
+        };
+        let WitnessesRegisterResponse::TrackerVisibilityState { state } =
+            response
+        else {
+            return false;
+        };
+        if !state.is_full() {
+            return false;
+        }
+        for range in &state.stored_ranges {
+            if range.from_sn > meta.sn {
+                break;
+            }
+            if matches!(
+                range.visibility,
+                crate::model::common::TrackerStoredVisibility::None
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Verifica criptográficamente un transfer_event, simula si el nodo local
     /// sigue siendo testigo tras esa transferencia, y si es así lo registra en
     /// el TransferVerificationRegister.
@@ -296,6 +353,96 @@ impl TransferVerifier {
         let (governance_id, _, subject_data) = self
             .verify_light(ctx, transfer_event, subject_id, first_ledger)
             .await?;
+
+        // When the pre-state is local (we are exactly one sn behind
+        // the transfer), check the evaluation evidence against it:
+        // request binding, evaluator quorum and result hash must
+        // reproduce over the pre-event properties.
+        if let Some(local_sn) =
+            get_local_subject_sn(ctx, subject_id).await.ok().flatten()
+            && local_sn.saturating_add(1) == transfer_event.sn
+        {
+            let Protocols::Transfer {
+                event_request,
+                evaluation,
+                validation,
+            } = &transfer_event.protocols
+            else {
+                return Err(ActorError::Functional {
+                    description: "transfer hint is not a transfer".to_string(),
+                });
+            };
+            let path = ave_actors::ActorPath::from(format!(
+                "/user/node/subject_manager/{subject_id}"
+            ));
+            if let Ok(tracker) = ctx
+                .system()
+                .get_actor::<crate::tracker::Tracker>(&path)
+                .await
+                && let Ok(crate::tracker::TrackerResponse::Metadata(meta)) =
+                    tracker
+                        .ask(crate::tracker::TrackerMessage::GetMetadata)
+                        .await
+                && Self::prefix_complete(ctx, &governance_id, &meta).await
+            {
+                let pre: Metadata = (*meta).clone();
+                // Missing roles (the register only serves the
+                // current governance version) mean the evidence
+                // can not be judged here: skip it, the seal and
+                // validation quorum still apply.
+                if let Ok((eval_data, _, _)) = get_actual_roles_register(
+                    ctx,
+                    &governance_id,
+                    SearchRole {
+                        schema_id: pre.schema_id.clone(),
+                        namespace: pre.namespace.clone(),
+                    },
+                    false,
+                    false,
+                    transfer_event.gov_version,
+                )
+                .await
+                {
+                    let signer =
+                        validation.validation_req_signature.signer.clone();
+                    let req_hash = hash_borsh(
+                        &*self.hash.hasher(),
+                        &RequestSubjectData {
+                            subject_id: pre.subject_id.clone(),
+                            governance_id: pre.governance_id.clone(),
+                            namespace: pre.namespace.clone(),
+                            schema_id: pre.schema_id.clone(),
+                            sn: pre.sn.saturating_add(1),
+                            gov_version: transfer_event.gov_version,
+                            signer: signer.clone(),
+                        },
+                    )
+                    .map_err(|e| {
+                        ActorError::Functional {
+                            description: format!("req hash failed: {e}"),
+                        }
+                    })?;
+                    check_evaluation(
+                        &self.hash,
+                        evaluation.clone(),
+                        eval_data,
+                        pre.properties.clone(),
+                        EventAnchor {
+                            event_request,
+                            metadata: &pre,
+                            gov_version: transfer_event.gov_version,
+                            req_subject_data_hash: req_hash,
+                            signer,
+                        },
+                    )
+                    .map_err(|e| {
+                        DistributorError::TransferEventInvalid {
+                            details: format!("eval evidence: {e}"),
+                        }
+                    })?;
+                }
+            }
+        }
 
         // No sn-vs-batch gate here: the sender fetches the pending
         // transfer separately from the offered window by design

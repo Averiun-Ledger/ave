@@ -183,6 +183,9 @@ pub enum SubjectError {
     #[error("viewpoints hash mismatch: expected {expected}, got {actual}")]
     ViewpointsHashMismatch { expected: String, actual: String },
 
+    #[error("evaluation evidence is invalid: {details}")]
+    EvaluationEvidenceInvalid { details: String },
+
     // Actor and system errors
     #[error("actor not found: {path}")]
     ActorNotFound { path: String },

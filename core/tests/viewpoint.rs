@@ -23,7 +23,8 @@ use ave_core::governance::{
     data::GovernanceData,
     model::{CreatorWitness, RoleCreator},
 };
-use ave_network::{NodeType, RoutingNode};
+use ave_core::helpers::network::{ActorMessage, NetworkMessage};
+use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
     assert_tracker_fact_full, assert_tracker_fact_opaque,
@@ -11075,4 +11076,153 @@ async fn test_witness_copy_many_cuts_converge() {
             &[*viewpoint],
         );
     }
+}
+
+// H3: receipt-side visibility. A Hash-granted witness must store
+// Opaque even when the batch (or push) carries Full: the sender's
+// projection is a claim, the receiver re-checks per event.
+#[test(tokio::test)]
+async fn test_receipt_masks_over_clear_facts() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let hash_wit = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&hash_wit]).await;
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "HashNode", "key": hash_wit.public_key()}
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["HashNode"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "HashNode", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "HashNode",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&hash_wit, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact_viewpoints(
+        &owner,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // First copy with an over-clear batch: Full where Opaque is due.
+    let full = owner
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 2);
+    let receiver_key = PublicKey::from_str(hash_wit.public_key()).unwrap();
+    let from_key = PublicKey::from_str(nodes[0].api.public_key()).unwrap();
+    hash_wit
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: receiver_key,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: full,
+                    is_all: true,
+                    transfer_event: None,
+                },
+            ),
+            &from_key,
+        )
+        .await
+        .unwrap();
+    let mut stored = Vec::new();
+    for _ in 0..50 {
+        if let Ok(events) =
+            get_events(&hash_wit, subject_id.clone(), 2, true).await
+            && events.len() == 2
+        {
+            stored = events;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(stored.len(), 2);
+    assert_tracker_fact_opaque(&stored[1].event, &["agua"]).unwrap();
+
+    // Push path: the next over-clear fact is masked the same way.
+    emit_fact_viewpoints(
+        &owner,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        BTreeSet::from(["basura".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut pushed = Vec::new();
+    for _ in 0..50 {
+        if let Ok(events) =
+            get_events(&hash_wit, subject_id.clone(), 3, true).await
+            && events.len() == 3
+        {
+            pushed = events;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(pushed.len(), 3);
+    assert_tracker_fact_opaque(&pushed[2].event, &["basura"]).unwrap();
 }

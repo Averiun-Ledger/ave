@@ -9588,3 +9588,123 @@ async fn test_witness_copy_stale_register_window() {
     }
     assert!(window.last().is_some_and(|range| range.1 == 4));
 }
+
+// H5: single-witness first copy supervises loss. The first sweep
+// request is dropped once; the updater retry plus the round retry
+// must still drive the copy to the tip (no Direct fire-and-forget).
+#[test(tokio::test)]
+async fn test_single_witness_first_copy_survives_request_loss() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let bob = &nodes[2].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![alice]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Bob",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [1, 2, 3] {
+        emit_fact(
+            alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    bob.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Single witness: Bob copies Alice's subject through Alice only.
+    // Drop the first distribution request; the sweep retries it.
+    bob.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerReq,
+        peer: None,
+        remaining: Some(1),
+        action: FaultAction::Drop,
+    })
+    .await
+    .unwrap();
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+
+    let state = get_subject(bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+}

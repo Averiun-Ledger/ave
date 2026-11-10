@@ -70,6 +70,7 @@ pub(crate) struct CheckAuthCommon {
     pub(crate) governance_id: DigestIdentifier,
     pub(crate) namespace: String,
     pub(crate) is_gov: bool,
+    pub(crate) gov_version: u64,
 }
 
 pub(crate) struct TransferBatch<'a> {
@@ -413,6 +414,7 @@ impl DistriWorker {
                 governance_id: DigestIdentifier::default(),
                 namespace,
                 is_gov: true,
+                gov_version: 0,
             });
         }
 
@@ -450,6 +452,7 @@ impl DistriWorker {
             governance_id,
             namespace,
             is_gov: false,
+            gov_version,
         })
     }
 
@@ -475,8 +478,25 @@ impl DistriWorker {
             schema_id,
             governance_id,
             namespace,
+            gov_version,
             ..
         } = common;
+
+        // The suffix must not run ahead of our governance: the first
+        // event check in check_auth_common is not enough, an inline
+        // transfer could otherwise smuggle a newer gov_version.
+        if ledger.iter().any(|e| e.gov_version > *gov_version) {
+            let their = ledger
+                .iter()
+                .map(|e| e.gov_version)
+                .max()
+                .unwrap_or(*gov_version);
+            return Err(DistributorError::GovernanceVersionMismatch {
+                our_version: *gov_version,
+                their_version: their,
+            }
+            .into());
+        }
 
         // subject_data puede haber cambiado entre iteraciones del loop de
         // LedgerDistribution (ej. subject creado en chunk anterior). Si
@@ -548,6 +568,16 @@ impl DistriWorker {
         } else {
             let first_ledger =
                 ledger.first().ok_or(DistributorError::EmptyEvents)?;
+            // Pre-authentication: an unvalidated inline transfer
+            // must never authorize its own prefix. Verify every
+            // inline transfer before rebuilding ownership from it.
+            for event in ledger.iter().filter(|e| {
+                matches!(e.get_event_request_type(), EventRequestType::Transfer)
+            }) {
+                self.transfer_verifier
+                    .verify_light(ctx, event, subject_id, first_ledger)
+                    .await?;
+            }
             let owner = first_ledger.ledger_seal_signature.signer.clone();
             let gov_version = first_ledger.gov_version;
             let transfer_data =
@@ -1493,6 +1523,21 @@ impl DistriWorker {
             }
             return Err(DistributorError::ReceiverNoAccess.into());
         }
+        // All events must belong to the same subject before any
+        // auth or ownership work: a transfer from another subject
+        // must never authorize this batch.
+        let first_subject = ledger[0].get_subject_id();
+        if ledger.iter().any(|e| e.get_subject_id() != first_subject) {
+            warn!(
+                msg_type = "LedgerDistribution",
+                sender = %sender,
+                "Mixed-subject ledger batch rejected"
+            );
+            if let Some(metrics) = crate::metrics::try_core_metrics() {
+                metrics.observe_distribution_failure("mixed_subject");
+            }
+            return Err(DistributorError::MixedSubjectBatch.into());
+        }
 
         let subject_id = ledger[0].get_subject_id();
         let ledger_count = ledger.len();
@@ -1520,6 +1565,13 @@ impl DistriWorker {
             transfer_event
         {
             if !common.is_gov {
+                if transfer_event.gov_version > common.gov_version {
+                    return Err(DistributorError::GovernanceVersionMismatch {
+                        our_version: common.gov_version,
+                        their_version: transfer_event.gov_version,
+                    }
+                    .into());
+                }
                 match self
                     .transfer_verifier
                     .verify_and_simulate(

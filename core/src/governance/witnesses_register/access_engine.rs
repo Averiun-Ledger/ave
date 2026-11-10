@@ -1035,4 +1035,158 @@ impl WitnessesRegister {
             }
         }
     }
+
+    /// Receipt-side visibility, one mode per received event. The base
+    /// is the stored transfer data when the subject is known, else a
+    /// reconstruction from the received chain itself. Ownership in the
+    /// batch is applied first, so every event is evaluated with the
+    /// same final ownership the sender projects with (the current
+    /// owner keeps its bypass over the whole history); visibility
+    /// spans for new sns are inferred from each event in order, so
+    /// the owner bypass applies even before the spans persist.
+    pub(crate) async fn tracker_delivery_modes_for_receipt(
+        &self,
+        _ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        namespace: &Namespace,
+        schema_id: &SchemaType,
+        ledger: &[crate::model::event::Ledger],
+    ) -> Result<Vec<TrackerDeliveryMode>, ActorError> {
+        use crate::model::common::{Interval, TrackerStoredVisibility};
+        use crate::model::event::Protocols;
+        use ave_common::request::EventRequest;
+
+        let stored = self.subjects.get(subject_id).cloned();
+        let stored_exists = stored.is_some();
+        let mut working = if let Some(data) = stored {
+            data
+        } else {
+            match Self::transfer_data_from_ledger(subject_id, ledger) {
+                Ok(data) => data,
+                Err(_) => {
+                    return Ok(ledger
+                        .iter()
+                        .map(|_| TrackerDeliveryMode::Opaque)
+                        .collect());
+                }
+            }
+        };
+        // First pass: final ownership. A reconstruction from this
+        // same batch is already final and must not be extended
+        // twice; a stored base moves forward with the batch.
+        if stored_exists {
+            for event in ledger {
+                working.sn = event.sn;
+                working.gov_version = event.gov_version;
+                match event.get_event_request() {
+                    Some(EventRequest::Transfer(req)) => {
+                        let ok = matches!(&event.protocols,
+                            Protocols::Transfer { evaluation, .. }
+                            if evaluation
+                                .evaluator_response_ok()
+                                .is_some());
+                        if ok {
+                            working.actual_new_owner_data = Some((
+                                req.new_owner.clone(),
+                                event.gov_version,
+                            ));
+                        }
+                    }
+                    Some(EventRequest::Confirm(_)) => {
+                        if let Some((new_owner, new_gov)) =
+                            working.actual_new_owner_data.take()
+                        {
+                            let entry = working
+                                .old_owners
+                                .entry(working.actual_owner.clone())
+                                .or_default();
+                            entry.sn = event.sn;
+                            entry.interval_gov_version.insert(Interval {
+                                lo: working.gov_version,
+                                hi: event.gov_version,
+                            });
+                            working.actual_owner = new_owner;
+                            working.gov_version = new_gov;
+                        }
+                    }
+                    Some(EventRequest::Reject(_)) => {
+                        if let Some((new_owner, new_gov)) =
+                            working.actual_new_owner_data.take()
+                        {
+                            let entry = working
+                                .old_owners
+                                .entry(new_owner)
+                                .or_default();
+                            entry.sn = event.sn;
+                            entry.interval_gov_version.insert(Interval {
+                                lo: new_gov,
+                                hi: event.gov_version,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Second pass: spans in order, modes against the final
+        // ownership above.
+        let mut modes = Vec::with_capacity(ledger.len());
+        for event in ledger {
+            let (stored, inferred) = match &event.protocols {
+                Protocols::TrackerFactFull { event_request, .. } => {
+                    match event_request.content() {
+                        EventRequest::Fact(fact) => {
+                            if fact.viewpoints.is_empty() {
+                                (
+                                    TrackerStoredVisibility::Full,
+                                    crate::model::common::TrackerEventVisibility::Fact(
+                                        fact.viewpoints.clone(),
+                                    ),
+                                )
+                            } else {
+                                (
+                                    TrackerStoredVisibility::Only(
+                                        fact.viewpoints.clone(),
+                                    ),
+                                    crate::model::common::TrackerEventVisibility::Fact(
+                                        fact.viewpoints.clone(),
+                                    ),
+                                )
+                            }
+                        }
+                        _ => (
+                            TrackerStoredVisibility::Full,
+                            crate::model::common::TrackerEventVisibility::NonFact,
+                        ),
+                    }
+                }
+                Protocols::TrackerFactOpaque { evaluation, .. } => (
+                    TrackerStoredVisibility::None,
+                    crate::model::common::TrackerEventVisibility::Fact(
+                        evaluation.viewpoints.clone(),
+                    ),
+                ),
+                _ => (
+                    TrackerStoredVisibility::Full,
+                    crate::model::common::TrackerEventVisibility::NonFact,
+                ),
+            };
+            // Always advance the working spans: an open range from an
+            // older event would otherwise cover this sn and the mode
+            // would be evaluated on stale visibility.
+            working
+                .visibility_state
+                .record_event(event.sn, stored, inferred);
+            modes.push(self.event_delivery_mode(
+                &working,
+                node,
+                namespace,
+                schema_id,
+                event.sn,
+                event.gov_version,
+            ));
+        }
+        Ok(modes)
+    }
 }

@@ -1,4 +1,5 @@
 use ave_actors::{ActorContext, ActorError};
+use ave_common::SchemaType;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
 
@@ -8,6 +9,7 @@ use crate::model::common::subject::{
 };
 use crate::model::common::{
     check_subject_creation, crash_system, record_verified_transfer,
+    remove_verified_transfer,
 };
 use crate::{
     distribution::error::DistributorError,
@@ -15,8 +17,7 @@ use crate::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
     governance::{
-        Governance, GovernanceMessage,
-        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
+        Governance, GovernanceMessage, witnesses_register::TrackerDeliveryMode,
     },
     model::event::{Ledger, Protocols},
 };
@@ -42,15 +43,12 @@ impl DistriWorker {
         let transfer_simulation = transfer_batch.simulation;
 
         // Truncation detection: the sender's `is_all` is a claim, so
-        // the offered tip is checked against our own window. A batch
-        // claiming completeness below it is treated as partial (more
-        // is requested) instead of stalling short. The ranges double
-        // as the receipt-side visibility check below.
-        let (window_sn, receive_ranges): (
-            Option<u64>,
-            Vec<TrackerDeliveryRange>,
-        ) = if common.is_gov {
-            (None, Vec::new())
+        // the offered tip is checked against our own window and
+        // against any verified transfer floor. A batch claiming
+        // completeness below either is treated as partial (more is
+        // requested) instead of stalling short.
+        let window_sn: Option<u64> = if common.is_gov {
+            None
         } else if let Some(data) = common.subject_data.as_ref() {
             self.get_tracker_window(
                 ctx,
@@ -61,10 +59,9 @@ impl DistriWorker {
             )
             .await
             .ok()
-            .map(|(sn, _, _, ranges)| (Some(sn), ranges))
-            .unwrap_or((None, Vec::new()))
+            .map(|(sn, _, _, _)| sn)
         } else {
-            (None, Vec::new())
+            None
         };
 
         loop {
@@ -128,16 +125,28 @@ impl DistriWorker {
                 return Err(DistributorError::ReceiverNoAccess.into());
             }
 
-            Self::reproject_receipt_visibility(
+            self.reproject_receipt_visibility(
+                ctx,
                 &mut pending_ledger,
-                &receive_ranges,
                 &subject_id,
                 &sender,
-            )?;
+                common,
+            )
+            .await?;
 
-            let truncated = window_sn.is_some_and(|window| {
-                sender_is_all && chunk_offered_hi_sn < window
-            });
+            let verify_floor = verified_transfer_sn
+                .into_iter()
+                .chain(transfer_event.map(|e| e.sn))
+                .max();
+            let truncated = if sender_is_all {
+                let below_window = window_sn
+                    .is_some_and(|window| chunk_offered_hi_sn < window);
+                let below_floor = verify_floor
+                    .is_some_and(|floor| chunk_offered_hi_sn < floor);
+                below_window || below_floor
+            } else {
+                false
+            };
             if truncated {
                 warn!(
                     msg_type = "LedgerDistribution",
@@ -331,9 +340,28 @@ impl DistriWorker {
                             // artifact acquisition pass.
                             self.trigger_deferred_acquisition(ctx, &subject_id)
                                 .await;
+                        } else {
+                            self.notify_update_done(ctx, &subject_id, last_sn)
+                                .await;
                         }
                     }
                     Err(e) => {
+                        if transfer_recorded && !common.is_gov {
+                            if let Err(remove_err) = remove_verified_transfer(
+                                ctx,
+                                &common.governance_id,
+                                &subject_id,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    msg_type = "LedgerDistribution",
+                                    subject_id = %subject_id,
+                                    error = %remove_err,
+                                    "Failed to drop transfer proof"
+                                );
+                            }
+                        }
                         if let ActorError::FunctionalCritical { .. } = e.clone()
                         {
                             error!(
@@ -400,6 +428,9 @@ impl DistriWorker {
                     // The catch-up round reached the witness-certified
                     // tip: run the deferred artifact acquisition pass.
                     self.trigger_deferred_acquisition(ctx, &subject_id).await;
+                } else {
+                    self.notify_update_done(ctx, &subject_id, applied_hi_sn)
+                        .await;
                 }
             }
 
@@ -410,77 +441,111 @@ impl DistriWorker {
     }
 
     /// Receipt-side visibility: the sender's projection is a claim.
-    /// Every full fact is re-checked against our own window: facts
-    /// in an Opaque range are masked locally (the same bytes an
-    /// honest sender would deliver); everything else passes through
-    /// (missing ranges must not stall legit sync).
-    ///
-    /// Ranges come out of build_tracker_window_from_data sorted and
-    /// non-overlapping, and the ledger arrives in SN order, so a single
-    /// forward index replaces the per-event linear scan.
-    fn reproject_receipt_visibility(
+    /// Every full fact is re-checked event by event against our own
+    /// register: opaque modes are masked locally, clear modes pass.
+    /// Events above our governance version pass through: with a
+    /// lagging governance we cannot judge grants yet, and blocking
+    /// would wedge legit sync.
+    async fn reproject_receipt_visibility(
+        &self,
+        ctx: &mut ActorContext<Self>,
         ledger: &mut [Ledger],
-        ranges: &[TrackerDeliveryRange],
         subject_id: &DigestIdentifier,
         sender: &PublicKey,
+        common: &CheckAuthCommon,
     ) -> Result<(), ActorError> {
-        if ranges.is_empty() {
+        if common.is_gov || ledger.is_empty() {
             return Ok(());
         }
-        let mut range_idx = 0;
-        for event in ledger.iter_mut() {
+        let has_full = ledger
+            .iter()
+            .any(|e| matches!(e.protocols, Protocols::TrackerFactFull { .. }));
+        if !has_full {
+            return Ok(());
+        }
+        let modes = self
+            .tracker_delivery_modes(
+                ctx,
+                &common.governance_id,
+                subject_id,
+                (*self.our_key).clone(),
+                common.namespace.clone(),
+                common.schema_id.clone(),
+                ledger,
+            )
+            .await
+            .unwrap_or_default();
+        if modes.len() != ledger.len() {
+            return Ok(());
+        }
+        for (event, mode) in ledger.iter_mut().zip(modes.iter()) {
             if !matches!(event.protocols, Protocols::TrackerFactFull { .. }) {
                 continue;
             }
-            while range_idx < ranges.len() && ranges[range_idx].to_sn < event.sn
-            {
-                range_idx += 1;
+            if event.gov_version > common.gov_version {
+                continue;
             }
-            let mode = if range_idx < ranges.len()
-                && ranges[range_idx].from_sn <= event.sn
-            {
-                Some(&ranges[range_idx].mode)
-            } else {
-                None
-            };
-            match mode {
-                Some(TrackerDeliveryMode::Clear) => {}
-                Some(TrackerDeliveryMode::Opaque) => {
-                    *event = event.to_tracker_opaque().map_err(|e| {
-                        ActorError::Functional {
-                            description: format!(
-                                "Failed to mask opaque fact: {e:?}"
-                            ),
-                        }
-                    })?;
-                    warn!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        sender = %sender,
-                        sn = event.sn,
-                        "Masked over-clear fact on receipt"
-                    );
-                    if let Some(metrics) = crate::metrics::try_core_metrics() {
-                        metrics.observe_distribution_failure(
-                            "visibility_remasked",
-                        );
+            if matches!(mode, TrackerDeliveryMode::Opaque) {
+                *event = event.to_tracker_opaque().map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Failed to mask opaque fact: {e:?}"
+                        ),
                     }
-                }
-                None => {
-                    // No covering range (owner paths, stale window):
-                    // pass through. Blocking here stalls legit sync;
-                    // numeric safe_hi_sn above already bounded it.
-                    debug!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        sender = %sender,
-                        sn = event.sn,
-                        "Fact without covering range on receipt, kept as-is"
-                    );
+                })?;
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    sender = %sender,
+                    sn = event.sn,
+                    "Masked over-clear fact on receipt"
+                );
+                if let Some(metrics) = crate::metrics::try_core_metrics() {
+                    metrics.observe_distribution_failure("visibility_remasked");
                 }
             }
         }
         Ok(())
+    }
+
+    async fn tracker_delivery_modes(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        ledger: &[Ledger],
+    ) -> Result<Vec<TrackerDeliveryMode>, ActorError> {
+        use crate::governance::witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        };
+        use ave_actors::ActorPath;
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{governance_id}/witnesses_register"
+        ));
+        let actor = ctx.system().get_actor::<WitnessesRegister>(&path).await?;
+        let response = actor
+            .ask(WitnessesRegisterMessage::GetTrackerDeliveryModes {
+                subject_id: subject_id.clone(),
+                node,
+                namespace,
+                schema_id,
+                ledger: ledger.to_vec(),
+            })
+            .await?;
+        match response {
+            WitnessesRegisterResponse::TrackerDeliveryModes { modes } => {
+                Ok(modes)
+            }
+            _ => Err(ActorError::UnexpectedResponse {
+                path,
+                expected: "WitnessesRegisterResponse::TrackerDeliveryModes"
+                    .to_owned(),
+            }),
+        }
     }
 
     /// A governance catch-up round reached the witness-certified tip:
@@ -530,10 +595,33 @@ impl DistriWorker {
         }
     }
 
+    /// Best-effort completion signal to the update round
+    /// supervising this subject, if any: reaching the sender
+    /// certified tip satisfies its target, so its retry timer is
+    /// moot and the actor can stop now instead of lingering for
+    /// it. Partial rounds send nothing; their timer still
+    /// supervises them. A missing actor just means no round is
+    /// running.
+    async fn notify_update_done(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        sn: u64,
+    ) {
+        use crate::update::{Update, UpdateMessage};
+        let path = ave_actors::ActorPath::from(format!(
+            "/user/node/auth/{subject_id}"
+        ));
+        let Ok(actor) = ctx.system().get_actor::<Update>(&path).await else {
+            return;
+        };
+        let _ = actor.tell(UpdateMessage::DistributionDone { sn }).await;
+    }
+
     pub(crate) async fn process_last_event_distribution(
         &self,
         ctx: &mut ActorContext<Self>,
-        ledger: Ledger,
+        mut ledger: Ledger,
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
@@ -590,6 +678,56 @@ impl DistriWorker {
                 "Discarding event above current receiver access limit"
             );
             return Err(DistributorError::ReceiverNoAccess.into());
+        }
+
+        if !is_gov
+            && matches!(ledger.protocols, Protocols::TrackerFactFull { .. })
+            && let Some(data) =
+                crate::model::common::node::get_subject_data(ctx, &subject_id)
+                    .await
+                    .ok()
+                    .flatten()
+            && let crate::node::SubjectData::Tracker {
+                governance_id,
+                schema_id,
+                namespace,
+                ..
+            } = data
+            && let Ok(our_gov) =
+                crate::model::common::subject::get_version(ctx, &governance_id)
+                    .await
+            && ledger.gov_version <= our_gov
+            && let Ok(modes) = self
+                .tracker_delivery_modes(
+                    ctx,
+                    &governance_id,
+                    &subject_id,
+                    (*self.our_key).clone(),
+                    namespace,
+                    schema_id,
+                    std::slice::from_ref(&ledger),
+                )
+                .await
+            && modes.first().is_some_and(|m| {
+                matches!(
+                    m,
+                    crate::governance::witnesses_register::
+                        TrackerDeliveryMode::Opaque
+                )
+            })
+        {
+            ledger = ledger.to_tracker_opaque().map_err(|e| {
+                ActorError::Functional {
+                    description: format!("Failed to mask pushed fact: {e:?}"),
+                }
+            })?;
+            warn!(
+                msg_type = "LastEventDistribution",
+                subject_id = %subject_id,
+                sender = %sender,
+                sn = sn,
+                "Masked over-clear pushed fact"
+            );
         }
 
         let lease = if ledger.is_create_event() {

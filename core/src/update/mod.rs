@@ -47,7 +47,6 @@ pub struct UpdateWitnessOffer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateStartMode {
-    Direct,
     Sweep,
     Empty,
 }
@@ -92,6 +91,7 @@ pub struct Update {
     max_round_retries: usize,
     witness_retry_count: usize,
     witness_retry_interval_secs: u64,
+    pending_target_sn: Option<u64>,
 }
 
 impl Update {
@@ -113,6 +113,7 @@ impl Update {
             max_round_retries: data.max_round_retries,
             witness_retry_count: data.witness_retry_count,
             witness_retry_interval_secs: data.witness_retry_interval_secs,
+            pending_target_sn: None,
         }
     }
 
@@ -214,6 +215,7 @@ impl Update {
     fn reset_round(&mut self) {
         self.witnesses = self.all_witnesses.clone();
         self.offers.clear();
+        self.pending_target_sn = None;
     }
 
     async fn stop_active_updaters(
@@ -300,18 +302,6 @@ impl Update {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<UpdateStartMode, ActorError> {
-        if self.all_witnesses.len() == 1 && self.our_sn.is_none() {
-            let Some(witness) = self.all_witnesses.iter().next() else {
-                return Ok(UpdateStartMode::Direct);
-            };
-
-            let verified_sn =
-                self.already_verified_transfer_sn(ctx, &witness).await;
-            self.request_distribution(witness.clone(), None, verified_sn)
-                .await?;
-            return Ok(UpdateStartMode::Direct);
-        }
-
         self.stop_active_updaters(ctx).await?;
 
         for witness in self.witnesses.clone() {
@@ -425,6 +415,9 @@ pub enum UpdateMessage {
         offer: Option<UpdateWitnessOffer>,
         round: u64,
     },
+    DistributionDone {
+        sn: u64,
+    },
 }
 
 impl Message for UpdateMessage {}
@@ -473,10 +466,6 @@ impl Handler<Self> for Update {
                 };
 
                 match start_mode {
-                    UpdateStartMode::Direct => {
-                        ctx.stop(None).await;
-                        return Ok(());
-                    }
                     UpdateStartMode::Empty => {
                         self.stop_empty(ctx).await;
                         return Ok(());
@@ -551,10 +540,6 @@ impl Handler<Self> for Update {
                 };
 
                 match start_mode {
-                    UpdateStartMode::Direct => {
-                        ctx.stop(None).await;
-                        return Ok(());
-                    }
                     UpdateStartMode::Empty => {
                         self.stop_empty(ctx).await;
                         return Ok(());
@@ -584,7 +569,7 @@ impl Handler<Self> for Update {
                             // Only offers covering our next sn count:
                             // a stale witness must not inflate the
                             // target beyond the selected peer's reach.
-                            let expected_target_sn = self
+                            let mut expected_target_sn = self
                                 .offers
                                 .values()
                                 .filter(|offer| {
@@ -601,6 +586,37 @@ impl Handler<Self> for Update {
                             let verified_sn = self
                                 .already_verified_transfer_sn(ctx, &better_node)
                                 .await;
+                            // A verified transfer is a floor even when
+                            // offers are stale: completing below it would
+                            // accept a premature `is_all` as done.
+                            if let Some(data) =
+                                get_subject_data(ctx, &self.subject_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                            {
+                                let gov_id = match &data {
+                                    SubjectData::Tracker {
+                                        governance_id,
+                                        ..
+                                    } => Some(governance_id.clone()),
+                                    SubjectData::Governance { .. } => {
+                                        Some(self.subject_id.clone())
+                                    }
+                                };
+                                if let Some(gov_id) = gov_id
+                                    && let Ok(Some((sn, _))) =
+                                        get_verified_transfer_sn(
+                                            ctx,
+                                            &gov_id,
+                                            &self.subject_id,
+                                        )
+                                        .await
+                                {
+                                    expected_target_sn =
+                                        expected_target_sn.max(sn);
+                                }
+                            }
                             if let Err(e) = self
                                 .request_distribution(
                                     better_node.clone(),
@@ -633,6 +649,8 @@ impl Handler<Self> for Update {
                                 && self.should_retry_auth_rounds()
                             {
                                 keep_running = true;
+                                self.pending_target_sn =
+                                    Some(expected_target_sn);
                                 // A running actor without its retry timer
                                 // waits for a round that never comes: timer
                                 // scheduling is local infrastructure, fail
@@ -724,6 +742,21 @@ impl Handler<Self> for Update {
                         "Ignoring response from unexpected or already-processed witness"
                     );
                 }
+            }
+            UpdateMessage::DistributionDone { sn } => {
+                // Fast stop on proven completion: the distributor
+                // reached the supervised target, so the retry timer
+                // is moot. Anything below the target is a partial
+                // round the timer still supervises. Same stop as the
+                // timer path, just without waiting for it.
+                if !self.pending_target_sn.is_some_and(|t| sn >= t) {
+                    return Ok(());
+                }
+                if let Some(key) = self.pending_retry.take() {
+                    ctx.cancel_timer(key);
+                }
+                self.pending_target_sn = None;
+                ctx.stop(None).await;
             }
         };
 

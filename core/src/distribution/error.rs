@@ -70,6 +70,9 @@ pub enum DistributorError {
     #[error("failed to update subject ledger: {details}")]
     UpdateLedgerFailed { details: String },
 
+    #[error("batch mixes events from different subjects")]
+    MixedSubjectBatch,
+
     #[error("transfer event verification failed: {details}")]
     TransferEventInvalid { details: String },
 }
@@ -91,6 +94,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::GetGovernanceFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. }
             | DistributorError::TransferEventInvalid { .. }
+            | DistributorError::MixedSubjectBatch
             | DistributorError::TrackerBanned
             | DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
