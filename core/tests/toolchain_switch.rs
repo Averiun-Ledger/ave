@@ -1,4 +1,4 @@
-//! TEST-PIN switch paths (P1/P2): every switch runs against real
+//! Pin switch paths: every switch runs against real
 //! registry IDs, never synthetic ones. For the capacity tests,
 //! per-node toolchain maps.
 //!
@@ -129,7 +129,7 @@ async fn properties(
 }
 
 #[test(tokio::test)]
-// TEST-PIN-01: pin switch with no schemas commits directly and the
+// Pin switch with no schemas commits directly and the
 // committed pin moves. No test proves a pin can commit otherwise.
 async fn test_pin_switch_no_schemas_commits() {
     let (node, _dirs) = single_node().await;
@@ -179,7 +179,7 @@ async fn test_pin_bare_switch_without_capacity_reboots() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-02: switch with a previous schema recompiles everything
+// Switch with a previous schema recompiles everything
 // under the new pin with evidence; the official artifact is intact
 // until the commit.
 async fn test_pin_switch_recompiles_all() {
@@ -229,7 +229,7 @@ async fn test_pin_switch_recompiles_all() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-16: parallel recompile-all — three schemas switch cleanly,
+// Parallel recompile-all — three schemas switch cleanly,
 // and a broken first schema fails deterministically BY SCHEMA ORDER
 // (not completion order): the fold votes the alphabetically-first
 // failure whatever finishes first.
@@ -271,7 +271,7 @@ async fn test_pin_switch_parallel_recompile() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-16b: concurrent builds with one broken schema abort naming
+// Concurrent builds with one broken schema abort naming
 // the first schema IN ORDER — a first-completed-wins fold would name
 // a pooled fast schema instead, flakily.
 async fn test_pin_switch_parallel_failure_order() {
@@ -312,7 +312,7 @@ async fn test_pin_switch_parallel_failure_order() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-03: switch plus add plus modify in a single event —
+// Switch plus add plus modify in a single event —
 // everything builds and commits under the NEW pin, mixing the
 // staging path (add/change) with the official path (recompile).
 async fn test_pin_switch_with_add_and_modify() {
@@ -422,7 +422,7 @@ async fn test_pin_rollback_is_symmetric() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-06: switch plus modify denied at approval — the previous
+// Switch plus modify denied at approval — the previous
 // version is never deleted nor overwritten: official bytes identical,
 // staging swept, pin and schemas untouched.
 async fn test_pin_switch_denied_keeps_previous_version() {
@@ -861,7 +861,7 @@ async fn test_pin_switch_with_remove() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-13: request en vuelo durante el cambio. Un add atascado
+// Request en vuelo durante el cambio. Un add atascado
 // en compilación (pool en hold) retiene el subject; el switch entra
 // en cola (InQueue, no solapa: un manager por subject) y al liberar
 // commitea el add bajo el pin viejo y el switch reintenta con la
@@ -944,7 +944,7 @@ async fn test_pin_inflight_add_then_switch() {
 }
 
 #[test(tokio::test)]
-// TEST-REC-01: muerte a mitad de build (sin parada graciosa: se
+// Muerte a mitad de build (sin parada graciosa: se
 // cancela y se abandona, como un kill -9 en lo que al disco
 // respecta) y rearranque con las mismas DBs. El evento combina
 // switch con add de una fuente NUEVA —su build hace miss en todas
@@ -1074,7 +1074,7 @@ async fn test_pin_kill_mid_recompile_then_restart() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-04: a pin nobody holds stands down everywhere — reboot, no
+// A pin nobody holds stands down everywhere — reboot, no
 // crash-loop, no commit. The owner path stays open (node responsive).
 async fn test_pin_nobody_holds_reboots() {
     // Holds the default pin only: the switch target is unresolvable,
@@ -1118,7 +1118,7 @@ async fn test_pin_nobody_holds_reboots() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-05: partial capacity — two of three compilers hold the pin,
+// Partial capacity — two of three compilers hold the pin,
 // quorum 2/3 commits with the capable subset. The stood-down compiler
 // is replaced, not waited on.
 async fn test_pin_partial_capacity_quorum_with_subset() {
@@ -1238,7 +1238,7 @@ async fn test_pin_partial_capacity_quorum_with_subset() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-10 (with contracts): unknown pin plus committed schemas —
+// Unknown pin plus committed schemas (with contracts) —
 // the evaluator gate preempts any build, so it commits a
 // deterministic error with everything intact (no reboot loops, no
 // partial rebuilds).
@@ -1283,7 +1283,7 @@ async fn test_pin_unknown_with_contracts_votes_error() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-14: boot without the committed pin stays dormant — the node
+// Boot without the committed pin stays dormant — the node
 // boots, heals nothing by rebuilding, keeps serving retained state,
 // and new builds reboot instead of crash-looping.
 async fn test_pin_boot_without_pin_stays_dormant() {
@@ -1370,13 +1370,13 @@ async fn test_pin_boot_without_pin_stays_dormant() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-22: blind proponent. The owner proposes a switch to a pin
+// Blind proponent. The owner proposes a switch to a pin
 // it does not hold (not yet installed): its own compiler votes
 // `NoToolchain`, the two capable compilers carry the quorum, and the
 // switch commits everywhere — including on the owner, which goes
 // dormant serving retained artifacts instead of crashing. This is the
 // rollout shape the operator procedure blesses ("no hace falta que
-// TODOS lo tengan"); TEST-PIN-05 covers an incapable peer, never the
+// TODOS lo tengan"); partial capacity covers an incapable peer, never the
 // incapable requester itself.
 async fn test_pin_switch_blind_proponent_commits() {
     let (mut nodes, mut dirs) =
@@ -1508,7 +1508,7 @@ async fn test_pin_switch_blind_proponent_commits() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-23: lying mapping fails the boot loud. A pin mapped at a
+// Lying mapping fails the boot loud. A pin mapped at a
 // toolchain whose measured version is not the registry entry's never
 // becomes a node: `Api::build` errors instead of voting divergent
 // bytes under a valid ID later. No builds involved (one rustc spawn).
@@ -1538,12 +1538,12 @@ async fn test_pin_boot_wrong_mapping_fails_loud() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-24: two governances, two pins, one node. The pin selects
+// Two governances, two pins, one node. The pin selects
 // per governance version, never a node-global toolchain: gov1 keeps
 // building and committing on the default pin while gov2 lives on
 // 1.98.1, both artifacts served. Guards against any future global
 // toolchain state leaking across governances (today everything is
-// explicit parameters, verified in audit — this pins it).
+// explicit parameters — this pins it).
 async fn test_pin_two_governances_two_pins_coexist() {
     let (node, _dirs) = single_node().await;
     let node = &node.api;
@@ -1617,7 +1617,7 @@ async fn test_pin_two_governances_two_pins_coexist() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-25: a compiler that stands down for the new pin stays
+// A compiler that stands down for the new pin stays
 // live through fetch. Node3 holds compiler+evaluator roles but no
 // PIN_198 toolchain: after the switch commits without it, an
 // A compiler that stands down for the new pin must survive the
@@ -1781,7 +1781,7 @@ async fn test_pin_stood_down_node_survives_switch() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-26: a pin mapped at a toolchain that is not installed can
+// A pin mapped at a toolchain that is not installed can
 // not boot either. 23 covers the lying mapping (wrong version); this
 // covers the missing one: the entry is broken either way and the
 // boot fails loud before serving anything. Fast: the probe fails

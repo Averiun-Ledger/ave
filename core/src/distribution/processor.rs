@@ -46,8 +46,11 @@ impl DistriWorker {
         // the offered tip is checked against our own window and
         // against any verified transfer floor. A batch claiming
         // completeness below either is treated as partial (more is
-        // requested) instead of stalling short.
-        let window_sn: Option<u64> = if common.is_gov {
+        // requested) instead of stalling short. The window is only
+        // built when the sender claims completeness: otherwise the
+        // flag below is false by definition and the build is pure
+        // waste on every batch.
+        let window_sn: Option<u64> = if !sender_is_all || common.is_gov {
             None
         } else if let Some(data) = common.subject_data.as_ref() {
             self.get_tracker_window(

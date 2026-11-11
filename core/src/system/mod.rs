@@ -230,7 +230,7 @@ pub async fn system(
     );
 
     // The node never compiles contracts remotely in production: the
-    // gRPC compiler client is a TEST-BUILD helper (embedded pool or
+    // gRPC compiler client is a test-build helper (embedded pool or
     // explicit endpoints, e.g. dead ones for failure-path tests).
     // Production nodes compile in-process (`toolchain` feature); a
     // node built without it answers `CompilersUnavailable`.

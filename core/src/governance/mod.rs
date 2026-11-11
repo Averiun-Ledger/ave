@@ -1011,7 +1011,7 @@ impl Governance {
 
         // Same refresh point for the tracker sync peer set: every
         // governance update re-pushes members + witnesses, so the
-        // serving gate never goes stale (SYNC-08).
+        // serving gate never goes stale.
         self.push_tracker_sync_peers(ctx).await?;
 
         Ok(())

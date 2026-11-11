@@ -369,10 +369,29 @@ impl WitnessesRegister {
         // The register may lag behind the ledger (independent tells, no
         // barrier): serve only the mapped prefix. Without this cap,
         // unmapped SNs would be evaluated under a guessed gov version.
-        // An empty map means no evidence at all (fresh subject whose
-        // RegisterSn has not landed yet); keep serving it so bootstrap
-        // is not wedged, and let the next round catch up.
-        if let Some(covered_to) =
+        if gov_versions.is_empty() {
+            // No mapping evidence at all: never evaluate SNs under an
+            // assumed gov version. Only direct rights (owner bypasses
+            // need no grant lookups, so their modes do not depend on
+            // the version) may still be served, keeping bootstrap for
+            // the owners themselves unwedged. Grant-dependent access
+            // waits for the register to catch up.
+            let direct_only = data.actual_owner == *node
+                || data
+                    .actual_new_owner_data
+                    .as_ref()
+                    .is_some_and(|(new_owner, _)| new_owner == node);
+            if !direct_only {
+                if let Some(old_owner) = data.old_owners.get(node) {
+                    access_limit = access_limit.min(old_owner.sn);
+                } else {
+                    return Ok((None, transfer_sn, None, Vec::new()));
+                }
+            }
+            if access_limit < from_sn {
+                return Ok((None, transfer_sn, None, Vec::new()));
+            }
+        } else if let Some(covered_to) =
             gov_versions.last().map(|(interval, _)| interval.hi)
         {
             if covered_to < from_sn {
@@ -403,11 +422,10 @@ impl WitnessesRegister {
                 gv_idx += 1;
             }
 
-            // Unreachable with a non-empty map: every window lies within
-            // the covered prefix by construction, so a gov range always
-            // contains range_from. Only an empty map (no evidence at all,
-            // e.g. fresh subject) reaches the fallback, which keeps the
-            // previous behavior so bootstrap is not wedged.
+            // Only an empty map (direct-bypass bootstrap, no grant
+            // evidence) reaches the fallback below: bypasses resolve
+            // those modes before any grant lookup, so the assumed
+            // version is never used to judge grants.
             let gov_version = if gv_idx < gov_versions.len()
                 && gov_versions[gv_idx].0.contains(range_from)
             {

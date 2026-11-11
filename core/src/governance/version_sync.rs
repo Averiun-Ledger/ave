@@ -82,11 +82,11 @@ pub struct GovernanceVersionSync {
     /// When the current `update_target` was adopted. A target that
     /// never resolves (dead peer, failed distribution) must not pin
     /// the sync forever: once stale, the next tick drops it and opens
-    /// a fresh round (SYNC-01).
+    /// a fresh round.
     target_set_at: Option<Instant>,
     /// Last local version an idle round was reported for. Idle is a
     /// state, not an event: re-notifying every tick is noise
-    /// (SYNC-05).
+    ///
     idle_notified_at_version: Option<u64>,
 }
 
@@ -101,7 +101,7 @@ const MAX_BACKOFF_ROUNDS: u64 = 16;
 /// Consecutive-failure backoff for sync peers: a peer that goes quiet
 /// sits out a few rounds instead of burning one timeout per cycle.
 /// Any answer resets it at once — temporary drops are forgiven on the
-/// spot, only sustained silence is skipped (SYNC-09). Entries die
+/// spot, only sustained silence is skipped. Entries die
 /// with success or when the peer leaves the known set, so a dead peer
 /// costs one small map entry, never a ban.
 #[derive(Debug, Clone, Default)]
@@ -259,7 +259,7 @@ impl GovernanceVersionSync {
 
     /// Reports an idle round at most once per local version: idle
     /// is a state, and every tick re-proving it would spam the
-    /// governance actor with full acquisition passes (SYNC-05).
+    /// governance actor with full acquisition passes.
     async fn maybe_notify_idle_round(&mut self, ctx: &ActorContext<Self>) {
         if self.idle_notified_at_version != Some(self.local_version) {
             self.idle_notified_at_version = Some(self.local_version);
@@ -412,7 +412,7 @@ impl GovernanceVersionSync {
     ) -> Result<(), ActorError> {
         // A target that never resolved pins the sync: drop it once
         // stale so this tick opens a fresh round instead of
-        // no-op-ing forever (SYNC-01).
+        // no-op-ing forever.
         self.drop_stale_target();
         if self.update_target.is_some() {
             self.schedule_tick(ctx)?;
@@ -558,7 +558,7 @@ impl Handler<Self> for GovernanceVersionSync {
                     );
                     // A failed tick must still arm the next one: the
                     // consumed timer was the only one, and without it
-                    // the sync dies silently (SYNC-02).
+                    // the sync dies silently.
                     if let Err(e) = self.schedule_tick(ctx) {
                         warn!(
                             governance_id = %self.governance_id,
@@ -630,7 +630,7 @@ impl Handler<Self> for GovernanceVersionSync {
                     // Late but valuable: the round already closed, yet
                     // a known peer is ahead of us (and of any target).
                     // Adopt it and fire the update now instead of
-                    // dropping the intel until the next tick (SYNC-03).
+                    // dropping the intel until the next tick.
                     // Not an idle proof, so no idle notify.
                     self.peer_backoff.note_success(&peer);
                     self.update_target = Some(UpdateTarget { peer, version });

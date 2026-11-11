@@ -5144,7 +5144,6 @@ async fn test_tracker_fact_viewpoints_reject_invalid_values() {
 //   3. O bien: B intenta emitir un `DistributionLedgerRes` manual.
 //   4. Verificar `SubjectNotFound`.
 //
-// Prioridad: ALTA.
 async fn test_emisor_subject_not_found() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -5255,7 +5254,6 @@ async fn test_emisor_subject_not_found() {
 //   8. W se autentica con owner e intenta update_subject.
 //   9. W permanece en SN=10 porque su witness window está cerrada.
 //
-// Prioridad: ALTA.
 async fn test_emisor_actual_sn_bigger_than_witness_tracker() {
     let (mut nodes, dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -5483,12 +5481,9 @@ async fn test_emisor_actual_sn_bigger_than_witness_tracker() {
 //   10. W sigue en SN=10.
 //
 // Nota: El caso `ActualSnBiggerThanWitness` para governance no es
-// implementable en tests de integración puros sin manipulación de DB
-// (documentado en temporal/unimplementable-tests.md como E05/X12).
+// implementable en tests de integración puros sin manipulación de DB.
 // Este test verifica el escenario más cercano: un testigo de gobernanza
 // que es removido y pierde acceso a actualizaciones futuras.
-//
-// Prioridad: ALTA.
 async fn test_emisor_actual_sn_bigger_than_witness_gov() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -5619,7 +5614,6 @@ async fn test_emisor_actual_sn_bigger_than_witness_gov() {
 //   3. W intenta obtener el tracker.
 //   4. `SenderNoAccess`.
 //
-// Prioridad: ALTA.
 async fn test_emisor_sender_no_access() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {

@@ -40,7 +40,7 @@ use test_log::test;
 use crate::common::PORT_COUNTER;
 
 #[test(tokio::test)]
-// B01: arquitectura base y ausencia de acoples
+// Arquitectura base y ausencia de acoples
 //
 // Setup:
 //   crear un tracker y una governance;
@@ -470,7 +470,7 @@ async fn test_viewpoints_architecture_battery() {
 }
 
 #[test(tokio::test)]
-// B02: precedencia y composición de grants
+// Precedencia y composición de grants
 //
 // Setup:
 //   usar el mismo witness con varios grants:
@@ -1053,7 +1053,7 @@ async fn test_viewpoints_grant_precedence_battery() {
 }
 
 #[test(tokio::test)]
-// B03: huecos históricos y cambios múltiples de viewpoint
+// Huecos históricos y cambios múltiples de viewpoint
 //
 // Setup:
 //   dar acceso `agua`;
@@ -1458,7 +1458,7 @@ async fn test_viewpoints_historical_gaps_battery() {
 }
 
 #[test(tokio::test)]
-// B04: ventana de búsqueda por batch
+// Ventana de búsqueda por batch
 //
 // Setup:
 //   crear tres testigos explícitos por tramos:
@@ -1896,7 +1896,7 @@ async fn test_viewpoints_batch_window_battery() {
 }
 
 #[test(tokio::test)]
-// B05: respuesta según el requester
+// Respuesta según el requester
 //
 // Setup:
 //   hacer que el witness vea más que el requester;
@@ -2359,7 +2359,7 @@ async fn test_viewpoints_requester_perspective_battery() {
 }
 
 #[test(tokio::test)]
-// B06: transferencias que sobreescriben el pasado
+// Transferencias que sobreescriben el pasado
 //
 // Setup:
 //   crear facts;
@@ -2853,7 +2853,7 @@ async fn test_viewpoints_transfer_override_battery() {
 }
 
 #[test(tokio::test)]
-// B07: `Reject`, `old_owner` y ownership repetido
+// `Reject`, `old_owner` y ownership repetido
 //
 // Setup:
 //   crear facts;
@@ -3781,7 +3781,7 @@ async fn test_viewpoints_reject_and_old_owner_battery() {
 }
 
 #[test(tokio::test)]
-// B08: proyección `TrackerFactFull -> TrackerFactOpaque`
+// Proyección `TrackerFactFull -> TrackerFactOpaque`
 //
 // Setup:
 //   crear facts full;
@@ -4359,7 +4359,7 @@ async fn test_viewpoints_projection_battery() {
 }
 
 #[test(tokio::test)]
-// B09: copia manual, auth y auto-update
+// Copia manual, auth y auto-update
 //
 // Setup:
 //   usar el mismo requester y los mismos witnesses para las tres rutas.
@@ -10292,11 +10292,11 @@ async fn test_viewpoints_opaque_tracker_cannot_confirm_transfer() {
     );
 }
 
-// T-A: late, withdrawn and re-added witness grants, plus a closed
+// Late, withdrawn and re-added witness grants, plus a closed
 // creator-Witnesses membership.
 // Grants are capabilities over the ownership, not per-event tickets:
 // a witness trusted at any point of it reads its viewpoints across
-// it (B01/B05 pin pre-grant facts arriving Full; the exact version
+// it (pre-grant facts arrive Full; the exact version
 // is consulted first, then any grant overlapping the ownership).
 // The numeric copy, in contrast, IS capped: a closed
 // creator-Witnesses membership caps the generic schema-witness path
@@ -10311,10 +10311,10 @@ async fn test_viewpoints_opaque_tracker_cannot_confirm_transfer() {
 //   P1: private fact under open Witnesses -> Wgen gets it Full.
 //   P2: Witnesses closed -> Wgen stays capped (no LastSn invention).
 //   P3: Wuser granted late -> pre-grant facts still arrive Full
-//       (retroactive capability, B05-shaped pin).
+//       (retroactive capability).
 //   P4: fact under a strictly later version -> Wuser gets it Full.
 //   P5: grant withdrawn -> the numeric copy caps at the closure,
-//       so the gap fact is not served at all (F2).
+//       so the gap fact is not served at all.
 //   P6: grant re-added -> the gap fact and the new fact arrive Full.
 //
 // NOTE: background tracker sync is silenced for this test so every
@@ -10533,7 +10533,8 @@ async fn test_witness_copy_grant_intervals_and_witnesses_closure() {
         .unwrap();
 
     // P3: late explicit grant for Wuser; earlier private facts
-    // arrive Opaque, never retroactively Clear.
+    // still arrive Full (retroactive capability, not per-event
+    // tickets).
     let json = json!({
         "roles": {
             "schema": [
@@ -10871,7 +10872,7 @@ async fn test_witness_copy_grant_intervals_and_witnesses_closure() {
     );
 }
 
-// T-F: many alternating grant cuts with small batches still converge
+// Many alternating grant cuts with small batches still converge
 // in a single update, with per-event clarity matching each grant.
 //
 // Six gov versions alternate W between [agua] and [basura]; each
@@ -10881,7 +10882,7 @@ async fn test_witness_copy_grant_intervals_and_witnesses_closure() {
 // keep making progress without the full suffix on the wire.
 #[test(tokio::test)]
 async fn test_witness_copy_many_cuts_converge() {
-    // Same silenced background sync as T-A: convergence must come
+    // Same silenced background sync: convergence must come
     // from explicit updates with the minimal head-only offer.
     let idle_sync = Some(TrackerSyncConfig {
         interval_secs: 3600,
@@ -11078,7 +11079,7 @@ async fn test_witness_copy_many_cuts_converge() {
     }
 }
 
-// H3: receipt-side visibility. A Hash-granted witness must store
+// Receipt-side visibility. A Hash-granted witness must store
 // Opaque even when the batch (or push) carries Full: the sender's
 // projection is a claim, the receiver re-checks per event.
 #[test(tokio::test)]

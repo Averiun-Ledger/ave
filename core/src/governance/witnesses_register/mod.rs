@@ -906,14 +906,20 @@ impl WitnessesRegister {
                             return ActualSearch::End(SnLimit::LastSn);
                         }
                         Some(hi) => {
-                            better_gov_version =
-                                better_gov_version.max(Some(hi));
+                            // The open schema role must have started
+                            // at or before the Witnesses closure to
+                            // share a version with it.
+                            if matches!(actual_lo, Some(lo) if *lo <= hi) {
+                                better_gov_version =
+                                    better_gov_version.max(Some(hi));
+                            }
                         }
                     }
                 }
 
                 if let Some(range) = interval.iter().last()
                     && gov_version <= range.hi
+                    && witnesses_hi.is_none_or(|w| range.lo <= w)
                 {
                     // range.hi is the top reachable gov_version; resolve
                     // its sn.

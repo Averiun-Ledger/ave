@@ -5052,7 +5052,6 @@ async fn test_sink_replay_and_external_db_battery() {
 //      múltiples chunks porque batch_size=2 < total_events).
 //   5. Verificar que W1 tiene el mismo SN que owner.
 //
-// Prioridad: MEDIA.
 async fn test_build_batch_gov() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
@@ -5140,7 +5139,6 @@ async fn test_build_batch_gov() {
 //   5. W1 hace update_subject de nuevo → debe obtener SN=3.
 //   6. Verificar que W1 siempre recibe el SN más alto ofrecido por owner.
 //
-// Prioridad: MEDIA.
 async fn test_update_offer_gov() {
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {

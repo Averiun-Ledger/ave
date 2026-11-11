@@ -8634,7 +8634,7 @@ async fn test_distribution_pushed_create_without_request() {
     );
 }
 
-// T-B: auxiliary-transfer provenance (F5) + direct-right floor (F4).
+// Auxiliary-transfer provenance plus the direct-right floor.
 //
 // s1 (A->B, single transfer): N is B's explicit witness through a
 // grant closed right after the transfer era. N's first copy runs
@@ -8932,7 +8932,7 @@ async fn test_witness_copy_transfer_aux_second_owner() {
         .await
         .unwrap();
 
-    // F4: new device with Alice's keys copies s4 up to the tip even
+    // New device with Alice's keys copies s4 up to the tip even
     // though her witness candidate ended at SN 2. Nadia synced the
     // whole subject straight from Alice, so her register is current
     // by construction and she can serve it after Alice is gone.
@@ -9033,7 +9033,7 @@ async fn test_witness_copy_transfer_aux_second_owner() {
     );
 }
 
-// T-C: stint-chained auxiliary transfer (F6).
+// Stint-chained auxiliary transfer.
 //
 // A->B->A->C with Nb as B's witness through a grant closed early:
 // the copy caps at SN 3 while Bob's aggregated exit moved on to
@@ -9355,7 +9355,7 @@ async fn test_witness_copy_transfer_aux_stint_chain() {
         .unwrap();
 }
 
-// T-E: stale-register window (F3).
+// Stale-register window.
 //
 // Advancing governance without tracker events must not invent
 // mappings: the version window ends at the last mapped SN instead
@@ -9589,7 +9589,7 @@ async fn test_witness_copy_stale_register_window() {
     assert!(window.last().is_some_and(|range| range.1 == 4));
 }
 
-// H5: single-witness first copy supervises loss. The first sweep
+// Single-witness first copy supervises loss. The first sweep
 // request is dropped once; the updater retry plus the round retry
 // must still drive the copy to the tip (no Direct fire-and-forget).
 #[test(tokio::test)]
@@ -9707,4 +9707,887 @@ async fn test_single_witness_first_copy_survives_request_loss() {
         .await
         .unwrap();
     assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+}
+
+// No overlap between creator Witnesses and schema role, no
+// access. Witnesses closes at gov 2; Nora gets the schema role at
+// gov 3 (phase 1: still open) and loses it at gov 4 (phase 2:
+// fully closed afterwards). Neither phase shares a version with
+// the closure, so Nora must never register the subject. Marta, a
+// schema witness since gov 1, keeps the mapped prefix (control).
+#[test(tokio::test)]
+async fn test_schema_role_after_witnesses_closure_grants_nothing() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let marta = &nodes[2].api;
+    let nora = &nodes[3].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![alice, marta, nora]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Marta", "key": marta.public_key()},
+                {"name": "Nora", "key": nora.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Marta", "Nora"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "Owner", "namespace": []},
+                            {"name": "Marta", "namespace": []}
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // gov 2: the creator Witnesses membership closes.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Serving-side settle: the owner must hold the event and have
+    // mapped it before anyone copies, otherwise a stale offer
+    // decides the test instead of the access rules.
+    get_subject(alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 2),
+        "alice register never mapped sn 2, got {window:?}"
+    );
+
+    // Marta (witness since gov 1) keeps the mapped prefix: control
+    // that serving works while Nora gets nothing. Her overlap with
+    // the closed Witnesses ([1,1]) ends at gov 1, so she must stop
+    // exactly at sn 1.
+    for node in [marta, nora] {
+        node.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+        node.update_subject(governance_id.clone()).await.unwrap();
+    }
+    get_subject(marta, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    get_subject(nora, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    marta
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    marta.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(marta, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // gov 3: Nora gets the schema role after the closure (phase 1:
+    // open schema without overlap).
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "witness": [
+                            {"name": "Nora", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 3),
+        "alice register never mapped sn 3, got {window:?}"
+    );
+    get_subject(marta, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    get_subject(nora, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // The closure caps Marta at the gov 1 tip even though new
+    // events keep arriving: re-requesting must not advance her.
+    marta.update_subject(subject_id.clone()).await.unwrap();
+    for _ in 0..30 {
+        let state = marta.get_subject_state(subject_id.clone()).await.unwrap();
+        assert_eq!(state.sn, 1, "closed Witnesses must cap at sn 1");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    nora.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    nora.update_subject(subject_id.clone()).await.unwrap();
+    for _ in 0..30 {
+        assert!(
+            nora.get_subject_state(subject_id.clone()).await.is_err(),
+            "schema role after Witnesses closure must grant nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // gov 4: Nora loses the schema role too (phase 2: closed after
+    // the closure). Still no shared version, still nothing.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "remove": {
+                        "witness": [
+                            {"name": "Nora", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 4}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 4) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 4),
+        "alice register never mapped sn 4, got {window:?}"
+    );
+    get_subject(nora, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    nora.update_subject(subject_id.clone()).await.unwrap();
+    for _ in 0..30 {
+        assert!(
+            nora.get_subject_state(subject_id.clone()).await.is_err(),
+            "fully closed schema role must grant nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&nora).await.unwrap();
+}
+
+// The aux must be the confirmed installing transfer, never
+// the rejected proposal, and it must follow the winning owner
+// across stints. Chain: A->B (rejected) then A->C (confirmed).
+// Dave (pending via C->Dave) must be offered exactly that
+// transfer; then, once Dave confirms and transfers to Erin, Erin
+// must be offered exactly Dave's transfer.
+#[test(tokio::test)]
+async fn test_aux_follows_confirmed_transfer_across_stints() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let bob = &nodes[2].api;
+    let carol = &nodes[3].api;
+    let dave = &nodes[4].api;
+    let erin = &nodes[5].api;
+
+    let governance_id = create_and_authorize_governance(
+        owner,
+        vec![alice, bob, carol, dave, erin],
+    )
+    .await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "Carol", "key": carol.public_key()},
+                {"name": "Dave", "key": dave.public_key()},
+                {"name": "Erin", "key": erin.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob", "Carol", "Dave", "Erin"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Carol",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Dave",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Erin",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}, {"name": "Carol", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // Everyone syncs the governance once; no roles change after
+    // this, so no re-sync is needed later.
+    for node in [bob, carol, dave, erin] {
+        node.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+        node.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(node, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key, true)
+        .await
+        .unwrap();
+
+    // Bob copies through his pending transfer, then rejects it.
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_reject(&bob, subject_id.clone(), true).await.unwrap();
+    let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key, true)
+        .await
+        .unwrap();
+    // Carol copies through her pending transfer, then confirms it.
+    carol
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    carol.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(carol, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    emit_confirm(&carol, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    let dave_key = PublicKey::from_str(dave.public_key()).unwrap();
+    emit_transfer(&carol, subject_id.clone(), dave_key, true)
+        .await
+        .unwrap();
+    // sn6 is Dave's installing transfer; sn2 is the rejected one.
+    get_subject(&carol, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = carol
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 6) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 6),
+        "carol register never mapped sn 6, got {window:?}"
+    );
+
+    // Phase 1: Dave (pending via Carol) copies with batch size 1.
+    // A wrong aux (the rejected sn2 instead of the confirmed sn6,
+    // or none) stalls the install, so reaching sn6 proves the
+    // first batch carried sn6. Re-request on empty rounds: the
+    // server answers only once its witness state lands.
+    dave.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(carol.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    for _ in 0..6 {
+        if let Err(e) = dave.update_subject(subject_id.clone()).await {
+            assert!(
+                e.to_string().contains("already in progress"),
+                "dave update failed: {e}"
+            );
+        }
+        if dave
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_ok_and(|state| state.sn >= 6)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    get_subject(dave, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    // Phase 2: Dave confirms and transfers to Erin; reaching
+    // sn8 proves the aux followed the winning owner to Dave's
+    // transfer instead of stalling on the old one.
+    emit_confirm(&dave, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    let erin_key = PublicKey::from_str(erin.public_key()).unwrap();
+    emit_transfer(&dave, subject_id.clone(), erin_key, true)
+        .await
+        .unwrap();
+    get_subject(&dave, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = dave
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 8) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 8),
+        "dave register never mapped sn 8, got {window:?}"
+    );
+
+    erin.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(dave.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    for _ in 0..6 {
+        if let Err(e) = erin.update_subject(subject_id.clone()).await {
+            assert!(
+                e.to_string().contains("already in progress"),
+                "erin update failed: {e}"
+            );
+        }
+        if erin
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_ok_and(|state| state.sn >= 8)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    get_subject(erin, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+}
+
+// The direct floor beats a finite witness candidate, for the
+// pending new owner and for the old owner. Both creators start
+// with a User witness each, closed at gov 2: the surviving
+// candidate caps at sn 1. Bob (pending, floor sn 2) and later
+// Alice (old owner, floor sn 3) must still copy through it on a
+// fresh device holding only their keys.
+#[test(tokio::test)]
+async fn test_direct_floor_beats_finite_witness_candidate() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Bob",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Alice",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            }
+                        ],
+                        "issuer": [
+                            {"name": "Alice", "namespace": []},
+                            {"name": "Bob", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // gov 2: close both User grants. Every witness candidate ends
+    // at gov 1 (sn 1); direct rights must carry further.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            },
+                            {
+                                "actual_name": "Bob",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // sn2: Alice transfers to Bob (pending). Bob's floor is sn 2.
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key, true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 2),
+        "alice register never mapped sn 2, got {window:?}"
+    );
+
+    // Fresh Bob (pending new owner) copies through the sn 1 cap.
+    nodes[2].token.cancel();
+    join_all(nodes[2].handler.iter_mut()).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_new_bob, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_bob = node_new_bob.api;
+    node_running(&new_bob).await.unwrap();
+    new_bob
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&new_bob, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    new_bob
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_bob.update_subject(subject_id.clone()).await.unwrap();
+    let state = get_subject(&new_bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 2, "pending floor must beat the sn 1 cap");
+
+    // sn3: Bob confirms. Alice becomes old owner with floor sn 3.
+    emit_confirm(&new_bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&new_bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = new_bob
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 3),
+        "bob register never mapped sn 3, got {window:?}"
+    );
+
+    // Fresh Alice (old owner) copies through the sn 1 cap.
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_new_alice, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_alice = node_new_alice.api;
+    node_running(&new_alice).await.unwrap();
+    new_alice
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_alice
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&new_alice, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    new_alice
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(
+                PublicKey::from_str(new_bob.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    new_alice.update_subject(subject_id.clone()).await.unwrap();
+    let state = get_subject(&new_alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3, "old-owner floor must beat the sn 1 cap");
+    node_running(&new_alice).await.unwrap();
 }

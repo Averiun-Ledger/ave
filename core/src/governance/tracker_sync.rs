@@ -150,7 +150,7 @@ pub struct TrackerSync {
     peers: PeerSet,
     /// Pages served this cycle. Pagination without a bound lets one
     /// lying or broken peer hold the cycle (and the tick loop) forever
-    /// by repeating `next_cursor` (SYNC-06).
+    /// by repeating `next_cursor`.
     pages_this_cycle: u32,
     /// Cursor to resume from on the next cycle when the page cap cut
     /// this one short. Cleared on every full pass so new heads are
@@ -558,7 +558,7 @@ impl TrackerSync {
         if !matches!(self.state, SyncState::Updating(_)) {
             // Unreachable through the nonce-guarded timeout path, but
             // `take` below would silently wipe the state if it ever
-            // fired off-state: scream instead of vanishing (SYNC-07).
+            // fired off-state: scream instead of vanishing.
             warn!(
                 governance_id = %self.governance_id,
                 state = ?std::mem::discriminant(&self.state),
@@ -701,7 +701,7 @@ impl TrackerSync {
     /// fellow governance member or governance witness, from the set
     /// the parent pushes on every update. Strangers get silence, not
     /// data — the list enumerates what we follow and each answer
-    /// costs a register scan (SYNC-08).
+    /// costs a register scan.
     fn is_sync_peer(&self, sender: &PublicKey) -> bool {
         self.peers.members.contains(sender)
             || self.peers.witnesses.contains(sender)
@@ -937,7 +937,7 @@ impl Handler<Self> for TrackerSync {
                 // Page budget spent but the peer keeps paging: save where
                 // to resume next tick and yield instead of letting one
                 // peer hold the cycle (and the tick loop) forever
-                // (SYNC-06). A finished list (`next_cursor: None`)
+                // A finished list (`next_cursor: None`)
                 // completes normally below.
                 if next_cursor.is_some()
                     && self.pages_this_cycle >= MAX_PAGES_PER_CYCLE

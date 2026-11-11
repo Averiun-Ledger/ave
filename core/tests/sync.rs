@@ -131,7 +131,7 @@ async fn wait_held_ledger_reqs(api: &Api, at_least: usize, timeout_secs: u64) {
     );
 }
 
-// SYNC-01: an update target that never resolves must not pin the sync
+// An update target that never resolves must not pin the sync
 // forever. B announces v2 and then its ledger never arrives; after the
 // target TTL the node must open a fresh round (second ledger-request
 // wave) instead of no-op-ing on the stale target.
@@ -222,7 +222,7 @@ async fn test_sync_stale_target_resweeps() {
         .unwrap();
 }
 
-// SYNC-06: a peer repeating next_cursor must not hold the fetch cycle
+// A peer repeating next_cursor must not hold the fetch cycle
 // (and the tick loop) forever. 100 forged single-item pages hit the
 // per-cycle cap; the next cycle resumes from the saved cursor.
 #[test(tokio::test)]
@@ -320,7 +320,7 @@ async fn test_sync_page_cap_and_resume() {
     }
 }
 
-// SYNC-08: the serving gate. A stranger (non-member) asking for
+// The serving gate. A stranger (non-member) asking for
 // our witness list gets silence; a member gets an answer. Proves the
 // gate without needing any tick: requests are injected straight into
 // A's tracker_sync actor and A's outbound answers are held.

@@ -1,4 +1,4 @@
-//! Toolchain pin acceptance (TEST-PIN).
+//! Toolchain pin acceptance.
 mod common;
 
 use ave_common::SchemaType;
@@ -25,7 +25,7 @@ async fn three_nodes() -> (Vec<NodeData>, Vec<tempfile::TempDir>) {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-07: unknown pin string votes a deterministic error. The
+// Unknown pin string votes a deterministic error. The
 // error commits to the ledger as the event outcome (it never builds
 // nor rejects unilaterally) and the committed pin does not move.
 async fn test_pin_unknown_votes_error() {
@@ -122,7 +122,7 @@ async fn test_pin_same_pin_with_schemas_votes_error() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-09: switching to the current pin is a no-op switch and
+// Switching to the current pin is a no-op switch and
 // votes a deterministic error, even with no other change in the event.
 async fn test_pin_same_pin_votes_error() {
     let (nodes, _dirs) = three_nodes().await;
@@ -179,7 +179,7 @@ fn example_schema_fact(extra: serde_json::Value) -> serde_json::Value {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-17: same pin plus real changes commits normally — the gate
+// Same pin plus real changes commits normally — the gate
 // must not over-block. Catches a no-op check written too broadly.
 async fn test_pin_same_pin_with_changes_commits() {
     let (nodes, _dirs) = three_nodes().await;
@@ -224,7 +224,7 @@ async fn test_pin_same_pin_with_changes_commits() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-18: unknown pin plus real changes still votes a
+// Unknown pin plus real changes still votes a
 // deterministic error — nothing is applied half-way.
 async fn test_pin_unknown_with_changes_votes_error() {
     let (nodes, _dirs) = three_nodes().await;
@@ -268,7 +268,7 @@ async fn test_pin_unknown_with_changes_votes_error() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-19: legacy event without the toolchain field commits
+// Legacy event without the toolchain field commits
 // normally and keeps the pin — rolling upgrade safety.
 async fn test_pin_absent_field_commits() {
     let (nodes, _dirs) = three_nodes().await;
@@ -305,7 +305,7 @@ async fn test_pin_absent_field_commits() {
 }
 
 #[test(tokio::test)]
-// TEST-PIN-15: an evaluator-only node (no compiler role, no local
+// An evaluator-only node (no compiler role, no local
 // toolchains) votes on pin events like everyone else — the pin never
 // demands builds from non-compilers.
 async fn test_pin_evaluator_only_ignores_builds() {
