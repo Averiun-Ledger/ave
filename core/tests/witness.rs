@@ -1,7 +1,7 @@
 mod common;
 
 use ave_common::identity::keys::Ed25519Signer;
-use ave_common::identity::{KeyPair, PublicKey};
+use ave_common::identity::{DigestIdentifier, KeyPair, PublicKey};
 use ave_core::auth::AuthWitness;
 use common::{
     EXAMPLE_CONTRACT, create_and_authorize_governance,
@@ -10590,4 +10590,251 @@ async fn test_direct_floor_beats_finite_witness_candidate() {
         .unwrap();
     assert_eq!(state.sn, 3, "old-owner floor must beat the sn 1 cap");
     node_running(&new_alice).await.unwrap();
+}
+
+// Boot-recovery re-sends are idempotent: replaying an applied
+// Transfer+Confirm (or Transfer+Reject) pair must not reopen the
+// pending transfer, list the owner as their own old owner, or
+// duplicate the stint. A legitimate new transfer still applies.
+// Boot-recovery re-sends are idempotent: replaying an applied
+// Transfer+Confirm (or Transfer+Reject) pair must not reopen the
+// pending transfer, list the owner as their own old owner, or
+// duplicate the stint. A legitimate new transfer still applies.
+#[test(tokio::test)]
+async fn test_ownership_replay_is_idempotent() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let bob = &nodes[2].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![alice, bob]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            }
+                        ],
+                        "issuer": [
+                            {"name": "Alice", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // sn0 creates the register entry (actual owner Alice).
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    let carol_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let dave_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+
+    async fn ownership(
+        api: &Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) -> (
+        Option<PublicKey>,
+        Option<PublicKey>,
+        Vec<(PublicKey, u64)>,
+        usize,
+    ) {
+        let (owner, pending, mut old, stints) = api
+            .test_witnesses_ownership(governance_id, subject_id.clone())
+            .await
+            .unwrap();
+        old.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        (owner, pending, old, stints)
+    }
+
+    // Legit pair through raw tells, like reconcile sends them.
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id.clone(),
+            bob_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id).await,
+        (
+            Some(PublicKey::from_str(alice.public_key()).unwrap()),
+            Some(bob_key.clone()),
+            vec![],
+            0
+        )
+    );
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id).await,
+        (
+            Some(bob_key.clone()),
+            None,
+            vec![(PublicKey::from_str(alice.public_key()).unwrap(), 2)],
+            1,
+        )
+    );
+
+    // Dirty-boot replay of the same pair: the transfer targets the
+    // current owner and the confirm finds no pending transfer, so
+    // both are ignored and the state is bit-identical.
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id.clone(),
+            bob_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id).await,
+        (
+            Some(bob_key.clone()),
+            None,
+            vec![(PublicKey::from_str(alice.public_key()).unwrap(), 2)],
+            1,
+        )
+    );
+
+    // A legitimate new transfer still applies afterwards.
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id.clone(),
+            carol_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id).await.1,
+        Some(carol_key.clone())
+    );
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id.clone(), 3, 1)
+        .await
+        .unwrap();
+    let (owner, pending, old, stints) =
+        ownership(alice, &governance_id, &subject_id).await;
+    assert_eq!(owner, Some(carol_key));
+    assert_eq!(pending, None);
+    assert_eq!(old.len(), 2);
+    assert_eq!(stints, 2);
+
+    // Same idempotency for the reject path on a fresh subject.
+    let (subject_id2, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id2.clone(), Some(0), true)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id2.clone(),
+            dave_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_reject(&governance_id, subject_id2.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id2).await,
+        (
+            Some(PublicKey::from_str(alice.public_key()).unwrap()),
+            None,
+            vec![(dave_key.clone(), 2)],
+            1,
+        )
+    );
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id2.clone(),
+            dave_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_reject(&governance_id, subject_id2.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id2).await,
+        (
+            Some(PublicKey::from_str(alice.public_key()).unwrap()),
+            None,
+            vec![(dave_key, 2)],
+            1,
+        )
+    );
 }

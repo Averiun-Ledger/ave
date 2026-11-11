@@ -64,6 +64,9 @@ pub enum DistributorError {
     #[error("failed to get governance data: {details}")]
     GetGovernanceFailed { details: String },
 
+    #[error("failed to resolve receipt visibility: {details}")]
+    VisibilityCheckFailed { details: String },
+
     #[error("failed to up tracker: {details}")]
     UpTrackerFailed { details: String },
 
@@ -92,6 +95,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::EmptyEvents
             | DistributorError::MissingCreateEventInCreateLedger { .. }
             | DistributorError::GetGovernanceFailed { .. }
+            | DistributorError::VisibilityCheckFailed { .. }
             | DistributorError::GovernanceVersionMismatch { .. }
             | DistributorError::TransferEventInvalid { .. }
             | DistributorError::MixedSubjectBatch

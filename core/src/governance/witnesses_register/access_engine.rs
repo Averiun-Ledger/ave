@@ -1096,7 +1096,11 @@ impl WitnessesRegister {
         if stored_exists {
             for event in ledger {
                 working.sn = event.sn;
-                working.gov_version = event.gov_version;
+                // working.gov_version is the reign start, not the
+                // last seen version: it only moves when a Confirm
+                // installs a new owner below. Overwriting it per
+                // event would shrink the old-owner interval to the
+                // closing version and hide earlier grants.
                 match event.get_event_request() {
                     Some(EventRequest::Transfer(req)) => {
                         let ok = matches!(&event.protocols,

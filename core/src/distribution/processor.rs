@@ -477,9 +477,18 @@ impl DistriWorker {
                 ledger,
             )
             .await
-            .unwrap_or_default();
+            .map_err(|e| DistributorError::VisibilityCheckFailed {
+                details: e.to_string(),
+            })?;
         if modes.len() != ledger.len() {
-            return Ok(());
+            return Err(DistributorError::VisibilityCheckFailed {
+                details: format!(
+                    "modes cover {} of {} events",
+                    modes.len(),
+                    ledger.len()
+                ),
+            }
+            .into());
         }
         for (event, mode) in ledger.iter_mut().zip(modes.iter()) {
             if !matches!(event.protocols, Protocols::TrackerFactFull { .. }) {
@@ -685,52 +694,84 @@ impl DistriWorker {
 
         if !is_gov
             && matches!(ledger.protocols, Protocols::TrackerFactFull { .. })
-            && let Some(data) =
+        {
+            let data =
                 crate::model::common::node::get_subject_data(ctx, &subject_id)
                     .await
                     .ok()
                     .flatten()
-            && let crate::node::SubjectData::Tracker {
+                    .filter(|data| {
+                        matches!(data, crate::node::SubjectData::Tracker { .. })
+                    });
+            if let Some(crate::node::SubjectData::Tracker {
                 governance_id,
                 schema_id,
                 namespace,
                 ..
-            } = data
-            && let Ok(our_gov) =
-                crate::model::common::subject::get_version(ctx, &governance_id)
-                    .await
-            && ledger.gov_version <= our_gov
-            && let Ok(modes) = self
-                .tracker_delivery_modes(
+            }) = data
+            {
+                let our_gov = crate::model::common::subject::get_version(
                     ctx,
                     &governance_id,
-                    &subject_id,
-                    (*self.our_key).clone(),
-                    namespace,
-                    schema_id,
-                    std::slice::from_ref(&ledger),
                 )
                 .await
-            && modes.first().is_some_and(|m| {
-                matches!(
-                    m,
-                    crate::governance::witnesses_register::
-                        TrackerDeliveryMode::Opaque
-                )
-            })
-        {
-            ledger = ledger.to_tracker_opaque().map_err(|e| {
-                ActorError::Functional {
-                    description: format!("Failed to mask pushed fact: {e:?}"),
+                .map_err(|e| {
+                    DistributorError::VisibilityCheckFailed {
+                        details: e.to_string(),
+                    }
+                })?;
+                // A fact newer than our governance cannot be judged
+                // yet: leave it for the catch-up round, which runs
+                // the same check once the version lands.
+                if ledger.gov_version <= our_gov {
+                    let modes = self
+                        .tracker_delivery_modes(
+                            ctx,
+                            &governance_id,
+                            &subject_id,
+                            (*self.our_key).clone(),
+                            namespace,
+                            schema_id,
+                            std::slice::from_ref(&ledger),
+                        )
+                        .await
+                        .map_err(|e| {
+                            DistributorError::VisibilityCheckFailed {
+                                details: e.to_string(),
+                            }
+                        })?;
+                    match modes.first() {
+                        Some(
+                            crate::governance::witnesses_register::TrackerDeliveryMode::Opaque,
+                        ) => {
+                            ledger = ledger.to_tracker_opaque().map_err(
+                                |e| ActorError::Functional {
+                                    description: format!(
+                                        "Failed to mask pushed fact: {e:?}"
+                                    ),
+                                },
+                            )?;
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sender = %sender,
+                                sn = sn,
+                                "Masked over-clear pushed fact"
+                            );
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err(
+                                DistributorError::VisibilityCheckFailed {
+                                    details: "empty modes for pushed fact"
+                                        .to_owned(),
+                                }
+                                .into(),
+                            );
+                        }
+                    }
                 }
-            })?;
-            warn!(
-                msg_type = "LastEventDistribution",
-                subject_id = %subject_id,
-                sender = %sender,
-                sn = sn,
-                "Masked over-clear pushed fact"
-            );
+            }
         }
 
         let lease = if ledger.is_create_event() {

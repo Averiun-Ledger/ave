@@ -3169,6 +3169,154 @@ impl Api {
         Ok(count)
     }
 
+    async fn test_witnesses_register(
+        &self,
+        governance_id: &DigestIdentifier,
+    ) -> Result<
+        ActorRef<crate::governance::witnesses_register::WitnessesRegister>,
+        Error,
+    > {
+        self.system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/witnesses_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "witnesses_register".to_owned(),
+                reason: "Witnesses register actor not found".to_owned(),
+            })
+    }
+
+    /// Tells a raw ownership transfer straight to this node's
+    /// witnesses register, bypassing evaluation: replays the exact
+    /// boot-recovery interleaving (independent tells, no barrier)
+    /// that a dirty reboot re-sends.
+    pub async fn test_witnesses_transfer(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        new_owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::Transfer {
+                subject_id,
+                new_owner,
+                gov_version,
+            })
+            .await?
+        {
+            WitnessesRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Tells a raw ownership confirmation straight to this node's
+    /// witnesses register (see `test_witnesses_transfer`).
+    pub async fn test_witnesses_confirm(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        sn: u64,
+        gov_version: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::Confirm {
+                subject_id,
+                sn,
+                gov_version,
+            })
+            .await?
+        {
+            WitnessesRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Tells a raw ownership rejection straight to this node's
+    /// witnesses register (see `test_witnesses_transfer`).
+    pub async fn test_witnesses_reject(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        sn: u64,
+        gov_version: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::Reject {
+                subject_id,
+                sn,
+                gov_version,
+            })
+            .await?
+        {
+            WitnessesRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Reads back this node's ownership view of a subject: actual
+    /// owner, pending new owner, old owners with their last sn (by
+    /// key), and how many stints the log holds.
+    pub async fn test_witnesses_ownership(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<
+        (
+            Option<PublicKey>,
+            Option<PublicKey>,
+            Vec<(PublicKey, u64)>,
+            usize,
+        ),
+        Error,
+    > {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::GetOwnership { subject_id })
+            .await?
+        {
+            WitnessesRegisterResponse::Ownership {
+                owner,
+                pending,
+                old_owners,
+                stints,
+            } => Ok((owner, pending, old_owners, stints)),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "Ownership".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Tells a test-crafted approval vote directly to a validator
     /// worker's mailbox, bypassing the network: once this returns the
     /// message is queued, so anything the worker receives afterwards

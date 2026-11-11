@@ -10872,6 +10872,379 @@ async fn test_witness_copy_grant_intervals_and_witnesses_closure() {
     );
 }
 
+// Receipt keeps the ownership start across the batch: a witness
+// holding only the old owner's grant still reads pre-transfer
+// facts as Full after Transfer+Confirm move on. The reprojected
+// batch is injected whole into a late-joining node (its stored
+// register already exists from the Create), so a per-event
+// overwrite of the reign start would shrink the old-owner interval
+// to the closing version and mask the fact.
+#[test(tokio::test)]
+async fn test_receipt_keeps_ownership_start_across_batch() {
+    let w_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let w_pubkey = w_keys.public_key();
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob]).await;
+
+    // W's User grant under Alice starts at gov 1: it covers the
+    // fact below, so only the shrunken old-owner interval can hide
+    // it. W has no node yet, so no push can reach her.
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "W", "key": w_pubkey},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                    "viewpoints": ["agua"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "W",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": []
+                            },
+                        ],
+                        "issuer": [
+                            {"name": "Alice", "namespace": []},
+                            {"name": "Bob", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // sn0-1 under gov 1.
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact_viewpoints(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    bob.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // gov 2 (dummy member with a fresh key: a real membership
+    // change, so the version actually bumps): the transfer below
+    // lands on a newer version than the reign start, which is
+    // exactly what the buggy per-event overwrite got wrong.
+    let dummy_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Dummy", "key": dummy_keys.public_key()}
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    let gov_state = get_subject(&owner, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let gov_data: GovernanceData =
+        from_value(gov_state.properties.clone()).unwrap();
+    assert_eq!(gov_data.version, 2, "dummy member must bump the version");
+    // Bob must see gov 2 before emitting: the transfer and its
+    // confirm have to land on the newer version, otherwise the
+    // reign start never differs from the closing version and the
+    // test cannot tell the overwrite apart.
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // sn2-3: Alice transfers to Bob (pending) and Bob confirms.
+    // Bob pulls the prefix through his pending floor.
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key, true)
+        .await
+        .unwrap();
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // W joins late, after every commit and push: nothing flows to
+    // her except the crafted injects below.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_w, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(w_keys),
+        ..Default::default()
+    })
+    .await;
+    let w = node_w.api;
+    node_running(&w).await.unwrap();
+    w.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    w.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&w, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Real events from Alice, injected in two chunks: the lone
+    // Create first (stored register comes alive), then the rest as
+    // one batch so the whole ownership transition is evaluated
+    // together against the stored start.
+    let full = alice
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 4);
+    let mut ordered = full.clone();
+    ordered.sort_by_key(|e| e.sn);
+    assert!(ordered.iter().enumerate().all(|(i, e)| e.sn as usize == i));
+    let (head, tail): (Vec<_>, Vec<_>) =
+        ordered.into_iter().partition(|e| e.sn == 0);
+    assert_eq!(head.len(), 1);
+    assert_eq!(tail.len(), 3);
+    let from_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let receiver_key = PublicKey::from_str(w.public_key()).unwrap();
+    w.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: receiver_key.clone(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: head,
+                // Complete claim on purpose: the receiver must not
+                // pull the rest on its own, the second crafted chunk
+                // below covers it.
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&w, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    w.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: receiver_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: tail,
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    let w_events = get_events(&w, subject_id.clone(), 4, true).await.unwrap();
+    assert_eq!(w_events.len(), 4);
+    assert_tracker_fact_full(
+        &w_events[1].event,
+        json!({"ModOne": {"data": 1}}),
+        &["agua"],
+    );
+}
+
+// Receipt masking is fail-closed on the push path too: a Full
+// fact pushed to a witness whose grant only hashes arrives
+// Opaque. W never asks for anything, so no offer or window can
+// mask a broken modes lookup; a modes failure drops the push
+// instead of applying it Full.
+#[test(tokio::test)]
+async fn test_push_masks_over_clear_facts() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let wit = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &wit]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "HashWit", "key": wit.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "HashWit"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "HashWit", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "HashWit",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // HashWit syncs governance only: every tracker event below
+    // arrives exclusively through the push path.
+    wit.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    wit.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&wit, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact_viewpoints(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // The creator grant only hashes: the pushed Full fact must land
+    // masked, never as visible data.
+    let wit_events =
+        get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
+    assert_eq!(wit_events.len(), 2);
+    assert_tracker_fact_opaque(&wit_events[1].event, &["agua"]).unwrap();
+}
+
 // Many alternating grant cuts with small batches still converge
 // in a single update, with per-event clarity matching each grant.
 //

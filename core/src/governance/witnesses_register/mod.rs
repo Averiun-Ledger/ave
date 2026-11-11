@@ -190,9 +190,18 @@ pub struct OldOwnerData {
 /// marked as such: the rejected node still needs its own transfer to
 /// copy, but a rejection must never serve as another owner's link.
 /// The log is append-only; stints are identified by position, so
-/// repeated ownership keeps every stint.
+/// repeated ownership keeps every stint. Exact duplicates are
+// dropped instead: serial numbers only grow live, so an identical
+// stint can only be a boot-recovery re-send.
 #[derive(
-    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 pub struct OwnershipStint {
     pub(crate) owner: PublicKey,
@@ -305,6 +314,12 @@ pub enum WitnessesRegisterMessage {
         gov_version: u64,
     },
     GetTrackerVisibilityState {
+        subject_id: DigestIdentifier,
+    },
+    /// Test-only ownership introspection: actual owner, pending new
+    /// owner, old owners with their last sn, and how many stints the
+    /// log holds. Read-only; used to pin replay idempotency.
+    GetOwnership {
         subject_id: DigestIdentifier,
     },
     GetTrackerDeliveryModes {
@@ -467,6 +482,14 @@ pub enum WitnessesRegisterResponse {
     },
     WitnessStatus(WitnessStatus),
     MaxVersion(u64),
+    /// Test-only ownership snapshot: actual owner, pending new
+    /// owner, old owners with their last sn, and the stint count.
+    Ownership {
+        owner: Option<PublicKey>,
+        pending: Option<PublicKey>,
+        old_owners: Vec<(PublicKey, u64)>,
+        stints: usize,
+    },
     Ok,
 }
 
@@ -1473,6 +1496,37 @@ impl Handler<Self> for WitnessesRegister {
                     state,
                 });
             }
+            WitnessesRegisterMessage::GetOwnership { subject_id } => {
+                let data = self.subjects.get(&subject_id);
+                let mut old_owners: Vec<(PublicKey, u64)> = data
+                    .map(|data| {
+                        data.old_owners
+                            .iter()
+                            .map(|(owner, old)| (owner.clone(), old.sn))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                old_owners
+                    .sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+                let (owner, pending, stints) = data
+                    .map(|data| {
+                        (
+                            Some(data.actual_owner.clone()),
+                            data.actual_new_owner_data
+                                .as_ref()
+                                .map(|(new_owner, _)| new_owner.clone()),
+                            data.ownership_transitions.len(),
+                        )
+                    })
+                    .unwrap_or((None, None, 0));
+
+                return Ok(WitnessesRegisterResponse::Ownership {
+                    owner,
+                    pending,
+                    old_owners,
+                    stints,
+                });
+            }
             WitnessesRegisterMessage::GetTrackerDeliveryModes {
                 subject_id,
                 node,
@@ -1944,17 +1998,37 @@ impl PersistentActor for WitnessesRegister {
                 gov_version,
             } => {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
-                    data.actual_new_owner_data =
-                        Some((new_owner.clone(), *gov_version));
+                    // Idempotent replay: a live Transfer never lands
+                    // while another is pending (the request layer
+                    // rejects every Tracker event meanwhile) and
+                    // never targets the current owner (evaluation
+                    // rejects self-transfers). Both cases below can
+                    // only be a boot-recovery re-send, which must not
+                    // reopen or replace the pending transfer.
+                    let duplicate = data.actual_new_owner_data.is_some()
+                        || data.actual_owner == *new_owner;
+                    if !duplicate {
+                        data.actual_new_owner_data =
+                            Some((new_owner.clone(), *gov_version));
 
-                    debug!(
-                        msg_type = "Transfer",
-                        event_type = "Transfer",
-                        subject_id = %subject_id,
-                        new_owner = %new_owner,
-                        gov_version = gov_version,
-                        "Transfer initiated"
-                    );
+                        debug!(
+                            msg_type = "Transfer",
+                            event_type = "Transfer",
+                            subject_id = %subject_id,
+                            new_owner = %new_owner,
+                            gov_version = gov_version,
+                            "Transfer initiated"
+                        );
+                    } else {
+                        debug!(
+                            msg_type = "Transfer",
+                            event_type = "Transfer",
+                            subject_id = %subject_id,
+                            new_owner = %new_owner,
+                            gov_version = gov_version,
+                            "Duplicate transfer ignored, pending unchanged"
+                        );
+                    }
                 } else {
                     error!(
                         msg_type = "Transfer",
@@ -1973,7 +2047,20 @@ impl PersistentActor for WitnessesRegister {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
-                    if let Some((new_owner, new_owner_gov_version)) = new_owner
+                    // Confirming to the current owner would list them
+                    // as their own old owner and duplicate the stint:
+                    // evaluation forbids self-transfers, so this is
+                    // only a boot-recovery re-send after the pending
+                    // transfer was replayed. Restore the pending and
+                    // skip instead of corrupting the ownership.
+                    let self_confirm =
+                        new_owner.as_ref().is_some_and(|(pending_owner, _)| {
+                            *pending_owner == data.actual_owner
+                        });
+                    if self_confirm {
+                        data.actual_new_owner_data = new_owner;
+                    } else if let Some((new_owner, new_owner_gov_version)) =
+                        new_owner
                     {
                         let entry = data
                             .old_owners
@@ -2044,7 +2131,19 @@ impl PersistentActor for WitnessesRegister {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
                     let new_owner = data.actual_new_owner_data.take();
 
-                    if let Some((new_owner, new_owner_gov_version)) = new_owner
+                    // Rejecting for the current owner would record a
+                    // rejected stint against themselves: evaluation
+                    // forbids self-transfers, so this is only a
+                    // boot-recovery re-send. Restore the pending
+                    // and skip instead of duplicating the stint.
+                    let self_reject =
+                        new_owner.as_ref().is_some_and(|(pending_owner, _)| {
+                            *pending_owner == data.actual_owner
+                        });
+                    if self_reject {
+                        data.actual_new_owner_data = new_owner;
+                    } else if let Some((new_owner, new_owner_gov_version)) =
+                        new_owner
                     {
                         let entry = data
                             .old_owners
@@ -2062,13 +2161,24 @@ impl PersistentActor for WitnessesRegister {
                         // owner's link. No tracker event can interleave
                         // between Transfer and Reject while a new owner
                         // is pending, so the rejected transfer is the
-                        // immediately preceding SN.
-                        data.ownership_transitions.push(OwnershipStint {
+                        // immediately preceding SN. An identical stint
+                        // means this exact rejection was already
+                        // recorded: sns only grow live, so it can only
+                        // be a boot-recovery re-send. Drop it instead
+                        // of duplicating the log; the tail replay
+                        // re-establishes any live pending transfer
+                        // that follows this event.
+                        let stint = OwnershipStint {
                             owner: new_owner,
                             incoming_transfer_sn: sn.saturating_sub(1),
                             exit_sn: *sn,
                             outcome: OwnershipStintOutcome::Rejected,
-                        });
+                        };
+                        if data.ownership_transitions.contains(&stint) {
+                            data.actual_new_owner_data = None;
+                        } else {
+                            data.ownership_transitions.push(stint);
+                        }
 
                         debug!(
                             msg_type = "Reject",
