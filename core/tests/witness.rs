@@ -9709,6 +9709,155 @@ async fn test_single_witness_first_copy_survives_request_loss() {
     assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
 }
 
+// Rounds without any selectable offer must still retry: hold every
+// first-round offer response, let the round collapse with no offer,
+// then clear and require the copy to complete via the retry round.
+// Without the retry the actor stops and the subject never arrives.
+#[test(tokio::test)]
+async fn test_update_retries_round_without_selectable_offer() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let bob = &nodes[2].api;
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![alice]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Bob",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [1, 2, 3] {
+        emit_fact(
+            alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+
+    bob.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Hold every offer response: the round collapses with no offer.
+    for message in [
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+    ] {
+        bob.test_install_fault(FaultRule {
+            direction: FaultDirection::Inbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+
+    // Offers arrive held; wait until no more arrive (the round
+    // collapsed) instead of sleeping a fixed time.
+    wait_held(bob, 1).await;
+    let mut last = 0;
+    let mut quiet = 0;
+    for _ in 0..60 {
+        let held = bob.test_held_count().await.unwrap_or(0);
+        if held >= 1 && held == last {
+            quiet += 1;
+            if quiet >= 10 {
+                break;
+            }
+        } else {
+            quiet = 0;
+        }
+        last = held;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(quiet >= 10, "offer responses never settled");
+
+    // Dropping the held responses releases the round; the retry round
+    // must re-sweep and complete the copy.
+    bob.test_clear_faults().await.unwrap();
+    let state = get_subject(bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+    node_running(bob).await.unwrap();
+}
+
 // No overlap between creator Witnesses and schema role, no
 // access. Witnesses closes at gov 2; Nora gets the schema role at
 // gov 3 (phase 1: still open) and loses it at gov 4 (phase 2:

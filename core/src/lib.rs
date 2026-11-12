@@ -3319,6 +3319,49 @@ impl Api {
         }
     }
 
+    /// Reads back this node's stored transfer proof for a subject:
+    /// the verified transfer sn with the sender it was verified
+    /// from, if any. Read-only; used to pin that rejected batches
+    /// leave no proof behind.
+    pub async fn test_get_verified_transfer_sn(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<Option<(u64, PublicKey)>, Error> {
+        use crate::governance::transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<TransferVerificationRegister>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/\
+                    {governance_id}/transfer_verification_register"
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "transfer_verification_register".to_owned(),
+                reason: "Transfer verification register not found".to_owned(),
+            })?;
+        match actor
+            .ask(TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+                subject_id,
+            })
+            .await?
+        {
+            TransferVerificationRegisterResponse::VerifiedTransferSn(
+                result,
+            ) => Ok(result),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "transfer_verification_register".to_owned(),
+                expected: "VerifiedTransferSn".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Tells a test-crafted approval vote directly to a validator
     /// worker's mailbox, bypassing the network: once this returns the
     /// message is queued, so anything the worker receives afterwards

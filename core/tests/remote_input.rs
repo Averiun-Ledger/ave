@@ -15,6 +15,9 @@ use ave_common::identity::{
     hash_borsh,
 };
 use ave_common::request::{EventRequest, TransferRequest};
+use ave_core::helpers::network::test_faults::{
+    FaultAction, FaultDirection, FaultMessage, FaultRule,
+};
 use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::model::event::{
     Ledger, LedgerSeal, Protocols, ValidationMetadata,
@@ -1037,6 +1040,650 @@ async fn remote_mixed_and_forged_inline_batches_rejected() {
     join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
+}
+
+/// A committed transfer with failed evaluation is valid history, not
+/// passage: receivers with independent rights must copy the exact
+/// failed event, both as a joint batch and as a lone pushed
+/// transfer. The receivers join only after every commit, so the
+/// injected batches below are the only delivery: no push or update
+/// round can interleave.
+/// The outsider control on the same history still advances nothing
+/// and leaves no transfer proof behind.
+#[test(tokio::test)]
+async fn remote_failed_transfer_is_copyable_with_direct_rights() {
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let zed_signer = Ed25519Signer::generate().unwrap();
+    let zed_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        zed_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+
+    // Zed witnesses Alice's creations; Rita is a plain member.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Zed", "key": zed_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                    {"name": "Bob", "key": bob_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Zed",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    // Block every natural tracker delivery from Alice from now on:
+    // the receivers below join only after every commit, so the
+    // injected batches are the only copy they process.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .expect("failed transfer must still commit its ledger record");
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(
+        !history
+            .iter()
+            .find(|event| event.sn == 1)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "premise: the transfer to a non-creator must fail evaluation"
+    );
+
+    // Zed joins only now: no push ever reached her, the injected
+    // batch below is the first and only copy she processes.
+    let zed_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut zed_node, zed_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{zed_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
+            zed_signer,
+        )),
+        ..Default::default()
+    })
+    .await;
+    let zed = zed_node.api.clone();
+    node_running(&zed).await.unwrap();
+    zed.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    zed.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&zed, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    // Phase one: Create plus failed transfer in a single batch. The
+    // batch path verifies the transfer cryptographically without
+    // demanding an Ok evaluation, grants nothing, and lets the
+    // independent rights carry the copy.
+    inject_ledger_batch(
+        &zed,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        history.clone(),
+        None,
+    )
+    .await;
+    let state = get_subject(&zed, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1);
+    let copied = zed
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 2);
+    assert!(
+        !copied
+            .iter()
+            .find(|event| event.sn == 1)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "the failed transfer must stay failed in the copy"
+    );
+    assert!(
+        zed.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a failed transfer grants no passage and leaves no proof"
+    );
+    node_running(&zed).await.unwrap();
+
+    // Phase two: a lone failed transfer through the push path lands
+    // as history under the same direct rights.
+    let (subject_id2, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_transfer(&alice, subject_id2.clone(), rita_key.clone(), false)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id2.clone(), Some(1), true)
+        .await
+        .expect("failed transfer must still commit its ledger record");
+    let history2 = alice
+        .test_get_tracker_ledger(subject_id2.clone(), 1)
+        .await
+        .unwrap();
+    let create2 = history2
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let failed2 = history2
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        !failed2.protocols.is_success(),
+        "premise: the second transfer must also fail evaluation"
+    );
+    inject_ledger_batch(
+        &zed,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        vec![create2],
+        None,
+    )
+    .await;
+    get_subject(&zed, subject_id2.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let zed_push_key = PublicKey::from_str(zed.public_key()).unwrap();
+    let alice_push_key = PublicKey::from_str(alice.public_key()).unwrap();
+    zed.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: zed_push_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(failed2),
+            },
+        ),
+        &alice_push_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&zed, subject_id2.clone(), Some(1), true)
+        .await
+        .unwrap();
+    node_running(&zed).await.unwrap();
+
+    // Phase three: a lone successful transfer through the push path
+    // lands as history with its pending ownership. Zed only
+    // witnesses Alice, so the pending new owner grants her nothing;
+    // the simulation still sees her current-owner rights and the
+    // copy lands under them, recording the pending transfer.
+    let (subject_id3, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_transfer(&alice, subject_id3.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id3.clone(), Some(1), true)
+        .await
+        .expect("transfer to a creator must commit");
+    let history3 = alice
+        .test_get_tracker_ledger(subject_id3.clone(), 1)
+        .await
+        .unwrap();
+    assert!(
+        history3
+            .iter()
+            .find(|event| event.sn == 1)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "premise: the transfer to a creator must succeed"
+    );
+    let create3 = history3
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let ok_transfer = history3
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("transfer event")
+        .clone();
+    inject_ledger_batch(
+        &zed,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        vec![create3],
+        None,
+    )
+    .await;
+    get_subject(&zed, subject_id3.clone(), Some(0), true)
+        .await
+        .unwrap();
+    zed.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(zed.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(ok_transfer),
+            },
+        ),
+        &alice_push_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&zed, subject_id3.clone(), Some(1), true)
+        .await
+        .unwrap();
+    node_running(&zed).await.unwrap();
+    alice.test_clear_faults().await.unwrap();
+
+    // Outsider control on the same history: Rita still advances
+    // nothing and leaves no transfer proof behind.
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer,
+            address: vec![boot_addr],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
+            rita_signer,
+        )),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+    inject_ledger_batch(
+        &rita,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        history,
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        let advanced = rita
+            .get_subject_state(subject_id.clone())
+            .await
+            .map(|state| state.sn >= 1)
+            .unwrap_or(false);
+        assert!(!advanced, "failed transfer must not admit the outsider");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no transfer proof may persist from a rejected batch"
+    );
+    node_running(&rita).await.unwrap();
+
+    zed_node.token.cancel();
+    rita_node.token.cancel();
+    join_all(
+        zed_node
+            .handler
+            .iter_mut()
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(zed_node);
+    drop(zed_dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// An inline transfer whose previous hash was swapped must be
+/// rejected before any local write, even with a fresh valid seal:
+/// the chain link is verified up front, not only at apply time.
+/// The genuine batch afterwards must still copy fine (control).
+#[test(tokio::test)]
+async fn remote_forged_prev_hash_transfer_rejected_before_create() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let zoe_signer = Ed25519Signer::generate().unwrap();
+    let zoe_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        zoe_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id = setup_example_governance(
+        &owner,
+        &[MemberSpec {
+            api: &alice,
+            name: "Alice",
+            gov_witness: true,
+            creator: true,
+            issuer: true,
+        }],
+    )
+    .await;
+    // Zoe is a plain member and a creator, so a transfer to her is
+    // genuine and committed.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [{ "name": "Zoe", "key": zoe_key.to_string() }]
+            },
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "creator": [
+                                {
+                                    "name": "Zoe",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), zoe_key.clone(), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    let genuine = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        genuine.protocols.is_success(),
+        "premise: the transfer to a creator must succeed"
+    );
+
+    // Same request, evaluation and quorum block; only the previous
+    // hash is swapped, with a fresh seal from the previous owner.
+    let mut forged = genuine.clone();
+    forged.prev_ledger_event_hash = DigestIdentifier::default();
+    assert_ne!(
+        forged.prev_ledger_event_hash, genuine.prev_ledger_event_hash,
+        "premise: the forged link must differ"
+    );
+    let protocols_hash = forged
+        .protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    let forged_seal = LedgerSeal {
+        gov_version: forged.gov_version,
+        sn: forged.sn,
+        prev_ledger_event_hash: forged.prev_ledger_event_hash.clone(),
+        protocols_hash,
+    };
+    forged.ledger_seal_signature =
+        Signature::new(&forged_seal, &alice_keys).unwrap();
+
+    // Zoe joins only now: the forged batch is her only source.
+    let zoe_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut zoe_node, zoe_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{zoe_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer,
+            address: vec![boot_addr],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(zoe_signer)),
+        ..Default::default()
+    })
+    .await;
+    let zoe = zoe_node.api.clone();
+    node_running(&zoe).await.unwrap();
+    zoe.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    zoe.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&zoe, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    inject_ledger_batch(
+        &zoe,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        vec![create.clone(), fact.clone(), forged],
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            zoe.get_subject_state(subject_id.clone()).await.is_err(),
+            "forged link must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        zoe.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no transfer proof may persist from a rejected batch"
+    );
+    node_running(&zoe).await.unwrap();
+
+    // Control: the genuine batch copies fine afterwards.
+    inject_ledger_batch(
+        &zoe,
+        &PublicKey::from_str(alice.public_key()).unwrap(),
+        history,
+        None,
+    )
+    .await;
+    get_subject(&zoe, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    zoe_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(zoe_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(zoe_node);
+    drop(zoe_dirs);
 }
 
 /// SLOW: governance recovery must not replay the page-boundary event.

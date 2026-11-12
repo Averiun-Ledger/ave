@@ -11,6 +11,7 @@ use crate::model::common::{
     TrackerVisibilityMode, TrackerVisibilityState, crash_system, purge_storage,
 };
 use crate::model::event::Ledger;
+use crate::model::event::Protocols;
 use async_trait::async_trait;
 use ave_actors::PersistentActor;
 use ave_actors::{
@@ -1588,48 +1589,66 @@ impl Handler<Self> for WitnessesRegister {
                 namespace,
                 schema_id,
             } => {
-                let (new_owner, gov_version) = match transfer_event
-                    .get_event_request()
-                {
-                    Some(EventRequest::Transfer(req)) => {
-                        (req.new_owner, transfer_event.gov_version)
-                    }
-                    _ => {
-                        return Err(ActorError::Functional {
+                let (new_owner, gov_version, evaluation_ok) =
+                    match (
+                        &transfer_event.protocols,
+                        transfer_event.get_event_request(),
+                    ) {
+                        (
+                            Protocols::Transfer { evaluation, .. },
+                            Some(EventRequest::Transfer(req)),
+                        ) => (
+                            req.new_owner,
+                            transfer_event.gov_version,
+                            evaluation.is_ok(),
+                        ),
+                        _ => {
+                            return Err(ActorError::Functional {
                                 description:
                                     "SimulateTransferHiSnLimit called with non-Transfer event"
                                         .to_string(),
                             });
-                    }
-                };
+                        }
+                    };
 
                 // Si ya tenemos TransferData para este subject (por gobernanza o
                 // batches anteriores), lo usamos como base y solo actualizamos el
                 // estado actual con el evento de transferencia. Así conservamos
                 // el historial de old_owners que la simulación necesita.
+                // A failed transfer changes nothing: forcing its pending
+                // would open free passage on an event that grants none,
+                // so only a successful evaluation installs it.
                 let mut data = if let Some(existing) =
                     self.subjects.get(&subject_id)
                 {
                     let mut data = existing.clone();
-                    data.actual_owner =
-                        transfer_event.ledger_seal_signature.signer.clone();
-                    data.actual_new_owner_data = Some((new_owner, gov_version));
-                    data.sn = transfer_event.sn;
-                    data.gov_version = gov_version;
+                    if evaluation_ok {
+                        data.actual_owner =
+                            transfer_event.ledger_seal_signature.signer.clone();
+                        data.actual_new_owner_data =
+                            Some((new_owner, gov_version));
+                        data.sn = transfer_event.sn;
+                        data.gov_version = gov_version;
+                    }
                     data
                 } else {
-                    TransferData {
+                    let mut data = TransferData {
                         actual_owner: transfer_event
                             .ledger_seal_signature
                             .signer
                             .clone(),
-                        actual_new_owner_data: Some((new_owner, gov_version)),
+                        actual_new_owner_data: None,
                         sn: transfer_event.sn,
                         gov_version,
                         old_owners: HashMap::new(),
                         ownership_transitions: Vec::new(),
                         visibility_state: TrackerVisibilityState::default(),
+                    };
+                    if evaluation_ok {
+                        data.actual_new_owner_data =
+                            Some((new_owner, gov_version));
                     }
+                    data
                 };
                 data.visibility_state.record_event(
                     0,

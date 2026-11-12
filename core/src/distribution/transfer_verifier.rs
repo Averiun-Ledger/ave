@@ -45,14 +45,24 @@ impl TransferVerifier {
         Self { hash, our_key }
     }
 
-    /// Verificación criptográfica ligera de un evento Transfer.
-    /// Devuelve (governance_id, is_register).
+    /// Lightweight cryptographic check of a Transfer event.
+    /// With `require_ok` the evaluation must be successful: passage
+    /// proofs only open access on success. Without it, failed
+    /// transfers still pass every cryptographic and structural
+    /// check (a committed failure is valid history); they just
+    /// grant no ownership, which the caller must enforce.
+    /// `prev_event` is the ledger predecessor when known (the
+    /// event with `sn - 1` inside the same batch): the transfer
+    /// must link to it, otherwise a re-sealed event could open
+    /// reception before the apply-time chain check.
     pub(crate) async fn verify_light(
         &self,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         transfer_event: &Ledger,
         expected_subject_id: &DigestIdentifier,
         ledger: &Ledger,
+        require_ok: bool,
+        prev_event: Option<&Ledger>,
     ) -> Result<(DigestIdentifier, bool, Option<SubjectData>), DistributorError>
     {
         // 1. El protocolo debe ser Transfer.
@@ -70,10 +80,29 @@ impl TransferVerifier {
                 }
             };
 
-        if !evaluation.is_ok() {
+        if require_ok && !evaluation.is_ok() {
             return Err(DistributorError::TransferEventInvalid {
                 details: "transfer evaluation is not ok".to_string(),
             });
+        }
+
+        // Chain link: the transfer must extend its predecessor.
+        // A re-sealed event with a forged previous hash passes
+        // every check below, so the link is verified up front,
+        // before ownership is rebuilt from the batch.
+        if let Some(prev) = prev_event {
+            let prev_hash =
+                prev.ledger_hash(self.hash).map_err(|e| {
+                    DistributorError::TransferEventInvalid {
+                        details: format!("prev hash failed: {e}"),
+                    }
+                })?;
+            if transfer_event.prev_ledger_event_hash != prev_hash {
+                return Err(DistributorError::TransferEventInvalid {
+                    details: "transfer does not link to previous event"
+                        .to_string(),
+                });
+            }
         }
 
         if validation.validators_signatures.is_empty() {
@@ -351,7 +380,18 @@ impl TransferVerifier {
                             .to_string(),
                 })?;
         let (governance_id, _, subject_data) = self
-            .verify_light(ctx, transfer_event, subject_id, first_ledger)
+            .verify_light(
+                ctx,
+                transfer_event,
+                subject_id,
+                first_ledger,
+                // A failed transfer is valid history that grants
+                // no passage: let the simulation below (which only
+                // opens ownership on success) decide Witness or
+                // NotWitness instead of rejecting up front.
+                false,
+                None,
+            )
             .await?;
 
         // When the pre-state is local (we are exactly one sn behind

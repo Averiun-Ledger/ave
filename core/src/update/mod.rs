@@ -452,6 +452,13 @@ impl Handler<Self> for Update {
         match msg {
             UpdateMessage::Run => {
                 self.retry_attempt = 0;
+                // A restart must not inherit the previous round's
+                // timer: drop it and invalidate its token, or a stale
+                // retry could stop a sweep that just started.
+                if let Some(key) = self.pending_retry.take() {
+                    ctx.cancel_timer(key);
+                }
+                self.retry_token = self.retry_token.saturating_add(1);
                 self.reset_round();
                 let start_mode = match self.create_updates(ctx).await {
                     Ok(start_mode) => start_mode,
@@ -671,6 +678,34 @@ impl Handler<Self> for Update {
                             }
                         }
 
+                        // No selectable offer left: without a retry the
+                        // actor stops and the round never repeats. Keep
+                        // a supervised round with the last known target
+                        // (or the next sn we need) as its floor.
+                        if selected_request.is_none()
+                            && self.should_retry_auth_rounds()
+                        {
+                            let floor = self
+                                .pending_target_sn
+                                .max(Some(self.next_needed_sn()))
+                                .unwrap_or(0);
+                            if let Err(e) = self.schedule_retry(
+                                ctx,
+                                floor,
+                                self.retry_attempt,
+                            ) {
+                                error!(
+                                    msg_type = "ScheduleRetry",
+                                    subject_id = %self.subject_id,
+                                    error = %e,
+                                    "Failed to schedule update retry"
+                                );
+                                return Err(crash_system(ctx, e).await);
+                            }
+                            keep_running = true;
+                            self.pending_target_sn = Some(floor);
+                        }
+
                         if let UpdateType::Request { id, subject_id } =
                             &self.update_type
                         {
@@ -684,7 +719,9 @@ impl Handler<Self> for Update {
                                 .await
                             {
                                 Ok(request_actor) => {
-                                    let request = if self.offers.is_empty() {
+                                    let request = if self.offers.is_empty()
+                                        && !keep_running
+                                    {
                                         RequestManagerMessage::FinishReboot {
                                             request_id: id.clone(),
                                         }

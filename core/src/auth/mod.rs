@@ -699,19 +699,54 @@ impl Handler<Self> for SubjectAccess {
                             "Update process initiated with multiple witnesses"
                         );
                     } else {
-                        // A second update with possibly different
-                        // witnesses can not merge into the running one:
-                        // surface it instead of dropping it silently.
-                        warn!(
-                            msg_type = "Update",
-                            subject_id = %subject_id,
-                            "An update is already in progress."
-                        );
-                        return Err(ActorError::Functional {
-                            description: format!(
-                                "Update already in progress for subject {subject_id}"
-                            ),
-                        });
+                        // An update is already sweeping for this subject:
+                        // restart it instead of rejecting the second
+                        // call, so back-to-back authorize/update and
+                        // re-update flows keep working while a
+                        // supervised round is still alive.
+                        let child_path = ActorPath::from(format!(
+                            "{}/{}",
+                            ctx.path(),
+                            subject_id
+                        ));
+                        match ctx
+                            .system()
+                            .get_actor::<Update>(&child_path)
+                            .await
+                        {
+                            Ok(running) => {
+                                if let Err(e) =
+                                    running.tell(UpdateMessage::Run).await
+                                {
+                                    error!(
+                                        msg_type = "Update",
+                                        subject_id = %subject_id,
+                                        error = %e,
+                                        "Failed to restart running update"
+                                    );
+                                    return Err(crash_system(ctx, e).await);
+                                }
+                                debug!(
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    "Running update restarted"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    msg_type = "Update",
+                                    subject_id = %subject_id,
+                                    error = %e,
+                                    "Update actor gone, cannot restart"
+                                );
+                                return Err(ActorError::Functional {
+                                    description: format!(
+                                        "Update already in progress \
+                                        for subject {subject_id}"
+                                    ),
+                                });
+                            }
+                        }
                     };
                 }
             }

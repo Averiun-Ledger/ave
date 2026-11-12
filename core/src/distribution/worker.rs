@@ -571,11 +571,26 @@ impl DistriWorker {
             // Pre-authentication: an unvalidated inline transfer
             // must never authorize its own prefix. Verify every
             // inline transfer before rebuilding ownership from it.
+            // Failed transfers are valid history and stay copyable:
+            // they grant no ownership (the rebuild below only opens
+            // it on success), so only the success proof requires
+            // an Ok evaluation. Each transfer is also linked to
+            // its batch predecessor up front.
             for event in ledger.iter().filter(|e| {
                 matches!(e.get_event_request_type(), EventRequestType::Transfer)
             }) {
+                let prev = event.sn.checked_sub(1).and_then(|prev_sn| {
+                    ledger.iter().find(|e| e.sn == prev_sn)
+                });
                 self.transfer_verifier
-                    .verify_light(ctx, event, subject_id, first_ledger)
+                    .verify_light(
+                        ctx,
+                        event,
+                        subject_id,
+                        first_ledger,
+                        false,
+                        prev,
+                    )
                     .await?;
             }
             let owner = first_ledger.ledger_seal_signature.signer.clone();
@@ -764,6 +779,24 @@ impl DistriWorker {
         } else {
             let owner = first_ledger.ledger_seal_signature.signer.clone();
             let gov_version = first_ledger.gov_version;
+            // Same pre-authentication bar as batches: a lone inline
+            // transfer is verified before rebuilding ownership from
+            // it (no batch predecessor exists for the link check).
+            if matches!(
+                first_ledger.get_event_request_type(),
+                EventRequestType::Transfer
+            ) {
+                self.transfer_verifier
+                    .verify_light(
+                        ctx,
+                        first_ledger,
+                        &subject_id,
+                        first_ledger,
+                        false,
+                        None,
+                    )
+                    .await?;
+            }
             let transfer_data =
                 Some(WitnessesRegister::transfer_data_from_ledger(
                     &subject_id,
