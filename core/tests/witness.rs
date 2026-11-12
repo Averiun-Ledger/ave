@@ -10828,6 +10828,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id.clone(),
+            1,
             bob_key.clone(),
             1,
         )
@@ -10863,6 +10864,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id.clone(),
+            1,
             bob_key.clone(),
             1,
         )
@@ -10887,6 +10889,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id.clone(),
+            3,
             carol_key.clone(),
             1,
         )
@@ -10897,7 +10900,7 @@ async fn test_ownership_replay_is_idempotent() {
         Some(carol_key.clone())
     );
     alice
-        .test_witnesses_confirm(&governance_id, subject_id.clone(), 3, 1)
+        .test_witnesses_confirm(&governance_id, subject_id.clone(), 4, 1)
         .await
         .unwrap();
     let (owner, pending, old, stints) =
@@ -10919,6 +10922,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id2.clone(),
+            1,
             dave_key.clone(),
             1,
         )
@@ -10941,6 +10945,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id2.clone(),
+            1,
             dave_key.clone(),
             1,
         )
@@ -10976,6 +10981,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id3.clone(),
+            1,
             bob_key.clone(),
             1,
         )
@@ -10989,6 +10995,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id3.clone(),
+            3,
             carol_key.clone(),
             1,
         )
@@ -11029,6 +11036,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id4.clone(),
+            1,
             bob_key.clone(),
             1,
         )
@@ -11042,6 +11050,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_transfer(
             &governance_id,
             subject_id4.clone(),
+            3,
             dave_key.clone(),
             1,
         )
@@ -11068,5 +11077,178 @@ async fn test_ownership_replay_is_idempotent() {
             vec![(bob_key, 2)],
             1,
         )
+    );
+
+    // Two completed confirms plus a full replay in order: the
+    // historic transfers must not reopen any pending transfer.
+    let (subject_id5, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id5.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let eve_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let frank_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id5.clone(),
+            1,
+            eve_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id5.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id5.clone(),
+            3,
+            frank_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id5.clone(), 4, 1)
+        .await
+        .unwrap();
+    let before = ownership(alice, &governance_id, &subject_id5).await;
+    assert_eq!(before.0, Some(frank_key.clone()));
+    assert_eq!(before.1, None);
+    assert_eq!(before.3, 2);
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id5.clone(),
+            1,
+            eve_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id5.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id5.clone(),
+            3,
+            frank_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id5.clone(), 4, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id5).await,
+        before
+    );
+
+    // A new transfer to an already-seen key still opens pending
+    // when its sn is new.
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id5.clone(),
+            5,
+            eve_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id5).await.1,
+        Some(eve_key)
+    );
+
+    // Reject followed by confirm plus a full replay in order:
+    // neither the rejected nor the confirmed stint may duplicate.
+    let (subject_id6, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id6.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let grace_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let heidi_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id6.clone(),
+            1,
+            grace_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_reject(&governance_id, subject_id6.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id6.clone(),
+            3,
+            heidi_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id6.clone(), 4, 1)
+        .await
+        .unwrap();
+    let before_reject = ownership(alice, &governance_id, &subject_id6).await;
+    assert_eq!(before_reject.0, Some(heidi_key.clone()));
+    assert_eq!(before_reject.1, None);
+    assert_eq!(before_reject.3, 2);
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id6.clone(),
+            1,
+            grace_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_reject(&governance_id, subject_id6.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id6.clone(),
+            3,
+            heidi_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id6.clone(), 4, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id6).await,
+        before_reject
     );
 }

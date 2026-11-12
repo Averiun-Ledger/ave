@@ -358,6 +358,7 @@ impl Subject for Governance {
     async fn transfer(
         &self,
         ctx: &mut ActorContext<Self>,
+        _sn: u64,
         new_owner: PublicKey,
         _gov_version: u64,
     ) -> Result<(), ActorError> {
@@ -4461,6 +4462,7 @@ impl Governance {
                     EventRequest::Transfer(transfer_request) if transfer_ok => {
                         self.transfer(
                             ctx,
+                            event.sn,
                             transfer_request.new_owner.clone(),
                             0,
                         )

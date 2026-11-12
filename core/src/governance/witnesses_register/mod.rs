@@ -284,6 +284,7 @@ pub enum WitnessesRegisterMessage {
     },
     Transfer {
         subject_id: DigestIdentifier,
+        sn: u64,
         new_owner: PublicKey,
         gov_version: u64,
     },
@@ -416,6 +417,7 @@ pub enum WitnessesRegisterEvent {
     },
     Transfer {
         subject_id: DigestIdentifier,
+        sn: u64,
         new_owner: PublicKey,
         gov_version: u64,
     },
@@ -1401,12 +1403,14 @@ impl Handler<Self> for WitnessesRegister {
             }
             WitnessesRegisterMessage::Transfer {
                 subject_id,
+                sn,
                 new_owner,
                 gov_version,
             } => {
                 self.on_event(
                     WitnessesRegisterEvent::Transfer {
                         subject_id: subject_id.clone(),
+                        sn,
                         new_owner: new_owner.clone(),
                         gov_version,
                     },
@@ -1994,18 +1998,26 @@ impl PersistentActor for WitnessesRegister {
             }
             WitnessesRegisterEvent::Transfer {
                 subject_id,
+                sn,
                 new_owner,
                 gov_version,
             } => {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
-                    // Idempotent replay: a live Transfer never lands
-                    // while another is pending (the request layer
-                    // rejects every Tracker event meanwhile) and
-                    // never targets the current owner (evaluation
-                    // rejects self-transfers). Both cases below can
-                    // only be a boot-recovery re-send, which must not
-                    // reopen or replace the pending transfer.
-                    let duplicate = data.actual_new_owner_data.is_some()
+                    // Idempotent replay: serial numbers only grow
+                    // live, so a transfer whose sn already closed a
+                    // stint can only be a boot-recovery re-send and
+                    // must not reopen any pending transfer. A live
+                    // transfer never lands while another is pending
+                    // (the request layer rejects every tracker event
+                    // meanwhile) and never targets the current owner
+                    // (evaluation rejects self-transfers); both cases
+                    // below are re-sends too and keep the pending.
+                    let already_recorded = data
+                        .ownership_transitions
+                        .iter()
+                        .any(|stint| stint.incoming_transfer_sn == *sn);
+                    let duplicate = already_recorded
+                        || data.actual_new_owner_data.is_some()
                         || data.actual_owner == *new_owner;
                     if !duplicate {
                         data.actual_new_owner_data =

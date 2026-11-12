@@ -2404,6 +2404,7 @@ where
     async fn transfer(
         &self,
         ctx: &mut ActorContext<Self>,
+        sn: u64,
         new_owner: PublicKey,
         gov_version: u64,
     ) -> Result<(), ActorError>;

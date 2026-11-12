@@ -487,6 +487,7 @@ impl Tracker {
                 witnesses_register
                     .tell(WitnessesRegisterMessage::Transfer {
                         subject_id: subject_id.clone(),
+                        sn: event.sn,
                         new_owner: transfer_request.new_owner.clone(),
                         gov_version: event.gov_version,
                     })

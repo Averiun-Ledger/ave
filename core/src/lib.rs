@@ -3195,6 +3195,7 @@ impl Api {
         &self,
         governance_id: &DigestIdentifier,
         subject_id: DigestIdentifier,
+        sn: u64,
         new_owner: PublicKey,
         gov_version: u64,
     ) -> Result<(), Error> {
@@ -3205,6 +3206,7 @@ impl Api {
         match actor
             .ask(WitnessesRegisterMessage::Transfer {
                 subject_id,
+                sn,
                 new_owner,
                 gov_version,
             })

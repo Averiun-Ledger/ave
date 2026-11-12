@@ -293,6 +293,7 @@ impl Subject for Tracker {
     async fn transfer(
         &self,
         ctx: &mut ActorContext<Self>,
+        sn: u64,
         new_owner: PublicKey,
         gov_version: u64,
     ) -> Result<(), ActorError> {
@@ -323,6 +324,7 @@ impl Subject for Tracker {
         let WitnessesRegisterResponse::Ok = witnesses_register
             .ask(WitnessesRegisterMessage::Transfer {
                 subject_id: self.subject_metadata.subject_id.clone(),
+                sn,
                 new_owner,
                 gov_version,
             })
@@ -956,6 +958,7 @@ impl Tracker {
                         {
                             self.transfer(
                                 ctx,
+                                event.sn,
                                 transfer_request.new_owner.clone(),
                                 event.gov_version,
                             )
