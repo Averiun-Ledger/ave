@@ -9717,7 +9717,7 @@ async fn test_single_witness_first_copy_survives_request_loss() {
 // schema witness since gov 1, keeps the mapped prefix (control).
 #[test(tokio::test)]
 async fn test_schema_role_after_witnesses_closure_grants_nothing() {
-    let (nodes, _dirs) =
+    let (mut nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0], vec![0]],
@@ -9725,13 +9725,14 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
             ..Default::default()
         })
         .await;
-    let owner = &nodes[0].api;
-    let alice = &nodes[1].api;
-    let marta = &nodes[2].api;
-    let nora = &nodes[3].api;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let marta = nodes[2].api.clone();
+    let nora = nodes[3].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(owner, vec![alice, marta, nora]).await;
+        create_and_authorize_governance(&owner, vec![&alice, &marta, &nora])
+            .await;
 
     let json = json!({
         "members": {
@@ -9781,16 +9782,16 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
             ]
         }
     });
-    emit_fact(owner, governance_id.clone(), json, true)
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
 
     let (subject_id, _) =
-        create_subject(alice, governance_id.clone(), "Example", "", true)
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
     emit_fact(
-        alice,
+        &alice,
         subject_id.clone(),
         json!({"ModOne": {"data": 1}}),
         true,
@@ -9817,11 +9818,11 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
             ]
         }
     });
-    emit_fact(owner, governance_id.clone(), json, true)
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
     emit_fact(
-        alice,
+        &alice,
         subject_id.clone(),
         json!({"ModOne": {"data": 2}}),
         true,
@@ -9832,7 +9833,7 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
     // Serving-side settle: the owner must hold the event and have
     // mapped it before anyone copies, otherwise a stale offer
     // decides the test instead of the access rules.
-    get_subject(alice, subject_id.clone(), Some(2), true)
+    get_subject(&alice, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
     let mut window = Vec::new();
@@ -9860,7 +9861,7 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
     // that serving works while Nora gets nothing. Her overlap with
     // the closed Witnesses ([1,1]) ends at gov 1, so she must stop
     // exactly at sn 1.
-    for node in [marta, nora] {
+    for node in [&marta, &nora] {
         node.authorize_governance(
             governance_id.clone(),
             AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
@@ -9869,10 +9870,10 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
         .unwrap();
         node.update_subject(governance_id.clone()).await.unwrap();
     }
-    get_subject(marta, governance_id.clone(), Some(2), true)
+    get_subject(&marta, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    get_subject(nora, governance_id.clone(), Some(2), true)
+    get_subject(&nora, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
     marta
@@ -9883,7 +9884,7 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
         .await
         .unwrap();
     marta.update_subject(subject_id.clone()).await.unwrap();
-    get_subject(marta, subject_id.clone(), Some(1), true)
+    get_subject(&marta, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
 
@@ -9903,18 +9904,18 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
             ]
         }
     });
-    emit_fact(owner, governance_id.clone(), json, true)
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
     emit_fact(
-        alice,
+        &alice,
         subject_id.clone(),
         json!({"ModOne": {"data": 3}}),
         true,
     )
     .await
     .unwrap();
-    get_subject(alice, subject_id.clone(), Some(3), true)
+    get_subject(&alice, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
     let mut window = Vec::new();
@@ -9937,10 +9938,10 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
         window.last().is_some_and(|range| range.1 >= 3),
         "alice register never mapped sn 3, got {window:?}"
     );
-    get_subject(marta, governance_id.clone(), Some(3), true)
+    get_subject(&marta, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
-    get_subject(nora, governance_id.clone(), Some(3), true)
+    get_subject(&nora, governance_id.clone(), Some(3), true)
         .await
         .unwrap();
 
@@ -9984,18 +9985,18 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
             ]
         }
     });
-    emit_fact(owner, governance_id.clone(), json, true)
+    emit_fact(&owner, governance_id.clone(), json, true)
         .await
         .unwrap();
     emit_fact(
-        alice,
+        &alice,
         subject_id.clone(),
         json!({"ModOne": {"data": 4}}),
         true,
     )
     .await
     .unwrap();
-    get_subject(alice, subject_id.clone(), Some(4), true)
+    get_subject(&alice, subject_id.clone(), Some(4), true)
         .await
         .unwrap();
     let mut window = Vec::new();
@@ -10018,7 +10019,7 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
         window.last().is_some_and(|range| range.1 >= 4),
         "alice register never mapped sn 4, got {window:?}"
     );
-    get_subject(nora, governance_id.clone(), Some(4), true)
+    get_subject(&nora, governance_id.clone(), Some(4), true)
         .await
         .unwrap();
 
@@ -10031,6 +10032,127 @@ async fn test_schema_role_after_witnesses_closure_grants_nothing() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     node_running(&nora).await.unwrap();
+
+    // Phase 3: Marta gets a second, later schema grant after her
+    // first one closes, then loses that too. Only the first
+    // interval overlaps the Witnesses closure, so a fresh Marta
+    // must still copy exactly the mapped prefix (sn 1) and stop:
+    // the newer interval without overlap must not hide it.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "remove": {
+                        "witness": [
+                            {"name": "Marta", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&marta, governance_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "witness": [
+                            {"name": "Marta", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&marta, governance_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "remove": {
+                        "witness": [
+                            {"name": "Marta", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    get_subject(&marta, governance_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+
+    // A fresh Marta (same keys, empty state) must recover exactly
+    // the mapped prefix: sn 1, and never advance to the sn 4 tip.
+    nodes[2].token.cancel();
+    join_all(nodes[2].handler.iter_mut()).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_new_marta, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[2].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_marta = node_new_marta.api;
+    node_running(&new_marta).await.unwrap();
+    new_marta
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_marta
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&new_marta, governance_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+    new_marta
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_marta.update_subject(subject_id.clone()).await.unwrap();
+    let state = get_subject(&new_marta, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1, "second grant must not hide the first prefix");
+    for _ in 0..30 {
+        let state = new_marta
+            .get_subject_state(subject_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 1, "capped prefix must not advance");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&new_marta).await.unwrap();
 }
 
 // The aux must be the confirmed installing transfer, never
@@ -10833,7 +10955,117 @@ async fn test_ownership_replay_is_idempotent() {
         (
             Some(PublicKey::from_str(alice.public_key()).unwrap()),
             None,
-            vec![(dave_key, 2)],
+            vec![(dave_key.clone(), 2)],
+            1,
+        )
+    );
+
+    // An old Confirm replayed while a newer transfer is pending
+    // must not consume it: A->B confirmed, B->C pending, then the
+    // stale B install is re-sent.
+    let (subject_id3, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id3.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let carol_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id3.clone(),
+            bob_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id3.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id3.clone(),
+            carol_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id3).await,
+        (
+            Some(bob_key.clone()),
+            Some(carol_key.clone()),
+            vec![(PublicKey::from_str(alice.public_key()).unwrap(), 2)],
+            1,
+        )
+    );
+    alice
+        .test_witnesses_confirm(&governance_id, subject_id3.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id3).await,
+        (
+            Some(bob_key.clone()),
+            Some(carol_key),
+            vec![(PublicKey::from_str(alice.public_key()).unwrap(), 2)],
+            1,
+        )
+    );
+
+    // Same for Reject with a newer pending transfer in flight.
+    let (subject_id4, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(alice, subject_id4.clone(), Some(0), true)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id4.clone(),
+            bob_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_reject(&governance_id, subject_id4.clone(), 2, 1)
+        .await
+        .unwrap();
+    alice
+        .test_witnesses_transfer(
+            &governance_id,
+            subject_id4.clone(),
+            dave_key.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id4).await,
+        (
+            Some(PublicKey::from_str(alice.public_key()).unwrap()),
+            Some(dave_key.clone()),
+            vec![(bob_key.clone(), 2)],
+            1,
+        )
+    );
+    alice
+        .test_witnesses_reject(&governance_id, subject_id4.clone(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership(alice, &governance_id, &subject_id4).await,
+        (
+            Some(PublicKey::from_str(alice.public_key()).unwrap()),
+            Some(dave_key),
+            vec![(bob_key, 2)],
             1,
         )
     );

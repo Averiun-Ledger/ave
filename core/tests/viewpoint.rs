@@ -11139,33 +11139,35 @@ async fn test_receipt_keeps_ownership_start_across_batch() {
     );
 }
 
-// Receipt masking is fail-closed on the push path too: a Full
-// fact pushed to a witness whose grant only hashes arrives
-// Opaque. W never asks for anything, so no offer or window can
-// mask a broken modes lookup; a modes failure drops the push
-// instead of applying it Full.
+// Receipt-side masking is fail-closed on the push path too: an
+// explicitly injected over-clear push for a Hash-only witness must
+// land Opaque, never Full. The witness node joins after every
+// commit, so no sender-side projection can mask the push first:
+// what lands is decided here. W never asks for anything, so no
+// offer or window can hide a broken modes lookup either.
 #[test(tokio::test)]
 async fn test_push_masks_over_clear_facts() {
+    let w_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let w_pubkey = w_keys.public_key();
     let (nodes, _dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
-            addressable: vec![vec![0], vec![0]],
+            addressable: vec![vec![0]],
             always_accept: true,
             ..Default::default()
         })
         .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
-    let wit = nodes[2].api.clone();
 
     let governance_id =
-        create_and_authorize_governance(&owner, vec![&alice, &wit]).await;
+        create_and_authorize_governance(&owner, vec![&alice]).await;
 
     let json = json!({
         "members": {
             "add": [
                 {"name": "Alice", "key": alice.public_key()},
-                {"name": "HashWit", "key": wit.public_key()},
+                {"name": "HashWit", "key": w_pubkey},
             ]
         },
         "schemas": {
@@ -11179,7 +11181,7 @@ async fn test_push_masks_over_clear_facts() {
             ]
         },
         "roles": {
-            "governance": {"add": {"witness": ["Alice", "HashWit"]}},
+            "governance": {"add": {"witness": ["Alice"]}},
             "schema": [
                 {
                     "schema_id": "Example",
@@ -11210,19 +11212,6 @@ async fn test_push_masks_over_clear_facts() {
         .await
         .unwrap();
 
-    // HashWit syncs governance only: every tracker event below
-    // arrives exclusively through the push path.
-    wit.authorize_governance(
-        governance_id.clone(),
-        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
-    )
-    .await
-    .unwrap();
-    wit.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&wit, governance_id.clone(), None, true)
-        .await
-        .unwrap();
-
     let (subject_id, _) =
         create_subject(&alice, governance_id.clone(), "Example", "", true)
             .await
@@ -11236,9 +11225,72 @@ async fn test_push_masks_over_clear_facts() {
     )
     .await
     .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let full = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 2);
 
-    // The creator grant only hashes: the pushed Full fact must land
-    // masked, never as visible data.
+    // HashWit joins after every commit and syncs only governance:
+    // nothing was ever pushed to her, so the injected batch below
+    // is the first and only copy she processes.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_w, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(w_keys),
+        ..Default::default()
+    })
+    .await;
+    let wit = node_w.api;
+    node_running(&wit).await.unwrap();
+    wit.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    wit.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&wit, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Both events travel the push path as committed (Full): the
+    // receiver must mask the private fact itself.
+    let from_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let receiver_key = PublicKey::from_str(wit.public_key()).unwrap();
+    for event in &full {
+        wit.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: receiver_key.clone(),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLastEventReq {
+                    ledger: Box::new(event.clone()),
+                },
+            ),
+            &from_key,
+        )
+        .await
+        .unwrap();
+        get_subject(&wit, subject_id.clone(), Some(event.sn), true)
+            .await
+            .unwrap();
+    }
+
+    // The creator grant only hashes: the Full fact must be stored
+    // as Opaque, never as visible data.
     let wit_events =
         get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
     assert_eq!(wit_events.len(), 2);

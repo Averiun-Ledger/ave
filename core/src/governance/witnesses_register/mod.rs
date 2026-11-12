@@ -190,18 +190,12 @@ pub struct OldOwnerData {
 /// marked as such: the rejected node still needs its own transfer to
 /// copy, but a rejection must never serve as another owner's link.
 /// The log is append-only; stints are identified by position, so
-/// repeated ownership keeps every stint. Exact duplicates are
-// dropped instead: serial numbers only grow live, so an identical
-// stint can only be a boot-recovery re-send.
+/// repeated ownership keeps every stint. A close with an sn at or
+/// below an already recorded exit can only be a boot-recovery
+/// re-send (serial numbers grow live), so the register ignores it
+/// instead of duplicating the log.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
+    Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct OwnershipStint {
     pub(crate) owner: PublicKey,
@@ -940,13 +934,19 @@ impl WitnessesRegister {
                     }
                 }
 
-                if let Some(range) = interval.iter().last()
-                    && gov_version <= range.hi
-                    && witnesses_hi.is_none_or(|w| range.lo <= w)
-                {
-                    // range.hi is the top reachable gov_version; resolve
-                    // its sn.
-                    // The witnesses side caps it when it closed earlier.
+                // Closed intervals are checked oldest first and every
+                // overlapping one counts: only the last interval was
+                // consulted before, so a newer grant without overlap
+                // hid an older valid prefix behind a denial.
+                for range in interval.iter() {
+                    if gov_version > range.hi
+                        || witnesses_hi.is_some_and(|w| range.lo > w)
+                    {
+                        continue;
+                    }
+                    // range.hi is the top reachable gov_version;
+                    // resolve its sn. The witnesses side caps it when
+                    // it closed earlier.
                     let hi = witnesses_hi.map_or(range.hi, |w| w.min(range.hi));
                     better_gov_version = better_gov_version.max(Some(hi));
                 }
@@ -2045,22 +2045,26 @@ impl PersistentActor for WitnessesRegister {
                 gov_version,
             } => {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
-                    let new_owner = data.actual_new_owner_data.take();
-
-                    // Confirming to the current owner would list them
-                    // as their own old owner and duplicate the stint:
-                    // evaluation forbids self-transfers, so this is
-                    // only a boot-recovery re-send after the pending
-                    // transfer was replayed. Restore the pending and
-                    // skip instead of corrupting the ownership.
-                    let self_confirm =
-                        new_owner.as_ref().is_some_and(|(pending_owner, _)| {
-                            *pending_owner == data.actual_owner
-                        });
-                    if self_confirm {
-                        data.actual_new_owner_data = new_owner;
+                    // Serial numbers only grow live, so a stint that
+                    // already closed at or after this sn can only
+                    // come from a boot-recovery re-send. Skip it
+                    // before touching the pending transfer: the live
+                    // pending (if any) belongs to a newer transfer
+                    // the replay must not consume.
+                    let already_closed = data
+                        .ownership_transitions
+                        .iter()
+                        .any(|stint| stint.exit_sn >= *sn);
+                    if already_closed {
+                        debug!(
+                            msg_type = "Confirm",
+                            event_type = "Confirm",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            "Duplicate confirm ignored, pending unchanged"
+                        );
                     } else if let Some((new_owner, new_owner_gov_version)) =
-                        new_owner
+                        data.actual_new_owner_data.take()
                     {
                         let entry = data
                             .old_owners
@@ -2129,21 +2133,41 @@ impl PersistentActor for WitnessesRegister {
                 gov_version,
             } => {
                 if let Some(data) = inner.subjects.get_mut(subject_id) {
-                    let new_owner = data.actual_new_owner_data.take();
-
-                    // Rejecting for the current owner would record a
-                    // rejected stint against themselves: evaluation
-                    // forbids self-transfers, so this is only a
-                    // boot-recovery re-send. Restore the pending
-                    // and skip instead of duplicating the stint.
-                    let self_reject =
-                        new_owner.as_ref().is_some_and(|(pending_owner, _)| {
-                            *pending_owner == data.actual_owner
-                        });
-                    if self_reject {
-                        data.actual_new_owner_data = new_owner;
+                    // Same replay rule as Confirm: serial numbers only
+                    // grow live, so a stint already closed at or after
+                    // this sn can only be a boot-recovery re-send.
+                    // Skip it before touching the pending transfer.
+                    // Clear the pending only when it matches the
+                    // duplicated close: that is the replay's own
+                    // transfer residue. A newer live pending has a
+                    // different owner and must be kept (its own
+                    // transfer still follows later in the replay).
+                    let already_closed = data
+                        .ownership_transitions
+                        .iter()
+                        .any(|stint| stint.exit_sn >= *sn);
+                    if already_closed {
+                        let is_residue = data
+                            .actual_new_owner_data
+                            .as_ref()
+                            .is_some_and(|(pending_owner, _)| {
+                                data.ownership_transitions.iter().any(|stint| {
+                                    stint.exit_sn == *sn
+                                        && stint.owner == *pending_owner
+                                })
+                            });
+                        if is_residue {
+                            data.actual_new_owner_data = None;
+                        }
+                        debug!(
+                            msg_type = "Reject",
+                            event_type = "Reject",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            "Duplicate reject ignored"
+                        );
                     } else if let Some((new_owner, new_owner_gov_version)) =
-                        new_owner
+                        data.actual_new_owner_data.take()
                     {
                         let entry = data
                             .old_owners
@@ -2161,24 +2185,13 @@ impl PersistentActor for WitnessesRegister {
                         // owner's link. No tracker event can interleave
                         // between Transfer and Reject while a new owner
                         // is pending, so the rejected transfer is the
-                        // immediately preceding SN. An identical stint
-                        // means this exact rejection was already
-                        // recorded: sns only grow live, so it can only
-                        // be a boot-recovery re-send. Drop it instead
-                        // of duplicating the log; the tail replay
-                        // re-establishes any live pending transfer
-                        // that follows this event.
-                        let stint = OwnershipStint {
+                        // immediately preceding SN.
+                        data.ownership_transitions.push(OwnershipStint {
                             owner: new_owner,
                             incoming_transfer_sn: sn.saturating_sub(1),
                             exit_sn: *sn,
                             outcome: OwnershipStintOutcome::Rejected,
-                        };
-                        if data.ownership_transitions.contains(&stint) {
-                            data.actual_new_owner_data = None;
-                        } else {
-                            data.ownership_transitions.push(stint);
-                        }
+                        });
 
                         debug!(
                             msg_type = "Reject",
