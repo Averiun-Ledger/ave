@@ -456,6 +456,9 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        #[cfg(feature = "test")]
+                        test_modes_fault:
+                            std::sync::atomic::AtomicU8::new(0),
                     },
                 )
                 .await?;
@@ -477,6 +480,9 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        #[cfg(feature = "test")]
+                        test_modes_fault:
+                            std::sync::atomic::AtomicU8::new(0),
                     },
                 )
                 .await?;
@@ -1188,6 +1194,9 @@ impl Actor for Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        #[cfg(feature = "test")]
+                        test_modes_fault:
+                            std::sync::atomic::AtomicU8::new(0),
                     },
                 )
                 .await
@@ -1294,6 +1303,9 @@ impl Handler<Self> for Node {
                             ledger_batch_size: self.ledger_batch_size,
                             transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
+                            #[cfg(feature = "test")]
+                            test_modes_fault:
+                                std::sync::atomic::AtomicU8::new(0),
                         },
                     )
                     .await?;

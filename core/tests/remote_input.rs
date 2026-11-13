@@ -20,7 +20,7 @@ use ave_core::helpers::network::test_faults::{
 };
 use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::model::event::{
-    Ledger, LedgerSeal, Protocols, ValidationMetadata,
+    EvaluationResponse, Ledger, LedgerSeal, Protocols, ValidationMetadata,
 };
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use futures::future::join_all;
@@ -1684,6 +1684,392 @@ async fn remote_forged_prev_hash_transfer_rejected_before_create() {
     drop(dirs);
     drop(zoe_node);
     drop(zoe_dirs);
+}
+
+// A transfer whose evaluation was forged to Ok (same request,
+// validator quorum and chain link, fresh owner seal) must not leave
+// a prefix behind: the apply-time evidence check rejects it, and
+// the failed first copy is rolled back instead of keeping the
+// Create and the fact persisted.
+#[test(tokio::test)]
+async fn remote_forged_evaluation_transfer_leaves_no_prefix() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+
+    // Bob witnesses Alice's creations; Rita is a plain member, so a
+    // transfer to her fails evaluation but still commits.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Bob", "key": bob_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Bob",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    // Block every natural tracker delivery from Alice from now on:
+    // the receivers below join only after every commit, so the
+    // injected batches are the only copy they process.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    assert!(
+        fact.protocols.is_success(),
+        "premise: the fact must succeed"
+    );
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        !transfer.protocols.is_success(),
+        "premise: the transfer to a non-creator must fail evaluation"
+    );
+
+    // Same request, validator quorum and chain link; only the
+    // evaluation is swapped to a genuine Ok result from the fact,
+    // keeping the failure's result hash so light checks pass while
+    // the evidence can never reproduce. Fresh owner seal.
+    let fact_result = match &fact.protocols {
+        Protocols::TrackerFactFull { evaluation, .. } => evaluation
+            .evaluator_response_ok()
+            .expect("fact evaluation ok"),
+        _ => panic!("expected a full fact event"),
+    };
+    let mut forged = transfer.clone();
+    match &mut forged.protocols {
+        Protocols::Transfer { evaluation, .. } => {
+            let old_hash = match &evaluation.response {
+                EvaluationResponse::Error { result_hash, .. } => {
+                    result_hash.clone()
+                }
+                _ => panic!("premise: transfer evaluation failed"),
+            };
+            evaluation.response = EvaluationResponse::Ok {
+                result: fact_result,
+                result_hash: old_hash,
+            };
+        }
+        _ => panic!("expected a transfer event"),
+    }
+    let protocols_hash = forged
+        .protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    let forged_seal = LedgerSeal {
+        gov_version: forged.gov_version,
+        sn: forged.sn,
+        prev_ledger_event_hash: forged.prev_ledger_event_hash.clone(),
+        protocols_hash,
+    };
+    forged.ledger_seal_signature =
+        Signature::new(&forged_seal, &alice_keys).unwrap();
+
+    // Rita joins only now: the forged batch is her first source.
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact.clone(), forged.clone()],
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(subject_id.clone()).await.is_err(),
+            "forged evaluation must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no transfer proof may persist from a rejected batch"
+    );
+    match rita
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+    {
+        Err(_) => {}
+        Ok((owner_now, pending, _, _)) => assert!(
+            owner_now.is_none() && pending.is_none(),
+            "no ownership may derive from a rejected batch"
+        ),
+    }
+    node_running(&rita).await.unwrap();
+
+    // Control: the genuine batch (with its failed transfer) is also
+    // rejected for Rita, who holds no access, and leaves nothing.
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact.clone(), transfer.clone()],
+        None,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(subject_id.clone()).await.is_err(),
+            "genuine failure without access must not register either"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no transfer proof may persist from the genuine batch"
+    );
+    node_running(&rita).await.unwrap();
+
+    // Control: Bob holds direct witness rights, so the same genuine
+    // history copies as data with its failure intact and no proof.
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
+        ..Default::default()
+    })
+    .await;
+    let bob = bob_node.api.clone();
+    node_running(&bob).await.unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+    // Phase one: the forged batch is rejected even with direct
+    // rights, and the failed apply leaves no prefix behind.
+    inject_ledger_batch(&bob, &alice_key, vec![create, fact, forged], None)
+        .await;
+    for _ in 0..30 {
+        assert!(
+            bob.get_subject_state(subject_id.clone()).await.is_err(),
+            "forged evaluation must not leave a prefix with rights"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        bob.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "no transfer proof may persist from a rejected apply"
+    );
+    node_running(&bob).await.unwrap();
+
+    // Phase two: the genuine history copies as data, keeping the
+    // failure intact and no proof.
+    inject_ledger_batch(&bob, &alice_key, history.clone(), None).await;
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let copied = bob
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert!(
+        !copied
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "the failed transfer must stay failed in the copy"
+    );
+    assert!(
+        bob.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a failed transfer grants no passage and leaves no proof"
+    );
+    node_running(&bob).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    bob_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+    drop(bob_node);
+    drop(bob_dirs);
 }
 
 /// SLOW: governance recovery must not replay the page-boundary event.

@@ -36,7 +36,7 @@ use crate::{
                 has_role,
             },
         },
-        event::Ledger,
+        event::{EvaluationResponse, Ledger, Protocols},
     },
     node::SubjectData,
     tracker::{Tracker, TrackerMessage, TrackerResponse},
@@ -59,6 +59,11 @@ pub struct DistriWorker {
     pub ledger_batch_size: u64,
     pub hash: HashAlgorithm,
     pub(crate) transfer_verifier: super::transfer_verifier::TransferVerifier,
+    /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
+    /// Atomic so the shared `&self` receipt helpers can consume it;
+    /// production never arms it.
+    #[cfg(feature = "test")]
+    pub(crate) test_modes_fault: std::sync::atomic::AtomicU8,
 }
 
 use super::transfer_verifier::TransferSimulationResult;
@@ -595,10 +600,63 @@ impl DistriWorker {
             }
             let owner = first_ledger.ledger_seal_signature.signer.clone();
             let gov_version = first_ledger.gov_version;
-            let transfer_data =
+            // Evidence binding: a transfer whose evaluation does not
+            // reproduce over the batch prefix itself must not open
+            // pending ownership. With inline transfers, rebuild
+            // ownership from a screened copy where unverified ones
+            // stay failed history: the batch can still be copied on
+            // independent rights, and the apply backstop plus
+            // first-copy rollback cover the rest. The screened copy
+            // only feeds this reconstruction.
+            let has_inline_transfer = ledger.iter().any(|event| {
+                matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Transfer
+                )
+            });
+            let transfer_data = if has_inline_transfer {
+                let proven = self
+                    .transfer_verifier
+                    .verified_inline_transfers(ctx, governance_id, ledger)
+                    .await;
+                if ledger.iter().all(|event| {
+                    !matches!(
+                        event.get_event_request_type(),
+                        EventRequestType::Transfer
+                    ) || proven.contains(&event.sn)
+                }) {
+                    Some(WitnessesRegister::transfer_data_from_ledger(
+                        subject_id, ledger,
+                    )?)
+                } else {
+                    let mut screened = ledger.to_vec();
+                    for event in screened.iter_mut().filter(|event| {
+                        matches!(
+                            event.get_event_request_type(),
+                            EventRequestType::Transfer
+                        ) && !proven.contains(&event.sn)
+                    }) {
+                        if let Protocols::Transfer { evaluation, .. } =
+                            &mut event.protocols
+                            && evaluation.is_ok()
+                        {
+                            use crate::evaluation::response::EvaluatorError;
+                            evaluation.response = EvaluationResponse::Error {
+                                result:
+                                    EvaluatorError::InvalidEventSignature,
+                                result_hash: DigestIdentifier::default(),
+                            };
+                        }
+                    }
+                    Some(WitnessesRegister::transfer_data_from_ledger(
+                        subject_id, &screened,
+                    )?)
+                }
+            } else {
                 Some(WitnessesRegister::transfer_data_from_ledger(
                     subject_id, ledger,
-                )?);
+                )?)
+            };
 
             let (witness_status, receiver_window_sn, ..) =
                 check_witness_status_and_window(
@@ -1743,6 +1801,14 @@ pub enum DistriWorkerMessage {
         info: ComunicateInfo,
         sender: PublicKey,
     },
+    /// Test-only fault injection: the next visibility lookup for
+    /// this worker fails (`empty == false`) or returns no modes
+    /// (`empty == true`), exercising the fail-closed receipt paths.
+    /// One-shot and local to this worker; production never sets it.
+    #[cfg(feature = "test")]
+    TestFailNextModes {
+        empty: bool,
+    },
 }
 
 impl Message for DistriWorkerMessage {}
@@ -1902,6 +1968,19 @@ impl Handler<Self> for DistriWorker {
                     "Ledger distribution failed",
                     sender = &sender
                 )?;
+            }
+            #[cfg(feature = "test")]
+            DistriWorkerMessage::TestFailNextModes { empty } => {
+                let code = u8::from(empty) + 1;
+                self.test_modes_fault.store(
+                    code,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                debug!(
+                    msg_type = "TestFailNextModes",
+                    empty = empty,
+                    "Armed one-shot visibility fault"
+                );
             }
         };
 

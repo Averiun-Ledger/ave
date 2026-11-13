@@ -1,7 +1,11 @@
-use ave_actors::{ActorContext, ActorError};
+use std::sync::Arc;
+
+use ave_actors::{ActorContext, ActorError, ActorPath};
 use ave_common::SchemaType;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
+
+use crate::helpers::db::ExternalDB;
 
 use crate::model::common::subject::{
     acquire_subject, create_subject, get_local_subject_sn,
@@ -18,8 +22,25 @@ use crate::{
     },
     governance::{
         Governance, GovernanceMessage, witnesses_register::TrackerDeliveryMode,
+        sn_register::{
+            SnRegister, SnRegisterMessage, SnRegisterResponse,
+        },
+        subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        },
+        transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        },
+        witnesses_register::{
+            WitnessesRegister, WitnessesRegisterMessage,
+            WitnessesRegisterResponse,
+        },
     },
     model::event::{Ledger, Protocols},
+    node::{Node, NodeMessage},
+    sink::{SinkManager, SinkManagerMessage},
+    tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 use tracing::{debug, error, warn};
 
@@ -365,6 +386,31 @@ impl DistriWorker {
                                 );
                             }
                         }
+                        // A failed first copy must leave no trace:
+                        // the prefix was authorized by a suffix the
+                        // apply just rejected, so drop the subject
+                        // created in this batch instead of keeping
+                        // its Create and valid events persisted.
+                        if !is_register && !common.is_gov {
+                            if let Some(lease) = lease {
+                                if let Err(finish_err) =
+                                    lease.finish(ctx).await
+                                {
+                                    warn!(
+                                        msg_type = "LedgerDistribution",
+                                        subject_id = %subject_id,
+                                        error = %finish_err,
+                                        "Failed to release subject lease",
+                                    );
+                                }
+                            }
+                            Self::rollback_first_copy(
+                                ctx,
+                                &common.governance_id,
+                                &subject_id,
+                            )
+                            .await;
+                        }
                         if let ActorError::FunctionalCritical { .. } = e.clone()
                         {
                             error!(
@@ -441,6 +487,267 @@ impl DistriWorker {
         }
 
         Ok(())
+    }
+
+    /// Best-effort teardown of a tracker first-created in a batch
+    /// whose apply just failed. Only subject-scoped state is
+    /// dropped (tracker ledger and actor, per-subject register
+    /// entries, node registration, database row): the shared
+    /// governance registers keep running for the other subjects.
+    /// Never masks the original error: every failure is logged and
+    /// the caller still returns it.
+    async fn rollback_first_copy(
+        ctx: &mut ActorContext<Self>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) {
+        let tracker_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{subject_id}"
+        ));
+        match ctx.system().get_actor::<Tracker>(&tracker_path).await {
+            Ok(tracker) => {
+                match tracker.ask(TrackerMessage::PurgeStorage).await {
+                    Ok(TrackerResponse::Ok) => {}
+                    Ok(other) => warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        response = ?other,
+                        "Unexpected response purging tracker on rollback",
+                    ),
+                    Err(error) => warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to purge tracker on rollback",
+                    ),
+                }
+                if let Err(error) = tracker.ask_stop().await {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to stop tracker on rollback",
+                    );
+                }
+            }
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Tracker unavailable for rollback",
+            ),
+        }
+        let gov_path =
+            format!("/user/node/subject_manager/{governance_id}");
+        match ctx
+            .system()
+            .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                "{gov_path}/subject_register"
+            )))
+            .await
+        {
+            Ok(register) => match register
+                .ask(SubjectRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SubjectRegisterResponse::Ok) => {}
+                Ok(other) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    response = ?other,
+                    "Unexpected subject register response on rollback",
+                ),
+                Err(error) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Failed to clear subject register on rollback",
+                ),
+            },
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Subject register unavailable for rollback",
+            ),
+        }
+        match ctx
+            .system()
+            .get_actor::<SnRegister>(&ActorPath::from(format!(
+                "{gov_path}/sn_register"
+            )))
+            .await
+        {
+            Ok(register) => match register
+                .ask(SnRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SnRegisterResponse::Ok) => {}
+                Ok(other) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    response = ?other,
+                    "Unexpected sn register response on rollback",
+                ),
+                Err(error) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Failed to clear sn register on rollback",
+                ),
+            },
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Sn register unavailable for rollback",
+            ),
+        }
+        match ctx
+            .system()
+            .get_actor::<WitnessesRegister>(&ActorPath::from(format!(
+                "{gov_path}/witnesses_register"
+            )))
+            .await
+        {
+            Ok(register) => match register
+                .ask(WitnessesRegisterMessage::DeleteSubject {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(WitnessesRegisterResponse::Ok) => {}
+                Ok(_) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    "Unexpected witnesses response on rollback",
+                ),
+                Err(error) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Failed to clear witnesses register on rollback",
+                ),
+            },
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Witnesses register unavailable for rollback",
+            ),
+        }
+        match ctx
+            .system()
+            .get_actor::<TransferVerificationRegister>(&ActorPath::from(
+                format!("{gov_path}/transfer_verification_register"),
+            ))
+            .await
+        {
+            Ok(register) => match register
+                .ask(TransferVerificationRegisterMessage::Remove {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(TransferVerificationRegisterResponse::Ok) => {}
+                Ok(other) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    response = ?other,
+                    "Unexpected proof register response on rollback",
+                ),
+                Err(error) => warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Failed to clear proof register on rollback",
+                ),
+            },
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Proof register unavailable for rollback",
+            ),
+        }
+        let node_path = ActorPath::from("/user/node");
+        match ctx.system().get_actor::<Node>(&node_path).await {
+            Ok(node) => {
+                if let Err(error) = node
+                    .ask(NodeMessage::DeleteSubject(subject_id.clone()))
+                    .await
+                {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to unregister subject on rollback",
+                    );
+                }
+            }
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Node unavailable for rollback",
+            ),
+        }
+        // The apply already published state to the external database:
+        // drop that row too, or the subject would stay queryable.
+        // Sink tracking follows the same best-effort rule: untrack
+        // the subject without touching the shared manager.
+        match ctx
+            .system()
+            .get_actor::<SinkManager>(&ActorPath::from(format!(
+                "{gov_path}/sink_manager"
+            )))
+            .await
+        {
+            Ok(sink_manager) => {
+                if let Err(error) = sink_manager
+                    .tell(SinkManagerMessage::RemoveSubject {
+                        subject_id: subject_id.to_string(),
+                    })
+                    .await
+                {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to untrack subject on rollback",
+                    );
+                }
+            }
+            Err(error) => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Sink manager unavailable for rollback",
+            ),
+        }
+        match ctx.system().get_helper::<Arc<ExternalDB>>("ext_db") {
+            Some(db) => {
+                if let Err(error) =
+                    db.delete_subject(&subject_id.to_string()).await
+                {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to delete subject row on rollback",
+                    );
+                }
+            }
+            None => warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                "External database unavailable for rollback",
+            ),
+        }
     }
 
     /// Receipt-side visibility: the sender's projection is a claim.
@@ -530,6 +837,22 @@ impl DistriWorker {
         schema_id: SchemaType,
         ledger: &[Ledger],
     ) -> Result<Vec<TrackerDeliveryMode>, ActorError> {
+        // Test-only one-shot fault: fail the lookup or answer with
+        // no modes, so the fail-closed receipt paths can be pinned.
+        // Production never arms this flag.
+        #[cfg(feature = "test")]
+        match self
+            .test_modes_fault
+            .swap(0, std::sync::atomic::Ordering::SeqCst)
+        {
+            0 => {}
+            1 => {
+                return Err(ActorError::Functional {
+                    description: "test modes fault".to_string(),
+                });
+            }
+            _ => return Ok(Vec::new()),
+        }
         use crate::governance::witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,

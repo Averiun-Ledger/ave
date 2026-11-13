@@ -1,16 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ave_actors::{ActorContext, ActorError};
 use ave_common::{
-    Namespace, SchemaType,
+    Namespace, SchemaType, ValueWrapper,
     identity::{
         DigestIdentifier, HashAlgorithm, PublicKey, Signed, hash_borsh,
     },
     request::EventRequest,
 };
 
-use crate::governance::role_register::SearchRole;
+use crate::governance::role_register::{RoleDataRegister, SearchRole};
 use crate::model::common::{
     check_quorum_signers, get_actual_roles_register, node::get_subject_data,
     subject::get_local_subject_sn,
@@ -308,6 +308,152 @@ impl TransferVerifier {
         }
 
         Ok((governance_id, is_register, subject_data))
+    }
+
+    /// Pre-authorization evidence for first-copy batches. Rebuilds
+    /// the pre-transfer properties from the batch prefix itself
+    /// (genesis plus each evidence-checked event) and runs the full
+    /// evaluation check over them. Returns the SNs of inline
+    /// transfers whose Ok evaluation genuinely reproduces: only
+    /// those may open pending ownership during reception. Anything
+    /// else (failed, unverifiable or forged evidence) grants
+    /// nothing, though the batch can still be copied on independent
+    /// rights. Fails closed at the first gap: transfers past an
+    /// unchecked event stay unverified.
+    pub(crate) async fn verified_inline_transfers(
+        &self,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        ledger: &[Ledger],
+    ) -> HashSet<u64> {
+        use json_patch::{Patch, patch};
+        fn apply_patch(
+            properties: &mut ValueWrapper,
+            json_patch: ValueWrapper,
+        ) -> Result<(), DistributorError> {
+            let json_patch =
+                serde_json::from_value::<Patch>(json_patch.0).map_err(
+                    |e| DistributorError::TransferEventInvalid {
+                        details: format!("patch decode failed: {e}"),
+                    },
+                )?;
+            patch(&mut properties.0, &json_patch).map_err(|e| {
+                DistributorError::TransferEventInvalid {
+                    details: format!("patch apply failed: {e}"),
+                }
+            })?;
+            Ok(())
+        }
+        let mut proven = HashSet::new();
+        let mut ordered = ledger.to_vec();
+        ordered.sort_by_key(|event| event.sn);
+        let Some(create) = ordered.first().filter(|e| e.is_create_event())
+        else {
+            return proven;
+        };
+        let Protocols::Create { validation, .. } = &create.protocols
+        else {
+            return proven;
+        };
+        let ValidationMetadata::Metadata(genesis) =
+            &validation.validation_metadata
+        else {
+            return proven;
+        };
+        let mut cursor: Metadata = genesis.as_ref().clone();
+        // Roles repeat per governance version, not per event: cache
+        // them so a long first-copy batch costs one lookup.
+        let mut roles_cache: HashMap<u64, RoleDataRegister> = HashMap::new();
+        for event in ordered.iter().skip(1) {
+            if event.sn != cursor.sn.saturating_add(1) {
+                break;
+            }
+            let (request, evaluation, validation, is_transfer) =
+                match &event.protocols {
+                    Protocols::TrackerFactFull {
+                        event_request,
+                        evaluation,
+                        validation,
+                    } => (event_request, evaluation, validation, false),
+                    Protocols::Transfer {
+                        event_request,
+                        evaluation,
+                        validation,
+                    } => (event_request, evaluation, validation, true),
+                    _ => break,
+                };
+            let eval_data = match roles_cache.get(&event.gov_version) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let Ok((fetched, _, _)) = get_actual_roles_register(
+                        ctx,
+                        governance_id,
+                        SearchRole {
+                            schema_id: cursor.schema_id.clone(),
+                            namespace: cursor.namespace.clone(),
+                        },
+                        false,
+                        false,
+                        event.gov_version,
+                    )
+                    .await
+                    else {
+                        break;
+                    };
+                    roles_cache
+                        .insert(event.gov_version, fetched.clone());
+                    fetched
+                }
+            };
+            let signer = validation.validation_req_signature.signer.clone();
+            let Ok(req_hash) = hash_borsh(
+                &*self.hash.hasher(),
+                &RequestSubjectData {
+                    subject_id: cursor.subject_id.clone(),
+                    governance_id: cursor.governance_id.clone(),
+                    namespace: cursor.namespace.clone(),
+                    schema_id: cursor.schema_id.clone(),
+                    sn: cursor.sn.saturating_add(1),
+                    gov_version: event.gov_version,
+                    signer: signer.clone(),
+                },
+            ) else {
+                break;
+            };
+            if check_evaluation(
+                &self.hash,
+                evaluation.clone(),
+                eval_data,
+                cursor.properties.clone(),
+                EventAnchor {
+                    event_request: request,
+                    metadata: &cursor,
+                    gov_version: event.gov_version,
+                    req_subject_data_hash: req_hash,
+                    signer,
+                },
+            )
+            .is_err()
+            {
+                break;
+            }
+            if evaluation.is_ok() {
+                if is_transfer {
+                    proven.insert(event.sn);
+                }
+                if let Some(result) = evaluation.evaluator_response_ok()
+                    && apply_patch(
+                        &mut cursor.properties,
+                        result.patch.clone(),
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            cursor.sn = event.sn;
+        }
+        proven
     }
 
     /// Whether the local pre-state reproduces the owner's: full

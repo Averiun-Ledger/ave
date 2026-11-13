@@ -3362,6 +3362,50 @@ impl Api {
         }
     }
 
+    /// Arms a one-shot visibility fault on the node's distributor:
+    /// the next modes lookup fails. Test deliveries address the
+    /// node-level distributor, which always exists.
+    pub async fn test_fail_next_tracker_delivery_modes(
+        &self,
+    ) -> Result<(), Error> {
+        self.test_arm_modes_fault(false).await
+    }
+
+    /// Same as above, but the next lookup answers with no modes.
+    pub async fn test_empty_next_tracker_delivery_modes(
+        &self,
+    ) -> Result<(), Error> {
+        self.test_arm_modes_fault(true).await
+    }
+
+    async fn test_arm_modes_fault(
+        &self,
+        empty: bool,
+    ) -> Result<(), Error> {
+        use crate::distribution::worker::{
+            DistriWorker, DistriWorkerMessage,
+        };
+        // Test deliveries address the node-level distributor, so the
+        // fault lives there: one flag per worker, consumed once.
+        let actor = self
+            .system
+            .get_actor::<DistriWorker>(&ActorPath::from(
+                "/user/node/distributor",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Distributor actor not found".to_owned(),
+            })?;
+        actor
+            .tell(DistriWorkerMessage::TestFailNextModes { empty })
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Failed to arm modes fault".to_owned(),
+            })
+    }
+
     /// Tells a test-crafted approval vote directly to a validator
     /// worker's mailbox, bypassing the network: once this returns the
     /// message is queued, so anything the worker receives afterwards

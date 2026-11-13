@@ -24,6 +24,9 @@ use ave_core::governance::{
     model::{CreatorWitness, RoleCreator},
 };
 use ave_core::helpers::network::{ActorMessage, NetworkMessage};
+use ave_core::helpers::network::test_faults::{
+    FaultAction, FaultDirection, FaultMessage, FaultRule,
+};
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
@@ -11291,6 +11294,482 @@ async fn test_push_masks_over_clear_facts() {
 
     // The creator grant only hashes: the Full fact must be stored
     // as Opaque, never as visible data.
+    let wit_events =
+        get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
+    assert_eq!(wit_events.len(), 2);
+    assert_tracker_fact_opaque(&wit_events[1].event, &["agua"]).unwrap();
+}
+
+/// First-copy fixture with a Hash-only witness: Alice commits
+/// Create plus one Full fact, and the witness joins only afterwards
+/// with governance synced. Every injected batch below is the first
+/// and only copy she processes.
+async fn hash_wit_first_copy_fixture() -> (
+    Vec<common::NodeData>,
+    common::NodeData,
+    ave_common::identity::DigestIdentifier,
+    ave_common::identity::DigestIdentifier,
+    Vec<ave_core::model::event::Ledger>,
+    ave_common::identity::PublicKey,
+) {
+    let w_keys = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let w_pubkey = w_keys.public_key();
+    let (nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+
+    // Isolation: no natural tracker delivery may reach the witness
+    // before the injected batch below. It joins only after every
+    // commit, so any later Alice retry would be a second source and
+    // break the first-copy premise. Governance traffic is
+    // unaffected (different messages).
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "HashWit", "key": w_pubkey},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "HashWit", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "HashWit",
+                                        "viewpoints": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact_viewpoints(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true).await.unwrap();
+    let full = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 2);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (node_w, _w_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(w_keys),
+        ..Default::default()
+    })
+    .await;
+    let wit = node_w.api.clone();
+    node_running(&wit).await.unwrap();
+    wit.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    wit.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&wit, governance_id.clone(), None, true).await.unwrap();
+
+    let from_key =
+        PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+    (nodes, node_w, governance_id, subject_id, full, from_key)
+}
+
+/// A modes lookup failure must reject the batch instead of
+/// persisting the over-clear fact: fail-closed on error.
+#[test(tokio::test)]
+async fn test_receipt_batch_modes_failure_drops_full() {
+    let (_nodes, node_w, _governance_id, subject_id, full, from_key) =
+        hash_wit_first_copy_fixture().await;
+    let wit = node_w.api.clone();
+
+    wit.test_fail_next_tracker_delivery_modes()
+        .await
+        .unwrap();
+    let receiver_key = PublicKey::from_str(wit.public_key()).unwrap();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: receiver_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: full.clone(),
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+
+    // Nothing is persisted: the subject stays unregistered and the
+    // node keeps running on the failed batch.
+    for _ in 0..30 {
+        assert!(
+            wit.get_subject_state(subject_id.clone()).await.is_err(),
+            "failed modes lookup must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&wit).await.unwrap();
+
+    // Without the fault, the same batch applies and the private
+    // fact lands Opaque.
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: full,
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    let wit_events =
+        get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
+    assert_eq!(wit_events.len(), 2);
+    assert_tracker_fact_opaque(&wit_events[1].event, &["agua"]).unwrap();
+}
+
+/// An empty modes answer must be treated like a failure, never as
+/// an absence of evidence to keep clarity.
+#[test(tokio::test)]
+async fn test_receipt_batch_empty_modes_drops_full() {
+    let (_nodes, node_w, _governance_id, subject_id, full, from_key) =
+        hash_wit_first_copy_fixture().await;
+    let wit = node_w.api.clone();
+
+    wit.test_empty_next_tracker_delivery_modes()
+        .await
+        .unwrap();
+    let receiver_key = PublicKey::from_str(wit.public_key()).unwrap();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: receiver_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: full.clone(),
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..30 {
+        assert!(
+            wit.get_subject_state(subject_id.clone()).await.is_err(),
+            "empty modes must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&wit).await.unwrap();
+
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: full,
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    let wit_events =
+        get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
+    assert_eq!(wit_events.len(), 2);
+    assert_tracker_fact_opaque(&wit_events[1].event, &["agua"]).unwrap();
+}
+
+/// A pushed fact with a failing modes lookup must be dropped, not
+/// stored in the clear.
+#[test(tokio::test)]
+async fn test_receipt_push_modes_failure_drops_full() {
+    let (_nodes, node_w, _governance_id, subject_id, full, from_key) =
+        hash_wit_first_copy_fixture().await;
+    let wit = node_w.api.clone();
+
+    // The Create lands first so the subject exists at sn 0.
+    let mut ordered = full.clone();
+    ordered.sort_by_key(|e| e.sn);
+    let create = ordered
+        .iter()
+        .find(|e| e.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = ordered
+        .iter()
+        .find(|e| e.sn == 1)
+        .expect("fact event")
+        .clone();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(create),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&wit, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    wit.test_fail_next_tracker_delivery_modes()
+        .await
+        .unwrap();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(fact.clone()),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+
+    // The fact is dropped: only the Create is stored and the node
+    // keeps running on the failed push.
+    for _ in 0..30 {
+        let count = wit
+            .get_events(
+                subject_id.clone(),
+                ave_common::bridge::request::EventsQuery {
+                    quantity: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|state| state.events.len())
+            .unwrap_or(usize::MAX);
+        assert_eq!(count, 1, "failed push must not persist the fact");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&wit).await.unwrap();
+
+    // Without the fault, the same push applies masked.
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(fact),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    let wit_events =
+        get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
+    assert_eq!(wit_events.len(), 2);
+    assert_tracker_fact_opaque(&wit_events[1].event, &["agua"]).unwrap();
+}
+
+/// A pushed fact with an empty modes answer is dropped as well.
+#[test(tokio::test)]
+async fn test_receipt_push_empty_modes_drops_full() {
+    let (_nodes, node_w, _governance_id, subject_id, full, from_key) =
+        hash_wit_first_copy_fixture().await;
+    let wit = node_w.api.clone();
+
+    let mut ordered = full.clone();
+    ordered.sort_by_key(|e| e.sn);
+    let create = ordered
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = ordered
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(create),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&wit, subject_id.clone(), Some(0), true).await.unwrap();
+
+    wit.test_empty_next_tracker_delivery_modes()
+        .await
+        .unwrap();
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(fact.clone()),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..30 {
+        let count = wit
+            .get_events(
+                subject_id.clone(),
+                ave_common::bridge::request::EventsQuery {
+                    quantity: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|state| state.events.len())
+            .unwrap_or(usize::MAX);
+        assert_eq!(count, 1, "empty modes must not persist the fact");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&wit).await.unwrap();
+
+    wit.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(wit.public_key()).unwrap(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(fact),
+            },
+        ),
+        &from_key,
+    )
+    .await
+    .unwrap();
     let wit_events =
         get_events(&wit, subject_id.clone(), 2, true).await.unwrap();
     assert_eq!(wit_events.len(), 2);

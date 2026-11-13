@@ -9706,13 +9706,16 @@ async fn test_single_witness_first_copy_survives_request_loss() {
     let state = get_subject(bob, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
+
     assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
 }
 
-// Rounds without any selectable offer must still retry: hold every
-// first-round offer response, let the round collapse with no offer,
-// then clear and require the copy to complete via the retry round.
-// Without the retry the actor stops and the subject never arrives.
+// Rounds without any selectable offer must still retry instead of
+// stopping the update: hold every offer until the first round is
+// provably starved (sweep plus witness retry, both held), then
+// clear and require the copy to complete through a retry round.
+// Without the retry the actor would be gone by the clear and the
+// final wait would expire.
 #[test(tokio::test)]
 async fn test_update_retries_round_without_selectable_offer() {
     let (nodes, _dirs) =
@@ -9720,7 +9723,6 @@ async fn test_update_retries_round_without_selectable_offer() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0], vec![0]],
             always_accept: true,
-            ledger_batch_size: Some(1),
             ..Default::default()
         })
         .await;
@@ -9783,16 +9785,14 @@ async fn test_update_retries_round_without_selectable_offer() {
         create_subject(alice, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    for data in [1, 2, 3] {
-        emit_fact(
-            alice,
-            subject_id.clone(),
-            json!({"ModOne": {"data": data}}),
-            true,
-        )
-        .await
-        .unwrap();
-    }
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
 
     bob.authorize_governance(
         governance_id.clone(),
@@ -9805,57 +9805,358 @@ async fn test_update_retries_round_without_selectable_offer() {
         .await
         .unwrap();
 
-    // Hold every offer response: the round collapses with no offer.
-    for message in [
-        FaultMessage::UpdateOffer,
-        FaultMessage::UpdateNoOffer,
-    ] {
-        bob.test_install_fault(FaultRule {
-            direction: FaultDirection::Inbound,
-            message,
-            peer: None,
-            remaining: None,
-            action: FaultAction::Hold,
-        })
-        .await
-        .unwrap();
-    }
+    // Hold every offer to Bob: the round never sees a selectable
+    // one. The first sweep plus its witness retry are both held,
+    // which proves the round ran starved to completion.
     bob.authorize_governance(
         subject_id.clone(),
         AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
     )
     .await
     .unwrap();
-    bob.update_subject(subject_id.clone()).await.unwrap();
-
-    // Offers arrive held; wait until no more arrive (the round
-    // collapsed) instead of sleeping a fixed time.
-    wait_held(bob, 1).await;
-    let mut last = 0;
-    let mut quiet = 0;
-    for _ in 0..60 {
-        let held = bob.test_held_count().await.unwrap_or(0);
-        if held >= 1 && held == last {
-            quiet += 1;
-            if quiet >= 10 {
-                break;
-            }
-        } else {
-            quiet = 0;
-        }
-        last = held;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    assert!(quiet >= 10, "offer responses never settled");
-
-    // Dropping the held responses releases the round; the retry round
-    // must re-sweep and complete the copy.
-    bob.test_clear_faults().await.unwrap();
-    let state = get_subject(bob, subject_id.clone(), Some(3), true)
+    alice
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::UpdateOffer,
+            peer: Some(PublicKey::from_str(bob.public_key()).unwrap()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
         .await
         .unwrap();
-    assert_eq!(state.properties, json!({"one": 3, "two": 0, "three": 0}));
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    // Three held offers prove a full starved round (sweep plus
+    // witness retry) and a retry round already underway: without
+    // round retries the count would stall at two and this wait
+    // would expire instead.
+    wait_held(alice, 3).await;
+    assert!(
+        bob.get_subject_state(subject_id.clone()).await.is_err(),
+        "no copy may complete while every offer is held"
+    );
+
+    // Clearing drops the stale held offers: only a live retry round
+    // re-sweeps and completes the copy afterwards.
+    alice.test_clear_faults().await.unwrap();
+    let state = get_subject(bob, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(state.properties, json!({"one": 1, "two": 0, "three": 0}));
     node_running(bob).await.unwrap();
+}
+
+// A verification recorded from sender A must not be advertised to
+// B: R copies the Create batch through Alice (recording the pending
+// transfer hint attributed to her) via a single injected batch,
+// stalls while Alice's deliveries stay dropped, then continues
+// through Bob once Alice is gone. The round via Bob must request
+// without already_verified so B includes the hint and the copy
+// completes. R is the pending target and holds no other right.
+#[test(tokio::test)]
+async fn test_verified_transfer_not_reused_across_senders() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = &nodes[0].api;
+    let alice = &nodes[1].api;
+    let bob = &nodes[2].api;
+
+    let r_keypair =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let r_key = r_keypair.public_key();
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(owner, vec![alice, bob]).await;
+
+    // Determinism: Bob must not serve R in round one. Block all
+    // natural tracker deliveries from Alice to Bob from the start
+    // (same pattern the failed-transfer test uses to isolate its
+    // receivers), so Bob holds nothing and R can only select Alice
+    // below. Bob's governance sync is unaffected (different
+    // messages).
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(bob_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "R", "key": r_key.to_string()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "Bob",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            },
+                            {
+                                "name": "R",
+                                "namespace": [],
+                                "quantity": "infinity"
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(alice, subject_id.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // R joins only now: Alice's deliveries to her stay dropped,
+    // so the injected first batch below is the only copy she
+    // processes in round one; round two travels through a normal
+    // update round.
+    let r_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (r_node, _r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{r_port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(r_keypair),
+        ..Default::default()
+    })
+    .await;
+    let r = r_node.api.clone();
+    node_running(&r).await.unwrap();
+    r.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    r.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    get_subject(&r, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    // Round one through Alice only, without any update race:
+    // drop every Alice delivery to R so the injected first batch
+    // below is the only copy R processes, then inject Create plus
+    // the pending-transfer hint. The batch is truncated below the
+    // window, so R records the hint and stalls waiting for more
+    // that never arrives.
+    alice
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerRes,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    alice
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLastEventReq,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    r.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(alice_key.clone()),
+    )
+    .await
+    .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: r_key.clone(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create],
+                is_all: true,
+                transfer_event: Some(Box::new(transfer)),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&r, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((2, alice_key.clone())),
+        "round one must record the transfer proof from Alice"
+    );
+
+    // Bob syncs everything while Alice is still up, then Alice goes
+    // away: the next round can only select Bob. Releasing the
+    // round-one blocks first: Bob was held back on purpose.
+    alice.test_clear_faults().await.unwrap();
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(alice_key.clone()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    // Round two through Bob: hold the outgoing request and require
+    // it to carry no reused proof for Bob.
+    r.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerReq,
+        peer: None,
+        remaining: Some(1),
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    r.update_subject(subject_id.clone()).await.unwrap();
+    wait_held(&r, 1).await;
+    let request = r
+        .test_held_outbound()
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|m| match m.message {
+            ActorMessage::DistributionLedgerReq {
+                subject_id: req_subject,
+                already_verified_transfer_sn,
+                ..
+            } => Some((
+                m.info.receiver,
+                req_subject,
+                already_verified_transfer_sn,
+            )),
+            _ => None,
+        })
+        .expect("a ledger request to Bob must have been held");
+    assert_eq!(request.0, bob_key, "dead Alice must not be asked");
+    assert_eq!(request.1, subject_id, "request must target the subject");
+    assert_eq!(
+        request.2, None,
+        "a proof verified from Alice must not be advertised to Bob"
+    );
+    r.test_release_held().await.unwrap();
+
+    // With the hint included, the copy advances past the Create and
+    // completes through the pending transfer.
+    get_subject(&r, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    node_running(&r).await.unwrap();
 }
 
 // No overlap between creator Witnesses and schema role, no

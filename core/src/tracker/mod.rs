@@ -381,11 +381,6 @@ impl Subject for Tracker {
                     sn = self.subject_metadata.sn,
                     "Error verifying new ledger events"
                 );
-
-                // Failed during creation
-                if self.subject_metadata.sn == 0 {
-                    return Err(e);
-                }
             } else {
                 error!(
                     msg_type = "VerifyLedger",
@@ -394,8 +389,12 @@ impl Subject for Tracker {
                     sn = self.subject_metadata.sn,
                     "Critical error verifying new ledger events"
                 );
-                return Err(e);
             }
+            // Never swallow a verification failure: the events
+            // applied before it stay persisted, so the caller must
+            // see the error to roll back or retry instead of
+            // treating a truncated prefix as a complete copy.
+            return Err(e);
         };
 
         if current_sn < self.subject_metadata.sn || current_sn == 0 {
