@@ -15,8 +15,13 @@ use crate::model::common::{
     check_quorum_signers, get_actual_roles_register, node::get_subject_data,
     subject::get_local_subject_sn,
 };
-use crate::model::event::{Ledger, LedgerSeal, Protocols, ValidationMetadata};
+use crate::model::event::{
+    EvaluationData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
+};
 use crate::node::SubjectData;
+use crate::node::subject_manager::{
+    SubjectManager, SubjectManagerMessage,
+};
 use crate::subject::Metadata;
 use crate::subject::RequestSubjectData;
 use crate::validation::response::ValidationRes;
@@ -28,8 +33,35 @@ use super::error::DistributorError;
 pub(crate) enum TransferSimulationResult {
     /// La simulación fue afirmativa: el nodo es testigo del owner/new_owner.
     Witness,
+    /// The aux evidence is not (yet) checkable, so the aux opens
+    /// speculative passage with a speculative proof: a later batch
+    /// rechecks the evidence once its chain is available, firming
+    /// the proof or rolling the subject back on refutation.
+    WitnessUnproven,
+    /// The aux evidence was checkable and refuted: the hint is
+    /// forged and must open nothing, leaving no trace behind.
+    /// Any speculative passage it opened is rolled back.
+    Refuted,
     /// La simulación devolvió None: no somos testigo.
     NotWitness,
+}
+
+/// Outcome of rebuilding the evaluation evidence chain for an
+/// external transfer hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuxEvidence {
+    /// The aux evaluation reproduces over the sender batch
+    /// continued from our own ledger: free passage with proof.
+    Proven,
+    /// The chain can not be rebuilt yet (gap, opaque or diverged
+    /// prefix, unavailable roles, missing genesis): no verdict yet,
+    /// a later batch may still prove or refute it once the chain
+    /// is available. Never a substitute for evidence.
+    Missing,
+    /// The chain is complete and checkable, but the aux evaluation
+    /// does not reproduce: the hint is forged and must open
+    /// nothing, leaving no trace behind.
+    Refuted,
 }
 
 pub(crate) struct TransferVerifier {
@@ -326,6 +358,215 @@ impl TransferVerifier {
         governance_id: &DigestIdentifier,
         ledger: &[Ledger],
     ) -> HashSet<u64> {
+        let mut ordered = ledger.to_vec();
+        ordered.sort_by_key(|event| event.sn);
+        let Some(mut cursor) = Self::genesis_metadata(&ordered) else {
+            return HashSet::new();
+        };
+        // Roles repeat per governance version, not per event: cache
+        // them so a long first-copy batch costs one lookup.
+        let mut roles_cache: HashMap<u64, RoleDataRegister> = HashMap::new();
+        let (proven, _) = self
+            .verify_chain(
+                ctx,
+                governance_id,
+                &mut cursor,
+                &ordered[1..],
+                &mut roles_cache,
+            )
+            .await;
+        proven
+    }
+
+    /// Genesis pre-state of a Create-led batch, if usable.
+    fn genesis_metadata(ordered: &[Ledger]) -> Option<Metadata> {
+        let create = ordered.first().filter(|e| e.is_create_event())?;
+        if create.sn != 0 {
+            return None;
+        }
+        let Protocols::Create { validation, .. } = &create.protocols else {
+            return None;
+        };
+        let ValidationMetadata::Metadata(genesis) =
+            &validation.validation_metadata
+        else {
+            return None;
+        };
+        Some(genesis.as_ref().clone())
+    }
+
+    /// Evidence gate for an external transfer hint: the aux grants
+    /// free passage only if its evaluation reproduces over a
+    /// trustworthy pre-state. That is the receiver's own ledger
+    /// continued with the sender batch, or batch genesis when the
+    /// subject is unknown. Anything else (gap, opaque or diverged
+    /// prefix, unverifiable evidence) yields Missing, so the caller
+    /// defers instead of opening passage on seal and quorum alone.
+    /// Checkable but wrong evidence yields Refuted instead. An
+    /// already applied transfer needs no gate.
+    pub(crate) async fn verify_aux_evidence(
+        &self,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        sender_ledger: &[Ledger],
+        transfer_event: &Ledger,
+    ) -> AuxEvidence {
+        let local_sn =
+            get_local_subject_sn(ctx, subject_id).await.ok().flatten();
+        if let Some(lsn) = local_sn
+            && lsn >= transfer_event.sn
+        {
+            return AuxEvidence::Proven;
+        }
+        // Own prefix first: the locally applied events are exactly
+        // what a continued copy would rebuild, with no register
+        // round-trip that could race a just-applied prefix. Gaps,
+        // opaque spans and unverifiable evidence yield Missing (the
+        // aux may still prove itself once the chain is available);
+        // only checkable-but-wrong evidence yields Refuted.
+        let mut combined: Vec<Ledger> = Vec::new();
+        let mut tip: Option<u64> = None;
+        if local_sn.is_some() {
+            let path = ave_actors::ActorPath::from(format!(
+                "/user/node/subject_manager/{subject_id}"
+            ));
+            // An idle tracker is already stopped: only live
+            // requesters keep it running, so reload it for the read
+            // and release the lease right away.
+            let mut reloaded = false;
+            let tracker = match ctx
+                .system()
+                .get_actor::<crate::tracker::Tracker>(&path)
+                .await
+            {
+                Ok(tracker) => tracker,
+                Err(_) => {
+                    let manager_path = ave_actors::ActorPath::from(
+                        "/user/node/subject_manager",
+                    );
+                    let Ok(manager) = ctx
+                        .system()
+                        .get_actor::<SubjectManager>(&manager_path)
+                        .await
+                    else {
+                        return AuxEvidence::Missing;
+                    };
+                    if manager
+                        .ask(SubjectManagerMessage::Up {
+                            subject_id: subject_id.clone(),
+                            requester: "aux-evidence".to_owned(),
+                            create_ledger: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return AuxEvidence::Missing;
+                    }
+                    reloaded = true;
+                    let Ok(tracker) = ctx
+                        .system()
+                        .get_actor::<crate::tracker::Tracker>(&path)
+                        .await
+                    else {
+                        return AuxEvidence::Missing;
+                    };
+                    tracker
+                }
+            };
+            let fetched = tracker
+                .ask(crate::tracker::TrackerMessage::GetLedger {
+                    lo_sn: None,
+                    hi_sn: local_sn.unwrap_or(0),
+                })
+                .await;
+            if reloaded
+                && let Ok(manager) = ctx
+                    .system()
+                    .get_actor::<SubjectManager>(&ave_actors::ActorPath::from(
+                        "/user/node/subject_manager",
+                    ))
+                    .await
+            {
+                let _ = manager
+                    .ask(SubjectManagerMessage::Finish {
+                        subject_id: subject_id.clone(),
+                        requester: "aux-evidence".to_owned(),
+                    })
+                    .await;
+            }
+            let Ok(crate::tracker::TrackerResponse::Ledger {
+                ledger,
+                ..
+            }) = fetched
+            else {
+                return AuxEvidence::Missing;
+            };
+            tip = ledger.last().map(|event| event.sn);
+            combined.extend(ledger);
+        }
+        // Sender events strictly after the own tip, up to the aux.
+        let after_tip = tip;
+        let mut needed: Vec<Ledger> = sender_ledger
+            .iter()
+            .filter(|event| {
+                after_tip.is_none_or(|tip| event.sn > tip)
+                    && event.sn <= transfer_event.sn
+            })
+            .cloned()
+            .collect();
+        needed.retain(|event| event.sn != transfer_event.sn);
+        needed.push(transfer_event.clone());
+        combined.extend(needed);
+        // Own events win on overlap: they are what this node
+        // already committed, never the sender's claim about them.
+        combined.sort_by_key(|event| event.sn);
+        combined.dedup_by_key(|event| event.sn);
+        let Some(mut cursor) = Self::genesis_metadata(&combined) else {
+            return AuxEvidence::Missing;
+        };
+        let (_, tail) = combined.split_at(1);
+        let mut roles_cache = HashMap::new();
+        let (proven, refuted) = self
+            .verify_chain(ctx, governance_id, &mut cursor, tail, &mut roles_cache)
+            .await;
+        if proven.contains(&transfer_event.sn) {
+            AuxEvidence::Proven
+        } else if refuted.contains(&transfer_event.sn) {
+            AuxEvidence::Refuted
+        } else {
+            AuxEvidence::Missing
+        }
+    }
+
+    /// Chained evaluation evidence shared by inline screening and
+    /// external-aux validation. Rebuilds properties event by event
+    /// from `cursor` (exclusive) and returns the SNs of transfers
+    /// whose Ok evaluation genuinely reproduces, plus the SNs of
+    /// transfers whose checkable evidence failed. Stops (without
+    /// error) at the first gap, the first refuted evidence, or a
+    /// protocol that cannot be replayed here: later transfers stay
+    /// unverified. Confirm and Reject carry no evaluation and
+    /// change no properties, so they are skipped without breaking
+    /// the chain; opaque or foreign protocols stop it instead of
+    /// standing in for evidence they cannot provide.
+    ///
+    /// When the evaluation roles for an event version are
+    /// unavailable (the register only serves the current version),
+    /// the evidence can not be judged: the event is trusted on its
+    /// envelope like the apply path does, its patch advances the
+    /// cursor, but it never counts as proven. A later event whose
+    /// evidence genuinely reproduces still proves over that cursor.
+    /// Refuted evidence (roles available, check failed) stops the
+    /// chain instead.
+    pub(crate) async fn verify_chain(
+        &self,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        cursor: &mut Metadata,
+        events: &[Ledger],
+        roles_cache: &mut HashMap<u64, RoleDataRegister>,
+    ) -> (HashSet<u64>, HashSet<u64>) {
         use json_patch::{Patch, patch};
         fn apply_patch(
             properties: &mut ValueWrapper,
@@ -344,27 +585,28 @@ impl TransferVerifier {
             })?;
             Ok(())
         }
+        // Advances the cursor over one envelope-trusted event: the
+        // patch applies when the evaluation succeeded, but nothing
+        // is proven. A corrupt patch stops the chain instead.
+        fn advance_unproven(
+            cursor: &mut Metadata,
+            event: &Ledger,
+            evaluation: &EvaluationData,
+        ) -> Result<(), DistributorError> {
+            if evaluation.is_ok()
+                && let Some(result) = evaluation.evaluator_response_ok()
+            {
+                apply_patch(
+                    &mut cursor.properties,
+                    result.patch.clone(),
+                )?;
+            }
+            cursor.sn = event.sn;
+            Ok(())
+        }
         let mut proven = HashSet::new();
-        let mut ordered = ledger.to_vec();
-        ordered.sort_by_key(|event| event.sn);
-        let Some(create) = ordered.first().filter(|e| e.is_create_event())
-        else {
-            return proven;
-        };
-        let Protocols::Create { validation, .. } = &create.protocols
-        else {
-            return proven;
-        };
-        let ValidationMetadata::Metadata(genesis) =
-            &validation.validation_metadata
-        else {
-            return proven;
-        };
-        let mut cursor: Metadata = genesis.as_ref().clone();
-        // Roles repeat per governance version, not per event: cache
-        // them so a long first-copy batch costs one lookup.
-        let mut roles_cache: HashMap<u64, RoleDataRegister> = HashMap::new();
-        for event in ordered.iter().skip(1) {
+        let mut refuted = HashSet::new();
+        for event in events {
             if event.sn != cursor.sn.saturating_add(1) {
                 break;
             }
@@ -380,12 +622,17 @@ impl TransferVerifier {
                         evaluation,
                         validation,
                     } => (event_request, evaluation, validation, true),
+                    Protocols::TrackerConfirm { .. }
+                    | Protocols::Reject { .. } => {
+                        cursor.sn = event.sn;
+                        continue;
+                    }
                     _ => break,
                 };
             let eval_data = match roles_cache.get(&event.gov_version) {
-                Some(cached) => cached.clone(),
+                Some(cached) => Some(cached.clone()),
                 None => {
-                    let Ok((fetched, _, _)) = get_actual_roles_register(
+                    match get_actual_roles_register(
                         ctx,
                         governance_id,
                         SearchRole {
@@ -397,13 +644,27 @@ impl TransferVerifier {
                         event.gov_version,
                     )
                     .await
-                    else {
-                        break;
-                    };
-                    roles_cache
-                        .insert(event.gov_version, fetched.clone());
-                    fetched
+                    {
+                        Ok((fetched, _, _)) => {
+                            roles_cache.insert(
+                                event.gov_version,
+                                fetched.clone(),
+                            );
+                            Some(fetched)
+                        }
+                        Err(_) => None,
+                    }
                 }
+            };
+            let Some(eval_data) = eval_data else {
+                // Old version or momentarily missing register: the
+                // apply path trusts the envelope and skips the
+                // recheck, so the screening advances the cursor the
+                // same way without granting passage on it.
+                if advance_unproven(cursor, event, evaluation).is_err() {
+                    break;
+                }
+                continue;
             };
             let signer = validation.validation_req_signature.signer.clone();
             let Ok(req_hash) = hash_borsh(
@@ -427,7 +688,7 @@ impl TransferVerifier {
                 cursor.properties.clone(),
                 EventAnchor {
                     event_request: request,
-                    metadata: &cursor,
+                    metadata: cursor,
                     gov_version: event.gov_version,
                     req_subject_data_hash: req_hash,
                     signer,
@@ -435,6 +696,12 @@ impl TransferVerifier {
             )
             .is_err()
             {
+                // Checkable and wrong: the evidence is refuted, not
+                // merely missing. Callers decide whether that fails
+                // the batch outright or only denies passage.
+                if is_transfer {
+                    refuted.insert(event.sn);
+                }
                 break;
             }
             if evaluation.is_ok() {
@@ -453,58 +720,7 @@ impl TransferVerifier {
             }
             cursor.sn = event.sn;
         }
-        proven
-    }
-
-    /// Whether the local pre-state reproduces the owner's: full
-    /// visibility mode plus no opaque span in the prefix. Opaque
-    /// facts carry no patch, so any `None` span means the local
-    /// properties diverge and the evidence can not be rechecked.
-    async fn prefix_complete(
-        ctx: &mut ActorContext<super::worker::DistriWorker>,
-        governance_id: &DigestIdentifier,
-        meta: &Metadata,
-    ) -> bool {
-        use crate::governance::witnesses_register::{
-            WitnessesRegister, WitnessesRegisterMessage,
-            WitnessesRegisterResponse,
-        };
-        let path = ave_actors::ActorPath::from(format!(
-            "/user/node/subject_manager/{governance_id}/witnesses_register"
-        ));
-        let Ok(actor) =
-            ctx.system().get_actor::<WitnessesRegister>(&path).await
-        else {
-            return false;
-        };
-        let Ok(response) = actor
-            .ask(WitnessesRegisterMessage::GetTrackerVisibilityState {
-                subject_id: meta.subject_id.clone(),
-            })
-            .await
-        else {
-            return false;
-        };
-        let WitnessesRegisterResponse::TrackerVisibilityState { state } =
-            response
-        else {
-            return false;
-        };
-        if !state.is_full() {
-            return false;
-        }
-        for range in &state.stored_ranges {
-            if range.from_sn > meta.sn {
-                break;
-            }
-            if matches!(
-                range.visibility,
-                crate::model::common::TrackerStoredVisibility::None
-            ) {
-                return false;
-            }
-        }
-        true
+        (proven, refuted)
     }
 
     /// Verifica criptográficamente un transfer_event, simula si el nodo local
@@ -540,103 +756,70 @@ impl TransferVerifier {
             )
             .await?;
 
-        // When the pre-state is local (we are exactly one sn behind
-        // the transfer), check the evaluation evidence against it:
-        // request binding, evaluator quorum and result hash must
-        // reproduce over the pre-event properties.
-        if let Some(local_sn) =
-            get_local_subject_sn(ctx, subject_id).await.ok().flatten()
-            && local_sn.saturating_add(1) == transfer_event.sn
-        {
-            let Protocols::Transfer {
-                event_request,
-                evaluation,
-                validation,
-            } = &transfer_event.protocols
-            else {
-                return Err(ActorError::Functional {
-                    description: "transfer hint is not a transfer".to_string(),
-                });
-            };
-            let path = ave_actors::ActorPath::from(format!(
-                "/user/node/subject_manager/{subject_id}"
-            ));
-            if let Ok(tracker) = ctx
-                .system()
-                .get_actor::<crate::tracker::Tracker>(&path)
-                .await
-                && let Ok(crate::tracker::TrackerResponse::Metadata(meta)) =
-                    tracker
-                        .ask(crate::tracker::TrackerMessage::GetMetadata)
-                        .await
-                && Self::prefix_complete(ctx, &governance_id, &meta).await
-            {
-                let pre: Metadata = (*meta).clone();
-                // Missing roles (the register only serves the
-                // current governance version) mean the evidence
-                // can not be judged here: skip it, the seal and
-                // validation quorum still apply.
-                if let Ok((eval_data, _, _)) = get_actual_roles_register(
+        // The sender fetches the pending transfer separately from
+        // the offered window by design (`build_distribution_batch`),
+        // so an aux ahead of the batch is the normal case.
+        //
+        // A failed transfer is valid history that grants no
+        // passage on its own: only a successful transfer can open
+        // pending ownership, so only it needs its evidence
+        // rechecked up front. Failed transfers fall through to the
+        // simulation below, which grants Witness solely on
+        // independent rights, never on the failed transfer itself.
+        //
+        // When the evidence can not be rebuilt yet (aux ahead of
+        // the batch), the aux still opens speculative passage with
+        // a speculative proof, and a later batch rechecks it once
+        // its chain is available; refuting it then rolls the
+        // subject back. Checkable-but-wrong evidence fails here
+        // instead, leaving no trace. A recorded firm proof means
+        // its evidence was already validated: do not re-validate
+        // per batch.
+        let transfer_opens_passage = matches!(
+            &transfer_event.protocols,
+            Protocols::Transfer { evaluation, .. }
+                if evaluation.is_ok()
+        );
+        let mut covered = false;
+        if transfer_opens_passage
+            && let Ok(Some((proven_sn, _, speculative))) =
+                crate::model::common::get_verified_transfer_detail(
                     ctx,
                     &governance_id,
-                    SearchRole {
-                        schema_id: pre.schema_id.clone(),
-                        namespace: pre.namespace.clone(),
-                    },
-                    false,
-                    false,
-                    transfer_event.gov_version,
+                    subject_id,
                 )
                 .await
-                {
-                    let signer =
-                        validation.validation_req_signature.signer.clone();
-                    let req_hash = hash_borsh(
-                        &*self.hash.hasher(),
-                        &RequestSubjectData {
-                            subject_id: pre.subject_id.clone(),
-                            governance_id: pre.governance_id.clone(),
-                            namespace: pre.namespace.clone(),
-                            schema_id: pre.schema_id.clone(),
-                            sn: pre.sn.saturating_add(1),
-                            gov_version: transfer_event.gov_version,
-                            signer: signer.clone(),
-                        },
-                    )
-                    .map_err(|e| {
-                        ActorError::Functional {
-                            description: format!("req hash failed: {e}"),
-                        }
-                    })?;
-                    check_evaluation(
-                        &self.hash,
-                        evaluation.clone(),
-                        eval_data,
-                        pre.properties.clone(),
-                        EventAnchor {
-                            event_request,
-                            metadata: &pre,
-                            gov_version: transfer_event.gov_version,
-                            req_subject_data_hash: req_hash,
-                            signer,
-                        },
-                    )
-                    .map_err(|e| {
-                        DistributorError::TransferEventInvalid {
-                            details: format!("eval evidence: {e}"),
-                        }
-                    })?;
+            && !speculative
+            && proven_sn >= transfer_event.sn
+        {
+            covered = true;
+        }
+        if transfer_opens_passage && !covered {
+            match self
+                .verify_aux_evidence(
+                    ctx,
+                    &governance_id,
+                    subject_id,
+                    sender_ledger,
+                    transfer_event,
+                )
+                .await
+            {
+                AuxEvidence::Proven => {}
+                // Speculative passage: the batch may advance on the
+                // aux, but the proof stays speculative until a later
+                // batch rechecks the evidence.
+                AuxEvidence::Missing => {
+                    return Ok(TransferSimulationResult::WitnessUnproven);
+                }
+                // Forged aux with a checkable chain: no passage, no
+                // proof, no writes. The worker additionally rolls
+                // back any speculative prefix it opened.
+                AuxEvidence::Refuted => {
+                    return Ok(TransferSimulationResult::Refuted);
                 }
             }
         }
-
-        // No sn-vs-batch gate here: the sender fetches the pending
-        // transfer separately from the offered window by design
-        // (`build_distribution_batch`), so a transfer ahead of the
-        // batch is the normal case, not an attack. The binding is the
-        // cryptographic verification above (seal + quorum + subject):
-        // a transfer that passes it is authentic, and the receiver
-        // still applies events strictly in order downstream.
         let (schema_id, namespace) = match subject_data {
             Some(SubjectData::Tracker {
                 schema_id,

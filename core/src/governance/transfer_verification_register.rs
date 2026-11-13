@@ -27,7 +27,7 @@ use crate::{
     BorshSerialize,
 )]
 pub struct TransferVerificationRegister {
-    register: HashMap<DigestIdentifier, (u64, PublicKey)>,
+    register: HashMap<DigestIdentifier, (u64, PublicKey, bool)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,7 +41,24 @@ pub enum TransferVerificationRegisterMessage {
         transfer_sn: u64,
         sender: PublicKey,
     },
+    /// Records an unverified passage hint: the aux could not be
+    /// evidence-checked yet, so the proof stays speculative until a
+    /// later batch verifies or refutes it. Never overwrites an
+    /// existing entry: the first verifier wins, and only a firm
+    /// record (or removal) replaces it.
+    RecordSpeculativeTransfer {
+        subject_id: DigestIdentifier,
+        transfer_sn: u64,
+        sender: PublicKey,
+    },
     GetVerifiedTransferSn {
+        subject_id: DigestIdentifier,
+    },
+    /// Same lookup as above, but also reports whether the proof is
+    /// still speculative (recorded without evidence). Used to decide
+    /// re-verification, free passage and rollback; the plain lookup
+    /// keeps reporting any proof so callers observe H6 behavior.
+    GetVerifiedTransferDetail {
         subject_id: DigestIdentifier,
     },
 }
@@ -52,6 +69,7 @@ impl Message for TransferVerificationRegisterMessage {
             self,
             Self::PurgeStorage
                 | Self::RecordVerifiedTransfer { .. }
+                | Self::RecordSpeculativeTransfer { .. }
                 | Self::Remove { .. }
         )
     }
@@ -61,6 +79,7 @@ impl Message for TransferVerificationRegisterMessage {
 pub enum TransferVerificationRegisterResponse {
     Ok,
     VerifiedTransferSn(Option<(u64, PublicKey)>),
+    VerifiedTransferDetail(Option<(u64, PublicKey, bool)>),
 }
 
 impl Response for TransferVerificationRegisterResponse {}
@@ -73,6 +92,11 @@ pub enum TransferVerificationRegisterEvent {
         subject_id: DigestIdentifier,
     },
     RecordVerifiedTransfer {
+        subject_id: DigestIdentifier,
+        transfer_sn: u64,
+        sender: PublicKey,
+    },
+    RecordSpeculativeTransfer {
         subject_id: DigestIdentifier,
         transfer_sn: u64,
         sender: PublicKey,
@@ -183,10 +207,39 @@ impl Handler<Self> for TransferVerificationRegister {
 
                 Ok(TransferVerificationRegisterResponse::Ok)
             }
+            TransferVerificationRegisterMessage::RecordSpeculativeTransfer {
+                subject_id,
+                transfer_sn,
+                sender,
+            } => {
+                self.on_event(
+                    TransferVerificationRegisterEvent::RecordSpeculativeTransfer {
+                        subject_id: subject_id.clone(),
+                        transfer_sn,
+                        sender: sender.clone(),
+                    },
+                    ctx,
+                )
+                .await;
+
+                debug!(
+                    msg_type = "RecordSpeculativeTransfer",
+                    subject_id = %subject_id,
+                    transfer_sn = transfer_sn,
+                    sender = %sender,
+                    "Speculative transfer hint recorded"
+                );
+
+                Ok(TransferVerificationRegisterResponse::Ok)
+            }
             TransferVerificationRegisterMessage::GetVerifiedTransferSn {
                 subject_id,
             } => {
-                let result = self.register.get(&subject_id).cloned();
+                let result = self
+                    .register
+                    .get(&subject_id)
+                    .cloned()
+                    .map(|(sn, sender, _)| (sn, sender));
 
                 debug!(
                     msg_type = "GetVerifiedTransferSn",
@@ -198,6 +251,24 @@ impl Handler<Self> for TransferVerificationRegister {
                 Ok(TransferVerificationRegisterResponse::VerifiedTransferSn(
                     result,
                 ))
+            }
+            TransferVerificationRegisterMessage::GetVerifiedTransferDetail {
+                subject_id,
+            } => {
+                let result = self.register.get(&subject_id).cloned();
+
+                debug!(
+                    msg_type = "GetVerifiedTransferDetail",
+                    subject_id = %subject_id,
+                    verified = ?result,
+                    "Transfer verification detail lookup completed"
+                );
+
+                Ok(
+                    TransferVerificationRegisterResponse::VerifiedTransferDetail(
+                        result,
+                    ),
+                )
             }
         }
     }
@@ -257,13 +328,21 @@ impl PersistentActor for TransferVerificationRegister {
                 inner
                     .register
                     .entry(subject_id.to_owned())
-                    .and_modify(|(existing_sn, existing_sender)| {
-                        if *transfer_sn > *existing_sn {
-                            *existing_sn = *transfer_sn;
-                            *existing_sender = sender.clone();
-                        }
-                    })
-                    .or_insert_with(|| (*transfer_sn, sender.clone()));
+                    .and_modify(
+                        |(existing_sn, existing_sender, speculative)| {
+                            if *transfer_sn > *existing_sn
+                                || (*transfer_sn == *existing_sn
+                                    && *speculative)
+                            {
+                                *existing_sn = *transfer_sn;
+                                *existing_sender = sender.clone();
+                                *speculative = false;
+                            }
+                        },
+                    )
+                    .or_insert_with(|| {
+                        (*transfer_sn, sender.clone(), false)
+                    });
 
                 debug!(
                     event_type = "RecordVerifiedTransfer",
@@ -271,6 +350,26 @@ impl PersistentActor for TransferVerificationRegister {
                     transfer_sn = transfer_sn,
                     sender = %sender,
                     "Transfer verification register state updated"
+                );
+            }
+            TransferVerificationRegisterEvent::RecordSpeculativeTransfer {
+                subject_id,
+                transfer_sn,
+                sender,
+            } => {
+                inner
+                    .register
+                    .entry(subject_id.to_owned())
+                    .or_insert_with(|| {
+                        (*transfer_sn, sender.clone(), true)
+                    });
+
+                debug!(
+                    event_type = "RecordSpeculativeTransfer",
+                    subject_id = %subject_id,
+                    transfer_sn = transfer_sn,
+                    sender = %sender,
+                    "Speculative transfer hint stored"
                 );
             }
         };

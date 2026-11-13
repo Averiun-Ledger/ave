@@ -12,11 +12,12 @@ use crate::model::common::subject::{
     get_subject_path_and_data, update_ledger,
 };
 use crate::model::common::{
-    check_subject_creation, crash_system, record_verified_transfer,
-    remove_verified_transfer,
+    check_subject_creation, crash_system, record_speculative_transfer,
+    record_verified_transfer, remove_verified_transfer,
 };
 use crate::{
     distribution::error::DistributorError,
+    distribution::transfer_verifier::TransferSimulationResult,
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
@@ -38,7 +39,12 @@ use crate::{
         },
     },
     model::event::{Ledger, Protocols},
-    node::{Node, NodeMessage},
+    node::{
+        Node, NodeMessage,
+        subject_manager::{
+            SubjectManager, SubjectManagerMessage, SubjectManagerResponse,
+        },
+    },
     sink::{SinkManager, SinkManagerMessage},
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
@@ -113,23 +119,49 @@ impl DistriWorker {
                 )
                 .await?;
 
+            // A proven aux records a firm proof and opens verified
+            // free passage for the rest of the loop. An unproven aux
+            // still opens speculative passage (the sender fetches it
+            // ahead of the window by design), but the proof stays
+            // speculative until a later batch rechecks the evidence;
+            // refuting it then rolls the subject back.
             if !transfer_recorded
-                && transfer_simulation.is_some()
                 && !common.is_gov
                 && let Some(transfer_event) = transfer_event
             {
-                record_verified_transfer(
-                    ctx,
-                    &common.governance_id,
-                    &subject_id,
-                    transfer_event.sn,
-                    sender.clone(),
-                )
-                .await?;
-                transfer_recorded = true;
-                // Refrescar verified_transfer_sn para que la siguiente
-                // iteración del loop pueda usar Path C (free passage).
-                verified_transfer_sn = Some(transfer_event.sn);
+                if matches!(
+                    transfer_simulation,
+                    Some(TransferSimulationResult::Witness)
+                ) {
+                    record_verified_transfer(
+                        ctx,
+                        &common.governance_id,
+                        &subject_id,
+                        transfer_event.sn,
+                        sender.clone(),
+                    )
+                    .await?;
+                    transfer_recorded = true;
+                    // Refresh verified_transfer_sn so the next loop
+                    // iteration can use Path C (free passage).
+                    verified_transfer_sn = Some(transfer_event.sn);
+                } else if matches!(
+                    transfer_simulation,
+                    Some(TransferSimulationResult::WitnessUnproven)
+                ) {
+                    // No one-shot flag here: a later chunk in this
+                    // same loop may still verify the aux and record
+                    // it firm below. The register itself keeps the
+                    // first speculative entry.
+                    record_speculative_transfer(
+                        ctx,
+                        &common.governance_id,
+                        &subject_id,
+                        transfer_event.sn,
+                        sender.clone(),
+                    )
+                    .await?;
+                }
             }
 
             let is_gov = auth.is_gov;
@@ -302,6 +334,18 @@ impl DistriWorker {
                 .unwrap_or(safe_hi_sn);
 
             if !pending_ledger.is_empty() {
+                // Chunk fingerprint for the rollback below: tip sn
+                // plus the first event signer, captured before the
+                // apply moves anything.
+                let chunk_tip_sn = pending_ledger
+                    .last()
+                    .map(|event| event.sn)
+                    .unwrap_or(safe_hi_sn);
+                let chunk_signer = pending_ledger
+                    .first()
+                    .map(|event| {
+                        event.ledger_seal_signature.signer.clone()
+                    });
                 let update_result = update_ledger(
                     ctx,
                     &subject_id,
@@ -404,10 +448,12 @@ impl DistriWorker {
                                     );
                                 }
                             }
-                            Self::rollback_first_copy(
+                            self.rollback_first_copy(
                                 ctx,
                                 &common.governance_id,
                                 &subject_id,
+                                chunk_tip_sn,
+                                chunk_signer,
                             )
                             .await;
                         }
@@ -489,53 +535,404 @@ impl DistriWorker {
         Ok(())
     }
 
+    /// Records a first-copy rollback skip for tests proving a
+    /// concurrent valid copy was spared. Best-effort and silent
+    /// outside tests: in production this is a no-op.
+    async fn note_rollback_skip(_ctx: &mut ActorContext<Self>) {
+        #[cfg(feature = "test")]
+        {
+            use crate::helpers::network::test_faults::SharedFaultRegistry;
+            if let Some(registry) =
+                _ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            {
+                if let Ok(mut faults) = registry.lock() {
+                    faults.note_rollback_skip();
+                }
+            }
+        }
+    }
+
+    /// Rolls back a subject whose speculative passage just got
+    /// refuted: the aux evidence proved forged once its chain was
+    /// complete. Only a still-speculative proof for that exact aux
+    /// triggers the purge; anything else (firm or absent proof)
+    /// just drops the poisoned hint and fails the batch. The purge
+    /// itself stays attempt-owned (see `rollback_first_copy`): a
+    /// concurrent valid copy is never deleted.
+    pub(crate) async fn rollback_refuted_aux(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        aux_sn: u64,
+    ) {
+        let speculative = matches!(
+            crate::model::common::get_verified_transfer_detail(
+                ctx,
+                governance_id,
+                subject_id,
+            )
+            .await,
+            Ok(Some((sn, _, true))) if sn == aux_sn
+        );
+        if !speculative {
+            return;
+        }
+        if let Err(error) =
+            remove_verified_transfer(ctx, governance_id, subject_id).await
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Failed to drop refuted transfer proof",
+            );
+        }
+        self.rollback_first_copy(
+            ctx,
+            governance_id,
+            subject_id,
+            aux_sn,
+            None,
+        )
+        .await;
+    }
+
+    /// Releases the reload requester above: keeps no tracker
+    /// alive on the rollback paths that back off after reloading.
+    /// Best-effort; a missing entry is a no-op.
+    async fn finish_rollback_up(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Ok(manager) = ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+        {
+            if let Err(error) = manager
+                .ask(SubjectManagerMessage::Finish {
+                    subject_id: subject_id.clone(),
+                    requester: "rollback".to_owned(),
+                })
+                .await
+            {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Rollback reload requester not released",
+                );
+            }
+        }
+    }
+
     /// Best-effort teardown of a tracker first-created in a batch
-    /// whose apply just failed. Only subject-scoped state is
+    /// whose reception just failed: either its apply errored, or a
+    /// forged aux it speculatively followed got refuted once its
+    /// chain became checkable. Only subject-scoped state is
     /// dropped (tracker ledger and actor, per-subject register
     /// entries, node registration, database row): the shared
     /// governance registers keep running for the other subjects.
     /// Never masks the original error: every failure is logged and
     /// the caller still returns it.
+    ///
+    /// Attempt-owned: the purge only runs when nothing else uses
+    /// or advanced the subject (no live requesters, tip below the
+    /// failed chunk, ownership untouched since creation). A
+    /// concurrent valid copy is never deleted.
+    /// Test-only rollback barrier: pause here while a test interleaves
+    /// a valid copy on another worker. The flag lives in the shared
+    /// test registry, never in this worker's mailbox (which stays
+    /// blocked while parked). Production never arms it.
+    #[cfg(feature = "test")]
+    fn rollback_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.rollback_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Test-only rollback barrier hit: lets a test prove the
+    /// interleaving really happened instead of passing vacuously.
+    /// Production never arms it.
+    #[cfg(feature = "test")]
+    fn note_rollback_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_rollback_hold();
+        }
+    }
+
     async fn rollback_first_copy(
+        &self,
         ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
+        chunk_tip_sn: u64,
+        baseline_owner: Option<PublicKey>,
     ) {
-        let tracker_path = ActorPath::from(format!(
-            "/user/node/subject_manager/{subject_id}"
-        ));
-        match ctx.system().get_actor::<Tracker>(&tracker_path).await {
-            Ok(tracker) => {
-                match tracker.ask(TrackerMessage::PurgeStorage).await {
-                    Ok(TrackerResponse::Ok) => {}
-                    Ok(other) => warn!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        response = ?other,
-                        "Unexpected response purging tracker on rollback",
-                    ),
-                    Err(error) => warn!(
-                        msg_type = "LedgerDistribution",
-                        subject_id = %subject_id,
-                        error = %error,
-                        "Failed to purge tracker on rollback",
-                    ),
+        // Test barrier: pause here while a test interleaves a valid
+        // copy on another worker. Production never arms it.
+        #[cfg(feature = "test")]
+        {
+            let mut noted = false;
+            while Self::rollback_paused(ctx) {
+                if !noted {
+                    Self::note_rollback_hold(ctx);
+                    noted = true;
                 }
-                if let Err(error) = tracker.ask_stop().await {
+                tokio::time::sleep(std::time::Duration::from_millis(100))
+                    .await;
+            }
+        }
+        // Someone else is mid-copy: only our lease was released
+        // above, never purge shared state.
+        match ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+        {
+            Ok(manager) => match manager
+                .ask(SubjectManagerMessage::HasLiveRequesters {
+                    subject_id: subject_id.clone(),
+                })
+                .await
+            {
+                Ok(SubjectManagerResponse::HasLiveRequesters(true)) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        "Rollback skipped: live requesters",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+                Ok(SubjectManagerResponse::HasLiveRequesters(false)) => {}
+                Ok(_) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        "Rollback skipped: unexpected requesters response",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+                Err(error) => {
                     warn!(
                         msg_type = "LedgerDistribution",
                         subject_id = %subject_id,
                         error = %error,
-                        "Failed to stop tracker on rollback",
+                        "Rollback skipped: requesters unreadable",
                     );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+            },
+            Err(error) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Rollback skipped: subject manager unavailable",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+        }
+        // Progress gate: only the failed attempt itself may be
+        // removed. Anything at or past the failed chunk tip, or with
+        // rotated ownership or a pending transfer, belongs to
+        // someone else's valid copy.
+        //
+        // The failed apply already released our lease, so an idle
+        // tracker for the failed attempt is already stopped: reload
+        // it from the store to purge the persisted prefix. A live
+        // tracker means someone else is using it; the gates below
+        // spare it.
+        let tracker_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{subject_id}"
+        ));
+        if ctx.system().get_actor::<Tracker>(&tracker_path).await.is_err()
+        {
+            match ctx
+                .system()
+                .get_actor::<SubjectManager>(&ActorPath::from(
+                    "/user/node/subject_manager",
+                ))
+                .await
+            {
+                Ok(manager) => {
+                    if let Err(error) = manager
+                        .ask(SubjectManagerMessage::Up {
+                            subject_id: subject_id.clone(),
+                            requester: "rollback".to_owned(),
+                            create_ledger: None,
+                        })
+                        .await
+                    {
+                        warn!(
+                            msg_type = "LedgerDistribution",
+                            subject_id = %subject_id,
+                            error = %error,
+                            "Rollback skipped: subject reload failed",
+                        );
+                        Self::note_rollback_skip(ctx).await;
+                        Self::finish_rollback_up(ctx, subject_id).await;
+                        return;
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Rollback skipped: subject manager unavailable",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
                 }
             }
-            Err(error) => warn!(
+        }
+        let tracker = match ctx.system().get_actor::<Tracker>(&tracker_path).await
+        {
+            Ok(tracker) => tracker,
+            Err(error) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Tracker unavailable for rollback",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+        };
+        let (current_sn, current_owner, current_pending) = match tracker
+            .ask(TrackerMessage::GetMetadata)
+            .await
+        {
+            Ok(TrackerResponse::Metadata(meta)) => (
+                meta.sn,
+                meta.owner.clone(),
+                meta.new_owner.clone(),
+            ),
+            Ok(other) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    response = ?other,
+                    "Unexpected metadata response on rollback",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+            Err(error) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Metadata unreadable for rollback",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+        };
+        if current_sn >= chunk_tip_sn {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                current_sn = current_sn,
+                chunk_tip_sn = chunk_tip_sn,
+                "Rollback skipped: subject progressed past the failed chunk",
+            );
+            Self::note_rollback_skip(ctx).await;
+            Self::finish_rollback_up(ctx, subject_id).await;
+            return;
+        }
+        if current_pending.is_some()
+            || baseline_owner.as_ref().is_some_and(|baseline| {
+                baseline != &current_owner
+            })
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                "Rollback skipped: ownership moved past the failed attempt",
+            );
+            Self::note_rollback_skip(ctx).await;
+            Self::finish_rollback_up(ctx, subject_id).await;
+            return;
+        }
+        // Atomic check-and-purge: the tracker refuses when it moved
+        // past the observed tip after this check.
+        match tracker
+            .ask(TrackerMessage::PurgeIfUnchanged {
+                expected_sn: current_sn,
+            })
+            .await
+        {
+            Ok(TrackerResponse::PurgeIfUnchanged { purged: true }) => {}
+            Ok(_) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    "Rollback skipped: tracker moved during rollback",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+            Err(error) => {
+                warn!(
+                    msg_type = "LedgerDistribution",
+                    subject_id = %subject_id,
+                    error = %error,
+                    "Failed to purge tracker on rollback",
+                );
+                Self::note_rollback_skip(ctx).await;
+                Self::finish_rollback_up(ctx, subject_id).await;
+                return;
+            }
+        }
+        // The purge (or the reload, when there was nothing stored)
+        // holds no requester from here on.
+        Self::finish_rollback_up(ctx, subject_id).await;
+        // The failed attempt left no transfer proof behind: drop any
+        // anyway so a rejected batch never opens future passage.
+        if let Err(error) = remove_verified_transfer(
+            ctx,
+            governance_id,
+            subject_id,
+        )
+        .await
+        {
+            warn!(
                 msg_type = "LedgerDistribution",
                 subject_id = %subject_id,
                 error = %error,
-                "Tracker unavailable for rollback",
-            ),
+                "Failed to drop transfer proof on rollback",
+            );
         }
         let gov_path =
             format!("/user/node/subject_manager/{governance_id}");
@@ -749,7 +1146,6 @@ impl DistriWorker {
             ),
         }
     }
-
     /// Receipt-side visibility: the sender's projection is a claim.
     /// Every full fact is re-checked event by event against our own
     /// register: opaque modes are masked locally, clear modes pass.

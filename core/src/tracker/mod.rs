@@ -1055,6 +1055,11 @@ pub enum TrackerMessage {
     GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
     GetLastLedger,
     PurgeStorage,
+    /// Atomically purge the ledger and stop only if the tracker is
+    /// still at the expected tip: a concurrent valid copy that
+    /// advanced past it is never wiped by someone else's rollback.
+    /// Returns whether the purge happened.
+    PurgeIfUnchanged { expected_sn: u64 },
     UpdateLedger { events: Vec<Ledger> },
     GetSinkEvents { from_sn: u64, batch_size: usize },
 }
@@ -1074,6 +1079,7 @@ pub enum TrackerResponse {
         ledger_event: Box<Option<Ledger>>,
     },
     SinkEvents(Vec<DataToSink>),
+    PurgeIfUnchanged { purged: bool },
     Ok,
 }
 impl Response for TrackerResponse {}
@@ -1321,6 +1327,30 @@ impl Handler<Self> for Tracker {
                 );
 
                 Ok(TrackerResponse::Ok)
+            }
+            TrackerMessage::PurgeIfUnchanged { expected_sn } => {
+                if self.subject_metadata.sn != expected_sn {
+                    warn!(
+                        msg_type = "PurgeIfUnchanged",
+                        subject_id = %self.subject_metadata.subject_id,
+                        expected_sn = expected_sn,
+                        actual_sn = self.subject_metadata.sn,
+                        "Refusing rollback purge: subject progressed",
+                    );
+                    return Ok(TrackerResponse::PurgeIfUnchanged {
+                        purged: false,
+                    });
+                }
+                purge_storage(ctx).await?;
+
+                debug!(
+                    msg_type = "PurgeIfUnchanged",
+                    subject_id = %self.subject_metadata.subject_id,
+                    "Tracker storage purged on rollback"
+                );
+
+                ctx.stop(None).await;
+                Ok(TrackerResponse::PurgeIfUnchanged { purged: true })
             }
             TrackerMessage::GetSinkEvents {
                 from_sn,

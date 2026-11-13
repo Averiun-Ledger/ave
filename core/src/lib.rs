@@ -3378,6 +3378,47 @@ impl Api {
         self.test_arm_modes_fault(true).await
     }
 
+    /// Parks (`pause == true`) or releases a first-copy rollback
+    /// barrier on this node: while paused, a failed first copy
+    /// waits instead of deleting, so a test can interleave a valid
+    /// copy and prove it survives. The flag lives in the shared
+    /// test registry, never in a worker mailbox (which would stay
+    /// blocked while parked).
+    pub async fn test_pause_rollback(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_rollback_paused(pause);
+        Ok(())
+    }
+
+    /// How many times a first-copy rollback barrier was hit on this
+    /// node: proves a concurrency test really interleaved instead
+    /// of passing vacuously.
+    pub async fn test_rollback_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rollback_hold_count();
+        Ok(count)
+    }
+
+    /// How many first-copy rollbacks backed off instead of
+    /// deleting: proves the stale rollback saw the valid copy and
+    /// spared it, rather than never running.
+    pub async fn test_rollback_skip_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rollback_skip_count();
+        Ok(count)
+    }
+
     async fn test_arm_modes_fault(
         &self,
         empty: bool,

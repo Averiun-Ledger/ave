@@ -22,7 +22,8 @@ use crate::{
     },
     helpers::network::{ActorMessage, delivery_of, service::NetworkSender},
     model::common::{
-        crash_system, get_verified_transfer_sn, node::get_subject_data,
+        crash_system, get_verified_transfer_sn,
+        get_verified_transfer_sn_firm, node::get_subject_data,
         subject::get_local_subject_sn,
     },
     node::SubjectData,
@@ -260,7 +261,7 @@ impl Update {
         // receiver drops any transfer proof from another sender, so
         // advertising it would make the sender omit the transfer event
         // the receiver still needs (same filter as request_ledger_from_sender).
-        get_verified_transfer_sn(ctx, &governance_id, &self.subject_id)
+        get_verified_transfer_sn_firm(ctx, &governance_id, &self.subject_id)
             .await
             .ok()
             .flatten()

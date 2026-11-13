@@ -49,6 +49,11 @@ pub enum SubjectManagerMessage {
     DeleteGovernance {
         subject_id: DigestIdentifier,
     },
+    /// Whether the subject still has live requesters: a rollback
+    /// must not purge shared state while someone else is using it.
+    HasLiveRequesters {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -59,6 +64,7 @@ pub enum SubjectManagerResponse {
     Finish,
     DeleteTracker,
     DeleteGovernance,
+    HasLiveRequesters(bool),
 }
 
 impl Response for SubjectManagerResponse {}
@@ -867,6 +873,13 @@ impl Handler<Self> for SubjectManager {
                 );
                 self.delete_governance(ctx, subject_id).await?;
                 Ok(SubjectManagerResponse::DeleteGovernance)
+            }
+            SubjectManagerMessage::HasLiveRequesters { subject_id } => {
+                let live = self
+                    .subjects
+                    .get(&subject_id)
+                    .is_some_and(|entry| !entry.requesters.is_empty());
+                Ok(SubjectManagerResponse::HasLiveRequesters(live))
             }
         }
     }

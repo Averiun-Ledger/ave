@@ -187,6 +187,9 @@ pub struct TestFaultRegistry {
     held: Vec<HeldMessage>,
     outbound: mpsc::Sender<Command<NetworkMessage>>,
     inbound: mpsc::Sender<Command<NetworkMessage>>,
+    rollback_holds: u64,
+    rollback_skips: u64,
+    rollback_paused: bool,
 }
 
 impl TestFaultRegistry {
@@ -196,6 +199,9 @@ impl TestFaultRegistry {
             held: Vec::new(),
             outbound: control.clone(),
             inbound: control,
+            rollback_holds: 0,
+            rollback_skips: 0,
+            rollback_paused: false,
         }
     }
 
@@ -217,6 +223,44 @@ impl TestFaultRegistry {
 
     pub fn held_count(&self) -> usize {
         self.held.len()
+    }
+
+    /// Records a first-copy rollback barrier hit, so a test can
+    /// prove the interleaving really happened instead of passing
+    /// vacuously when the rollback never ran.
+    pub fn note_rollback_hold(&mut self) {
+        self.rollback_holds += 1;
+    }
+
+    /// How many times a rollback barrier was hit on this node.
+    pub fn rollback_hold_count(&self) -> u64 {
+        self.rollback_holds
+    }
+
+    /// Records a first-copy rollback that backed off instead of
+    /// deleting: the concurrent valid copy it protected stayed
+    /// registered. Read back by tests proving the interleaving.
+    pub fn note_rollback_skip(&mut self) {
+        self.rollback_skips += 1;
+    }
+
+    /// How many first-copy rollbacks backed off instead of deleting.
+    pub fn rollback_skip_count(&self) -> u64 {
+        self.rollback_skips
+    }
+
+    /// Parks or releases first-copy rollbacks: while paused, a
+    /// failed first copy waits instead of deleting, so a test can
+    /// interleave a valid copy. Read by the worker directly from
+    /// this shared registry, never through its own mailbox (which
+    /// stays blocked while parked).
+    pub fn set_rollback_paused(&mut self, paused: bool) {
+        self.rollback_paused = paused;
+    }
+
+    /// Whether first-copy rollbacks must wait for release.
+    pub fn rollback_paused(&self) -> bool {
+        self.rollback_paused
     }
 
     /// Clones of the outbound messages currently held, so a test can

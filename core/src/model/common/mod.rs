@@ -305,6 +305,101 @@ where
     }
 }
 
+/// Records an unverified passage hint as speculative: it never
+/// counts as validated evidence, but a later batch rechecks it and
+/// either firms it or rolls the subject back.
+pub async fn record_speculative_transfer<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    transfer_sn: u64,
+    sender: PublicKey,
+) -> Result<(), ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(
+            TransferVerificationRegisterMessage::RecordSpeculativeTransfer {
+                subject_id: subject_id.to_owned(),
+                transfer_sn,
+                sender,
+            },
+        )
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::Ok => Ok(()),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected: "TransferVerificationRegisterResponse::Ok".to_string(),
+        }),
+    }
+}
+
+/// Reads back the stored transfer proof with its speculative flag:
+/// only a firm proof counts as validated evidence.
+pub async fn get_verified_transfer_detail<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<(u64, PublicKey, bool)>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    let actor_path = ActorPath::from(format!(
+        "/user/node/subject_manager/{}/transfer_verification_register",
+        governance_id
+    ));
+
+    let actor: ActorRef<TransferVerificationRegister> =
+        ctx.system().get_actor(&actor_path).await?;
+
+    let response = actor
+        .ask(TransferVerificationRegisterMessage::GetVerifiedTransferDetail {
+            subject_id: subject_id.to_owned(),
+        })
+        .await?;
+
+    match response {
+        TransferVerificationRegisterResponse::VerifiedTransferDetail(
+            result,
+        ) => Ok(result),
+        _ => Err(ActorError::UnexpectedResponse {
+            path: actor_path,
+            expected:
+                "TransferVerificationRegisterResponse::VerifiedTransferDetail"
+                    .to_string(),
+        }),
+    }
+}
+
+/// Reads back the stored transfer proof only when it was recorded
+/// with validated evidence. Speculative hints (recorded without
+/// evidence) never count: callers must keep requesting the aux so
+/// it can be verified or refuted once its chain is available.
+pub async fn get_verified_transfer_sn_firm<A>(
+    ctx: &mut ActorContext<A>,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+) -> Result<Option<(u64, PublicKey)>, ActorError>
+where
+    A: Actor + Handler<A>,
+{
+    Ok(get_verified_transfer_detail(ctx, governance_id, subject_id)
+        .await?
+        .filter(|(_, _, speculative)| !speculative)
+        .map(|(sn, sender, _)| (sn, sender)))
+}
+
 pub async fn remove_verified_transfer<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,

@@ -28,7 +28,7 @@ use crate::helpers::network::{
 };
 use crate::metrics::try_core_metrics;
 use crate::model::common::{
-    crash_system, get_verified_transfer_sn, node::get_subject_data,
+    crash_system, get_verified_transfer_sn_firm, node::get_subject_data,
     subject::get_tracker_sn_owner,
 };
 use crate::node::SubjectData;
@@ -441,7 +441,7 @@ impl TrackerSync {
         actual_sn: Option<u64>,
     ) -> Result<(), ActorError> {
         let already_verified_transfer_sn =
-            get_verified_transfer_sn(ctx, &self.governance_id, subject_id)
+            get_verified_transfer_sn_firm(ctx, &self.governance_id, subject_id)
                 .await
                 .ok()
                 .flatten()

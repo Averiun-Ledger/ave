@@ -27,8 +27,8 @@ use crate::{
     model::{
         common::{
             OwnerContext, TrackerIdentity, TrackerParams, TrackerPeers,
-            check_witness_status, crash_system, get_verified_transfer_sn,
-            node::get_subject_data,
+            check_witness_status, crash_system,
+            get_verified_transfer_sn_firm, node::get_subject_data,
             subject::{
                 acquire_subject, check_witness_status_and_window, get_gov_sn,
                 get_local_subject_sn,
@@ -513,8 +513,15 @@ impl DistriWorker {
         };
 
         // 1. Batch actual trae un transfer_event nuevo y la simulación dice Witness
-        if let (Some(transfer_event), Some(TransferSimulationResult::Witness)) =
+        // (or WitnessUnproven: speculative passage up to the aux, with
+        // a speculative proof recorded for later re-verification).
+        if let (Some(transfer_event), Some(simulation)) =
             (transfer_batch.event, transfer_batch.simulation.as_ref())
+            && matches!(
+                simulation,
+                TransferSimulationResult::Witness
+                    | TransferSimulationResult::WitnessUnproven
+            )
         {
             let chunk_first_sn =
                 ledger.first().ok_or(DistributorError::EmptyEvents)?.sn;
@@ -775,13 +782,26 @@ impl DistriWorker {
             EventRequestType::Transfer
         ) {
             // Same bar as the batch path: cryptographic verification
-            // plus simulation, not simulation alone.
+            // plus simulation, not simulation alone. An unproven aux
+            // opens speculative passage (see above); a refuted one
+            // rolls back and fails.
             match self
                 .transfer_verifier
                 .verify_and_simulate(ctx, &subject_id, ledger, first_ledger)
                 .await?
             {
                 TransferSimulationResult::Witness => {}
+                TransferSimulationResult::WitnessUnproven => {}
+                TransferSimulationResult::Refuted => {
+                    self.rollback_refuted_aux(
+                        ctx,
+                        &governance_id,
+                        &subject_id,
+                        first_ledger.sn,
+                    )
+                    .await;
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
                 TransferSimulationResult::NotWitness => {
                     return Err(DistributorError::ReceiverNoAccess.into());
                 }
@@ -1298,7 +1318,11 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let verified = match subject_data {
             Some(SubjectData::Tracker { governance_id, .. }) => {
-                match get_verified_transfer_sn(ctx, &governance_id, subject_id)
+                match get_verified_transfer_sn_firm(
+                    ctx,
+                    &governance_id,
+                    subject_id,
+                )
                     .await
                 {
                     Ok(v) => v,
@@ -1314,7 +1338,11 @@ impl DistriWorker {
                 }
             }
             Some(SubjectData::Governance { .. }) => {
-                match get_verified_transfer_sn(ctx, subject_id, subject_id)
+                match get_verified_transfer_sn_firm(
+                    ctx,
+                    subject_id,
+                    subject_id,
+                )
                     .await
                 {
                     Ok(v) => v,
@@ -1676,6 +1704,24 @@ impl DistriWorker {
                     TransferSimulationResult::Witness => {
                         Some(TransferSimulationResult::Witness)
                     }
+                    // Unproven aux: speculative passage up to the aux
+                    // with a speculative proof, rechecked later.
+                    TransferSimulationResult::WitnessUnproven => {
+                        Some(TransferSimulationResult::WitnessUnproven)
+                    }
+                    // Refuted aux: forged hint with a checkable chain.
+                    // Drop any speculative passage it opened, then
+                    // fail without writing anything new.
+                    TransferSimulationResult::Refuted => {
+                        self.rollback_refuted_aux(
+                            ctx,
+                            &common.governance_id,
+                            &subject_id,
+                            transfer_event.sn,
+                        )
+                        .await;
+                        return Err(DistributorError::ReceiverNoAccess.into());
+                    }
                     TransferSimulationResult::NotWitness => {
                         return Err(DistributorError::ReceiverNoAccess.into());
                     }
@@ -1688,7 +1734,7 @@ impl DistriWorker {
         };
 
         let verified_transfer_sn = if !common.is_gov {
-            match get_verified_transfer_sn(
+            match get_verified_transfer_sn_firm(
                 ctx,
                 &common.governance_id,
                 &subject_id,
