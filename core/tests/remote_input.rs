@@ -2388,9 +2388,10 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
     .await;
     assert_no_trace(&rita, &governance_id, &subject_id).await;
 
-    // Forged hint ahead of the batch with a missing middle
-    // event. The evidence is not checkable yet, so the prefix is
-    // applied speculatively with a speculative proof...
+    // Forged hint ahead of a partial batch with a missing middle
+    // event. The evidence is not checkable yet, so the batch is
+    // deferred unapplied: no subject, no proof, no ownership, and
+    // the sender is asked for the continuation instead.
     inject_with_hint(
         &rita,
         &alice_key,
@@ -2399,8 +2400,31 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
         Some(forged.clone()),
     )
     .await;
-    // ...which must land visibly: a silent drop would pass the
-    // assertions below vacuously.
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+
+    // The missing middle arrives but the evidence now refutes the
+    // hint instead of verifying it: the deferred prefix is dropped
+    // and still nothing is registered, proved or owned.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact.clone()],
+        false,
+        Some(forged.clone()),
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+
+    // Same forged hint, but with a sender that claims completeness:
+    // the prefix applies speculatively with a speculative proof...
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone()],
+        true,
+        Some(forged.clone()),
+    )
+    .await;
     get_subject(&rita, subject_id.clone(), Some(0), true)
         .await
         .unwrap();
@@ -2409,16 +2433,15 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
             .await
             .unwrap(),
         Some((2, alice_key.clone())),
-        "the unverifiable hint must record a speculative proof"
+        "the speculative hint must record a speculative proof"
     );
-    // ...then the missing middle arrives, the evidence becomes
-    // checkable, refutes the hint, and rolls the speculative
-    // prefix back: no subject, no proof, no ownership.
+    // ...and the refutation on the next batch rolls everything
+    // back: no subject, no proof, no ownership again.
     inject_with_hint(
         &rita,
         &alice_key,
         vec![fact.clone()],
-        false,
+        true,
         Some(forged.clone()),
     )
     .await;

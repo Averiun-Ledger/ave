@@ -190,6 +190,8 @@ pub struct TestFaultRegistry {
     rollback_holds: u64,
     rollback_skips: u64,
     rollback_paused: bool,
+    before_apply_holds: u64,
+    before_apply_paused: bool,
 }
 
 impl TestFaultRegistry {
@@ -202,6 +204,8 @@ impl TestFaultRegistry {
             rollback_holds: 0,
             rollback_skips: 0,
             rollback_paused: false,
+            before_apply_holds: 0,
+            before_apply_paused: false,
         }
     }
 
@@ -261,6 +265,22 @@ impl TestFaultRegistry {
     /// Whether first-copy rollbacks must wait for release.
     pub fn rollback_paused(&self) -> bool {
         self.rollback_paused
+    }
+
+    pub fn note_before_apply_hold(&mut self) {
+        self.before_apply_holds += 1;
+    }
+
+    pub fn before_apply_hold_count(&self) -> u64 {
+        self.before_apply_holds
+    }
+
+    pub fn set_before_apply_paused(&mut self, paused: bool) {
+        self.before_apply_paused = paused;
+    }
+
+    pub fn before_apply_paused(&self) -> bool {
+        self.before_apply_paused
     }
 
     /// Clones of the outbound messages currently held, so a test can

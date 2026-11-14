@@ -10022,10 +10022,10 @@ async fn test_verified_transfer_not_reused_across_senders() {
 
     // Round one through Alice only, without any update race:
     // drop every Alice delivery to R so the injected first batch
-    // below is the only copy R processes, then inject Create plus
-    // the pending-transfer hint. The batch is truncated below the
-    // window, so R records the hint and stalls waiting for more
-    // that never arrives.
+    // below is the only copy R processes, then inject Create and
+    // Fact plus the pending-transfer hint. The batch is truncated
+    // below the window, so R records the firm proof and stalls
+    // waiting for more that never arrives.
     alice
         .test_install_fault(FaultRule {
             direction: FaultDirection::Outbound,
@@ -10061,6 +10061,11 @@ async fn test_verified_transfer_not_reused_across_senders() {
         .find(|event| event.sn == 0)
         .expect("create event")
         .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
     let transfer = history
         .iter()
         .find(|event| event.sn == 2)
@@ -10075,7 +10080,7 @@ async fn test_verified_transfer_not_reused_across_senders() {
                 receiver_actor: "/user/node/distributor".to_owned(),
             },
             ActorMessage::DistributionLedgerRes {
-                ledger: vec![create],
+                ledger: vec![create, fact],
                 is_all: true,
                 transfer_event: Some(Box::new(transfer)),
             },
@@ -10084,7 +10089,7 @@ async fn test_verified_transfer_not_reused_across_senders() {
     )
     .await
     .unwrap();
-    get_subject(&r, subject_id.clone(), Some(0), true)
+    get_subject(&r, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
     assert_eq!(
@@ -10092,7 +10097,7 @@ async fn test_verified_transfer_not_reused_across_senders() {
             .await
             .unwrap(),
         Some((2, alice_key.clone())),
-        "round one must record the transfer proof from Alice"
+        "round one must record the firm transfer proof from Alice"
     );
 
     // Bob syncs everything while Alice is still up, then Alice goes

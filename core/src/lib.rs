@@ -3419,6 +3419,26 @@ impl Api {
         Ok(count)
     }
 
+    pub async fn test_pause_before_apply(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_before_apply_paused(pause);
+        Ok(())
+    }
+
+    pub async fn test_before_apply_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .before_apply_hold_count();
+        Ok(count)
+    }
+
     async fn test_arm_modes_fault(
         &self,
         empty: bool,

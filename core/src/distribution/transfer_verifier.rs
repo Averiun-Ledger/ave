@@ -411,6 +411,7 @@ impl TransferVerifier {
         subject_id: &DigestIdentifier,
         sender_ledger: &[Ledger],
         transfer_event: &Ledger,
+        buffered: &[Ledger],
     ) -> AuxEvidence {
         let local_sn =
             get_local_subject_sn(ctx, subject_id).await.ok().flatten();
@@ -505,6 +506,15 @@ impl TransferVerifier {
             tip = ledger.last().map(|event| event.sn);
             combined.extend(ledger);
         }
+        // Deferred batches held locally count as prefix too: they are
+        // exactly what this node already received but could not apply
+        // yet for lack of evidence. Anything at or below the applied
+        // tip is stale and ignored.
+        combined.extend(buffered.iter().filter(|event| {
+            local_sn.is_none_or(|applied| event.sn > applied)
+        }).cloned());
+        let buffered_tip = buffered.last().map(|event| event.sn);
+        tip = tip.max(buffered_tip);
         // Sender events strictly after the own tip, up to the aux.
         let after_tip = tip;
         let mut needed: Vec<Ledger> = sender_ledger
@@ -534,6 +544,14 @@ impl TransferVerifier {
             AuxEvidence::Proven
         } else if refuted.contains(&transfer_event.sn) {
             AuxEvidence::Refuted
+        } else if cursor.sn == transfer_event.sn {
+            // The chain is complete up to the aux but its evidence
+            // can not be rechecked (roles for an old version are
+            // gone): trust the envelope like the apply path does
+            // and grant firm passage instead of stalling forever.
+            // Gaps, opaque spans and refuted evidence never reach
+            // here: they stop the cursor short of the aux.
+            AuxEvidence::Proven
         } else {
             AuxEvidence::Missing
         }
@@ -606,6 +624,7 @@ impl TransferVerifier {
         }
         let mut proven = HashSet::new();
         let mut refuted = HashSet::new();
+        let mut skipped_opaque = false;
         for event in events {
             if event.sn != cursor.sn.saturating_add(1) {
                 break;
@@ -625,6 +644,18 @@ impl TransferVerifier {
                     Protocols::TrackerConfirm { .. }
                     | Protocols::Reject { .. } => {
                         cursor.sn = event.sn;
+                        continue;
+                    }
+                    Protocols::TrackerFactOpaque { .. } => {
+                        // Opaque facts carry no properties to replay:
+                        // advance past them without proving so later
+                        // transfers whose evaluation does not depend
+                        // on the hidden patch can still prove. A
+                        // transfer that does depend on it simply will
+                        // not reproduce and stays unproven, never
+                        // refuted on incomplete properties.
+                        cursor.sn = event.sn;
+                        skipped_opaque = true;
                         continue;
                     }
                     _ => break,
@@ -697,9 +728,12 @@ impl TransferVerifier {
             .is_err()
             {
                 // Checkable and wrong: the evidence is refuted, not
-                // merely missing. Callers decide whether that fails
+                // merely missing, unless the cursor skipped opaque
+                // facts whose hidden patch the check may need. Then
+                // the failure proves nothing and the chain simply
+                // stays unproven. Callers decide whether that fails
                 // the batch outright or only denies passage.
-                if is_transfer {
+                if is_transfer && !skipped_opaque {
                     refuted.insert(event.sn);
                 }
                 break;
@@ -732,6 +766,7 @@ impl TransferVerifier {
         subject_id: &DigestIdentifier,
         sender_ledger: &[Ledger],
         transfer_event: &Ledger,
+        buffered: &[Ledger],
     ) -> Result<TransferSimulationResult, ActorError> {
         let first_ledger =
             sender_ledger
@@ -741,12 +776,25 @@ impl TransferVerifier {
                         "Empty sender ledger in verify_and_simulate_transfer"
                             .to_string(),
                 })?;
+        // A continuation past a held prefix carries its genesis in
+        // the buffer: use it for light metadata when the tail alone
+        // has no create event.
+        let light_ledger = if first_ledger.get_create_event().is_some() {
+            first_ledger
+        } else if let Some(held) = buffered
+            .iter()
+            .find(|event| event.get_create_event().is_some())
+        {
+            held
+        } else {
+            first_ledger
+        };
         let (governance_id, _, subject_data) = self
             .verify_light(
                 ctx,
                 transfer_event,
                 subject_id,
-                first_ledger,
+                light_ledger,
                 // A failed transfer is valid history that grants
                 // no passage: let the simulation below (which only
                 // opens ownership on success) decide Witness or
@@ -768,13 +816,12 @@ impl TransferVerifier {
         // independent rights, never on the failed transfer itself.
         //
         // When the evidence can not be rebuilt yet (aux ahead of
-        // the batch), the aux still opens speculative passage with
-        // a speculative proof, and a later batch rechecks it once
-        // its chain is available; refuting it then rolls the
-        // subject back. Checkable-but-wrong evidence fails here
-        // instead, leaving no trace. A recorded firm proof means
-        // its evidence was already validated: do not re-validate
-        // per batch.
+        // the batch), a partial batch is held unapplied while a
+        // complete one still opens speculative passage; a later
+        // batch rechecks once its chain is available. Checkable-
+        // but-wrong evidence fails here instead, leaving no trace.
+        // A recorded firm proof means its evidence was already
+        // validated: do not re-validate per batch.
         let transfer_opens_passage = matches!(
             &transfer_event.protocols,
             Protocols::Transfer { evaluation, .. }
@@ -802,13 +849,13 @@ impl TransferVerifier {
                     subject_id,
                     sender_ledger,
                     transfer_event,
+                    buffered,
                 )
                 .await
             {
                 AuxEvidence::Proven => {}
-                // Speculative passage: the batch may advance on the
-                // aux, but the proof stays speculative until a later
-                // batch rechecks the evidence.
+                // Uncheckable yet: the caller defers the batch
+                // without passage or proof until the chain arrives.
                 AuxEvidence::Missing => {
                     return Ok(TransferSimulationResult::WitnessUnproven);
                 }
@@ -832,6 +879,7 @@ impl TransferVerifier {
             None => {
                 let create = sender_ledger
                     .iter()
+                    .chain(buffered.iter())
                     .find(|l| l.is_create_event())
                     .and_then(|l| l.get_create_event())
                     .ok_or_else(|| ActorError::Functional {

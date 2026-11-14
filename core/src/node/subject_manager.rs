@@ -54,6 +54,14 @@ pub enum SubjectManagerMessage {
     HasLiveRequesters {
         subject_id: DigestIdentifier,
     },
+    NoteSuccess {
+        subject_id: DigestIdentifier,
+        attempt: u64,
+    },
+    ShouldPurge {
+        subject_id: DigestIdentifier,
+        attempt: u64,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -65,6 +73,8 @@ pub enum SubjectManagerResponse {
     DeleteTracker,
     DeleteGovernance,
     HasLiveRequesters(bool),
+    NoteSuccess,
+    ShouldPurge(bool),
 }
 
 impl Response for SubjectManagerResponse {}
@@ -80,6 +90,7 @@ pub struct SubjectManager {
     is_service: bool,
     only_clear_events: bool,
     subjects: HashMap<DigestIdentifier, SubjectEntry>,
+    last_success: HashMap<DigestIdentifier, u64>,
     /// Last-shutdown dirtiness, cached from `UpGovernances`
     /// (unknown reads as dirty: safe direction). Transient: this
     /// actor is not persistent, so every boot starts unknown.
@@ -102,6 +113,7 @@ impl SubjectManager {
             is_service,
             only_clear_events,
             subjects: HashMap::new(),
+            last_success: HashMap::new(),
             dirty_boot: None,
             reconciled: HashSet::new(),
         }
@@ -298,6 +310,7 @@ impl SubjectManager {
         }
 
         self.subjects.remove(&subject_id);
+        self.last_success.remove(&subject_id);
 
         let governance_id = match ctx.get_parent::<Node>().await {
             Ok(node) => match node
@@ -493,6 +506,7 @@ impl SubjectManager {
         }
 
         self.subjects.remove(&subject_id);
+        self.last_success.remove(&subject_id);
 
         if cleanup_errors.is_empty() {
             Ok(())
@@ -880,6 +894,23 @@ impl Handler<Self> for SubjectManager {
                     .get(&subject_id)
                     .is_some_and(|entry| !entry.requesters.is_empty());
                 Ok(SubjectManagerResponse::HasLiveRequesters(live))
+            }
+            SubjectManagerMessage::NoteSuccess {
+                subject_id,
+                attempt,
+            } => {
+                self.last_success.insert(subject_id, attempt);
+                Ok(SubjectManagerResponse::NoteSuccess)
+            }
+            SubjectManagerMessage::ShouldPurge {
+                subject_id,
+                attempt,
+            } => {
+                let owned = self
+                    .last_success
+                    .get(&subject_id)
+                    .is_none_or(|last| *last == attempt);
+                Ok(SubjectManagerResponse::ShouldPurge(owned))
             }
         }
     }

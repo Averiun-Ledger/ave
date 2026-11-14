@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -59,6 +60,13 @@ pub struct DistriWorker {
     pub ledger_batch_size: u64,
     pub hash: HashAlgorithm,
     pub(crate) transfer_verifier: super::transfer_verifier::TransferVerifier,
+    /// Batches deferred while their aux evidence is uncheckable.
+    /// They are applied, in order, once a later batch lets the aux
+    /// verify; refutation or a fresh copy discards them. Memory-only:
+    /// never persisted, so a reboot starts clean. Keyed by subject
+    /// because the node-level worker multiplexes many of them.
+    pub(crate) deferred: HashMap<DigestIdentifier, Vec<Ledger>>,
+    pub(crate) attempt_seq: u64,
     /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
     /// Atomic so the shared `&self` receipt helpers can consume it;
     /// production never arms it.
@@ -90,6 +98,7 @@ pub(crate) struct DistributionContext {
     pub subject_id: DigestIdentifier,
     pub sender_is_all: bool,
     pub ledger_count: usize,
+    pub attempt: u64,
 }
 
 pub(crate) struct DistributionRange {
@@ -735,7 +744,7 @@ impl DistriWorker {
     }
 
     pub(crate) async fn check_auth_single(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         sender: PublicKey,
         info: &ComunicateInfo,
@@ -785,9 +794,20 @@ impl DistriWorker {
             // plus simulation, not simulation alone. An unproven aux
             // opens speculative passage (see above); a refuted one
             // rolls back and fails.
+            let single_buffered = self
+                .deferred
+                .get(&subject_id)
+                .cloned()
+                .unwrap_or_default();
             match self
                 .transfer_verifier
-                .verify_and_simulate(ctx, &subject_id, ledger, first_ledger)
+                .verify_and_simulate(
+                    ctx,
+                    &subject_id,
+                    ledger,
+                    first_ledger,
+                    &single_buffered,
+                )
                 .await?
             {
                 TransferSimulationResult::Witness => {}
@@ -798,6 +818,7 @@ impl DistriWorker {
                         &governance_id,
                         &subject_id,
                         first_ledger.sn,
+                        0,
                     )
                     .await;
                     return Err(DistributorError::ReceiverNoAccess.into());
@@ -1307,6 +1328,64 @@ impl DistriWorker {
         }
     }
 
+    /// Tip of the deferred (received but unapplied) prefix for a
+    /// subject, if any. Deferred batches never count as applied
+    /// state; they only let the receiver ask for the continuation
+    /// instead of replaying what it already holds.
+    pub(crate) fn deferred_tip(&self, subject_id: &DigestIdentifier) -> Option<u64> {
+        self.deferred.get(subject_id).and_then(|buffered| {
+            buffered.last().map(|event| event.sn)
+        })
+    }
+
+    /// Stages a batch whose aux can not be checked yet: it is held
+    /// unapplied (deduplicated, pruned past the applied tip) until
+    /// a later batch completes the evidence chain. Only events past
+    /// the applied tip are kept, so the buffer stays window-bounded.
+    pub(crate) fn stage_deferred(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        batch: Vec<Ledger>,
+        applied_tip: Option<u64>,
+    ) {
+        let buffered = self.deferred.entry(subject_id.clone()).or_default();
+        for event in batch {
+            if applied_tip.is_none_or(|tip| event.sn > tip)
+                && !buffered.iter().any(|staged| staged.sn == event.sn)
+            {
+                buffered.push(event);
+            }
+        }
+        buffered.sort_by_key(|event| event.sn);
+    }
+
+    /// Pruned deferred prefix: what this node holds but has not
+    /// applied yet, past the applied tip. Stale entries vanish here,
+    /// so a completed copy never replays them.
+    pub(crate) fn deferred_prefix(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        applied_tip: Option<u64>,
+    ) -> Vec<Ledger> {
+        if let Some(buffered) = self.deferred.get_mut(subject_id) {
+            buffered.retain(|event| {
+                applied_tip.is_none_or(|tip| event.sn > tip)
+            });
+            buffered.sort_by_key(|event| event.sn);
+            if buffered.is_empty() {
+                self.deferred.remove(subject_id);
+            }
+        }
+        self.deferred.get(subject_id).cloned().unwrap_or_default()
+    }
+
+    /// Drops deferred state for a subject: its chain proved forged
+    /// or its copy is being rolled back, so nothing staged may be
+    /// applied later. The sender re-sends anything still needed.
+    pub(crate) fn drop_deferred(&mut self, subject_id: &DigestIdentifier) {
+        self.deferred.remove(subject_id);
+    }
+
     pub(crate) async fn request_ledger_from_sender(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -1395,6 +1474,9 @@ impl DistriWorker {
     ) -> Result<bool, ActorError> {
         let subject_data = get_subject_data(ctx, subject_id).await?;
 
+        // Deferred batches count as held, never as applied: the next
+        // expected sn continues past both.
+        let buffered_tip = self.deferred_tip(subject_id);
         if subject_data.is_some() {
             let Some(local_sn) = get_local_subject_sn(ctx, subject_id).await?
             else {
@@ -1409,9 +1491,17 @@ impl DistriWorker {
                 .await?;
                 return Ok(false);
             };
-            let expected_sn = local_sn.saturating_add(1);
+            let held_tip = local_sn.max(buffered_tip.unwrap_or(0));
+            // Without any applied or deferred event only sn 0 may
+            // start a copy; otherwise the continuation follows the
+            // furthest held tip, deferred or applied alike.
+            let expected_sn = if local_sn == 0 && buffered_tip.is_none() {
+                1
+            } else {
+                held_tip.saturating_add(1)
+            };
 
-            if received_first_sn <= local_sn {
+            if received_first_sn <= held_tip {
                 // Stale head but possibly fresh tail (race with a
                 // concurrent push): ask from our tip instead of
                 // dropping the newer events with the batch.
@@ -1428,7 +1518,7 @@ impl DistriWorker {
                     subject_id,
                     sender.clone(),
                     info,
-                    Some(local_sn),
+                    Some(held_tip),
                     subject_data.clone(),
                 )
                 .await?;
@@ -1451,7 +1541,31 @@ impl DistriWorker {
                     subject_id,
                     sender,
                     info,
-                    Some(local_sn),
+                    Some(held_tip),
+                    subject_data.clone(),
+                )
+                .await?;
+
+                return Ok(false);
+            }
+        } else if let Some(buffered_tip) = buffered_tip {
+            // Nothing applied yet, but a deferred prefix is held:
+            // only its direct continuation may proceed, and it still
+            // needs its evidence checked downstream.
+            if received_first_sn != buffered_tip.saturating_add(1) {
+                debug!(
+                    subject_id = %subject_id,
+                    received_first_sn = received_first_sn,
+                    expected_sn = buffered_tip.saturating_add(1),
+                    "Gap past the deferred prefix, requesting update"
+                );
+
+                self.request_ledger_from_sender(
+                    ctx,
+                    subject_id,
+                    sender,
+                    info,
+                    Some(buffered_tip),
                     subject_data.clone(),
                 )
                 .await?;
@@ -1588,7 +1702,7 @@ impl DistriWorker {
     /// error policy: `FunctionalCritical` fails the node loud (like the
     /// last-event path) instead of being discarded in the tell handler.
     async fn handle_ledger_distribution(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         mut ledger: Vec<Ledger>,
         is_all: bool,
@@ -1596,6 +1710,8 @@ impl DistriWorker {
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
+        {
+        }
         if ledger.is_empty() {
             warn!(
                 msg_type = "LedgerDistribution",
@@ -1661,6 +1777,8 @@ impl DistriWorker {
         let subject_id = ledger[0].get_subject_id();
         let ledger_count = ledger.len();
         let first_sn = ledger[0].sn;
+        self.attempt_seq = self.attempt_seq.wrapping_add(1);
+        let attempt = self.attempt_seq;
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1675,12 +1793,48 @@ impl DistriWorker {
             return Ok(());
         }
 
-        let common = self
-            .check_auth_common(ctx, sender.clone(), &info, &ledger)
-            .await?;
+        // A continuation past a held prefix carries its Create in
+        // the buffer: authorize the combined chain so a Fact-only
+        // tail can still be gated and flushed in order instead of
+        // failing for a missing subject it never creates alone.
+        // This covers tails with and without their own aux: without
+        // it the combined chain still decides rights correctly.
+        let mut combined_auth: Option<Vec<Ledger>> = None;
+        if first_sn != 0
+            && self.deferred.contains_key(&subject_id)
+            && let Ok(None) = get_subject_data(ctx, &subject_id).await
+        {
+            let applied = get_local_subject_sn(ctx, &subject_id)
+                .await
+                .ok()
+                .flatten();
+            let held = self.deferred_prefix(&subject_id, applied);
+            if !held.is_empty()
+                && held.last().is_some_and(|last| {
+                    last.sn.saturating_add(1) == first_sn
+                })
+            {
+                let mut combined = held;
+                for event in &ledger {
+                    if !combined.iter().any(|staged| staged.sn == event.sn)
+                    {
+                        combined.push(event.clone());
+                    }
+                }
+                combined.sort_by_key(|event| event.sn);
+                combined_auth = Some(combined);
+            }
+        }
+        let common = if let Some(ref combined) = combined_auth {
+            self.check_auth_common(ctx, sender.clone(), &info, combined)
+                .await?
+        } else {
+            self.check_auth_common(ctx, sender.clone(), &info, &ledger)
+                .await?
+        };
         let subject_id = ledger[0].get_subject_id();
 
-        let transfer_simulation = if let Some(ref transfer_event) =
+        let mut transfer_simulation = if let Some(ref transfer_event) =
             transfer_event
         {
             if !common.is_gov {
@@ -1691,6 +1845,13 @@ impl DistriWorker {
                     }
                     .into());
                 }
+                // Deferred batches held for this subject count as
+                // prefix when rechecking the aux below.
+                let applied_tip = get_local_subject_sn(ctx, &subject_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let buffered = self.deferred_prefix(&subject_id, applied_tip);
                 match self
                     .transfer_verifier
                     .verify_and_simulate(
@@ -1698,26 +1859,29 @@ impl DistriWorker {
                         &subject_id,
                         &ledger,
                         transfer_event,
+                        &buffered,
                     )
                     .await?
                 {
                     TransferSimulationResult::Witness => {
                         Some(TransferSimulationResult::Witness)
                     }
-                    // Unproven aux: speculative passage up to the aux
-                    // with a speculative proof, rechecked later.
+                    // Unproven aux: uncheckable yet, the batch is
+                    // held unapplied until its chain arrives.
                     TransferSimulationResult::WitnessUnproven => {
                         Some(TransferSimulationResult::WitnessUnproven)
                     }
                     // Refuted aux: forged hint with a checkable chain.
-                    // Drop any speculative passage it opened, then
-                    // fail without writing anything new.
+                    // Drop any held prefix it poisoned, then fail
+                    // without writing anything new.
                     TransferSimulationResult::Refuted => {
+                        self.drop_deferred(&subject_id);
                         self.rollback_refuted_aux(
                             ctx,
                             &common.governance_id,
                             &subject_id,
                             transfer_event.sn,
+                            attempt,
                         )
                         .await;
                         return Err(DistributorError::ReceiverNoAccess.into());
@@ -1732,6 +1896,61 @@ impl DistriWorker {
         } else {
             None
         };
+
+        // An unproven aux never opens passage nor records
+        // anything. When the prefix is authorized on its own
+        // rights, copy it now without any proof and let a later
+        // batch verify the aux; otherwise hold the batch unapplied
+        // and ask for the continuation instead. A later batch with
+        // the full chain verifies or refutes; silence leaves no
+        // trace behind.
+        if transfer_simulation
+            == Some(TransferSimulationResult::WitnessUnproven)
+            && !is_all
+        {
+            let auth_ledger = combined_auth.as_ref().unwrap_or(&ledger);
+            let offered_hi = auth_ledger
+                .last()
+                .map(|event| event.sn)
+                .unwrap_or(first_sn);
+            let without_aux = self
+                .check_auth_batch(
+                    ctx,
+                    sender.clone(),
+                    auth_ledger,
+                    offered_hi,
+                    &common,
+                    TransferBatch {
+                        event: None,
+                        simulation: None,
+                        verified_sn: None,
+                    },
+                )
+                .await;
+            let prefix_open = matches!(without_aux, Ok(auth)
+                if auth.safe_hi_sn >= first_sn);
+            if prefix_open {
+                transfer_simulation = None;
+            } else {
+                let applied_tip = get_local_subject_sn(ctx, &subject_id)
+                    .await
+                    .ok()
+                    .flatten();
+                self.stage_deferred(&subject_id, ledger, applied_tip);
+                let from_sn =
+                    applied_tip.max(self.deferred_tip(&subject_id));
+                self.request_ledger_from_sender(
+                    ctx,
+                    &subject_id,
+                    sender,
+                    &info,
+                    from_sn,
+                    common.subject_data.clone(),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
 
         let verified_transfer_sn = if !common.is_gov {
             match get_verified_transfer_sn_firm(
@@ -1776,6 +1995,7 @@ impl DistriWorker {
                 subject_id: subject_id.clone(),
                 sender_is_all,
                 ledger_count,
+                attempt,
             },
         )
         .await?;

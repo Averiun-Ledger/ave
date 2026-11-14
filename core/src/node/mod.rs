@@ -456,6 +456,8 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        deferred: std::collections::HashMap::new(),
+                        attempt_seq: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -480,6 +482,8 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        deferred: std::collections::HashMap::new(),
+                        attempt_seq: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -1194,6 +1198,8 @@ impl Actor for Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
+                        deferred: std::collections::HashMap::new(),
+                        attempt_seq: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -1303,6 +1309,8 @@ impl Handler<Self> for Node {
                             ledger_batch_size: self.ledger_batch_size,
                             transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
+                            deferred: std::collections::HashMap::new(),
+                        attempt_seq: 0,
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),

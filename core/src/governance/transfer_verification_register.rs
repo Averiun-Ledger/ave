@@ -57,7 +57,8 @@ pub enum TransferVerificationRegisterMessage {
     /// Same lookup as above, but also reports whether the proof is
     /// still speculative (recorded without evidence). Used to decide
     /// re-verification, free passage and rollback; the plain lookup
-    /// keeps reporting any proof so callers observe H6 behavior.
+    /// keeps reporting any proof so per-sender filtering still
+    /// applies to firm proofs.
     GetVerifiedTransferDetail {
         subject_id: DigestIdentifier,
     },

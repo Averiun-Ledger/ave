@@ -52,7 +52,7 @@ use tracing::{debug, error, warn};
 
 impl DistriWorker {
     pub(crate) async fn process_ledger_chunks(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         mut pending_ledger: Vec<Ledger>,
         common: &CheckAuthCommon,
@@ -68,6 +68,18 @@ impl DistriWorker {
         let ledger_count = dist_ctx.ledger_count;
         let transfer_event = transfer_batch.event;
         let transfer_simulation = transfer_batch.simulation;
+
+        // Deferred prefix first: batches held back while their aux
+        // was uncheckable rejoin here, in order, before the current
+        // batch. Stale entries (already applied by another path) are
+        // pruned; anything genuinely new keeps its original order.
+        let applied_tip =
+            get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
+        let mut prefix = self.deferred_prefix(&subject_id, applied_tip);
+        if !prefix.is_empty() {
+            prefix.extend(pending_ledger);
+            pending_ledger = prefix;
+        }
 
         // Truncation detection: the sender's `is_all` is a claim, so
         // the offered tip is checked against our own window and
@@ -219,6 +231,22 @@ impl DistriWorker {
             let chunk_is_all =
                 remaining_ledger.is_empty() && sender_is_all && !truncated;
 
+            #[cfg(feature = "test")]
+            {
+                if !is_register && dist_ctx.info.request_id.is_empty() {
+                    let mut noted = false;
+                    while Self::before_apply_paused(ctx) {
+                        if !noted {
+                            Self::note_before_apply_hold(ctx);
+                            noted = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        ))
+                        .await;
+                    }
+                }
+            }
             let lease = if pending_ledger[0].is_create_event() && !is_register {
                 let create_ledger = pending_ledger[0].clone();
                 let requester = Self::requester_id(
@@ -368,6 +396,27 @@ impl DistriWorker {
                         if let Some(lease) = lease.clone() {
                             lease.finish(ctx).await?;
                         }
+                        if !common.is_gov
+                            && let Ok(manager) = ctx
+                                .system()
+                                .get_actor::<SubjectManager>(&ActorPath::from(
+                                    "/user/node/subject_manager",
+                                ))
+                                .await
+                            && let Err(error) = manager
+                                .ask(SubjectManagerMessage::NoteSuccess {
+                                    subject_id: subject_id.clone(),
+                                    attempt: dist_ctx.attempt,
+                                })
+                                .await
+                        {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                error = %error,
+                                "Failed to note successful copy attempt",
+                            );
+                        }
 
                         if !remaining_ledger.is_empty() {
                             pending_ledger = remaining_ledger;
@@ -454,6 +503,7 @@ impl DistriWorker {
                                 &subject_id,
                                 chunk_tip_sn,
                                 chunk_signer,
+                                dist_ctx.attempt,
                             )
                             .await;
                         }
@@ -552,20 +602,23 @@ impl DistriWorker {
         }
     }
 
-    /// Rolls back a subject whose speculative passage just got
-    /// refuted: the aux evidence proved forged once its chain was
-    /// complete. Only a still-speculative proof for that exact aux
-    /// triggers the purge; anything else (firm or absent proof)
-    /// just drops the poisoned hint and fails the batch. The purge
+    /// Drops a forged aux once its chain proves it: only a still
+    /// recorded proof for that exact aux triggers the purge below;
+    /// anything else just drops the held prefix and fails. The purge
     /// itself stays attempt-owned (see `rollback_first_copy`): a
     /// concurrent valid copy is never deleted.
     pub(crate) async fn rollback_refuted_aux(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
         aux_sn: u64,
+        attempt: u64,
     ) {
+        // The chain this aux belongs to just proved forged: drop
+        // anything we held back for it before deciding about the
+        // purge below.
+        self.drop_deferred(subject_id);
         let speculative = matches!(
             crate::model::common::get_verified_transfer_detail(
                 ctx,
@@ -594,6 +647,7 @@ impl DistriWorker {
             subject_id,
             aux_sn,
             None,
+            attempt,
         )
         .await;
     }
@@ -660,6 +714,35 @@ impl DistriWorker {
             .unwrap_or(false)
     }
 
+    /// Test-only pre-apply barrier: pauses a first copy based on
+    /// an injected batch (empty request id) before it writes, so a
+    /// test can interleave a valid Create and prove the later
+    /// rollback spares it. Update traffic (real request id) never
+    /// pauses. Production never arms it.
+    #[cfg(feature = "test")]
+    fn before_apply_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.before_apply_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_before_apply_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_before_apply_hold();
+        }
+    }
+
     /// Test-only rollback barrier hit: lets a test prove the
     /// interleaving really happened instead of passing vacuously.
     /// Production never arms it.
@@ -675,13 +758,18 @@ impl DistriWorker {
     }
 
     async fn rollback_first_copy(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         governance_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
         chunk_tip_sn: u64,
         baseline_owner: Option<PublicKey>,
+        attempt: u64,
     ) {
+        // The failed copy is being torn down: anything held back
+        // for it is stale by definition and must not be applied
+        // later.
+        self.drop_deferred(subject_id);
         // Test barrier: pause here while a test interleaves a valid
         // copy on another worker. Production never arms it.
         #[cfg(feature = "test")]
@@ -755,6 +843,40 @@ impl DistriWorker {
                 Self::finish_rollback_up(ctx, subject_id).await;
                 return;
             }
+        }
+        // Attempt gate: only the failed attempt itself may be
+        // removed. Another attempt that completed after this one
+        // started owns the current state, even at sn 0 with the
+        // same owner: never purge a concurrent valid copy.
+        let owned = match ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+        {
+            Ok(manager) => match manager
+                .ask(SubjectManagerMessage::ShouldPurge {
+                    subject_id: subject_id.clone(),
+                    attempt,
+                })
+                .await
+            {
+                Ok(SubjectManagerResponse::ShouldPurge(owned)) => owned,
+                Ok(_) => false,
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        if !owned {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                "Rollback skipped: concurrent valid copy",
+            );
+            Self::note_rollback_skip(ctx).await;
+            Self::finish_rollback_up(ctx, subject_id).await;
+            return;
         }
         // Progress gate: only the failed attempt itself may be
         // removed. Anything at or past the failed chunk tip, or with
@@ -1350,7 +1472,7 @@ impl DistriWorker {
     }
 
     pub(crate) async fn process_last_event_distribution(
-        &self,
+        &mut self,
         ctx: &mut ActorContext<Self>,
         mut ledger: Ledger,
         info: ComunicateInfo,
