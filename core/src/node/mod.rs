@@ -4,7 +4,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::AtomicU64,
+    },
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -169,6 +172,14 @@ pub struct Node {
     /// only: restarts re-derive it from persisted subjects.
     #[serde(skip)]
     pending_reconcile: HashSet<DigestIdentifier>,
+    /// Monotonic copy-attempt clock shared by every distributor on
+    /// this node. Attempt ids must be unique across workers (batch
+    /// and single paths), otherwise concurrent copies on different
+    /// workers could share an id and defeat attempt-owned rollback.
+    /// Runtime only: never persisted, every boot restarts at one
+    /// (zero stays reserved as unset).
+    #[serde(skip)]
+    attempt_clock: Arc<AtomicU64>,
 }
 
 // Manual Borsh implementation to skip the 'owner' field
@@ -231,6 +242,7 @@ impl BorshDeserialize for Node {
             is_service: false,
             only_clear_events: false,
             pending_reconcile: HashSet::new(),
+            attempt_clock: Arc::new(AtomicU64::new(1)),
         })
     }
 }
@@ -457,7 +469,8 @@ impl Node {
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                         deferred: std::collections::HashMap::new(),
-                        attempt_seq: 0,
+                        verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                            attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -483,7 +496,8 @@ impl Node {
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                         deferred: std::collections::HashMap::new(),
-                        attempt_seq: 0,
+                        verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                            attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -845,6 +859,15 @@ pub enum NodeMessage {
         subject_id: DigestIdentifier,
         data: SubjectData,
     },
+    /// Test-only: ensure the per-subject distributor actor exists
+    /// without registering any subject state. Lets a test park a
+    /// first copy on its own worker while another worker applies
+    /// the concurrent valid copy. Idempotent; production never
+    /// sends it.
+    #[cfg(feature = "test")]
+    EnsureDistributor {
+        subject_id: DigestIdentifier,
+    },
     GetSubjectData(DigestIdentifier),
     GovernanceTrackers(DigestIdentifier),
     DeleteSubject(DigestIdentifier),
@@ -1199,7 +1222,8 @@ impl Actor for Node {
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
                         deferred: std::collections::HashMap::new(),
-                        attempt_seq: 0,
+                        verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                            attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -1310,7 +1334,47 @@ impl Handler<Self> for Node {
                             transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
                             deferred: std::collections::HashMap::new(),
-                        attempt_seq: 0,
+                            verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                            attempt_clock: self.attempt_clock.clone(),
+                            #[cfg(feature = "test")]
+                            test_modes_fault:
+                                std::sync::atomic::AtomicU8::new(0),
+                        },
+                    )
+                    .await?;
+                }
+
+                Ok(NodeResponse::Ok)
+            }
+            #[cfg(feature = "test")]
+            NodeMessage::EnsureDistributor { subject_id } => {
+                let hash = self.hash()?;
+                let distributor_name =
+                    format!("distributor_{}", subject_id);
+                if ctx
+                    .get_child::<DistriWorker>(&distributor_name)
+                    .await
+                    .is_err()
+                {
+                    let Some(network): Option<Arc<NetworkSender>> =
+                        ctx.system().get_helper("network")
+                    else {
+                        return Err(ActorError::Helper {
+                            name: "network".to_string(),
+                            reason: "Not found".to_string(),
+                        });
+                    };
+                    ctx.create_child(
+                        &distributor_name,
+                        DistriWorker {
+                            our_key: self.our_key.clone(),
+                            network,
+                            ledger_batch_size: self.ledger_batch_size,
+                            transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
+                            hash,
+                            deferred: std::collections::HashMap::new(),
+                            verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                            attempt_clock: self.attempt_clock.clone(),
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),
@@ -1673,6 +1737,7 @@ impl PersistentActor for Node {
             reject_subjects: HashSet::new(),
             dirty_shutdown: true,
             pending_reconcile: HashSet::new(),
+            attempt_clock: Arc::new(AtomicU64::new(1)),
         }
     }
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -66,7 +67,13 @@ pub struct DistriWorker {
     /// never persisted, so a reboot starts clean. Keyed by subject
     /// because the node-level worker multiplexes many of them.
     pub(crate) deferred: HashMap<DigestIdentifier, Vec<Ledger>>,
-    pub(crate) attempt_seq: u64,
+    /// Saved verification prefixes, keyed by subject: later aux
+    /// checks resume the replay from the tip instead of reloading
+    /// and re-scanning the whole prefix. Volatile like `deferred`;
+    /// identity-checked on every use, LRU-bounded, and dropped on
+    /// rollback so no purge ever reuses a stale chain.
+    pub(crate) verify_cursors: super::transfer_verifier::VerifyCursorStore,
+    pub(crate) attempt_clock: Arc<AtomicU64>,
     /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
     /// Atomic so the shared `&self` receipt helpers can consume it;
     /// production never arms it.
@@ -522,14 +529,15 @@ impl DistriWorker {
         };
 
         // 1. Batch actual trae un transfer_event nuevo y la simulación dice Witness
-        // (or WitnessUnproven: speculative passage up to the aux, with
-        // a speculative proof recorded for later re-verification).
+        // (firm proof only, or passage without proof for a complete
+        // but unjudgeable chain: an unproven aux never opens passage
+        // here, the worker holds partial batches unapplied instead).
         if let (Some(transfer_event), Some(simulation)) =
             (transfer_batch.event, transfer_batch.simulation.as_ref())
             && matches!(
                 simulation,
                 TransferSimulationResult::Witness
-                    | TransferSimulationResult::WitnessUnproven
+                    | TransferSimulationResult::WitnessUnverified
             )
         {
             let chunk_first_sn =
@@ -597,11 +605,18 @@ impl DistriWorker {
             // it on success), so only the success proof requires
             // an Ok evaluation. Each transfer is also linked to
             // its batch predecessor up front.
+            let by_sn: HashMap<u64, &Ledger> = ledger
+                .iter()
+                .map(|event| (event.sn, event))
+                .fold(HashMap::new(), |mut map, (sn, event)| {
+                    map.entry(sn).or_insert(event);
+                    map
+                });
             for event in ledger.iter().filter(|e| {
                 matches!(e.get_event_request_type(), EventRequestType::Transfer)
             }) {
                 let prev = event.sn.checked_sub(1).and_then(|prev_sn| {
-                    ledger.iter().find(|e| e.sn == prev_sn)
+                    by_sn.get(&prev_sn).copied()
                 });
                 self.transfer_verifier
                     .verify_light(
@@ -750,6 +765,7 @@ impl DistriWorker {
         info: &ComunicateInfo,
         ledger: &[Ledger],
         offered_hi_sn: u64,
+        attempt: u64,
     ) -> Result<DistributionAuth, ActorError> {
         let common = self
             .check_auth_common(ctx, sender.clone(), info, ledger)
@@ -792,8 +808,8 @@ impl DistriWorker {
         ) {
             // Same bar as the batch path: cryptographic verification
             // plus simulation, not simulation alone. An unproven aux
-            // opens speculative passage (see above); a refuted one
-            // rolls back and fails.
+            // grants nothing and fails closed without writing; a
+            // refuted one rolls back and fails.
             let single_buffered = self
                 .deferred
                 .get(&subject_id)
@@ -802,6 +818,7 @@ impl DistriWorker {
             match self
                 .transfer_verifier
                 .verify_and_simulate(
+                    &mut self.verify_cursors,
                     ctx,
                     &subject_id,
                     ledger,
@@ -810,15 +827,18 @@ impl DistriWorker {
                 )
                 .await?
             {
-                TransferSimulationResult::Witness => {}
-                TransferSimulationResult::WitnessUnproven => {}
+                TransferSimulationResult::Witness
+                | TransferSimulationResult::WitnessUnverified => {}
+                TransferSimulationResult::WitnessUnproven => {
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
                 TransferSimulationResult::Refuted => {
                     self.rollback_refuted_aux(
                         ctx,
                         &governance_id,
                         &subject_id,
                         first_ledger.sn,
-                        0,
+                        attempt,
                     )
                     .await;
                     return Err(DistributorError::ReceiverNoAccess.into());
@@ -1777,8 +1797,8 @@ impl DistriWorker {
         let subject_id = ledger[0].get_subject_id();
         let ledger_count = ledger.len();
         let first_sn = ledger[0].sn;
-        self.attempt_seq = self.attempt_seq.wrapping_add(1);
-        let attempt = self.attempt_seq;
+        let attempt =
+            self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1855,6 +1875,7 @@ impl DistriWorker {
                 match self
                     .transfer_verifier
                     .verify_and_simulate(
+                        &mut self.verify_cursors,
                         ctx,
                         &subject_id,
                         &ledger,
@@ -1866,10 +1887,17 @@ impl DistriWorker {
                     TransferSimulationResult::Witness => {
                         Some(TransferSimulationResult::Witness)
                     }
-                    // Unproven aux: uncheckable yet, the batch is
-                    // held unapplied until its chain arrives.
+                    // Unproven aux: the chain is incomplete, so the
+                    // batch is held unapplied until the missing events
+                    // arrive. Unverifiable aux chains (complete but
+                    // unjudgeable) flow through below instead: like
+                    // the apply path, they open passage without ever
+                    // recording a proof.
                     TransferSimulationResult::WitnessUnproven => {
                         Some(TransferSimulationResult::WitnessUnproven)
+                    }
+                    TransferSimulationResult::WitnessUnverified => {
+                        Some(TransferSimulationResult::WitnessUnverified)
                     }
                     // Refuted aux: forged hint with a checkable chain.
                     // Drop any held prefix it poisoned, then fail
@@ -1898,15 +1926,14 @@ impl DistriWorker {
         };
 
         // An unproven aux never opens passage nor records
-        // anything. When the prefix is authorized on its own
-        // rights, copy it now without any proof and let a later
-        // batch verify the aux; otherwise hold the batch unapplied
-        // and ask for the continuation instead. A later batch with
-        // the full chain verifies or refutes; silence leaves no
-        // trace behind.
+        // anything, however the sender flags the batch. When the
+        // prefix is authorized on its own rights, copy it now
+        // without any proof and let a later batch verify the aux;
+        // otherwise hold the batch unapplied and ask for the
+        // continuation instead. A later batch with the full chain
+        // verifies or refutes; silence leaves no trace behind.
         if transfer_simulation
             == Some(TransferSimulationResult::WitnessUnproven)
-            && !is_all
         {
             let auth_ledger = combined_auth.as_ref().unwrap_or(&ledger);
             let offered_hi = auth_ledger

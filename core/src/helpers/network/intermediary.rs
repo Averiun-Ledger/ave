@@ -84,6 +84,17 @@ impl Intermediary {
             system.add_helper("test_faults", faults.clone());
             faults
         };
+        // Test-only verification workload counters, read by the
+        // suites through the `verify_stats` helper. Same lifetime
+        // and threading as the fault registry above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "verify_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::distribution::transfer_verifier::VerifyStatsRegistry::default(
+                ),
+            )),
+        );
 
         #[cfg(feature = "test")]
         let service_sender =

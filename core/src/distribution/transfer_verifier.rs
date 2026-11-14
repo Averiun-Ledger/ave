@@ -33,14 +33,19 @@ use super::error::DistributorError;
 pub(crate) enum TransferSimulationResult {
     /// La simulación fue afirmativa: el nodo es testigo del owner/new_owner.
     Witness,
-    /// The aux evidence is not (yet) checkable, so the aux opens
-    /// speculative passage with a speculative proof: a later batch
-    /// rechecks the evidence once its chain is available, firming
-    /// the proof or rolling the subject back on refutation.
+    /// The aux chain is incomplete: the missing events may still
+    /// arrive, so the batch is held unapplied without passage or
+    /// proof until a later batch completes the chain.
     WitnessUnproven,
+    /// The aux chain is complete but its evidence can not be
+    /// judged (opaque prefix, roles gone): like the apply path,
+    /// which trusts the envelope on an incomplete pre-state, the
+    /// aux may open passage, but it never records a proof and can
+    /// never be refuted into a rollback.
+    WitnessUnverified,
     /// The aux evidence was checkable and refuted: the hint is
     /// forged and must open nothing, leaving no trace behind.
-    /// Any speculative passage it opened is rolled back.
+    /// Any recorded proof for it is dropped with the held batch.
     Refuted,
     /// La simulación devolvió None: no somos testigo.
     NotWitness,
@@ -53,15 +58,157 @@ pub(crate) enum AuxEvidence {
     /// The aux evaluation reproduces over the sender batch
     /// continued from our own ledger: free passage with proof.
     Proven,
-    /// The chain can not be rebuilt yet (gap, opaque or diverged
-    /// prefix, unavailable roles, missing genesis): no verdict yet,
-    /// a later batch may still prove or refute it once the chain
-    /// is available. Never a substitute for evidence.
+    /// The chain is incomplete: events between our tip and the aux
+    /// are still missing, so no verdict is possible yet. A later
+    /// batch may still prove or refute the aux once the missing
+    /// events arrive; until then the batch is held unapplied and
+    /// records nothing.
     Missing,
     /// The chain is complete and checkable, but the aux evaluation
     /// does not reproduce: the hint is forged and must open
     /// nothing, leaving no trace behind.
     Refuted,
+    /// The chain reaches the aux, but its evidence can not be
+    /// judged: an opaque prefix hides the properties the check
+    /// would need, and the register only serves current roles. Like
+    /// the apply path, which trusts the envelope when its
+    /// pre-state is incomplete, the aux may open passage but never
+    /// records a proof, firm or speculative.
+    Unverifiable,
+}
+
+/// Trust built up while replaying a chain prefix: downgrade
+/// only, never upgraded by reuse. `Proven` means every replayed
+/// event reproduced fully; `EnvelopeOnly` that some event
+/// advanced on its envelope (roles gone), usable as state but
+/// never as proof; `Opaque` that an opaque event hides
+/// properties of the pre-state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorTrust {
+    Proven,
+    EnvelopeOnly,
+    Opaque,
+}
+
+/// Saved replay state for one subject chain: lets later aux
+/// checks resume `verify_chain` from the tip instead of
+/// rebuilding from genesis. Volatile (worker RAM only, never
+/// persisted); identity-checked on every use, so a divergent
+/// branch always rebuilds instead of reusing it. Verdicts are
+/// keyed by the exact replay inputs (aux bytes, tip and suffix),
+/// so reuse can never promote `Missing` into `Proven` nor an
+/// `Unverifiable` hint into a firm proof.
+pub(crate) struct VerifyCursor {
+    metadata: Metadata,
+    tip_hash: DigestIdentifier,
+    local_tip: Option<u64>,
+    trust: CursorTrust,
+    roles: HashMap<(u64, SchemaType, Namespace), RoleDataRegister>,
+    // (aux sn, aux bytes hash, chain tip hash, suffix fingerprint):
+    // a verdict is only reusable for the exact replay inputs that
+    // produced it, so a new batch can never inherit the verdict of
+    // a different chain, and staleness can not hide new events.
+    verdicts: HashMap<
+        (u64, DigestIdentifier, DigestIdentifier, DigestIdentifier),
+        AuxEvidence,
+    >,
+    last_used: u64,
+}
+
+/// Per-worker verification cursors, keyed by subject. Bounded
+/// with LRU eviction; eviction only costs a future rebuild,
+/// never correctness (a missing cursor rebuilds from scratch).
+pub(crate) struct VerifyCursorStore {
+    cursors: HashMap<DigestIdentifier, VerifyCursor>,
+    seq: u64,
+}
+
+impl VerifyCursorStore {
+    pub(crate) const MAX_CURSORS: usize = 64;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            cursors: HashMap::new(),
+            seq: 0,
+        }
+    }
+
+    pub(crate) fn get_mut(
+        &mut self,
+        subject_id: &DigestIdentifier,
+    ) -> Option<&mut VerifyCursor> {
+        self.seq = self.seq.wrapping_add(1);
+        let seq = self.seq;
+        self.cursors.get_mut(subject_id).map(|cursor| {
+            cursor.last_used = seq;
+            cursor
+        })
+    }
+
+    pub(crate) fn store(
+        &mut self,
+        subject_id: DigestIdentifier,
+        mut cursor: VerifyCursor,
+    ) {
+        self.seq = self.seq.wrapping_add(1);
+        cursor.last_used = self.seq;
+        if !self.cursors.contains_key(&subject_id)
+            && self.cursors.len() >= Self::MAX_CURSORS
+            && let Some(victim) = self
+                .cursors
+                .iter()
+                .min_by_key(|(_, existing)| existing.last_used)
+                .map(|(id, _)| id.clone())
+        {
+            self.cursors.remove(&victim);
+        }
+        self.cursors.insert(subject_id, cursor);
+    }
+
+    pub(crate) fn invalidate(&mut self, subject_id: &DigestIdentifier) {
+        self.cursors.remove(subject_id);
+    }
+}
+
+/// Test-only verification workload counters: full local reloads
+/// and events fed to the aux evidence replay, per subject.
+/// Proves the incremental check stays linear instead of
+/// re-scanning the prefix per aux. Zero cost in production:
+/// every increment is `cfg(test)`-gated, no locks or tasks.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub(crate) struct VerifyStatsRegistry {
+    processed: HashMap<DigestIdentifier, u64>,
+    reloads: HashMap<DigestIdentifier, u64>,
+}
+
+#[cfg(feature = "test")]
+pub(crate) type SharedVerifyStats =
+    std::sync::Arc<std::sync::Mutex<VerifyStatsRegistry>>;
+
+#[cfg(feature = "test")]
+impl VerifyStatsRegistry {
+    pub(crate) fn add_processed(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        n: u64,
+    ) {
+        *self.processed.entry(subject_id.clone()).or_default() += n;
+    }
+
+    pub(crate) fn add_reload(&mut self, subject_id: &DigestIdentifier) {
+        *self.reloads.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> (u64, u64) {
+        (
+            self.processed.get(subject_id).copied().unwrap_or(0),
+            self.reloads.get(subject_id).copied().unwrap_or(0),
+        )
+    }
 }
 
 pub(crate) struct TransferVerifier {
@@ -365,8 +512,11 @@ impl TransferVerifier {
         };
         // Roles repeat per governance version, not per event: cache
         // them so a long first-copy batch costs one lookup.
-        let mut roles_cache: HashMap<u64, RoleDataRegister> = HashMap::new();
-        let (proven, _) = self
+        let mut roles_cache: HashMap<
+            (u64, SchemaType, Namespace),
+            RoleDataRegister,
+        > = HashMap::new();
+        let (proven, _, _, _) = self
             .verify_chain(
                 ctx,
                 governance_id,
@@ -404,8 +554,413 @@ impl TransferVerifier {
     /// defers instead of opening passage on seal and quorum alone.
     /// Checkable but wrong evidence yields Refuted instead. An
     /// already applied transfer needs no gate.
+    ///
+    /// Test-only verification workload counters, proving the
+    /// incremental check stays linear instead of re-scanning the
+    /// prefix per aux. Zero cost in production: every increment is
+    /// `cfg(test)`-gated, no locks or tasks.
+    #[cfg(feature = "test")]
+    fn note_verify_work(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+        processed: u64,
+        reload: bool,
+    ) {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
+            let mut guard = stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if reload {
+                guard.add_reload(subject_id);
+            }
+            if processed > 0 {
+                guard.add_processed(subject_id, processed);
+            }
+        }
+    }
+
+    /// Reloads one applied-ledger window for the evidence replay.
+    /// `lo_sn` is exclusive: events after it up to `hi_sn` come
+    /// back. Any failure (missing tracker, failed read) is `None`:
+    /// callers fail closed instead of judging on a partial chain.
+    async fn load_local_ledger(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    ) -> Option<Vec<Ledger>> {
+        let path = ave_actors::ActorPath::from(format!(
+            "/user/node/subject_manager/{subject_id}"
+        ));
+        // An idle tracker is already stopped: only live
+        // requesters keep it running, so reload it for the read
+        // and release the lease right away.
+        let mut reloaded = false;
+        let tracker = match ctx
+            .system()
+            .get_actor::<crate::tracker::Tracker>(&path)
+            .await
+        {
+            Ok(tracker) => tracker,
+            Err(_) => {
+                let manager_path = ave_actors::ActorPath::from(
+                    "/user/node/subject_manager",
+                );
+                let Ok(manager) = ctx
+                    .system()
+                    .get_actor::<SubjectManager>(&manager_path)
+                    .await
+                else {
+                    return None;
+                };
+                if manager
+                    .ask(SubjectManagerMessage::Up {
+                        subject_id: subject_id.clone(),
+                        requester: "aux-evidence".to_owned(),
+                        create_ledger: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return None;
+                }
+                reloaded = true;
+                let Ok(tracker) = ctx
+                    .system()
+                    .get_actor::<crate::tracker::Tracker>(&path)
+                    .await
+                else {
+                    return None;
+                };
+                tracker
+            }
+        };
+        let fetched = tracker
+            .ask(crate::tracker::TrackerMessage::GetLedger {
+                lo_sn,
+                hi_sn,
+            })
+            .await;
+        if reloaded
+            && let Ok(manager) = ctx
+                .system()
+                .get_actor::<SubjectManager>(&ave_actors::ActorPath::from(
+                    "/user/node/subject_manager",
+                ))
+                .await
+        {
+            let _ = manager
+                .ask(SubjectManagerMessage::Finish {
+                    subject_id: subject_id.clone(),
+                    requester: "aux-evidence".to_owned(),
+                })
+                .await;
+        }
+        match fetched {
+            Ok(crate::tracker::TrackerResponse::Ledger {
+                ledger, ..
+            }) => Some(ledger),
+            _ => None,
+        }
+    }
+
+    /// Identity of the exact replay inputs: chain tip plus every
+    /// event about to be replayed. Verdicts cached under it can
+    /// only be reused by the identical aux over the identical
+    /// chain, so staleness can never hide newly arrived events.
+    fn chain_fingerprint(
+        &self,
+        tip_sn: u64,
+        tip_hash: &DigestIdentifier,
+        events: &[Ledger],
+    ) -> Option<DigestIdentifier> {
+        let mut parts: Vec<(u64, DigestIdentifier)> =
+            Vec::with_capacity(events.len() + 1);
+        parts.push((tip_sn, tip_hash.clone()));
+        for event in events {
+            parts.push((event.sn, event.ledger_hash(self.hash).ok()?));
+        }
+        hash_borsh(&*self.hash.hasher(), &parts).ok()
+    }
+
+    /// Incremental aux check: replays only the events past the
+    /// saved tip instead of the whole prefix. Returns `None` when
+    /// the saved tip can not be continued (divergent branch or an
+    /// already-covered aux): the caller discards the cursor and
+    /// rebuilds authoritatively.
+    #[allow(clippy::too_many_arguments)]
+    async fn verify_aux_suffix(
+        &self,
+        cursors: &mut VerifyCursorStore,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        sender_ledger: &[Ledger],
+        transfer_event: &Ledger,
+        buffered: &[Ledger],
+        aux_hash: &DigestIdentifier,
+        local_sn: Option<u64>,
+    ) -> Option<AuxEvidence> {
+        // Snapshot what the continuity check needs, then release
+        // the borrow before any await below.
+        let (tip_sn, tip_hash, covered) = {
+            let cursor = cursors.get_mut(subject_id)?;
+            if transfer_event.sn <= cursor.metadata.sn {
+                // Aux already behind the validated tip: rebuild
+                // authoritatively instead of guessing (rare).
+                return None;
+            }
+            // A vanished or regressed local ledger invalidates the
+            // coverage it provided; the full path below handles
+            // the no-local case like a first copy.
+            if cursor.local_tip.is_some() && local_sn.is_none() {
+                return None;
+            }
+            if let Some(covered) = cursor.local_tip
+                && let Some(current) = local_sn
+                && current < covered
+            {
+                return None;
+            }
+            (
+                cursor.metadata.sn,
+                cursor.tip_hash.clone(),
+                cursor.local_tip,
+            )
+        };
+        // Applied events are authoritative, so only what the
+        // cursor has not covered is re-fetched. A first delta with
+        // no coverage at all is a full reload, like the full path.
+        let mut fresh: Vec<Ledger> = Vec::new();
+        if local_sn.is_some_and(|current| Some(current) > covered) {
+            let Some(delta) = Self::load_local_ledger(
+                ctx,
+                subject_id,
+                covered,
+                local_sn.unwrap_or(0),
+            )
+            .await
+            else {
+                return Some(AuxEvidence::Missing);
+            };
+            fresh.extend(
+                delta.into_iter().filter(|event| event.sn > tip_sn),
+            );
+        }
+        // Held and sender bytes extend the tip only: anything at
+        // or below it (or the applied tip) is stale or already
+        // verified and never replays. The aux itself is always
+        // judged, even when it travels outside the sender batch;
+        // a held copy of the same SN wins, exactly like the
+        // full-path dedup order.
+        let floor = tip_sn.max(local_sn.unwrap_or(tip_sn));
+        fresh.extend(
+            buffered.iter().filter(|event| event.sn > floor).cloned(),
+        );
+        fresh.extend(
+            sender_ledger
+                .iter()
+                .filter(|event| {
+                    event.sn > floor && event.sn != transfer_event.sn
+                })
+                .cloned(),
+        );
+        if !fresh.iter().any(|event| event.sn == transfer_event.sn) {
+            fresh.push(transfer_event.clone());
+        }
+        fresh.sort_by_key(|event| event.sn);
+        // Exact-identity reuse: the same aux over the same tip
+        // with the same new events replays identically, so the
+        // cached verdict stands without re-running any check. Any
+        // new byte (continuation, fork, re-sealed hint) changes
+        // the fingerprint and forces a fresh replay below.
+        let suffix_fp = match self.chain_fingerprint(
+            tip_sn,
+            &tip_hash,
+            &fresh,
+        ) {
+            Some(fp) => fp,
+            // Unmeasurable inputs are never cached: replay now,
+            // store nothing.
+            None => {
+                return Some(
+                    self.replay_suffix(
+                        cursors,
+                        ctx,
+                        governance_id,
+                        subject_id,
+                        transfer_event,
+                        aux_hash,
+                        fresh,
+                        tip_sn,
+                        local_sn,
+                        None,
+                    )
+                    .await,
+                );
+            }
+        };
+        if let Some(hit) = cursors
+            .get_mut(subject_id)
+            .and_then(|cursor| {
+                cursor
+                    .verdicts
+                    .get(&(
+                        transfer_event.sn,
+                        aux_hash.clone(),
+                        tip_hash.clone(),
+                        suffix_fp.clone(),
+                    ))
+                    .copied()
+            })
+        {
+            return Some(hit);
+        }
+        // A genuinely absent continuation only defers: the valid
+        // prefix stays cached for the batch that brings it.
+        let Some(first) = fresh.first() else {
+            return Some(AuxEvidence::Missing);
+        };
+        if first.sn != tip_sn.saturating_add(1) {
+            return Some(AuxEvidence::Missing);
+        }
+        // Forked ancestry can not continue the saved tip: drop it
+        // and rebuild from the authoritative prefix instead.
+        if first.prev_ledger_event_hash != tip_hash {
+            return None;
+        }
+        Some(
+            self.replay_suffix(
+                cursors,
+                ctx,
+                governance_id,
+                subject_id,
+                transfer_event,
+                aux_hash,
+                fresh,
+                tip_sn,
+                local_sn,
+                Some(suffix_fp),
+            )
+            .await,
+        )
+    }
+
+    /// Replays one suffix through the saved cursor and adopts the
+    /// extended tip. The verdict is cached under the exact replay
+    /// inputs; entries from older tips are pruned since the tip
+    /// only moves forward and they can never match again.
+    #[allow(clippy::too_many_arguments)]
+    async fn replay_suffix(
+        &self,
+        cursors: &mut VerifyCursorStore,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+        transfer_event: &Ledger,
+        aux_hash: &DigestIdentifier,
+        fresh: Vec<Ledger>,
+        tip_sn: u64,
+        local_sn: Option<u64>,
+        suffix_fp: Option<DigestIdentifier>,
+    ) -> AuxEvidence {
+        let Some(cursor) = cursors.get_mut(subject_id) else {
+            // Evicted concurrently: nothing to resume; the caller
+            // rebuilds authoritatively instead.
+            return AuxEvidence::Missing;
+        };
+        // A first delta with no coverage at all counts as a full
+        // reload, like the full path; later deltas are uncounted.
+        let full_load = cursor.local_tip.is_none() && local_sn.is_some();
+        let (proven, refuted, skipped_opaque, used_envelope) = self
+            .verify_chain(
+                ctx,
+                governance_id,
+                &mut cursor.metadata,
+                &fresh,
+                &mut cursor.roles,
+            )
+            .await;
+        let trust = if skipped_opaque || cursor.trust == CursorTrust::Opaque
+        {
+            CursorTrust::Opaque
+        } else if used_envelope || cursor.trust != CursorTrust::Proven {
+            CursorTrust::EnvelopeOnly
+        } else {
+            CursorTrust::Proven
+        };
+        cursor.trust = trust;
+        let verdict = if proven.contains(&transfer_event.sn) {
+            AuxEvidence::Proven
+        } else if refuted.contains(&transfer_event.sn) {
+            AuxEvidence::Refuted
+        } else if cursor.metadata.sn == transfer_event.sn {
+            AuxEvidence::Unverifiable
+        } else if skipped_opaque || trust == CursorTrust::Opaque {
+            AuxEvidence::Unverifiable
+        } else {
+            AuxEvidence::Missing
+        };
+        // Adopt the extended tip: identity comes from the
+        // replayed bytes themselves.
+        if cursor.metadata.sn > tip_sn {
+            let tip_hash = fresh
+                .iter()
+                .find(|event| event.sn == cursor.metadata.sn)
+                .and_then(|event| event.ledger_hash(self.hash).ok());
+            match tip_hash {
+                Some(hash) => cursor.tip_hash = hash,
+                // Unreachable: the cursor only advances over the
+                // events just replayed. Keep the saved tip rather
+                // than attesting an unknown one.
+                None => return verdict,
+            }
+        }
+        cursor.local_tip = local_sn;
+        if let Some(fp) = suffix_fp {
+            cursor.verdicts.retain(|key, _| key.2 == cursor.tip_hash);
+            // Bounded per tip: entries for one tip are few by
+            // construction (one per distinct suffix), but an
+            // adversary could still vary suffixes; dropping the
+            // whole set only costs future replays, never
+            // correctness.
+            if cursor.verdicts.len() >= 16 {
+                cursor.verdicts.clear();
+            }
+            cursor.verdicts.insert(
+                (
+                    transfer_event.sn,
+                    aux_hash.clone(),
+                    cursor.tip_hash.clone(),
+                    fp,
+                ),
+                verdict,
+            );
+        }
+        #[cfg(feature = "test")]
+        Self::note_verify_work(
+            ctx,
+            subject_id,
+            fresh.len() as u64,
+            full_load,
+        );
+        verdict
+    }
+
+    /// Evidence gate for an external transfer hint: the aux grants
+    /// free passage only if its evaluation reproduces over a
+    /// trustworthy pre-state. That is the receiver's own ledger
+    /// continued with the sender batch, or batch genesis when the
+    /// subject is unknown. Anything else (gap, opaque or diverged
+    /// prefix, unverifiable evidence) yields Missing, so the caller
+    /// defers instead of opening passage on seal and quorum alone.
+    /// Checkable but wrong evidence yields Refuted instead. An
+    /// already applied transfer needs no gate.
     pub(crate) async fn verify_aux_evidence(
         &self,
+        cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         governance_id: &DigestIdentifier,
         subject_id: &DigestIdentifier,
@@ -420,6 +975,34 @@ impl TransferVerifier {
         {
             return AuxEvidence::Proven;
         }
+        // The verdict belongs to the exact hint bytes: a re-sealed
+        // variant never shares a verdict with another by SN alone.
+        let aux_hash = match transfer_event.ledger_hash(self.hash) {
+            Ok(hash) => hash,
+            Err(_) => return AuxEvidence::Missing,
+        };
+        // Fast path: resume the validated prefix instead of
+        // rebuilding it from genesis. A divergent branch or an
+        // already-covered aux falls back to a full rebuild below.
+        if cursors.get_mut(subject_id).is_some() {
+            match self
+                .verify_aux_suffix(
+                    cursors,
+                    ctx,
+                    governance_id,
+                    subject_id,
+                    sender_ledger,
+                    transfer_event,
+                    buffered,
+                    &aux_hash,
+                    local_sn,
+                )
+                .await
+            {
+                Some(verdict) => return verdict,
+                None => cursors.invalidate(subject_id),
+            }
+        }
         // Own prefix first: the locally applied events are exactly
         // what a continued copy would rebuild, with no register
         // round-trip that could race a just-applied prefix. Gaps,
@@ -429,77 +1012,13 @@ impl TransferVerifier {
         let mut combined: Vec<Ledger> = Vec::new();
         let mut tip: Option<u64> = None;
         if local_sn.is_some() {
-            let path = ave_actors::ActorPath::from(format!(
-                "/user/node/subject_manager/{subject_id}"
-            ));
-            // An idle tracker is already stopped: only live
-            // requesters keep it running, so reload it for the read
-            // and release the lease right away.
-            let mut reloaded = false;
-            let tracker = match ctx
-                .system()
-                .get_actor::<crate::tracker::Tracker>(&path)
-                .await
-            {
-                Ok(tracker) => tracker,
-                Err(_) => {
-                    let manager_path = ave_actors::ActorPath::from(
-                        "/user/node/subject_manager",
-                    );
-                    let Ok(manager) = ctx
-                        .system()
-                        .get_actor::<SubjectManager>(&manager_path)
-                        .await
-                    else {
-                        return AuxEvidence::Missing;
-                    };
-                    if manager
-                        .ask(SubjectManagerMessage::Up {
-                            subject_id: subject_id.clone(),
-                            requester: "aux-evidence".to_owned(),
-                            create_ledger: None,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return AuxEvidence::Missing;
-                    }
-                    reloaded = true;
-                    let Ok(tracker) = ctx
-                        .system()
-                        .get_actor::<crate::tracker::Tracker>(&path)
-                        .await
-                    else {
-                        return AuxEvidence::Missing;
-                    };
-                    tracker
-                }
-            };
-            let fetched = tracker
-                .ask(crate::tracker::TrackerMessage::GetLedger {
-                    lo_sn: None,
-                    hi_sn: local_sn.unwrap_or(0),
-                })
-                .await;
-            if reloaded
-                && let Ok(manager) = ctx
-                    .system()
-                    .get_actor::<SubjectManager>(&ave_actors::ActorPath::from(
-                        "/user/node/subject_manager",
-                    ))
-                    .await
-            {
-                let _ = manager
-                    .ask(SubjectManagerMessage::Finish {
-                        subject_id: subject_id.clone(),
-                        requester: "aux-evidence".to_owned(),
-                    })
-                    .await;
-            }
-            let Ok(crate::tracker::TrackerResponse::Ledger {
-                ledger,
-                ..
-            }) = fetched
+            let Some(ledger) = Self::load_local_ledger(
+                ctx,
+                subject_id,
+                None,
+                local_sn.unwrap_or(0),
+            )
+            .await
             else {
                 return AuxEvidence::Missing;
             };
@@ -536,25 +1055,87 @@ impl TransferVerifier {
             return AuxEvidence::Missing;
         };
         let (_, tail) = combined.split_at(1);
-        let mut roles_cache = HashMap::new();
-        let (proven, refuted) = self
+        let mut roles_cache: HashMap<
+            (u64, SchemaType, Namespace),
+            RoleDataRegister,
+        > = HashMap::new();
+        let (proven, refuted, skipped_opaque, used_envelope) = self
             .verify_chain(ctx, governance_id, &mut cursor, tail, &mut roles_cache)
             .await;
-        if proven.contains(&transfer_event.sn) {
+        #[cfg(feature = "test")]
+        Self::note_verify_work(
+            ctx,
+            subject_id,
+            tail.len() as u64,
+            local_sn.is_some(),
+        );
+        let verdict = if proven.contains(&transfer_event.sn) {
             AuxEvidence::Proven
         } else if refuted.contains(&transfer_event.sn) {
             AuxEvidence::Refuted
         } else if cursor.sn == transfer_event.sn {
-            // The chain is complete up to the aux but its evidence
-            // can not be rechecked (roles for an old version are
-            // gone): trust the envelope like the apply path does
-            // and grant firm passage instead of stalling forever.
-            // Gaps, opaque spans and refuted evidence never reach
-            // here: they stop the cursor short of the aux.
-            AuxEvidence::Proven
+            // The chain reaches the aux, but its evidence can not
+            // be rechecked (roles for its version are gone): trust
+            // the envelope like the apply path does, yet attest
+            // nothing, so this never records a proof.
+            AuxEvidence::Unverifiable
+        } else if skipped_opaque {
+            // An opaque prefix hides the properties the recheck
+            // would need: without them a failed check proves
+            // nothing, so the aux stays unverified instead of
+            // counting as refuted. Like the apply path, passage may
+            // open, but it never records a proof.
+            AuxEvidence::Unverifiable
         } else {
+            // The next expected event is simply absent: the chain is
+            // incomplete and a later batch with the missing events
+            // may still prove or refute the aux.
             AuxEvidence::Missing
+        };
+        // Remember the validated prefix and this verdict: later
+        // batches resume from the tip instead of replaying it.
+        // Downgrade-only trust: an opaque or envelope step never
+        // becomes a proof by reuse. The verdict is keyed by the
+        // exact replay inputs (aux bytes, tip and suffix), so a
+        // later batch with different events always replays instead
+        // of inheriting it.
+        if let Some(tip_event) =
+            combined.iter().find(|event| event.sn == cursor.sn)
+            && let Ok(tip_hash) = tip_event.ledger_hash(self.hash)
+            && let Some(suffix_fp) =
+                self.chain_fingerprint(cursor.sn, &tip_hash, tail)
+        {
+            let trust = if skipped_opaque {
+                CursorTrust::Opaque
+            } else if used_envelope {
+                CursorTrust::EnvelopeOnly
+            } else {
+                CursorTrust::Proven
+            };
+            let mut verdicts = HashMap::new();
+            verdicts.insert(
+                (
+                    transfer_event.sn,
+                    aux_hash,
+                    tip_hash.clone(),
+                    suffix_fp,
+                ),
+                verdict,
+            );
+            cursors.store(
+                subject_id.clone(),
+                VerifyCursor {
+                    metadata: cursor,
+                    tip_hash,
+                    local_tip: local_sn,
+                    trust,
+                    roles: roles_cache,
+                    verdicts,
+                    last_used: 0,
+                },
+            );
         }
+        verdict
     }
 
     /// Chained evaluation evidence shared by inline screening and
@@ -583,8 +1164,11 @@ impl TransferVerifier {
         governance_id: &DigestIdentifier,
         cursor: &mut Metadata,
         events: &[Ledger],
-        roles_cache: &mut HashMap<u64, RoleDataRegister>,
-    ) -> (HashSet<u64>, HashSet<u64>) {
+        roles_cache: &mut HashMap<
+            (u64, SchemaType, Namespace),
+            RoleDataRegister,
+        >,
+    ) -> (HashSet<u64>, HashSet<u64>, bool, bool) {
         use json_patch::{Patch, patch};
         fn apply_patch(
             properties: &mut ValueWrapper,
@@ -625,6 +1209,7 @@ impl TransferVerifier {
         let mut proven = HashSet::new();
         let mut refuted = HashSet::new();
         let mut skipped_opaque = false;
+        let mut used_envelope = false;
         for event in events {
             if event.sn != cursor.sn.saturating_add(1) {
                 break;
@@ -660,7 +1245,12 @@ impl TransferVerifier {
                     }
                     _ => break,
                 };
-            let eval_data = match roles_cache.get(&event.gov_version) {
+            let roles_key = (
+                event.gov_version,
+                cursor.schema_id.clone(),
+                cursor.namespace.clone(),
+            );
+            let eval_data = match roles_cache.get(&roles_key) {
                 Some(cached) => Some(cached.clone()),
                 None => {
                     match get_actual_roles_register(
@@ -678,7 +1268,7 @@ impl TransferVerifier {
                     {
                         Ok((fetched, _, _)) => {
                             roles_cache.insert(
-                                event.gov_version,
+                                roles_key,
                                 fetched.clone(),
                             );
                             Some(fetched)
@@ -695,6 +1285,7 @@ impl TransferVerifier {
                 if advance_unproven(cursor, event, evaluation).is_err() {
                     break;
                 }
+                used_envelope = true;
                 continue;
             };
             let signer = validation.validation_req_signature.signer.clone();
@@ -754,7 +1345,7 @@ impl TransferVerifier {
             }
             cursor.sn = event.sn;
         }
-        (proven, refuted)
+        (proven, refuted, skipped_opaque, used_envelope)
     }
 
     /// Verifica criptográficamente un transfer_event, simula si el nodo local
@@ -762,6 +1353,7 @@ impl TransferVerifier {
     /// el TransferVerificationRegister.
     pub(crate) async fn verify_and_simulate(
         &self,
+        cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         subject_id: &DigestIdentifier,
         sender_ledger: &[Ledger],
@@ -816,9 +1408,8 @@ impl TransferVerifier {
         // independent rights, never on the failed transfer itself.
         //
         // When the evidence can not be rebuilt yet (aux ahead of
-        // the batch), a partial batch is held unapplied while a
-        // complete one still opens speculative passage; a later
-        // batch rechecks once its chain is available. Checkable-
+        // the batch), the batch is held unapplied without passage
+        // or proof until the missing events arrive. Checkable-
         // but-wrong evidence fails here instead, leaving no trace.
         // A recorded firm proof means its evidence was already
         // validated: do not re-validate per batch.
@@ -842,8 +1433,9 @@ impl TransferVerifier {
             covered = true;
         }
         if transfer_opens_passage && !covered {
-            match self
+            let aux_evidence = self
                 .verify_aux_evidence(
+                    cursors,
                     ctx,
                     &governance_id,
                     subject_id,
@@ -851,17 +1443,23 @@ impl TransferVerifier {
                     transfer_event,
                     buffered,
                 )
-                .await
-            {
+                .await;
+            match aux_evidence {
                 AuxEvidence::Proven => {}
-                // Uncheckable yet: the caller defers the batch
-                // without passage or proof until the chain arrives.
+                // Incomplete chain: the caller holds the batch
+                // unapplied without passage or proof until the
+                // missing events arrive.
                 AuxEvidence::Missing => {
                     return Ok(TransferSimulationResult::WitnessUnproven);
                 }
+                // Complete chain whose evidence can not be rebuilt:
+                // passage opens without any recorded proof.
+                AuxEvidence::Unverifiable => {
+                    return Ok(TransferSimulationResult::WitnessUnverified);
+                }
                 // Forged aux with a checkable chain: no passage, no
-                // proof, no writes. The worker additionally rolls
-                // back any speculative prefix it opened.
+                // proof, no writes. The worker additionally drops
+                // any held prefix and rolls back on a recorded proof.
                 AuxEvidence::Refuted => {
                     return Ok(TransferSimulationResult::Refuted);
                 }

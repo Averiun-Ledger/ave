@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use ave_actors::{ActorContext, ActorError, ActorPath};
 use ave_common::SchemaType;
@@ -12,7 +13,7 @@ use crate::model::common::subject::{
     get_subject_path_and_data, update_ledger,
 };
 use crate::model::common::{
-    check_subject_creation, crash_system, record_speculative_transfer,
+    check_subject_creation, crash_system,
     record_verified_transfer, remove_verified_transfer,
 };
 use crate::{
@@ -60,6 +61,11 @@ impl DistriWorker {
         dist_ctx: DistributionContext,
     ) -> Result<(), ActorError> {
         let mut transfer_recorded = false;
+        // Proof write deferred until the chunk applies: the tracker
+        // consumes the register when it applies any transfer, so
+        // recording before the apply would let an earlier inline
+        // transfer wipe the proof this batch just earned.
+        let mut pending_proof_sn: Option<u64> = None;
         let sender_is_all = dist_ctx.sender_is_all;
         let mut verified_transfer_sn = transfer_batch.verified_sn;
         let info = &dist_ctx.info;
@@ -131,12 +137,17 @@ impl DistriWorker {
                 )
                 .await?;
 
-            // A proven aux records a firm proof and opens verified
-            // free passage for the rest of the loop. An unproven aux
-            // still opens speculative passage (the sender fetches it
-            // ahead of the window by design), but the proof stays
-            // speculative until a later batch rechecks the evidence;
-            // refuting it then rolls the subject back.
+            // A proven aux records a firm proof once its chunk
+            // applies, and opens verified free passage for the rest
+            // of the loop. An unproven aux never reaches this loop:
+            // the worker holds partial batches with incomplete
+            // chains unapplied until the missing events arrive,
+            // and copies own-rights prefixes with no aux at all.
+            // An unverifiable aux (complete chain whose evidence
+            // can not be rebuilt) opens passage like the apply
+            // path trusts it, but records nothing.
+            // Fail closed here as defense in depth: an unproven aux
+            // that somehow arrives fails without recording anything.
             if !transfer_recorded
                 && !common.is_gov
                 && let Some(transfer_event) = transfer_event
@@ -145,34 +156,17 @@ impl DistriWorker {
                     transfer_simulation,
                     Some(TransferSimulationResult::Witness)
                 ) {
-                    record_verified_transfer(
-                        ctx,
-                        &common.governance_id,
-                        &subject_id,
-                        transfer_event.sn,
-                        sender.clone(),
-                    )
-                    .await?;
-                    transfer_recorded = true;
                     // Refresh verified_transfer_sn so the next loop
-                    // iteration can use Path C (free passage).
+                    // iteration can use Path C (free passage). The
+                    // register write waits until the chunk applies
+                    // (see pending_proof_sn below).
                     verified_transfer_sn = Some(transfer_event.sn);
+                    pending_proof_sn = Some(transfer_event.sn);
                 } else if matches!(
                     transfer_simulation,
                     Some(TransferSimulationResult::WitnessUnproven)
                 ) {
-                    // No one-shot flag here: a later chunk in this
-                    // same loop may still verify the aux and record
-                    // it firm below. The register itself keeps the
-                    // first speculative entry.
-                    record_speculative_transfer(
-                        ctx,
-                        &common.governance_id,
-                        &subject_id,
-                        transfer_event.sn,
-                        sender.clone(),
-                    )
-                    .await?;
+                    return Err(DistributorError::ReceiverNoAccess.into());
                 }
             }
 
@@ -233,11 +227,24 @@ impl DistriWorker {
 
             #[cfg(feature = "test")]
             {
-                if !is_register && dist_ctx.info.request_id.is_empty() {
+                // Only per-subject distributors pause here, and only
+                // for injected batches (empty request id): the
+                // node-level distributor stays free for the
+                // interleaved valid copy, which carries its own
+                // request id. Update-driven traffic shares the empty
+                // request id, so the worker check is what tells both
+                // apart.
+                if !is_register
+                    && dist_ctx.info.request_id.is_empty()
+                    && !Self::worker_path(ctx).ends_with("/distributor")
+                {
                     let mut noted = false;
                     while Self::before_apply_paused(ctx) {
                         if !noted {
-                            Self::note_before_apply_hold(ctx);
+                            Self::note_before_apply_hold(
+                                ctx,
+                                dist_ctx.attempt,
+                            );
                             noted = true;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(
@@ -396,27 +403,29 @@ impl DistriWorker {
                         if let Some(lease) = lease.clone() {
                             lease.finish(ctx).await?;
                         }
-                        if !common.is_gov
-                            && let Ok(manager) = ctx
-                                .system()
-                                .get_actor::<SubjectManager>(&ActorPath::from(
-                                    "/user/node/subject_manager",
-                                ))
-                                .await
-                            && let Err(error) = manager
-                                .ask(SubjectManagerMessage::NoteSuccess {
-                                    subject_id: subject_id.clone(),
-                                    attempt: dist_ctx.attempt,
-                                })
-                                .await
+                        // The tracker consumes the register when it
+                        // applies a transfer: if this chunk already
+                        // applied the proven aux itself, the proof is
+                        // spent and must not be resurrected here.
+                        if let Some(proof_sn) = pending_proof_sn.take()
+                            && last_sn < proof_sn
                         {
-                            warn!(
-                                msg_type = "LedgerDistribution",
-                                subject_id = %subject_id,
-                                error = %error,
-                                "Failed to note successful copy attempt",
-                            );
+                            record_verified_transfer(
+                                ctx,
+                                &common.governance_id,
+                                &subject_id,
+                                proof_sn,
+                                sender.clone(),
+                            )
+                            .await?;
+                            transfer_recorded = true;
                         }
+                        Self::note_copy_success(
+                            ctx,
+                            &subject_id,
+                            dist_ctx.attempt,
+                        )
+                        .await;
 
                         if !remaining_ledger.is_empty() {
                             pending_ledger = remaining_ledger;
@@ -536,6 +545,19 @@ impl DistriWorker {
                     lease.finish(ctx).await?;
                 }
 
+                // Create-only batch: the creation above already
+                // applied SN0, so record it even though no update
+                // ran. Stale duplicates (already registered) record
+                // nothing.
+                if !is_register {
+                    Self::note_copy_success(
+                        ctx,
+                        &subject_id,
+                        dist_ctx.attempt,
+                    )
+                    .await;
+                }
+
                 if !remaining_ledger.is_empty() {
                     pending_ledger = remaining_ledger;
                     continue;
@@ -583,6 +605,38 @@ impl DistriWorker {
         }
 
         Ok(())
+    }
+
+    /// Records a successful copy step under this batch attempt
+    /// so a later failed first copy cannot purge it. Best-effort
+    /// with a warning: a registry failure must not fail the copy
+    /// itself. Only call after the creation or application has
+    /// actually succeeded.
+    async fn note_copy_success(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        attempt: u64,
+    ) {
+        if let Ok(manager) = ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            && let Err(error) = manager
+                .ask(SubjectManagerMessage::NoteSuccess {
+                    subject_id: subject_id.clone(),
+                    attempt,
+                })
+                .await
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Failed to note successful copy attempt",
+            );
+        }
     }
 
     /// Records a first-copy rollback skip for tests proving a
@@ -685,11 +739,11 @@ impl DistriWorker {
 
     /// Best-effort teardown of a tracker first-created in a batch
     /// whose reception just failed: either its apply errored, or a
-    /// forged aux it speculatively followed got refuted once its
-    /// chain became checkable. Only subject-scoped state is
-    /// dropped (tracker ledger and actor, per-subject register
-    /// entries, node registration, database row): the shared
-    /// governance registers keep running for the other subjects.
+    /// forged aux got refuted once its chain became checkable.
+    /// Only subject-scoped state is dropped (tracker ledger and
+    /// actor, per-subject register entries, node registration,
+    /// database row): the shared governance registers keep running
+    /// for the other subjects.
     /// Never masks the original error: every failure is logged and
     /// the caller still returns it.
     ///
@@ -714,11 +768,13 @@ impl DistriWorker {
             .unwrap_or(false)
     }
 
-    /// Test-only pre-apply barrier: pauses a first copy based on
-    /// an injected batch (empty request id) before it writes, so a
-    /// test can interleave a valid Create and prove the later
-    /// rollback spares it. Update traffic (real request id) never
-    /// pauses. Production never arms it.
+    /// Path of the worker running this handler, for tests
+    /// proving on which distributor a batch parked.
+    #[cfg(feature = "test")]
+    fn worker_path(ctx: &ActorContext<Self>) -> String {
+        ctx.path().to_string()
+    }
+
     #[cfg(feature = "test")]
     fn before_apply_paused(ctx: &ActorContext<Self>) -> bool {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
@@ -733,13 +789,16 @@ impl DistriWorker {
     }
 
     #[cfg(feature = "test")]
-    fn note_before_apply_hold(ctx: &ActorContext<Self>) {
+    fn note_before_apply_hold(ctx: &ActorContext<Self>, attempt: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
         if let Some(registry) =
             ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
-            faults.note_before_apply_hold();
+            faults.note_before_apply_hold(
+                attempt,
+                ctx.path().to_string(),
+            );
         }
     }
 
@@ -1037,6 +1096,10 @@ impl DistriWorker {
                 return;
             }
         }
+        // The purge executed: no validated prefix survives it, so
+        // the saved replay tip dies here too instead of shadowing
+        // the next copy with a stale chain.
+        self.verify_cursors.invalidate(subject_id);
         // The purge (or the reload, when there was nothing stored)
         // holds no requester from here on.
         Self::finish_rollback_up(ctx, subject_id).await;
@@ -1480,6 +1543,8 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let subject_id = ledger.get_subject_id();
         let sn = ledger.sn;
+        let attempt =
+            self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1507,6 +1572,7 @@ impl DistriWorker {
                 &info,
                 std::slice::from_ref(&ledger),
                 sn,
+                attempt,
             )
             .await;
         let auth = handle_distri_error!(
@@ -1619,6 +1685,7 @@ impl DistriWorker {
                 &subject_id,
                 "Failed to create subject from create event"
             )?;
+            Self::note_copy_success(ctx, &subject_id, attempt).await;
             None
         } else {
             let requester = Self::requester_id(
@@ -1671,6 +1738,8 @@ impl DistriWorker {
 
             match update_result {
                 Ok((last_sn, _, _)) if last_sn < ledger.sn => {
+                    Self::note_copy_success(ctx, &subject_id, attempt)
+                        .await;
                     debug!(
                         msg_type = "LastEventDistribution",
                         subject_id = %subject_id,
@@ -1722,7 +1791,11 @@ impl DistriWorker {
 
                     return Ok(());
                 }
-                Ok((..)) => lease,
+                Ok((..)) => {
+                    Self::note_copy_success(ctx, &subject_id, attempt)
+                        .await;
+                    lease
+                }
                 Err(e) => {
                     if let ActorError::FunctionalCritical { .. } = e.clone() {
                         error!(

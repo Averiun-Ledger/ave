@@ -62,6 +62,11 @@ pub enum SubjectManagerMessage {
         subject_id: DigestIdentifier,
         attempt: u64,
     },
+    /// Read-only view of the last successful copy attempt, for
+    /// tests proving attempt-owned rollback decisions.
+    GetLastSuccess {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -75,6 +80,7 @@ pub enum SubjectManagerResponse {
     HasLiveRequesters(bool),
     NoteSuccess,
     ShouldPurge(bool),
+    LastSuccess(Option<u64>),
 }
 
 impl Response for SubjectManagerResponse {}
@@ -911,6 +917,11 @@ impl Handler<Self> for SubjectManager {
                     .get(&subject_id)
                     .is_none_or(|last| *last == attempt);
                 Ok(SubjectManagerResponse::ShouldPurge(owned))
+            }
+            SubjectManagerMessage::GetLastSuccess { subject_id } => {
+                Ok(SubjectManagerResponse::LastSuccess(
+                    self.last_success.get(&subject_id).copied(),
+                ))
             }
         }
     }

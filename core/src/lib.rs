@@ -3439,6 +3439,180 @@ impl Api {
         Ok(count)
     }
 
+    /// Attempt id captured when the pre-apply barrier first fired,
+    /// if any: lets a test prove the stale rollback belongs to a
+    /// different attempt than the interleaved valid copy.
+    pub async fn test_before_apply_attempt(
+        &self,
+    ) -> Result<Option<u64>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .before_apply_attempt())
+    }
+
+    /// Worker path where the pre-apply barrier first fired, if any:
+    /// proves the parked batch went through the expected worker.
+    pub async fn test_before_apply_worker(
+        &self,
+    ) -> Result<Option<String>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .before_apply_worker())
+    }
+
+    /// Verification workload for a subject: events fed to the aux
+    /// evidence replay and full local reloads performed, in that
+    /// order. Lets scale tests pin the incremental check linear
+    /// instead of re-scanning the prefix per aux. Test deliveries
+    /// address the node-level distributor, which always exists.
+    pub async fn test_verify_stats(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::transfer_verifier::SharedVerifyStats>(
+                "verify_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "verify_stats".to_owned(),
+                reason: "Verify stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot(&subject_id))
+    }
+
+    /// Read-only view of the last successful copy attempt for a
+    /// subject: proves a concurrent valid copy really registered
+    /// instead of the rollback passing vacuously.
+    pub async fn test_get_last_success(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<Option<u64>, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::GetLastSuccess { subject_id })
+            .await?
+        {
+            SubjectManagerResponse::LastSuccess(result) => Ok(result),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "LastSuccess".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: ensure the per-subject distributor actor
+    /// exists without touching any subject state. Lets a test park
+    /// a first copy on its own worker while another worker applies
+    /// the concurrent valid copy. Idempotent.
+    pub async fn test_ensure_distributor(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        let response = self
+            .node
+            .ask(NodeMessage::EnsureDistributor {
+                subject_id: subject_id.clone(),
+            })
+            .await
+            .map_err(|e| {
+                warn!(
+                    msg_type = "ApiRequest",
+                    error = %e,
+                    "Failed to ensure subject distributor"
+                );
+                actor_communication_error("node", e)
+            })?;
+        match response {
+            NodeResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "node".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Whether the subject currently has live requesters: a stale
+    /// rollback must only be evaluated once nobody is using it.
+    pub async fn test_has_live_requesters(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::HasLiveRequesters { subject_id })
+            .await?
+        {
+            SubjectManagerResponse::HasLiveRequesters(live) => Ok(live),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "HasLiveRequesters".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Read-only attempt-ownership check: whether a rollback with
+    /// this attempt id would purge the subject now. Used to pin
+    /// that a stale attempt is declined while a valid copy stands.
+    pub async fn test_should_purge(
+        &self,
+        subject_id: DigestIdentifier,
+        attempt: u64,
+    ) -> Result<bool, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::ShouldPurge {
+                subject_id,
+                attempt,
+            })
+            .await?
+        {
+            SubjectManagerResponse::ShouldPurge(owned) => Ok(owned),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "ShouldPurge".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     async fn test_arm_modes_fault(
         &self,
         empty: bool,

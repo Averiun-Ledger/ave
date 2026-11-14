@@ -192,6 +192,8 @@ pub struct TestFaultRegistry {
     rollback_paused: bool,
     before_apply_holds: u64,
     before_apply_paused: bool,
+    before_apply_attempt: Option<u64>,
+    before_apply_worker: Option<String>,
 }
 
 impl TestFaultRegistry {
@@ -206,6 +208,8 @@ impl TestFaultRegistry {
             rollback_paused: false,
             before_apply_holds: 0,
             before_apply_paused: false,
+            before_apply_attempt: None,
+            before_apply_worker: None,
         }
     }
 
@@ -267,8 +271,18 @@ impl TestFaultRegistry {
         self.rollback_paused
     }
 
-    pub fn note_before_apply_hold(&mut self) {
+    pub fn note_before_apply_hold(&mut self, attempt: u64, worker: String) {
         self.before_apply_holds += 1;
+        self.before_apply_attempt.get_or_insert(attempt);
+        self.before_apply_worker.get_or_insert(worker);
+    }
+
+    pub fn before_apply_worker(&self) -> Option<String> {
+        self.before_apply_worker.clone()
+    }
+
+    pub fn before_apply_attempt(&self) -> Option<u64> {
+        self.before_apply_attempt
     }
 
     pub fn before_apply_hold_count(&self) -> u64 {
