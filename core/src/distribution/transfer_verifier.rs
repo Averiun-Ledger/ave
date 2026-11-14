@@ -19,9 +19,7 @@ use crate::model::event::{
     EvaluationData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
 };
 use crate::node::SubjectData;
-use crate::node::subject_manager::{
-    SubjectManager, SubjectManagerMessage,
-};
+use crate::node::subject_manager::{SubjectManager, SubjectManagerMessage};
 use crate::subject::Metadata;
 use crate::subject::RequestSubjectData;
 use crate::validation::response::ValidationRes;
@@ -200,10 +198,7 @@ impl VerifyStatsRegistry {
         *self.reloads.entry(subject_id.clone()).or_default() += 1;
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        subject_id: &DigestIdentifier,
-    ) -> (u64, u64) {
+    pub(crate) fn snapshot(&self, subject_id: &DigestIdentifier) -> (u64, u64) {
         (
             self.processed.get(subject_id).copied().unwrap_or(0),
             self.reloads.get(subject_id).copied().unwrap_or(0),
@@ -270,12 +265,11 @@ impl TransferVerifier {
         // every check below, so the link is verified up front,
         // before ownership is rebuilt from the batch.
         if let Some(prev) = prev_event {
-            let prev_hash =
-                prev.ledger_hash(self.hash).map_err(|e| {
-                    DistributorError::TransferEventInvalid {
-                        details: format!("prev hash failed: {e}"),
-                    }
-                })?;
+            let prev_hash = prev.ledger_hash(self.hash).map_err(|e| {
+                DistributorError::TransferEventInvalid {
+                    details: format!("prev hash failed: {e}"),
+                }
+            })?;
             if transfer_event.prev_ledger_event_hash != prev_hash {
                 return Err(DistributorError::TransferEventInvalid {
                     details: "transfer does not link to previous event"
@@ -605,9 +599,8 @@ impl TransferVerifier {
         {
             Ok(tracker) => tracker,
             Err(_) => {
-                let manager_path = ave_actors::ActorPath::from(
-                    "/user/node/subject_manager",
-                );
+                let manager_path =
+                    ave_actors::ActorPath::from("/user/node/subject_manager");
                 let Ok(manager) = ctx
                     .system()
                     .get_actor::<SubjectManager>(&manager_path)
@@ -638,10 +631,7 @@ impl TransferVerifier {
             }
         };
         let fetched = tracker
-            .ask(crate::tracker::TrackerMessage::GetLedger {
-                lo_sn,
-                hi_sn,
-            })
+            .ask(crate::tracker::TrackerMessage::GetLedger { lo_sn, hi_sn })
             .await;
         if reloaded
             && let Ok(manager) = ctx
@@ -659,9 +649,9 @@ impl TransferVerifier {
                 .await;
         }
         match fetched {
-            Ok(crate::tracker::TrackerResponse::Ledger {
-                ledger, ..
-            }) => Some(ledger),
+            Ok(crate::tracker::TrackerResponse::Ledger { ledger, .. }) => {
+                Some(ledger)
+            }
             _ => None,
         }
     }
@@ -730,9 +720,13 @@ impl TransferVerifier {
                 cursor.local_tip,
             )
         };
-        // Applied events are authoritative, so only what the
-        // cursor has not covered is re-fetched. A first delta with
-        // no coverage at all is a full reload, like the full path.
+        // The three prefix sources join here in authoritative
+        // order: applied local delta first, then held batches,
+        // then the sender batch. The sender window never runs
+        // past the aux it carries, like in the full path below.
+        // The aux itself is always judged, even when it travels
+        // outside the sender batch; a held copy of the same SN
+        // wins, exactly like the full-path dedup order.
         let mut fresh: Vec<Ledger> = Vec::new();
         if local_sn.is_some_and(|current| Some(current) > covered) {
             let Some(delta) = Self::load_local_ledger(
@@ -745,42 +739,88 @@ impl TransferVerifier {
             else {
                 return Some(AuxEvidence::Missing);
             };
-            fresh.extend(
-                delta.into_iter().filter(|event| event.sn > tip_sn),
-            );
+            // A first delta with no coverage at all is a full
+            // reload, like the full path.
+            fresh.extend(delta);
         }
-        // Held and sender bytes extend the tip only: anything at
-        // or below it (or the applied tip) is stale or already
-        // verified and never replays. The aux itself is always
-        // judged, even when it travels outside the sender batch;
-        // a held copy of the same SN wins, exactly like the
-        // full-path dedup order.
-        let floor = tip_sn.max(local_sn.unwrap_or(tip_sn));
-        fresh.extend(
-            buffered.iter().filter(|event| event.sn > floor).cloned(),
-        );
+        fresh.extend(buffered.iter().cloned());
         fresh.extend(
             sender_ledger
                 .iter()
-                .filter(|event| {
-                    event.sn > floor && event.sn != transfer_event.sn
-                })
+                .filter(|event| event.sn < transfer_event.sn)
                 .cloned(),
         );
         if !fresh.iter().any(|event| event.sn == transfer_event.sn) {
             fresh.push(transfer_event.clone());
         }
         fresh.sort_by_key(|event| event.sn);
+        // Merge by identity with authoritative precedence: the
+        // first copy wins, so an exact re-send replays once
+        // instead of stalling the chain. The same SN with
+        // different bytes is a divergent branch, not a
+        // duplicate: fall back to the authoritative rebuild
+        // instead of borrowing the forged bytes. Unmeasurable
+        // bytes never dedup and never diverge on their own: the
+        // replay below decides over them.
+        let mut deduped: Vec<Ledger> = Vec::with_capacity(fresh.len());
+        for event in fresh {
+            let duplicate = match deduped.last() {
+                Some(prev) if prev.sn == event.sn => {
+                    match (
+                        prev.ledger_hash(self.hash),
+                        event.ledger_hash(self.hash),
+                    ) {
+                        (Ok(previous), Ok(current)) => {
+                            Some(previous == current)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match duplicate {
+                // Exact re-send: replay once.
+                Some(true) => continue,
+                // Same SN, different bytes: divergent branch.
+                Some(false) => return None,
+                // Unique SN, or unmeasurable bytes the replay
+                // below decides over.
+                None => deduped.push(event),
+            }
+        }
+        fresh = deduped;
+        // Drop what the cursor already covers: history below the
+        // tip never replays. The tip itself replays only if it is
+        // gone, which the hash tells apart from a quiet re-send:
+        // a different hash for the same SN is a divergence and
+        // rebuilds instead of continuing from the saved tip.
+        let mut suffix: Vec<Ledger> = Vec::with_capacity(fresh.len());
+        for event in fresh {
+            if event.sn < tip_sn {
+                continue;
+            }
+            if event.sn == tip_sn {
+                let same = match event.ledger_hash(self.hash) {
+                    Ok(hash) => hash == tip_hash,
+                    // Unmeasurable tip bytes never pass as
+                    // covered: replay decides over them.
+                    _ => false,
+                };
+                if same {
+                    continue;
+                }
+                return None;
+            }
+            suffix.push(event);
+        }
+        fresh = suffix;
         // Exact-identity reuse: the same aux over the same tip
         // with the same new events replays identically, so the
         // cached verdict stands without re-running any check. Any
         // new byte (continuation, fork, re-sealed hint) changes
         // the fingerprint and forces a fresh replay below.
-        let suffix_fp = match self.chain_fingerprint(
-            tip_sn,
-            &tip_hash,
-            &fresh,
-        ) {
+        let suffix_fp = match self.chain_fingerprint(tip_sn, &tip_hash, &fresh)
+        {
             Some(fp) => fp,
             // Unmeasurable inputs are never cached: replay now,
             // store nothing.
@@ -802,20 +842,17 @@ impl TransferVerifier {
                 );
             }
         };
-        if let Some(hit) = cursors
-            .get_mut(subject_id)
-            .and_then(|cursor| {
-                cursor
-                    .verdicts
-                    .get(&(
-                        transfer_event.sn,
-                        aux_hash.clone(),
-                        tip_hash.clone(),
-                        suffix_fp.clone(),
-                    ))
-                    .copied()
-            })
-        {
+        if let Some(hit) = cursors.get_mut(subject_id).and_then(|cursor| {
+            cursor
+                .verdicts
+                .get(&(
+                    transfer_event.sn,
+                    aux_hash.clone(),
+                    tip_hash.clone(),
+                    suffix_fp.clone(),
+                ))
+                .copied()
+        }) {
             return Some(hit);
         }
         // A genuinely absent continuation only defers: the valid
@@ -883,8 +920,7 @@ impl TransferVerifier {
                 &mut cursor.roles,
             )
             .await;
-        let trust = if skipped_opaque || cursor.trust == CursorTrust::Opaque
-        {
+        let trust = if skipped_opaque || cursor.trust == CursorTrust::Opaque {
             CursorTrust::Opaque
         } else if used_envelope || cursor.trust != CursorTrust::Proven {
             CursorTrust::EnvelopeOnly
@@ -940,12 +976,7 @@ impl TransferVerifier {
             );
         }
         #[cfg(feature = "test")]
-        Self::note_verify_work(
-            ctx,
-            subject_id,
-            fresh.len() as u64,
-            full_load,
-        );
+        Self::note_verify_work(ctx, subject_id, fresh.len() as u64, full_load);
         verdict
     }
 
@@ -1029,9 +1060,14 @@ impl TransferVerifier {
         // exactly what this node already received but could not apply
         // yet for lack of evidence. Anything at or below the applied
         // tip is stale and ignored.
-        combined.extend(buffered.iter().filter(|event| {
-            local_sn.is_none_or(|applied| event.sn > applied)
-        }).cloned());
+        combined.extend(
+            buffered
+                .iter()
+                .filter(|event| {
+                    local_sn.is_none_or(|applied| event.sn > applied)
+                })
+                .cloned(),
+        );
         let buffered_tip = buffered.last().map(|event| event.sn);
         tip = tip.max(buffered_tip);
         // Sender events strictly after the own tip, up to the aux.
@@ -1060,7 +1096,13 @@ impl TransferVerifier {
             RoleDataRegister,
         > = HashMap::new();
         let (proven, refuted, skipped_opaque, used_envelope) = self
-            .verify_chain(ctx, governance_id, &mut cursor, tail, &mut roles_cache)
+            .verify_chain(
+                ctx,
+                governance_id,
+                &mut cursor,
+                tail,
+                &mut roles_cache,
+            )
             .await;
         #[cfg(feature = "test")]
         Self::note_verify_work(
@@ -1114,12 +1156,7 @@ impl TransferVerifier {
             };
             let mut verdicts = HashMap::new();
             verdicts.insert(
-                (
-                    transfer_event.sn,
-                    aux_hash,
-                    tip_hash.clone(),
-                    suffix_fp,
-                ),
+                (transfer_event.sn, aux_hash, tip_hash.clone(), suffix_fp),
                 verdict,
             );
             cursors.store(
@@ -1174,12 +1211,10 @@ impl TransferVerifier {
             properties: &mut ValueWrapper,
             json_patch: ValueWrapper,
         ) -> Result<(), DistributorError> {
-            let json_patch =
-                serde_json::from_value::<Patch>(json_patch.0).map_err(
-                    |e| DistributorError::TransferEventInvalid {
-                        details: format!("patch decode failed: {e}"),
-                    },
-                )?;
+            let json_patch = serde_json::from_value::<Patch>(json_patch.0)
+                .map_err(|e| DistributorError::TransferEventInvalid {
+                    details: format!("patch decode failed: {e}"),
+                })?;
             patch(&mut properties.0, &json_patch).map_err(|e| {
                 DistributorError::TransferEventInvalid {
                     details: format!("patch apply failed: {e}"),
@@ -1198,10 +1233,7 @@ impl TransferVerifier {
             if evaluation.is_ok()
                 && let Some(result) = evaluation.evaluator_response_ok()
             {
-                apply_patch(
-                    &mut cursor.properties,
-                    result.patch.clone(),
-                )?;
+                apply_patch(&mut cursor.properties, result.patch.clone())?;
             }
             cursor.sn = event.sn;
             Ok(())
@@ -1214,37 +1246,37 @@ impl TransferVerifier {
             if event.sn != cursor.sn.saturating_add(1) {
                 break;
             }
-            let (request, evaluation, validation, is_transfer) =
-                match &event.protocols {
-                    Protocols::TrackerFactFull {
-                        event_request,
-                        evaluation,
-                        validation,
-                    } => (event_request, evaluation, validation, false),
-                    Protocols::Transfer {
-                        event_request,
-                        evaluation,
-                        validation,
-                    } => (event_request, evaluation, validation, true),
-                    Protocols::TrackerConfirm { .. }
-                    | Protocols::Reject { .. } => {
-                        cursor.sn = event.sn;
-                        continue;
-                    }
-                    Protocols::TrackerFactOpaque { .. } => {
-                        // Opaque facts carry no properties to replay:
-                        // advance past them without proving so later
-                        // transfers whose evaluation does not depend
-                        // on the hidden patch can still prove. A
-                        // transfer that does depend on it simply will
-                        // not reproduce and stays unproven, never
-                        // refuted on incomplete properties.
-                        cursor.sn = event.sn;
-                        skipped_opaque = true;
-                        continue;
-                    }
-                    _ => break,
-                };
+            let (request, evaluation, validation, is_transfer) = match &event
+                .protocols
+            {
+                Protocols::TrackerFactFull {
+                    event_request,
+                    evaluation,
+                    validation,
+                } => (event_request, evaluation, validation, false),
+                Protocols::Transfer {
+                    event_request,
+                    evaluation,
+                    validation,
+                } => (event_request, evaluation, validation, true),
+                Protocols::TrackerConfirm { .. } | Protocols::Reject { .. } => {
+                    cursor.sn = event.sn;
+                    continue;
+                }
+                Protocols::TrackerFactOpaque { .. } => {
+                    // Opaque facts carry no properties to replay:
+                    // advance past them without proving so later
+                    // transfers whose evaluation does not depend
+                    // on the hidden patch can still prove. A
+                    // transfer that does depend on it simply will
+                    // not reproduce and stays unproven, never
+                    // refuted on incomplete properties.
+                    cursor.sn = event.sn;
+                    skipped_opaque = true;
+                    continue;
+                }
+                _ => break,
+            };
             let roles_key = (
                 event.gov_version,
                 cursor.schema_id.clone(),
@@ -1267,10 +1299,7 @@ impl TransferVerifier {
                     .await
                     {
                         Ok((fetched, _, _)) => {
-                            roles_cache.insert(
-                                roles_key,
-                                fetched.clone(),
-                            );
+                            roles_cache.insert(roles_key, fetched.clone());
                             Some(fetched)
                         }
                         Err(_) => None,
@@ -1334,11 +1363,8 @@ impl TransferVerifier {
                     proven.insert(event.sn);
                 }
                 if let Some(result) = evaluation.evaluator_response_ok()
-                    && apply_patch(
-                        &mut cursor.properties,
-                        result.patch.clone(),
-                    )
-                    .is_err()
+                    && apply_patch(&mut cursor.properties, result.patch.clone())
+                        .is_err()
                 {
                     break;
                 }

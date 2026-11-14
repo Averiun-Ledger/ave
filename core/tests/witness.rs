@@ -9867,8 +9867,7 @@ async fn test_verified_transfer_not_reused_across_senders() {
     let alice = &nodes[1].api;
     let bob = &nodes[2].api;
 
-    let r_keypair =
-        KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
+    let r_keypair = KeyPair::Ed25519(Ed25519Signer::generate().unwrap());
     let r_key = r_keypair.public_key();
     let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
     let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
@@ -11607,10 +11606,7 @@ async fn test_ownership_replay_is_idempotent() {
         .test_witnesses_confirm(&governance_id, subject_id5.clone(), 4, 1)
         .await
         .unwrap();
-    assert_eq!(
-        ownership(alice, &governance_id, &subject_id5).await,
-        before
-    );
+    assert_eq!(ownership(alice, &governance_id, &subject_id5).await, before);
 
     // A new transfer to an already-seen key still opens pending
     // when its sn is new.

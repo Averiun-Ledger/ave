@@ -1589,27 +1589,26 @@ impl Handler<Self> for WitnessesRegister {
                 namespace,
                 schema_id,
             } => {
-                let (new_owner, gov_version, evaluation_ok) =
-                    match (
-                        &transfer_event.protocols,
-                        transfer_event.get_event_request(),
-                    ) {
-                        (
-                            Protocols::Transfer { evaluation, .. },
-                            Some(EventRequest::Transfer(req)),
-                        ) => (
-                            req.new_owner,
-                            transfer_event.gov_version,
-                            evaluation.is_ok(),
-                        ),
-                        _ => {
-                            return Err(ActorError::Functional {
+                let (new_owner, gov_version, evaluation_ok) = match (
+                    &transfer_event.protocols,
+                    transfer_event.get_event_request(),
+                ) {
+                    (
+                        Protocols::Transfer { evaluation, .. },
+                        Some(EventRequest::Transfer(req)),
+                    ) => (
+                        req.new_owner,
+                        transfer_event.gov_version,
+                        evaluation.is_ok(),
+                    ),
+                    _ => {
+                        return Err(ActorError::Functional {
                                 description:
                                     "SimulateTransferHiSnLimit called with non-Transfer event"
                                         .to_string(),
                             });
-                        }
-                    };
+                    }
+                };
 
                 // Si ya tenemos TransferData para este subject (por gobernanza o
                 // batches anteriores), lo usamos como base y solo actualizamos el

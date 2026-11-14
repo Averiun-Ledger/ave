@@ -341,9 +341,7 @@ impl PersistentActor for TransferVerificationRegister {
                             }
                         },
                     )
-                    .or_insert_with(|| {
-                        (*transfer_sn, sender.clone(), false)
-                    });
+                    .or_insert_with(|| (*transfer_sn, sender.clone(), false));
 
                 debug!(
                     event_type = "RecordVerifiedTransfer",
@@ -361,9 +359,7 @@ impl PersistentActor for TransferVerificationRegister {
                 inner
                     .register
                     .entry(subject_id.to_owned())
-                    .or_insert_with(|| {
-                        (*transfer_sn, sender.clone(), true)
-                    });
+                    .or_insert_with(|| (*transfer_sn, sender.clone(), true));
 
                 debug!(
                     event_type = "RecordSpeculativeTransfer",

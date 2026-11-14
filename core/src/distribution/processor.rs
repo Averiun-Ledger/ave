@@ -13,8 +13,8 @@ use crate::model::common::subject::{
     get_subject_path_and_data, update_ledger,
 };
 use crate::model::common::{
-    check_subject_creation, crash_system,
-    record_verified_transfer, remove_verified_transfer,
+    check_subject_creation, crash_system, record_verified_transfer,
+    remove_verified_transfer,
 };
 use crate::{
     distribution::error::DistributorError,
@@ -23,10 +23,8 @@ use crate::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
     governance::{
-        Governance, GovernanceMessage, witnesses_register::TrackerDeliveryMode,
-        sn_register::{
-            SnRegister, SnRegisterMessage, SnRegisterResponse,
-        },
+        Governance, GovernanceMessage,
+        sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         },
@@ -34,6 +32,7 @@ use crate::{
             TransferVerificationRegister, TransferVerificationRegisterMessage,
             TransferVerificationRegisterResponse,
         },
+        witnesses_register::TrackerDeliveryMode,
         witnesses_register::{
             WitnessesRegister, WitnessesRegisterMessage,
             WitnessesRegisterResponse,
@@ -241,10 +240,7 @@ impl DistriWorker {
                     let mut noted = false;
                     while Self::before_apply_paused(ctx) {
                         if !noted {
-                            Self::note_before_apply_hold(
-                                ctx,
-                                dist_ctx.attempt,
-                            );
+                            Self::note_before_apply_hold(ctx, dist_ctx.attempt);
                             noted = true;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(
@@ -378,9 +374,7 @@ impl DistriWorker {
                     .unwrap_or(safe_hi_sn);
                 let chunk_signer = pending_ledger
                     .first()
-                    .map(|event| {
-                        event.ledger_seal_signature.signer.clone()
-                    });
+                    .map(|event| event.ledger_seal_signature.signer.clone());
                 let update_result = update_ledger(
                     ctx,
                     &subject_id,
@@ -495,8 +489,7 @@ impl DistriWorker {
                         // its Create and valid events persisted.
                         if !is_register && !common.is_gov {
                             if let Some(lease) = lease {
-                                if let Err(finish_err) =
-                                    lease.finish(ctx).await
+                                if let Err(finish_err) = lease.finish(ctx).await
                                 {
                                     warn!(
                                         msg_type = "LedgerDistribution",
@@ -550,12 +543,8 @@ impl DistriWorker {
                 // ran. Stale duplicates (already registered) record
                 // nothing.
                 if !is_register {
-                    Self::note_copy_success(
-                        ctx,
-                        &subject_id,
-                        dist_ctx.attempt,
-                    )
-                    .await;
+                    Self::note_copy_success(ctx, &subject_id, dist_ctx.attempt)
+                        .await;
                 }
 
                 if !remaining_ledger.is_empty() {
@@ -646,8 +635,9 @@ impl DistriWorker {
         #[cfg(feature = "test")]
         {
             use crate::helpers::network::test_faults::SharedFaultRegistry;
-            if let Some(registry) =
-                _ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            if let Some(registry) = _ctx
+                .system()
+                .get_helper::<SharedFaultRegistry>("test_faults")
             {
                 if let Ok(mut faults) = registry.lock() {
                     faults.note_rollback_skip();
@@ -761,9 +751,7 @@ impl DistriWorker {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.rollback_paused()
-                })
+                registry.lock().ok().map(|faults| faults.rollback_paused())
             })
             .unwrap_or(false)
     }
@@ -781,9 +769,10 @@ impl DistriWorker {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.before_apply_paused()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.before_apply_paused())
             })
             .unwrap_or(false)
     }
@@ -791,14 +780,12 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn note_before_apply_hold(ctx: &ActorContext<Self>, attempt: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
-            faults.note_before_apply_hold(
-                attempt,
-                ctx.path().to_string(),
-            );
+            faults.note_before_apply_hold(attempt, ctx.path().to_string());
         }
     }
 
@@ -808,8 +795,9 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn note_rollback_hold(ctx: &ActorContext<Self>) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_rollback_hold();
@@ -839,8 +827,7 @@ impl DistriWorker {
                     Self::note_rollback_hold(ctx);
                     noted = true;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
         // Someone else is mid-copy: only our lease was released
@@ -947,10 +934,13 @@ impl DistriWorker {
         // it from the store to purge the persisted prefix. A live
         // tracker means someone else is using it; the gates below
         // spare it.
-        let tracker_path = ActorPath::from(format!(
-            "/user/node/subject_manager/{subject_id}"
-        ));
-        if ctx.system().get_actor::<Tracker>(&tracker_path).await.is_err()
+        let tracker_path =
+            ActorPath::from(format!("/user/node/subject_manager/{subject_id}"));
+        if ctx
+            .system()
+            .get_actor::<Tracker>(&tracker_path)
+            .await
+            .is_err()
         {
             match ctx
                 .system()
@@ -992,53 +982,49 @@ impl DistriWorker {
                 }
             }
         }
-        let tracker = match ctx.system().get_actor::<Tracker>(&tracker_path).await
-        {
-            Ok(tracker) => tracker,
-            Err(error) => {
-                warn!(
-                    msg_type = "LedgerDistribution",
-                    subject_id = %subject_id,
-                    error = %error,
-                    "Tracker unavailable for rollback",
-                );
-                Self::note_rollback_skip(ctx).await;
-                Self::finish_rollback_up(ctx, subject_id).await;
-                return;
-            }
-        };
-        let (current_sn, current_owner, current_pending) = match tracker
-            .ask(TrackerMessage::GetMetadata)
-            .await
-        {
-            Ok(TrackerResponse::Metadata(meta)) => (
-                meta.sn,
-                meta.owner.clone(),
-                meta.new_owner.clone(),
-            ),
-            Ok(other) => {
-                warn!(
-                    msg_type = "LedgerDistribution",
-                    subject_id = %subject_id,
-                    response = ?other,
-                    "Unexpected metadata response on rollback",
-                );
-                Self::note_rollback_skip(ctx).await;
-                Self::finish_rollback_up(ctx, subject_id).await;
-                return;
-            }
-            Err(error) => {
-                warn!(
-                    msg_type = "LedgerDistribution",
-                    subject_id = %subject_id,
-                    error = %error,
-                    "Metadata unreadable for rollback",
-                );
-                Self::note_rollback_skip(ctx).await;
-                Self::finish_rollback_up(ctx, subject_id).await;
-                return;
-            }
-        };
+        let tracker =
+            match ctx.system().get_actor::<Tracker>(&tracker_path).await {
+                Ok(tracker) => tracker,
+                Err(error) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Tracker unavailable for rollback",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+            };
+        let (current_sn, current_owner, current_pending) =
+            match tracker.ask(TrackerMessage::GetMetadata).await {
+                Ok(TrackerResponse::Metadata(meta)) => {
+                    (meta.sn, meta.owner.clone(), meta.new_owner.clone())
+                }
+                Ok(other) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        response = ?other,
+                        "Unexpected metadata response on rollback",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        msg_type = "LedgerDistribution",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Metadata unreadable for rollback",
+                    );
+                    Self::note_rollback_skip(ctx).await;
+                    Self::finish_rollback_up(ctx, subject_id).await;
+                    return;
+                }
+            };
         if current_sn >= chunk_tip_sn {
             warn!(
                 msg_type = "LedgerDistribution",
@@ -1052,9 +1038,9 @@ impl DistriWorker {
             return;
         }
         if current_pending.is_some()
-            || baseline_owner.as_ref().is_some_and(|baseline| {
-                baseline != &current_owner
-            })
+            || baseline_owner
+                .as_ref()
+                .is_some_and(|baseline| baseline != &current_owner)
         {
             warn!(
                 msg_type = "LedgerDistribution",
@@ -1105,12 +1091,8 @@ impl DistriWorker {
         Self::finish_rollback_up(ctx, subject_id).await;
         // The failed attempt left no transfer proof behind: drop any
         // anyway so a rejected batch never opens future passage.
-        if let Err(error) = remove_verified_transfer(
-            ctx,
-            governance_id,
-            subject_id,
-        )
-        .await
+        if let Err(error) =
+            remove_verified_transfer(ctx, governance_id, subject_id).await
         {
             warn!(
                 msg_type = "LedgerDistribution",
@@ -1119,8 +1101,7 @@ impl DistriWorker {
                 "Failed to drop transfer proof on rollback",
             );
         }
-        let gov_path =
-            format!("/user/node/subject_manager/{governance_id}");
+        let gov_path = format!("/user/node/subject_manager/{governance_id}");
         match ctx
             .system()
             .get_actor::<SubjectRegister>(&ActorPath::from(format!(
@@ -1543,8 +1524,7 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let subject_id = ledger.get_subject_id();
         let sn = ledger.sn;
-        let attempt =
-            self.attempt_clock.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1738,8 +1718,7 @@ impl DistriWorker {
 
             match update_result {
                 Ok((last_sn, _, _)) if last_sn < ledger.sn => {
-                    Self::note_copy_success(ctx, &subject_id, attempt)
-                        .await;
+                    Self::note_copy_success(ctx, &subject_id, attempt).await;
                     debug!(
                         msg_type = "LastEventDistribution",
                         subject_id = %subject_id,
@@ -1792,8 +1771,7 @@ impl DistriWorker {
                     return Ok(());
                 }
                 Ok((..)) => {
-                    Self::note_copy_success(ctx, &subject_id, attempt)
-                        .await;
+                    Self::note_copy_success(ctx, &subject_id, attempt).await;
                     lease
                 }
                 Err(e) => {

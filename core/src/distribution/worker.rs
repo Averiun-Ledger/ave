@@ -29,8 +29,8 @@ use crate::{
     model::{
         common::{
             OwnerContext, TrackerIdentity, TrackerParams, TrackerPeers,
-            check_witness_status, crash_system,
-            get_verified_transfer_sn_firm, node::get_subject_data,
+            check_witness_status, crash_system, get_verified_transfer_sn_firm,
+            node::get_subject_data,
             subject::{
                 acquire_subject, check_witness_status_and_window, get_gov_sn,
                 get_local_subject_sn,
@@ -615,9 +615,10 @@ impl DistriWorker {
             for event in ledger.iter().filter(|e| {
                 matches!(e.get_event_request_type(), EventRequestType::Transfer)
             }) {
-                let prev = event.sn.checked_sub(1).and_then(|prev_sn| {
-                    by_sn.get(&prev_sn).copied()
-                });
+                let prev = event
+                    .sn
+                    .checked_sub(1)
+                    .and_then(|prev_sn| by_sn.get(&prev_sn).copied());
                 self.transfer_verifier
                     .verify_light(
                         ctx,
@@ -673,8 +674,7 @@ impl DistriWorker {
                         {
                             use crate::evaluation::response::EvaluatorError;
                             evaluation.response = EvaluationResponse::Error {
-                                result:
-                                    EvaluatorError::InvalidEventSignature,
+                                result: EvaluatorError::InvalidEventSignature,
                                 result_hash: DigestIdentifier::default(),
                             };
                         }
@@ -810,11 +810,8 @@ impl DistriWorker {
             // plus simulation, not simulation alone. An unproven aux
             // grants nothing and fails closed without writing; a
             // refuted one rolls back and fails.
-            let single_buffered = self
-                .deferred
-                .get(&subject_id)
-                .cloned()
-                .unwrap_or_default();
+            let single_buffered =
+                self.deferred.get(&subject_id).cloned().unwrap_or_default();
             match self
                 .transfer_verifier
                 .verify_and_simulate(
@@ -1352,10 +1349,13 @@ impl DistriWorker {
     /// subject, if any. Deferred batches never count as applied
     /// state; they only let the receiver ask for the continuation
     /// instead of replaying what it already holds.
-    pub(crate) fn deferred_tip(&self, subject_id: &DigestIdentifier) -> Option<u64> {
-        self.deferred.get(subject_id).and_then(|buffered| {
-            buffered.last().map(|event| event.sn)
-        })
+    pub(crate) fn deferred_tip(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Option<u64> {
+        self.deferred
+            .get(subject_id)
+            .and_then(|buffered| buffered.last().map(|event| event.sn))
     }
 
     /// Stages a batch whose aux can not be checked yet: it is held
@@ -1388,9 +1388,8 @@ impl DistriWorker {
         applied_tip: Option<u64>,
     ) -> Vec<Ledger> {
         if let Some(buffered) = self.deferred.get_mut(subject_id) {
-            buffered.retain(|event| {
-                applied_tip.is_none_or(|tip| event.sn > tip)
-            });
+            buffered
+                .retain(|event| applied_tip.is_none_or(|tip| event.sn > tip));
             buffered.sort_by_key(|event| event.sn);
             if buffered.is_empty() {
                 self.deferred.remove(subject_id);
@@ -1422,7 +1421,7 @@ impl DistriWorker {
                     &governance_id,
                     subject_id,
                 )
-                    .await
+                .await
                 {
                     Ok(v) => v,
                     Err(e) => {
@@ -1437,11 +1436,7 @@ impl DistriWorker {
                 }
             }
             Some(SubjectData::Governance { .. }) => {
-                match get_verified_transfer_sn_firm(
-                    ctx,
-                    subject_id,
-                    subject_id,
-                )
+                match get_verified_transfer_sn_firm(ctx, subject_id, subject_id)
                     .await
                 {
                     Ok(v) => v,
@@ -1730,8 +1725,7 @@ impl DistriWorker {
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
-        {
-        }
+        {}
         if ledger.is_empty() {
             warn!(
                 msg_type = "LedgerDistribution",
@@ -1797,8 +1791,7 @@ impl DistriWorker {
         let subject_id = ledger[0].get_subject_id();
         let ledger_count = ledger.len();
         let first_sn = ledger[0].sn;
-        let attempt =
-            self.attempt_clock.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1824,20 +1817,17 @@ impl DistriWorker {
             && self.deferred.contains_key(&subject_id)
             && let Ok(None) = get_subject_data(ctx, &subject_id).await
         {
-            let applied = get_local_subject_sn(ctx, &subject_id)
-                .await
-                .ok()
-                .flatten();
+            let applied =
+                get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
             let held = self.deferred_prefix(&subject_id, applied);
             if !held.is_empty()
-                && held.last().is_some_and(|last| {
-                    last.sn.saturating_add(1) == first_sn
-                })
+                && held
+                    .last()
+                    .is_some_and(|last| last.sn.saturating_add(1) == first_sn)
             {
                 let mut combined = held;
                 for event in &ledger {
-                    if !combined.iter().any(|staged| staged.sn == event.sn)
-                    {
+                    if !combined.iter().any(|staged| staged.sn == event.sn) {
                         combined.push(event.clone());
                     }
                 }
@@ -1867,10 +1857,8 @@ impl DistriWorker {
                 }
                 // Deferred batches held for this subject count as
                 // prefix when rechecking the aux below.
-                let applied_tip = get_local_subject_sn(ctx, &subject_id)
-                    .await
-                    .ok()
-                    .flatten();
+                let applied_tip =
+                    get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
                 let buffered = self.deferred_prefix(&subject_id, applied_tip);
                 match self
                     .transfer_verifier
@@ -1936,10 +1924,8 @@ impl DistriWorker {
             == Some(TransferSimulationResult::WitnessUnproven)
         {
             let auth_ledger = combined_auth.as_ref().unwrap_or(&ledger);
-            let offered_hi = auth_ledger
-                .last()
-                .map(|event| event.sn)
-                .unwrap_or(first_sn);
+            let offered_hi =
+                auth_ledger.last().map(|event| event.sn).unwrap_or(first_sn);
             let without_aux = self
                 .check_auth_batch(
                     ctx,
@@ -1959,13 +1945,10 @@ impl DistriWorker {
             if prefix_open {
                 transfer_simulation = None;
             } else {
-                let applied_tip = get_local_subject_sn(ctx, &subject_id)
-                    .await
-                    .ok()
-                    .flatten();
+                let applied_tip =
+                    get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
                 self.stage_deferred(&subject_id, ledger, applied_tip);
-                let from_sn =
-                    applied_tip.max(self.deferred_tip(&subject_id));
+                let from_sn = applied_tip.max(self.deferred_tip(&subject_id));
                 self.request_ledger_from_sender(
                     ctx,
                     &subject_id,
@@ -2099,9 +2082,7 @@ pub enum DistriWorkerMessage {
     /// (`empty == true`), exercising the fail-closed receipt paths.
     /// One-shot and local to this worker; production never sets it.
     #[cfg(feature = "test")]
-    TestFailNextModes {
-        empty: bool,
-    },
+    TestFailNextModes { empty: bool },
 }
 
 impl Message for DistriWorkerMessage {}
@@ -2265,10 +2246,8 @@ impl Handler<Self> for DistriWorker {
             #[cfg(feature = "test")]
             DistriWorkerMessage::TestFailNextModes { empty } => {
                 let code = u8::from(empty) + 1;
-                self.test_modes_fault.store(
-                    code,
-                    std::sync::atomic::Ordering::SeqCst,
-                );
+                self.test_modes_fault
+                    .store(code, std::sync::atomic::Ordering::SeqCst);
                 debug!(
                     msg_type = "TestFailNextModes",
                     empty = empty,

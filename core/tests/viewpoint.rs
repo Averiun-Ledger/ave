@@ -23,10 +23,10 @@ use ave_core::governance::{
     data::GovernanceData,
     model::{CreatorWitness, RoleCreator},
 };
-use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::helpers::network::test_faults::{
     FaultAction, FaultDirection, FaultMessage, FaultRule,
 };
+use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, EXAMPLE_CONTRACT,
@@ -11394,7 +11394,9 @@ async fn hash_wit_first_copy_fixture() -> (
             ]
         }
     });
-    emit_fact(&owner, governance_id.clone(), json, true).await.unwrap();
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
 
     let (subject_id, _) =
         create_subject(&alice, governance_id.clone(), "Example", "", true)
@@ -11409,7 +11411,9 @@ async fn hash_wit_first_copy_fixture() -> (
     )
     .await
     .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     let full = alice
         .test_get_tracker_ledger(subject_id.clone(), 1)
         .await
@@ -11438,10 +11442,11 @@ async fn hash_wit_first_copy_fixture() -> (
     .await
     .unwrap();
     wit.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&wit, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&wit, governance_id.clone(), None, true)
+        .await
+        .unwrap();
 
-    let from_key =
-        PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+    let from_key = PublicKey::from_str(nodes[1].api.public_key()).unwrap();
     (nodes, node_w, governance_id, subject_id, full, from_key)
 }
 
@@ -11453,9 +11458,7 @@ async fn test_receipt_batch_modes_failure_drops_full() {
         hash_wit_first_copy_fixture().await;
     let wit = node_w.api.clone();
 
-    wit.test_fail_next_tracker_delivery_modes()
-        .await
-        .unwrap();
+    wit.test_fail_next_tracker_delivery_modes().await.unwrap();
     let receiver_key = PublicKey::from_str(wit.public_key()).unwrap();
     wit.test_inject_inbound(
         NetworkMessage::new(
@@ -11521,9 +11524,7 @@ async fn test_receipt_batch_empty_modes_drops_full() {
         hash_wit_first_copy_fixture().await;
     let wit = node_w.api.clone();
 
-    wit.test_empty_next_tracker_delivery_modes()
-        .await
-        .unwrap();
+    wit.test_empty_next_tracker_delivery_modes().await.unwrap();
     let receiver_key = PublicKey::from_str(wit.public_key()).unwrap();
     wit.test_inject_inbound(
         NetworkMessage::new(
@@ -11618,9 +11619,7 @@ async fn test_receipt_push_modes_failure_drops_full() {
         .await
         .unwrap();
 
-    wit.test_fail_next_tracker_delivery_modes()
-        .await
-        .unwrap();
+    wit.test_fail_next_tracker_delivery_modes().await.unwrap();
     wit.test_inject_inbound(
         NetworkMessage::new(
             ComunicateInfo {
@@ -11715,11 +11714,11 @@ async fn test_receipt_push_empty_modes_drops_full() {
     )
     .await
     .unwrap();
-    get_subject(&wit, subject_id.clone(), Some(0), true).await.unwrap();
-
-    wit.test_empty_next_tracker_delivery_modes()
+    get_subject(&wit, subject_id.clone(), Some(0), true)
         .await
         .unwrap();
+
+    wit.test_empty_next_tracker_delivery_modes().await.unwrap();
     wit.test_inject_inbound(
         NetworkMessage::new(
             ComunicateInfo {

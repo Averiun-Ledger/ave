@@ -1207,9 +1207,7 @@ async fn remote_failed_transfer_is_copyable_with_direct_rights() {
             address: vec![boot_addr.clone()],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            zed_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(zed_signer)),
         ..Default::default()
     })
     .await;
@@ -1410,9 +1408,7 @@ async fn remote_failed_transfer_is_copyable_with_direct_rights() {
             address: vec![boot_addr],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            rita_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
         ..Default::default()
     })
     .await;
@@ -1817,7 +1813,9 @@ async fn remote_forged_evaluation_transfer_leaves_no_prefix() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -2212,7 +2210,9 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), false)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -2294,15 +2294,14 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
         .await
@@ -2318,8 +2317,7 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
         is_all: bool,
         hint: Option<Ledger>,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -2455,12 +2453,9 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
         .await
         .unwrap();
     assert_eq!(
-        rita.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap(),
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
         Some((2, alice_key.clone())),
         "the genuine hint must record its proof with the prefix"
     );
@@ -2514,13 +2509,10 @@ async fn remote_forged_external_aux_grants_nothing_without_evidence() {
     // The passage proof is consumed once the genuine transfer it
     // opened is applied: nothing must remain, forged or otherwise.
     assert!(
-        rita.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "no transfer proof may remain after the transfer applied"
     );
     match rita
@@ -2712,7 +2704,9 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
     emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
 
     // Bob copies through the first transfer, confirms it and moves
     // the subject on to Carol.
@@ -2726,12 +2720,18 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
     .await
     .unwrap();
     bob.update_subject(subject_id.clone()).await.unwrap();
-    get_subject(&bob, subject_id.clone(), Some(2), true).await.unwrap();
-    emit_confirm(&bob, subject_id.clone(), None, true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     emit_transfer(&bob, subject_id.clone(), carol_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&bob, subject_id.clone(), Some(4), true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
     let chain = bob
         .test_get_tracker_ledger(subject_id.clone(), 4)
         .await
@@ -2761,9 +2761,7 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
             address: vec![boot_addr.clone()],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            carol_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(carol_signer)),
         ..Default::default()
     })
     .await;
@@ -2782,8 +2780,7 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
     get_subject(&carol, governance_id.clone(), Some(gov_sn), true)
         .await
         .unwrap();
-    let carol_public =
-        PublicKey::from_str(carol.public_key()).unwrap();
+    let carol_public = PublicKey::from_str(carol.public_key()).unwrap();
     for api in [&alice, &bob] {
         for message in [
             FaultMessage::DistributionLedgerRes,
@@ -2831,20 +2828,15 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
                 Some(bob_key_public.clone()),
                 "the Confirm must install Bob before the stall"
             );
-            assert_eq!(
-                pending, None,
-                "the second transfer is not applied yet"
-            );
+            assert_eq!(pending, None, "the second transfer is not applied yet");
         }
     }
     assert!(
-        carol.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        carol
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "no transfer proof may appear without an aux"
     );
     node_running(&carol).await.unwrap();
@@ -2899,13 +2891,11 @@ async fn remote_confirm_chain_copies_through_second_transfer() {
         }
     }
     assert!(
-        carol.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        carol
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "inline transfers need no recorded proof"
     );
     node_running(&carol).await.unwrap();
@@ -3083,7 +3073,9 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
     emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
 
     // Bob copies through the first transfer and rejects it, so the
     // ownership falls back to Alice.
@@ -3094,17 +3086,25 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
     .await
     .unwrap();
     bob.update_subject(subject_id.clone()).await.unwrap();
-    get_subject(&bob, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     emit_reject(&bob, subject_id.clone(), true).await.unwrap();
-    get_subject(&bob, subject_id.clone(), Some(3), true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
 
     // Alice learns the rejection and moves the subject on to Carol.
     alice.update_subject(subject_id.clone()).await.unwrap();
-    get_subject(&alice, subject_id.clone(), Some(3), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
     emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(4), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
     let chain = alice
         .test_get_tracker_ledger(subject_id.clone(), 4)
         .await
@@ -3135,9 +3135,7 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
             address: vec![boot_addr.clone()],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            carol_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(carol_signer)),
         ..Default::default()
     })
     .await;
@@ -3156,8 +3154,7 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
     get_subject(&carol, governance_id.clone(), Some(gov_sn), true)
         .await
         .unwrap();
-    let carol_public =
-        PublicKey::from_str(carol.public_key()).unwrap();
+    let carol_public = PublicKey::from_str(carol.public_key()).unwrap();
     for api in [&alice, &bob] {
         for message in [
             FaultMessage::DistributionLedgerRes,
@@ -3205,20 +3202,15 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
                 Some(alice_key.clone()),
                 "the Reject must give the subject back to Alice"
             );
-            assert_eq!(
-                pending, None,
-                "the second transfer is not applied yet"
-            );
+            assert_eq!(pending, None, "the second transfer is not applied yet");
         }
     }
     assert!(
-        carol.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        carol
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "no transfer proof may appear without an aux"
     );
     node_running(&carol).await.unwrap();
@@ -3273,18 +3265,18 @@ async fn remote_reject_chain_copies_without_confusing_ownership() {
         }
     }
     assert!(
-        carol.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        carol
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "inline transfers need no recorded proof"
     );
     // Carol confirms on her own node: the chain stays consistent
     // past the copy.
-    emit_confirm(&carol, subject_id.clone(), None, true).await.unwrap();
+    emit_confirm(&carol, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     get_subject(&carol, subject_id.clone(), Some(5), true)
         .await
         .unwrap();
@@ -3471,7 +3463,9 @@ async fn remote_versioned_chain_copies_across_gov_versions() {
     emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -3506,9 +3500,7 @@ async fn remote_versioned_chain_copies_across_gov_versions() {
             address: vec![boot_addr.clone()],
         }],
         always_accept: true,
-        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(
-            carol_signer,
-        )),
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(carol_signer)),
         ..Default::default()
     })
     .await;
@@ -3527,8 +3519,7 @@ async fn remote_versioned_chain_copies_across_gov_versions() {
     get_subject(&carol, governance_id.clone(), Some(gov_sn), true)
         .await
         .unwrap();
-    let carol_public =
-        PublicKey::from_str(carol.public_key()).unwrap();
+    let carol_public = PublicKey::from_str(carol.public_key()).unwrap();
     for api in [&alice, &owner] {
         for message in [
             FaultMessage::DistributionLedgerRes,
@@ -3589,13 +3580,11 @@ async fn remote_versioned_chain_copies_across_gov_versions() {
         }
     }
     assert!(
-        carol.test_get_verified_transfer_sn(
-            &governance_id,
-            subject_id.clone()
-        )
-        .await
-        .unwrap()
-        .is_none(),
+        carol
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
         "inline transfers need no recorded proof"
     );
     node_running(&carol).await.unwrap();
@@ -3754,7 +3743,9 @@ async fn remote_opaque_fact_blocks_passage_but_not_rightful_copy() {
     emit_transfer(&alice, subject_id.clone(), erin_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -3858,8 +3849,7 @@ async fn remote_opaque_fact_blocks_passage_but_not_rightful_copy() {
         from: &PublicKey,
         ledger: Vec<Ledger>,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -4170,7 +4160,9 @@ async fn remote_rollback_keeps_concurrent_valid_copy() {
     emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -4411,10 +4403,6 @@ async fn remote_rollback_keeps_concurrent_valid_copy() {
     drop(w_dirs);
 }
 
-
-
-
-
 #[test(tokio::test)]
 async fn remote_rollback_keeps_concurrent_valid_create() {
     let (mut nodes, dirs) =
@@ -4528,7 +4516,9 @@ async fn remote_rollback_keeps_concurrent_valid_create() {
     emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -4734,7 +4724,9 @@ async fn remote_rollback_keeps_concurrent_valid_create() {
         "the stale attempt must differ from the valid one"
     );
     assert_eq!(
-        w.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        w.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         false,
         "B must have released its lease before A resumes"
     );
@@ -4986,7 +4978,9 @@ async fn remote_single_transfer_without_evidence_writes_nothing() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -5061,15 +5055,14 @@ async fn remote_single_transfer_without_evidence_writes_nothing() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
         .await
@@ -5079,46 +5072,39 @@ async fn remote_single_transfer_without_evidence_writes_nothing() {
     // Genuine prefix through the batch path: Rita reaches sn 1
     // with direct rights, so the later single push is contiguous.
     inject_ledger_batch(&rita, &alice_key, vec![create, fact], None).await;
-    get_subject(&rita, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&rita, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // Forged single push: contiguous but refuted, so it must fail
     // closed with no write and no proof behind.
     let rita_push_key = PublicKey::from_str(rita.public_key()).unwrap();
-    rita
-        .test_inject_inbound(
-            NetworkMessage::new(
-                ComunicateInfo {
-                    request_id: String::new(),
-                    version: 0,
-                    receiver: rita_push_key.clone(),
-                    receiver_actor: "/user/node/distributor".to_owned(),
-                },
-                ActorMessage::DistributionLastEventReq {
-                    ledger: Box::new(forged),
-                },
-            ),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    rita.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: rita_push_key.clone(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(forged),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
     for _ in 0..30 {
         assert_eq!(
-            rita
-                .get_subject_state(subject_id.clone())
-                .await
-                .unwrap()
-                .sn,
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
             1,
             "forged single push must not advance the copy"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
-                subject_id.clone()
-            )
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap()
             .is_none(),
@@ -5127,24 +5113,25 @@ async fn remote_single_transfer_without_evidence_writes_nothing() {
     node_running(&rita).await.unwrap();
 
     // Genuine single push still completes the copy afterwards.
-    rita
-        .test_inject_inbound(
-            NetworkMessage::new(
-                ComunicateInfo {
-                    request_id: String::new(),
-                    version: 0,
-                    receiver: rita_push_key,
-                    receiver_actor: "/user/node/distributor".to_owned(),
-                },
-                ActorMessage::DistributionLastEventReq {
-                    ledger: Box::new(transfer),
-                },
-            ),
-            &alice_key,
-        )
+    rita.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: rita_push_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(transfer),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&rita, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
-    get_subject(&rita, subject_id.clone(), Some(2), true).await.unwrap();
     node_running(&rita).await.unwrap();
 
     for node in nodes.iter_mut() {
@@ -5270,7 +5257,9 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -5312,8 +5301,7 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
             let mut result = evaluation
                 .evaluator_response_ok()
                 .expect("transfer evaluation ok");
-            result.patch =
-                ave_common::ValueWrapper(json!("unappliable"));
+            result.patch = ave_common::ValueWrapper(json!("unappliable"));
             evaluation.response = EvaluationResponse::Ok {
                 result,
                 result_hash: old_hash,
@@ -5349,15 +5337,14 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
         .await
@@ -5367,7 +5354,9 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
     // Genuine prefix through the batch path: Rita reaches sn 1
     // with direct rights, so the later single push is contiguous.
     inject_ledger_batch(&rita, &alice_key, vec![create, fact], None).await;
-    get_subject(&rita, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&rita, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // Move governance past the transfer version: the register
     // only serves current roles, so the v1 evidence can no
@@ -5426,41 +5415,32 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
     // nor refutable, so it must fail closed with no write and
     // no proof behind.
     let rita_push_key = PublicKey::from_str(rita.public_key()).unwrap();
-    rita
-        .test_inject_inbound(
-            NetworkMessage::new(
-                ComunicateInfo {
-                    request_id: String::new(),
-                    version: 0,
-                    receiver: rita_push_key.clone(),
-                    receiver_actor: "/user/node/distributor".to_owned(),
-                },
-                ActorMessage::DistributionLastEventReq {
-                    ledger: Box::new(forged),
-                },
-            ),
-            &alice_key,
-        )
-        .await
-        .unwrap();
+    rita.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: rita_push_key.clone(),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(forged),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
     for _ in 0..30 {
         assert_eq!(
-            rita
-                .get_subject_state(subject_id.clone())
-                .await
-                .unwrap()
-                .sn,
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
             1,
             "unproven single push must not advance the copy"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
-                subject_id.clone()
-            )
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap()
             .is_none(),
@@ -5488,24 +5468,25 @@ async fn remote_single_transfer_with_unjudgeable_evidence_writes_nothing() {
     // Genuine single push still completes the copy afterwards:
     // its evidence advances the cursor without proving, which
     // opens passage exactly like the apply path trusts it.
-    rita
-        .test_inject_inbound(
-            NetworkMessage::new(
-                ComunicateInfo {
-                    request_id: String::new(),
-                    version: 0,
-                    receiver: rita_push_key,
-                    receiver_actor: "/user/node/distributor".to_owned(),
-                },
-                ActorMessage::DistributionLastEventReq {
-                    ledger: Box::new(transfer),
-                },
-            ),
-            &alice_key,
-        )
+    rita.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: rita_push_key,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(transfer),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&rita, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
-    get_subject(&rita, subject_id.clone(), Some(2), true).await.unwrap();
     let copied = rita
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -5667,7 +5648,9 @@ async fn remote_silenced_aux_leaves_no_trace_across_restart() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -5742,15 +5725,14 @@ async fn remote_silenced_aux_leaves_no_trace_across_restart() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), Some(gov_sn), true)
         .await
@@ -5802,8 +5784,7 @@ async fn remote_silenced_aux_leaves_no_trace_across_restart() {
         is_all: bool,
         hint: Option<Ledger>,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -6086,7 +6067,9 @@ async fn remote_incremental_verification_stays_linear() {
     get_subject(&bob, subject_id.clone(), Some(13), true)
         .await
         .unwrap();
-    emit_confirm(&bob, subject_id.clone(), None, true).await.unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     for _ in 0..2 {
         emit_fact(
             &bob,
@@ -6132,8 +6115,7 @@ async fn remote_incremental_verification_stays_linear() {
         is_all: bool,
         hint: &Ledger,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -6176,15 +6158,14 @@ async fn remote_incremental_verification_stays_linear() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), None, true)
         .await
@@ -6219,11 +6200,7 @@ async fn remote_incremental_verification_stays_linear() {
         .await
         .unwrap();
     assert_eq!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
-                subject_id.clone()
-            )
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap(),
         Some((17, bob_public.clone())),
@@ -6268,11 +6245,7 @@ async fn remote_incremental_verification_stays_linear() {
         "the pending transfer must stay applied"
     );
     assert!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
-                subject_id.clone()
-            )
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap()
             .is_none(),
@@ -6362,14 +6335,8 @@ async fn remote_incremental_verification_stays_linear() {
         processed <= bound,
         "processed {processed} events over a {chain_len}-event chain"
     );
-    inject_with_hint(
-        &w,
-        &bob_public,
-        vec![transfer.clone()],
-        true,
-        &transfer,
-    )
-    .await;
+    inject_with_hint(&w, &bob_public, vec![transfer.clone()], true, &transfer)
+        .await;
     get_subject(&w, subject_id.clone(), Some(17), true)
         .await
         .unwrap();
@@ -6515,7 +6482,9 @@ async fn remote_repeated_aux_reuses_verdict() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -6567,8 +6536,7 @@ async fn remote_repeated_aux_reuses_verdict() {
             .unwrap(),
     };
     let seal = forged_seal(&forged);
-    forged.ledger_seal_signature =
-        Signature::new(&seal, &alice_keys).unwrap();
+    forged.ledger_seal_signature = Signature::new(&seal, &alice_keys).unwrap();
 
     // Same bytes, different result hash: still checkable and
     // still wrong, but a different hint that must re-verify.
@@ -6603,15 +6571,14 @@ async fn remote_repeated_aux_reuses_verdict() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), None, true)
         .await
@@ -6624,7 +6591,9 @@ async fn remote_repeated_aux_reuses_verdict() {
         .expect("create event")
         .clone();
     inject_ledger_batch(&rita, &alice_key, vec![create, fact], None).await;
-    get_subject(&rita, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&rita, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     // Single pushes go straight at the node-level distributor.
     async fn inject_single(
@@ -6632,8 +6601,7 @@ async fn remote_repeated_aux_reuses_verdict() {
         from: &PublicKey,
         ledger: Ledger,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -6661,20 +6629,20 @@ async fn remote_repeated_aux_reuses_verdict() {
     ) {
         for _ in 0..30 {
             assert_eq!(
-                api.get_subject_state(subject_id.clone())
-                    .await
-                    .unwrap()
-                    .sn,
+                api.get_subject_state(subject_id.clone()).await.unwrap().sn,
                 1,
                 "a refuted single must not advance the copy"
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         assert!(
-            api.test_get_verified_transfer_sn(governance_id, subject_id.clone())
-                .await
-                .unwrap()
-                .is_none(),
+            api.test_get_verified_transfer_sn(
+                governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "no transfer proof may persist from a refuted single"
         );
         match api
@@ -6734,7 +6702,9 @@ async fn remote_repeated_aux_reuses_verdict() {
     );
     // The genuine single still completes the copy afterwards.
     inject_single(&rita, &alice_key, transfer.clone()).await;
-    get_subject(&rita, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&rita, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     node_running(&rita).await.unwrap();
 
     for node in nodes.iter_mut() {
@@ -6863,7 +6833,9 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
     emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
         .await
         .unwrap();
-    get_subject(&alice, subject_id.clone(), Some(3), true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
     let history = alice
         .test_get_tracker_ledger(subject_id.clone(), 3)
         .await
@@ -6928,15 +6900,14 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            ave_core::auth::AuthWitness::One(
-                PublicKey::from_str(owner.public_key()).unwrap(),
-            ),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), None, true)
         .await
@@ -6965,8 +6936,7 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
         is_all: bool,
         hint: &Ledger,
     ) {
-        let receiver =
-            PublicKey::from_str(api.public_key()).expect("node key");
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
         api.test_inject_inbound(
             NetworkMessage::new(
                 ComunicateInfo {
@@ -7042,14 +7012,8 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
     // authoritative prefix instead of continuing from it; the
     // rebuild still verifies, the apply backstop still rejects
     // the bad link, and nothing persists.
-    inject_with_hint(
-        &rita,
-        &alice_key,
-        vec![forked.clone()],
-        false,
-        &transfer,
-    )
-    .await;
+    inject_with_hint(&rita, &alice_key, vec![forked.clone()], false, &transfer)
+        .await;
     assert_no_trace(&rita, &governance_id, &subject_id).await;
     assert_eq!(
         rita.test_verify_stats(subject_id.clone()).await.unwrap(),
@@ -7081,11 +7045,7 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
         "rebuilding the genuine prefix replays it once more"
     );
     assert_eq!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
-                subject_id.clone()
-            )
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap(),
         Some((3, alice_key.clone())),
@@ -7105,7 +7065,8 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
     get_subject(&rita, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
-    let copied = rita.test_get_tracker_ledger(subject_id.clone(), 3)
+    let copied = rita
+        .test_get_tracker_ledger(subject_id.clone(), 3)
         .await
         .unwrap();
     assert_eq!(copied.len(), 4);
@@ -7124,11 +7085,383 @@ async fn remote_divergent_branch_rebuilds_without_reusing_cursor() {
         "the tail is covered by the recorded proof, no replay needed"
     );
     assert!(
-        rita
-            .test_get_verified_transfer_sn(
-                &governance_id,
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// Suffix replays ignore exact re-sends and refuse conflicting
+/// ones: a re-sent tip or an already covered fact never replays
+/// nor stalls the copy, while the same SN with different bytes
+/// invalidates the cursor and rebuilds authoritatively instead
+/// of borrowing the forged bytes. The genuine chain still
+/// completes afterwards with proof recorded and consumed.
+#[test(tokio::test)]
+async fn remote_suffix_dedup_ignores_exact_replays() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact1 = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("first fact")
+        .clone();
+    let fact2 = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("second fact")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 3)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to Rita must succeed"
+    );
+
+    // Same SN, rewritten ancestry: genuine content on a forged
+    // link, re-sealed by the owner. A resend of the covered tip
+    // with these bytes must invalidate instead of being reused.
+    let mut forged_tip = fact1.clone();
+    forged_tip.prev_ledger_event_hash = DigestIdentifier::default();
+    let forged_hash = forged_tip
+        .protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    let forged_seal = LedgerSeal {
+        gov_version: forged_tip.gov_version,
+        sn: forged_tip.sn,
+        prev_ledger_event_hash: forged_tip.prev_ledger_event_hash.clone(),
+        protocols_hash: forged_hash,
+    };
+    forged_tip.ledger_seal_signature =
+        Signature::new(&forged_seal, &alice_keys).unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn assert_no_trace(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) {
+        for _ in 0..30 {
+            assert!(
+                api.get_subject_state(subject_id.clone()).await.is_err(),
+                "unverifiable batch must not register the subject"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            api.test_get_verified_transfer_sn(
+                governance_id,
                 subject_id.clone()
             )
+            .await
+            .unwrap()
+            .is_none(),
+            "no transfer proof may persist from an unproven batch"
+        );
+        match api
+            .test_witnesses_ownership(governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => {}
+            Ok((owner_now, pending, _, _)) => assert!(
+                owner_now.is_none() && pending.is_none(),
+                "no ownership may derive from an unproven batch"
+            ),
+        }
+        node_running(api).await.unwrap();
+    }
+
+    // Bare Create plus an uncheckable aux: nothing applied, the
+    // cursor stops at the tip while the batch waits deferred.
+    inject_with_hint(&rita, &alice_key, vec![create.clone()], false, &transfer)
+        .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    assert_eq!(
+        rita.test_verify_stats(subject_id.clone()).await.unwrap(),
+        (1, 0),
+        "first aux builds the cursor from the batch alone"
+    );
+    // Exact prefix resend: the copy already holds Create, so the
+    // batch is stale and dropped before verifying. It must leave
+    // no trace, add no work and stall nothing.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact1.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    assert_eq!(
+        rita.test_verify_stats(subject_id.clone()).await.unwrap(),
+        (1, 0),
+        "a stale resend must not re-verify nor stall the copy"
+    );
+    // Conflicting continuation: same SN as the held tip with
+    // different bytes. The suffix must invalidate instead of
+    // borrowing the forged bytes, rebuild authoritatively over
+    // the genuine prefix and write nothing.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![forged_tip.clone(), fact2.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    assert_eq!(
+        rita.test_verify_stats(subject_id.clone()).await.unwrap(),
+        (4, 0),
+        "a conflicting continuation must rebuild instead of reusing"
+    );
+    // Genuine prefix plus the pending hint: rebuilds from the
+    // authoritative prefix, records the proof and applies.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact1.clone(), fact2.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_verify_stats(subject_id.clone()).await.unwrap(),
+        (7, 0),
+        "rebuilding the genuine prefix replays it once more"
+    );
+    assert_eq!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((3, alice_key.clone())),
+        "the genuine hint must record its proof"
+    );
+    node_running(&rita).await.unwrap();
+    // The tail applies through the recorded proof, which is
+    // consumed single-use on application: nothing lingers.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![transfer.clone()],
+        true,
+        &transfer,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap()
             .is_none(),

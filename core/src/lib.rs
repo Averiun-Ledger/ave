@@ -3334,12 +3334,12 @@ impl Api {
         };
         let actor = self
             .system
-            .get_actor::<TransferVerificationRegister>(
-                &ActorPath::from(format!(
+            .get_actor::<TransferVerificationRegister>(&ActorPath::from(
+                format!(
                     "/user/node/subject_manager/\
                     {governance_id}/transfer_verification_register"
-                )),
-            )
+                ),
+            ))
             .await
             .map_err(|_| Error::MissingResource {
                 name: "transfer_verification_register".to_owned(),
@@ -3384,10 +3384,7 @@ impl Api {
     /// copy and prove it survives. The flag lives in the shared
     /// test registry, never in a worker mailbox (which would stay
     /// blocked while parked).
-    pub async fn test_pause_rollback(
-        &self,
-        pause: bool,
-    ) -> Result<(), Error> {
+    pub async fn test_pause_rollback(&self, pause: bool) -> Result<(), Error> {
         self.test_faults()?
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3613,13 +3610,8 @@ impl Api {
         }
     }
 
-    async fn test_arm_modes_fault(
-        &self,
-        empty: bool,
-    ) -> Result<(), Error> {
-        use crate::distribution::worker::{
-            DistriWorker, DistriWorkerMessage,
-        };
+    async fn test_arm_modes_fault(&self, empty: bool) -> Result<(), Error> {
+        use crate::distribution::worker::{DistriWorker, DistriWorkerMessage};
         // Test deliveries address the node-level distributor, so the
         // fault lives there: one flag per worker, consumed once.
         let actor = self

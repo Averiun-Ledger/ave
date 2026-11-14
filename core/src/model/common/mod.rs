@@ -364,9 +364,11 @@ where
         ctx.system().get_actor(&actor_path).await?;
 
     let response = actor
-        .ask(TransferVerificationRegisterMessage::GetVerifiedTransferDetail {
-            subject_id: subject_id.to_owned(),
-        })
+        .ask(
+            TransferVerificationRegisterMessage::GetVerifiedTransferDetail {
+                subject_id: subject_id.to_owned(),
+            },
+        )
         .await?;
 
     match response {

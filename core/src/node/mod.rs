@@ -4,10 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::{
-        Arc,
-        atomic::AtomicU64,
-    },
+    sync::{Arc, atomic::AtomicU64},
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -1349,8 +1346,7 @@ impl Handler<Self> for Node {
             #[cfg(feature = "test")]
             NodeMessage::EnsureDistributor { subject_id } => {
                 let hash = self.hash()?;
-                let distributor_name =
-                    format!("distributor_{}", subject_id);
+                let distributor_name = format!("distributor_{}", subject_id);
                 if ctx
                     .get_child::<DistriWorker>(&distributor_name)
                     .await

@@ -1052,16 +1052,26 @@ impl Tracker {
 #[derive(Debug, Clone)]
 pub enum TrackerMessage {
     GetMetadata,
-    GetLedger { lo_sn: Option<u64>, hi_sn: u64 },
+    GetLedger {
+        lo_sn: Option<u64>,
+        hi_sn: u64,
+    },
     GetLastLedger,
     PurgeStorage,
     /// Atomically purge the ledger and stop only if the tracker is
     /// still at the expected tip: a concurrent valid copy that
     /// advanced past it is never wiped by someone else's rollback.
     /// Returns whether the purge happened.
-    PurgeIfUnchanged { expected_sn: u64 },
-    UpdateLedger { events: Vec<Ledger> },
-    GetSinkEvents { from_sn: u64, batch_size: usize },
+    PurgeIfUnchanged {
+        expected_sn: u64,
+    },
+    UpdateLedger {
+        events: Vec<Ledger>,
+    },
+    GetSinkEvents {
+        from_sn: u64,
+        batch_size: usize,
+    },
 }
 
 impl Message for TrackerMessage {}
@@ -1079,7 +1089,9 @@ pub enum TrackerResponse {
         ledger_event: Box<Option<Ledger>>,
     },
     SinkEvents(Vec<DataToSink>),
-    PurgeIfUnchanged { purged: bool },
+    PurgeIfUnchanged {
+        purged: bool,
+    },
     Ok,
 }
 impl Response for TrackerResponse {}

@@ -22,9 +22,8 @@ use crate::{
     },
     helpers::network::{ActorMessage, delivery_of, service::NetworkSender},
     model::common::{
-        crash_system, get_verified_transfer_sn,
-        get_verified_transfer_sn_firm, node::get_subject_data,
-        subject::get_local_subject_sn,
+        crash_system, get_verified_transfer_sn, get_verified_transfer_sn_firm,
+        node::get_subject_data, subject::get_local_subject_sn,
     },
     node::SubjectData,
     request::manager::{RequestManager, RequestManagerMessage},
