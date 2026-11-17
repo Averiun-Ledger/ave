@@ -95,6 +95,17 @@ impl Intermediary {
                 ),
             )),
         );
+        // Test-only retained-prefix counters, read by the suites
+        // through the `deferred_stats` helper. Same lifetime and
+        // threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "deferred_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::distribution::deferred::DeferredStatsRegistry::default(
+                ),
+            )),
+        );
 
         #[cfg(feature = "test")]
         let service_sender =

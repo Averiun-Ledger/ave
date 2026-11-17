@@ -105,6 +105,7 @@ macro_rules! handle_distri_error {
 }
 
 pub mod coordinator;
+pub mod deferred;
 pub mod error;
 pub mod processor;
 pub mod transfer_verifier;

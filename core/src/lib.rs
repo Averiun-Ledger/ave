@@ -3080,6 +3080,31 @@ fn manager_sort_key(manager: &SinkManagerTarget) -> String {
 /// intermediary), so the test drives the exact interleaving.
 #[cfg(feature = "test")]
 impl Api {
+    /// Arms the one-shot tracker-resolve fault on this node's
+    /// distributor: the next evidence-ledger reload fails right
+    /// after a successful `Up`. Test deliveries address the
+    /// node-level distributor, which always exists.
+    pub async fn test_fail_next_tracker_resolve(&self) -> Result<(), Error> {
+        use crate::distribution::worker::{DistriWorker, DistriWorkerMessage};
+        let actor = self
+            .system
+            .get_actor::<DistriWorker>(&ActorPath::from(
+                "/user/node/distributor",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Distributor actor not found".to_owned(),
+            })?;
+        actor
+            .tell(DistriWorkerMessage::TestFailNextTrackerResolve)
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Failed to arm tracker resolve fault".to_owned(),
+            })
+    }
+
     fn test_faults(
         &self,
     ) -> Result<helpers::network::test_faults::SharedFaultRegistry, Error> {
@@ -3483,6 +3508,171 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .snapshot(&subject_id))
+    }
+
+    /// Retained staged prefix per node: subjects holding events,
+    /// staged events and staged bytes, in that order. Lets tests
+    /// pin the deferred-store budget exactly instead of inferring
+    /// retention from side effects. Test deliveries address the
+    /// node-level distributor, which always exists.
+    pub async fn test_deferred_stats(&self) -> Result<(usize, u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::deferred::SharedDeferredStats>(
+                "deferred_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "deferred_stats".to_owned(),
+                reason: "Deferred stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot())
+    }
+
+    /// Stored staged prefix per node, including the pruned dead
+    /// head still in RAM: same shape as the live stats. Lets
+    /// tests pin the real memory budget instead of only the live
+    /// suffix.
+    pub async fn test_deferred_retained_stats(
+        &self,
+    ) -> Result<(usize, u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::deferred::SharedDeferredStats>(
+                "deferred_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "deferred_stats".to_owned(),
+                reason: "Deferred stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot_retained())
+    }
+
+    /// Replaces the node-level distributor's deferred-store bounds
+    /// (subjects, events and bytes, per subject and global) so a
+    /// test can trigger overflow with a handful of events.
+    /// Production always uses the compiled-in defaults.
+    pub async fn test_set_deferred_limits(
+        &self,
+        limits: crate::distribution::deferred::DeferredLimits,
+    ) -> Result<(), Error> {
+        use crate::distribution::worker::{DistriWorker, DistriWorkerMessage};
+        let actor = self
+            .system
+            .get_actor::<DistriWorker>(&ActorPath::from(
+                "/user/node/distributor",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Distributor actor not found".to_owned(),
+            })?;
+        actor
+            .tell(DistriWorkerMessage::TestSetDeferredLimits { limits })
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Failed to set deferred limits".to_owned(),
+            })
+    }
+
+    /// Buffer workload for the incremental suffix assembly:
+    /// cloned events, merge/dedup visits and reordered elements,
+    /// in that order. Lets scale tests pin the assembly linear
+    /// instead of re-scanning or re-sorting the retained prefix
+    /// per aux.
+    pub async fn test_buffer_stats(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(u64, u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::transfer_verifier::SharedVerifyStats>(
+                "verify_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "verify_stats".to_owned(),
+                reason: "Verify stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .buffer_snapshot(&subject_id))
+    }
+
+    /// Drops the saved verification cursor for one subject on the
+    /// node-level distributor, like an LRU eviction, while keeping
+    /// any staged prefix. Test-only.
+    pub async fn test_evict_verify_cursor(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        use crate::distribution::worker::{DistriWorker, DistriWorkerMessage};
+        let actor = self
+            .system
+            .get_actor::<DistriWorker>(&ActorPath::from(
+                "/user/node/distributor",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Distributor actor not found".to_owned(),
+            })?;
+        actor
+            .tell(DistriWorkerMessage::TestEvictVerifyCursor { subject_id })
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "distributor".to_owned(),
+                reason: "Failed to evict verify cursor".to_owned(),
+            })
+    }
+
+    /// Authoritative rebuilds from genesis for a subject: tells an
+    /// incremental suffix replay apart from a full scan.
+    pub async fn test_full_rebuilds(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::transfer_verifier::SharedVerifyStats>(
+                "verify_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "verify_stats".to_owned(),
+                reason: "Verify stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .full_rebuilds(&subject_id))
+    }
+
+    /// Successful evaluation-role resolutions for a subject: proves
+    /// repeated events reuse the cached register instead of
+    /// resolving per event.
+    pub async fn test_roles_resolved(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::transfer_verifier::SharedVerifyStats>(
+                "verify_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "verify_stats".to_owned(),
+                reason: "Verify stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .roles_resolved(&subject_id))
     }
 
     /// Read-only view of the last successful copy attempt for a

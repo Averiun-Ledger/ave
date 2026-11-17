@@ -5927,6 +5927,12 @@ async fn remote_incremental_verification_stays_linear() {
         w_signer.public_key_bytes(),
     )
     .unwrap();
+    let x_signer = Ed25519Signer::generate().unwrap();
+    let x_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        x_signer.public_key_bytes(),
+    )
+    .unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&alice]).await;
@@ -5940,6 +5946,7 @@ async fn remote_incremental_verification_stays_linear() {
                     {"name": "Bob", "key": bob_key.to_string()},
                     {"name": "Rita", "key": rita_key.to_string()},
                     {"name": "W", "key": w_key.to_string()},
+                    {"name": "X", "key": x_key.to_string()},
                 ]
             },
             "schemas": {
@@ -5976,6 +5983,10 @@ async fn remote_incremental_verification_stays_linear() {
                                         },
                                         {
                                             "name": "W",
+                                            "viewpoints": ["AllViewpoints"]
+                                        },
+                                        {
+                                            "name": "X",
                                             "viewpoints": ["AllViewpoints"]
                                         }
                                     ]
@@ -6216,6 +6227,20 @@ async fn remote_incremental_verification_stays_linear() {
         processed <= bound,
         "processed {processed} events over a {chain_len}-event chain"
     );
+    let (cloned, visited, reordered) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
     // The pending transfer itself travels last and is covered by
     // the recorded proof, so it applies without re-verifying and
     // consumes the proof: nothing lingers.
@@ -6260,6 +6285,20 @@ async fn remote_incremental_verification_stays_linear() {
     assert!(
         processed <= bound,
         "processed {processed} events over a {chain_len}-event chain"
+    );
+    let (cloned, visited, reordered) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
     );
     node_running(&rita).await.unwrap();
 
@@ -6335,6 +6374,20 @@ async fn remote_incremental_verification_stays_linear() {
         processed <= bound,
         "processed {processed} events over a {chain_len}-event chain"
     );
+    let (cloned, visited, reordered) =
+        w.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
     inject_with_hint(&w, &bob_public, vec![transfer.clone()], true, &transfer)
         .await;
     get_subject(&w, subject_id.clone(), Some(17), true)
@@ -6350,7 +6403,115 @@ async fn remote_incremental_verification_stays_linear() {
         processed <= bound,
         "processed {processed} events over a {chain_len}-event chain"
     );
+    let (cloned, visited, reordered) =
+        w.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
     node_running(&w).await.unwrap();
+
+    // X copies the same chain one event per batch: the per-batch
+    // merge only touches the uncovered tail, so the total buffer
+    // work stays linear instead of rescanning the prefix.
+    let x_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut x_node, x_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{x_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(x_signer)),
+        ..Default::default()
+    })
+    .await;
+    let x = x_node.api.clone();
+    node_running(&x).await.unwrap();
+    x.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    x.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&x, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let x_public = PublicKey::from_str(x.public_key()).unwrap();
+    for api in [&alice, &bob] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(x_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    let batches = cut_batches(&history[..17], 1);
+    assert_eq!(batches.len(), 17);
+    for batch in &batches {
+        inject_with_hint(&x, &bob_public, batch.clone(), false, &transfer)
+            .await;
+    }
+    get_subject(&x, subject_id.clone(), Some(16), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        x.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((17, bob_public.clone())),
+        "the genuine hint must record its proof"
+    );
+    let (processed, reloads) =
+        x.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert_eq!(
+        reloads, 1,
+        "one full local reload, then only deltas: {reloads}"
+    );
+    assert!(
+        processed <= bound,
+        "processed {processed} events over a {chain_len}-event chain"
+    );
+    let (cloned, visited, reordered) =
+        x.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
+    inject_with_hint(&x, &bob_public, vec![transfer.clone()], true, &transfer)
+        .await;
+    get_subject(&x, subject_id.clone(), Some(17), true)
+        .await
+        .unwrap();
+    node_running(&x).await.unwrap();
 
     for node in nodes.iter_mut() {
         node.token.cancel();
@@ -6358,13 +6519,15 @@ async fn remote_incremental_verification_stays_linear() {
     bob_node.token.cancel();
     rita_node.token.cancel();
     w_node.token.cancel();
+    x_node.token.cancel();
     join_all(
         nodes
             .iter_mut()
             .flat_map(|node| node.handler.iter_mut())
             .chain(bob_node.handler.iter_mut())
             .chain(rita_node.handler.iter_mut())
-            .chain(w_node.handler.iter_mut()),
+            .chain(w_node.handler.iter_mut())
+            .chain(x_node.handler.iter_mut()),
     )
     .await;
     drop(nodes);
@@ -6375,6 +6538,8 @@ async fn remote_incremental_verification_stays_linear() {
     drop(rita_dirs);
     drop(w_node);
     drop(w_dirs);
+    drop(x_node);
+    drop(x_dirs);
 }
 
 /// A repeated aux reuses its verdict without re-running any
@@ -6666,13 +6831,19 @@ async fn remote_repeated_aux_reuses_verdict() {
     }
 
     // First presentation replays and refutes: full local reload
-    // plus the prefix and the hint.
+    // plus the prefix and the hint. Both replayed events share
+    // one governance version, so roles resolve exactly once.
     inject_single(&rita, &alice_key, forged.clone()).await;
     assert_rejected(&rita, &governance_id, &subject_id, &alice_key).await;
     assert_eq!(
         rita.test_verify_stats(subject_id.clone()).await.unwrap(),
         (2, 1),
         "first check replays the prefix and refutes"
+    );
+    assert_eq!(
+        rita.test_roles_resolved(subject_id.clone()).await.unwrap(),
+        1,
+        "same-version replays share one role resolution"
     );
     // Different suffix, same tip: the cached verdict can not
     // apply, so the hint replays alone and stays refuted. The
@@ -6684,6 +6855,11 @@ async fn remote_repeated_aux_reuses_verdict() {
         (3, 1),
         "same hint with new suffix events replays them"
     );
+    assert_eq!(
+        rita.test_roles_resolved(subject_id.clone()).await.unwrap(),
+        1,
+        "replays reuse the cached version instead of resolving again"
+    );
     // Identical retry reuses the verdict: zero new work.
     inject_single(&rita, &alice_key, forged.clone()).await;
     assert_rejected(&rita, &governance_id, &subject_id, &alice_key).await;
@@ -6691,6 +6867,11 @@ async fn remote_repeated_aux_reuses_verdict() {
         rita.test_verify_stats(subject_id.clone()).await.unwrap(),
         (3, 1),
         "same hint over the same tip must not re-verify"
+    );
+    assert_eq!(
+        rita.test_roles_resolved(subject_id.clone()).await.unwrap(),
+        1,
+        "a reused verdict resolves nothing new"
     );
     // Different bytes re-verify from scratch and stay rejected.
     inject_single(&rita, &alice_key, forged2.clone()).await;
@@ -6700,11 +6881,21 @@ async fn remote_repeated_aux_reuses_verdict() {
         (4, 1),
         "a different hint must re-verify instead of reusing"
     );
+    assert_eq!(
+        rita.test_roles_resolved(subject_id.clone()).await.unwrap(),
+        1,
+        "re-verifying the same version still resolves once"
+    );
     // The genuine single still completes the copy afterwards.
     inject_single(&rita, &alice_key, transfer.clone()).await;
     get_subject(&rita, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
+    assert_eq!(
+        rita.test_roles_resolved(subject_id.clone()).await.unwrap(),
+        1,
+        "the genuine tail reuses the cached version"
+    );
     node_running(&rita).await.unwrap();
 
     for node in nodes.iter_mut() {
@@ -7486,6 +7677,1401 @@ async fn remote_suffix_dedup_ignores_exact_replays() {
     drop(rita_dirs);
 }
 
+/// A deferred prefix that outgrows its per-subject budget is
+/// dropped as a whole instead of pinning unbounded RAM: no
+/// subject, SN, proof, ownership or retained entry survives the
+/// eviction, and a genuine chain still completes afterwards from
+/// a clean copy.
+#[test(tokio::test)]
+async fn remote_deferred_overflow_evicts_whole_chain() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(4), true).await.unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 4)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 5);
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact1 = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("first fact")
+        .clone();
+    let fact2 = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("second fact")
+        .clone();
+    let fact3 = history
+        .iter()
+        .find(|event| event.sn == 3)
+        .expect("third fact")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 4)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to Rita must succeed"
+    );
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    // Tight per-subject budget: unbounded staging must be
+    // rejected instead of growing with the chain. Installed
+    // before any batch so every verify already runs under it.
+    rita
+        .test_set_deferred_limits(
+            ave_core::distribution::deferred::DeferredLimits {
+                max_subjects: 4,
+                max_events_per_subject: 2,
+                max_bytes_per_subject: u64::MAX,
+                max_events_global: 1_000_000,
+                max_bytes_global: u64::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn assert_no_trace(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) {
+        for _ in 0..30 {
+            assert!(
+                api.get_subject_state(subject_id.clone()).await.is_err(),
+                "deferred evidence must not register the subject"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            api.test_get_verified_transfer_sn(
+                governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "no transfer proof may persist from a deferred batch"
+        );
+        match api
+            .test_witnesses_ownership(governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => {}
+            Ok((owner_now, pending, _, _)) => assert!(
+                owner_now.is_none() && pending.is_none(),
+                "no ownership may derive from a deferred batch"
+            ),
+        }
+        node_running(api).await.unwrap();
+    }
+
+    // Bare Create plus an uncheckable aux: nothing applied, the
+    // batch waits deferred and the retained counters pin it.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!(
+        (subjects, events),
+        (1, 1),
+        "one staged event under one subject"
+    );
+    assert!(bytes > 0, "retained bytes must be accounted");
+    // The next continuation replays only its suffix and stays
+    // deferred inside the same budget.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact1.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!(
+        (subjects, events),
+        (1, 2),
+        "the continuation extends the same entry"
+    );
+    assert!(bytes > 0, "retained bytes must be accounted");
+    // Over budget: the whole entry is dropped instead of growing
+    // forever. Silence afterwards leaves no key and no counters.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact2.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "overflow must drop the whole entry with its counters"
+    );
+    assert_no_trace(&rita, &governance_id, &subject_id).await;
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "silence after the eviction leaves no residue"
+    );
+    // The genuine chain still completes from a clean copy: the
+    // aux verifies, the prefix applies, the proof records.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact1.clone(), fact2.clone(), fact3.clone()],
+        false,
+        &transfer,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap(),
+        Some((4, alice_key.clone())),
+        "the genuine hint must record its proof"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "an applied copy holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+    // The tail applies through the recorded proof, which is
+    // consumed single-use on application: nothing lingers.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![transfer.clone()],
+        true,
+        &transfer,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// A global deferred budget evicts whole LRU chains instead of
+/// growing without bound: the surviving subject keeps its staged
+/// prefix and its own copy can still complete afterwards.
+#[test(tokio::test)]
+async fn remote_deferred_global_budget_evicts_lru_subject() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    async fn build_chain(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        new_owner: &PublicKey,
+    ) -> (DigestIdentifier, Vec<Ledger>, Ledger) {
+        let (subject_id, _) =
+            create_subject(api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        emit_fact(
+            api,
+            subject_id.clone(),
+            json!({"ModOne": {"data": 1}}),
+            true,
+        )
+        .await
+        .unwrap();
+        emit_fact(
+            api,
+            subject_id.clone(),
+            json!({"ModTwo": {"data": 2}}),
+            true,
+        )
+        .await
+        .unwrap();
+        emit_transfer(api, subject_id.clone(), new_owner.clone(), true)
+            .await
+            .unwrap();
+        get_subject(api, subject_id.clone(), Some(3), true).await.unwrap();
+        let history = api
+            .test_get_tracker_ledger(subject_id.clone(), 3)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 4);
+        let transfer = history
+            .iter()
+            .find(|event| event.sn == 3)
+            .expect("transfer event")
+            .clone();
+        assert!(
+            transfer.protocols.is_success(),
+            "premise: the transfer must succeed"
+        );
+        (subject_id, history, transfer)
+    }
+
+    let (subject_a, history_a, transfer_a) =
+        build_chain(&alice, &governance_id, &rita_key).await;
+    let (subject_b, history_b, transfer_b) =
+        build_chain(&alice, &governance_id, &rita_key).await;
+    let event_a = |sn: u64| {
+        history_a
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("event")
+            .clone()
+    };
+    let event_b = |sn: u64| {
+        history_b
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("event")
+            .clone()
+    };
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    // Global budget of three staged events: the fourth must evict
+    // a whole LRU chain instead of growing the worker's RAM.
+    rita
+        .test_set_deferred_limits(
+            ave_core::distribution::deferred::DeferredLimits {
+                max_subjects: 10,
+                max_events_per_subject: 100,
+                max_bytes_per_subject: u64::MAX,
+                max_events_global: 3,
+                max_bytes_global: u64::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn assert_no_trace(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) {
+        for _ in 0..30 {
+            assert!(
+                api.get_subject_state(subject_id.clone()).await.is_err(),
+                "deferred evidence must not register the subject"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            api.test_get_verified_transfer_sn(
+                governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "no transfer proof may persist from a deferred batch"
+        );
+        node_running(api).await.unwrap();
+    }
+
+    // Two staged prefixes fit the global budget of three events.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_a(0)],
+        false,
+        &transfer_a,
+    )
+    .await;
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_a(1)],
+        false,
+        &transfer_a,
+    )
+    .await;
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_b(0)],
+        false,
+        &transfer_b,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_a).await;
+    assert_no_trace(&rita, &governance_id, &subject_b).await;
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (2, 3));
+    assert!(bytes > 0, "retained bytes must be accounted");
+    // The fourth staged event overflows the global budget: the
+    // oldest chain goes away as a whole while the other keeps
+    // its staged prefix.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_b(1)],
+        false,
+        &transfer_b,
+    )
+    .await;
+    assert_no_trace(&rita, &governance_id, &subject_a).await;
+    assert_no_trace(&rita, &governance_id, &subject_b).await;
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!(
+        (subjects, events),
+        (1, 2),
+        "overflow must evict the whole LRU chain"
+    );
+    assert!(bytes > 0, "the surviving entry must keep its bytes");
+    // The survivor keeps its cursor: the next continuation replays
+    // only its suffix and applies the verified prefix. The staged
+    // Create rejoins through the take path, so the genuine prefix
+    // lands at SN2 with its proof recorded, instead of rolling
+    // back.
+    let (processed_before, _) = rita
+        .test_verify_stats(subject_b.clone())
+        .await
+        .unwrap();
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_b(2)],
+        false,
+        &transfer_b,
+    )
+    .await;
+    get_subject(&rita, subject_b.clone(), Some(2), true).await.unwrap();
+    let (processed_after, _) = rita
+        .test_verify_stats(subject_b.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        processed_after - processed_before,
+        2,
+        "the surviving cursor resumes instead of rebuilding"
+    );
+    assert_eq!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_b.clone()
+            )
+            .await
+            .unwrap(),
+        Some((3, alice_key.clone())),
+        "the surviving prefix must record its proof"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "an applied prefix holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+    // The evicted chain still completes from a genuine full copy:
+    // its cursor was invalidated, so the prefix rebuilds once.
+    let (processed_before, _) = rita
+        .test_verify_stats(subject_a.clone())
+        .await
+        .unwrap();
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![event_a(0), event_a(1), event_a(2)],
+        false,
+        &transfer_a,
+    )
+    .await;
+    get_subject(&rita, subject_a.clone(), Some(2), true).await.unwrap();
+    let (processed_after, _) = rita
+        .test_verify_stats(subject_a.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        processed_after - processed_before,
+        3,
+        "the evicted chain rebuilds authoritatively once"
+    );
+    assert_eq!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_a.clone()
+            )
+            .await
+            .unwrap(),
+        Some((3, alice_key.clone())),
+        "the genuine hint must record its proof"
+    );
+    node_running(&rita).await.unwrap();
+    // The tail applies through the recorded proof, which is
+    // consumed single-use on application: nothing lingers.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![transfer_a.clone()],
+        true,
+        &transfer_a,
+    )
+    .await;
+    get_subject(&rita, subject_a.clone(), Some(3), true).await.unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_a.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "a completed copy holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// A failed tracker resolve after a successful `Up` releases
+/// the `aux-evidence` lease: the evidence stays Missing with no
+/// writes, no live requesters remain, and a genuine delivery
+/// afterwards still completes the copy.
+///
+/// Rita has no direct rights (plain creator, like Erin in the
+/// opaque-chain test), so the fact chain only travels masked:
+/// the prefix copies through the aux passage without ever
+/// recording a proof, and no verification cursor survives the
+/// fault injection. Every live path from the sender stays
+/// silenced, so the crafted batches are the only deliveries.
+#[test(tokio::test)]
+async fn remote_tracker_resolve_fault_releases_lease() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let dave_signer = Ed25519Signer::generate().unwrap();
+    let dave_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        dave_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    // Alice creates with Dave as witness; Rita is a plain creator,
+    // so the transfer to her succeeds while she gains no direct
+    // access to a subject created by Alice.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Dave", "key": dave_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Dave",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Silence every ledger-carrying delivery from Alice to Rita:
+    // her coordinator would otherwise push the genuine chain on
+    // its own retry schedule and complete the copy outside the
+    // crafted batches. Validation and governance traffic to any
+    // other peer still flows, so local emits keep working.
+    let rita_public =
+        PublicKey::from_str(rita.public_key()).expect("node key");
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true).await.unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    let find = |sn: u64| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("event")
+            .clone()
+    };
+    let create = find(0);
+    let fact1 = find(1);
+    let fact2 = find(2);
+    let transfer = find(3);
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to Rita must succeed"
+    );
+
+    // Canonical masked projection of both genuine facts,
+    // re-sealed by the owner, plus the genuine transfer relinked
+    // onto the masked chain. Seal and quorum stay valid; only the
+    // evidence can not be rebuilt through the opaque steps.
+    fn mask_and_reseal(
+        event: &Ledger,
+        prev_hash: &DigestIdentifier,
+        signer: &ave_common::identity::keys::KeyPair,
+    ) -> Ledger {
+        let mut masked = event
+            .to_tracker_opaque()
+            .expect("premise: the fact must project to opaque");
+        masked.prev_ledger_event_hash = prev_hash.clone();
+        let masked_protocols_hash = masked
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap();
+        masked.ledger_seal_signature = Signature::new(
+            &LedgerSeal {
+                gov_version: masked.gov_version,
+                sn: masked.sn,
+                prev_ledger_event_hash: masked.prev_ledger_event_hash.clone(),
+                protocols_hash: masked_protocols_hash,
+            },
+            signer,
+        )
+        .unwrap();
+        masked
+    }
+    let masked1 = mask_and_reseal(
+        &fact1,
+        &create.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+    let masked2 = mask_and_reseal(
+        &fact2,
+        &masked1.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+    let mut hinted = transfer.clone();
+    hinted.prev_ledger_event_hash =
+        masked2.ledger_hash(HashAlgorithm::Blake3).unwrap();
+    let hinted_protocols_hash = hinted
+        .protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    hinted.ledger_seal_signature = Signature::new(
+        &LedgerSeal {
+            gov_version: hinted.gov_version,
+            sn: hinted.sn,
+            prev_ledger_event_hash: hinted.prev_ledger_event_hash.clone(),
+            protocols_hash: hinted_protocols_hash,
+        },
+        &alice_keys,
+    )
+    .unwrap();
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    // Zero-budget deferred limits: the next `set` drops every
+    // staged entry whole and invalidates its cursor, so the
+    // following delivery rebuilds authoritatively.
+    fn zero_limits() -> ave_core::distribution::deferred::DeferredLimits {
+        ave_core::distribution::deferred::DeferredLimits {
+            max_subjects: 0,
+            max_events_per_subject: 0,
+            max_bytes_per_subject: 0,
+            max_events_global: 0,
+            max_bytes_global: 0,
+        }
+    }
+
+    // The masked prefix copies through the aux passage: the
+    // evidence can not be rebuilt through the opaque steps, so
+    // the copy lands at SN2 without recording any proof.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![create.clone(), masked1.clone(), masked2.clone()],
+        false,
+        &hinted,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(2), true).await.unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "an unverifiable passage must record no proof"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "an applied prefix holds nothing back"
+    );
+
+    // Settle: every lease of the copy above is finished before
+    // the reboot below, so nothing is mid-copy when the node
+    // restarts.
+    for _ in 0..100 {
+        if !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "the tracker must go idle after the copy"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    node_running(&rita).await.unwrap();
+
+    // Reboot with the same storage: the applied prefix persists
+    // while every volatile cursor is gone, so the delivery under
+    // test rebuilds authoritatively and really reloads the ledger.
+    // The original TempDirs stay alive on purpose, so the
+    // rebooted node really reopens this storage. No subject reads
+    // happen after the reboot: any read would bring the tracker
+    // up and the resolve fault would never fire.
+    let keys = rita_node.keys.clone();
+    let local_db = rita_dirs[0].path().to_path_buf();
+    let ext_db = rita_dirs[1].path().to_path_buf();
+    rita_node.token.cancel();
+    join_all(rita_node.handler.iter_mut()).await;
+    drop(rita_node);
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, _rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+
+    // Settle: the boot reconciliation finishes and releases every
+    // lease, so the tracker stops and the reload below really
+    // goes through a fresh `Up`.
+    for _ in 0..100 {
+        if !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "the tracker must go idle after the copy"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    node_running(&rita).await.unwrap();
+
+    // Arm the one-shot fault here, right before the delivery
+    // under test: the reboot above cleared every volatile cursor,
+    // so the full rebuild below really reloads the applied prefix
+    // instead of resuming anything.
+    rita.test_fail_next_tracker_resolve().await.unwrap();
+
+    // The next resolve fails right after its `Up`: the evidence
+    // stays Missing, the batch waits deferred, and the lease is
+    // released instead of pinning `aux-evidence` until reboot.
+    // Re-inject until the staging lands: an early delivery may
+    // still find the node registration or the applied tip missing
+    // and ask for an update instead of verifying. Repeats are
+    // safe: once staged, further copies are stale no-ops.
+    for _ in 0..15 {
+        inject_with_hint(
+            &rita,
+            &alice_key,
+            vec![hinted.clone()],
+            true,
+            &hinted,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if rita.test_deferred_stats().await.unwrap().0 == 1 {
+            break;
+        }
+    }
+    for _ in 0..30 {
+        assert_eq!(
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+            2,
+            "a missing evidence batch must not advance the copy"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the failed resolve must record nothing"
+    );
+    assert!(
+        !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "the aux-evidence lease must be released on resolve failure"
+    );
+    // The staging travels through the worker mailbox: poll until
+    // the authoritative store reports it instead of assuming
+    // delivery order.
+    for _ in 0..50 {
+        let (subjects, events, _) =
+            rita.test_deferred_stats().await.unwrap();
+        if (subjects, events) == (1, 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 1));
+    assert!(bytes > 0, "retained bytes must be accounted");
+    node_running(&rita).await.unwrap();
+
+    // Drop the staged tail whole: the one-shot fault is already
+    // consumed, so the genuine re-delivery rebuilds, verifies
+    // from scratch and applies the tail.
+    rita.test_set_deferred_limits(zero_limits()).await.unwrap();
+    for _ in 0..50 {
+        if rita.test_deferred_stats().await.unwrap() == (0, 0, 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "eviction must drop the whole entry with its counters"
+    );
+    rita
+        .test_set_deferred_limits(
+            ave_core::distribution::deferred::DeferredLimits::production(),
+        )
+        .await
+        .unwrap();
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![hinted.clone()],
+        true,
+        &hinted,
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(3), true).await.unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "an unverifiable passage records no proof"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "a completed copy holds nothing back"
+    );
+    assert!(
+        !rita
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "no lease may linger after the genuine copy"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
 /// SLOW: governance recovery must not replay the page-boundary event.
 /// With 257 events the second page overlaps the first under the old
 /// cursor; the duplicate apply used to fail the boot.
@@ -7672,4 +9258,1776 @@ async fn concurrent_update_and_batch_reception_complete() {
     })
     .await
     .expect("concurrent update + batch reception hung (nested wait?)");
+}
+/// Without aux, authorization covers deferred plus current batch with
+/// the current tail as offered tip: an unknown prefix deferred for lack
+/// of rights applies once the witness is granted, without proof.
+#[test(tokio::test)]
+async fn remote_without_aux_covers_held_plus_current_after_grant() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Alice", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    // Gov sync peer: the roles change below bumps the gov version
+    // while Alice->Rita ledger traffic is fault-dropped. Without an
+    // unfaulted gov source Rita would stall on the old version and
+    // the grant could never take effect; the owner serves gov
+    // through the regular witness/offer flow.
+    rita
+        .add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    let find = |sn: u64| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("history event")
+            .clone()
+    };
+    let create = find(0);
+    let fact1 = find(1);
+    let transfer = find(3);
+
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn assert_no_trace(
+        api: &ave_core::Api,
+        subject_id: &DigestIdentifier,
+    ) {
+        for _ in 0..30 {
+            assert!(
+                api.get_subject_state(subject_id.clone()).await.is_err(),
+                "deferred evidence must not register the subject"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    inject_with_hint(&rita, &alice_key, vec![create.clone()], false, &transfer)
+        .await;
+    assert_no_trace(&rita, &subject_id).await;
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 1), "one staged event");
+    assert!(bytes > 0, "retained bytes must be accounted");
+
+    // Lift the fault so both nodes can sync the granting gov
+    // version: the tracker re-request from the deny above was a
+    // single tell with no retry behind it, and nothing else emits
+    // tracker batches spontaneously, so no uncontrolled delivery
+    // can slip in while faults are down. Faults go back up before
+    // the second inject.
+    alice.test_clear_faults().await.unwrap();
+
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": [
+                                        {
+                                            "name": "Rita",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    // Wait for the grant to land: the second delivery must run
+    // against the new governance version, not race a stale one.
+    // A stale version would deny again and the test would pass
+    // vacuously without ever exercising the granted path.
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    for _ in 0..100 {
+        let rita_gov_sn =
+            get_subject(&rita, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if rita_gov_sn >= gov_sn {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        get_subject(&rita, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .sn,
+        gov_sn,
+        "rita must sync the granting governance version first"
+    );
+
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    inject_with_hint(&rita, &alice_key, vec![fact1.clone()], false, &transfer)
+        .await;
+    get_subject(&rita, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the granted prefix applies and holds nothing back"
+    );
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "own-rights copy records no proof"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+
+/// A registered subject must rejoin its staged prefix after a cursor
+/// eviction: local SN0 plus deferred SN1 plus sender SN2 plus the aux
+/// prove and apply up to SN2, then the transfer itself applies and
+/// consumes the single-use proof.
+#[test(tokio::test)]
+async fn remote_registered_prefix_rejoins_after_cursor_eviction() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    // Rita witnesses Alice's creations, so a lone Create applies on
+    // direct rights; revoking her afterwards leaves the applied
+    // prefix valid while new events stop being covered.
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Rita",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    // Gov sync peers for the revocation round below: Alice's own
+    // gov update has no witnesses left to ask, so both nodes fetch
+    // the new version through the unfaulted owner instead. The
+    // owner is always a valid sync source for governance.
+    for api in [&alice, &rita] {
+        api.add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    // Silence Alice toward Rita before any tracker traffic: pushes
+    // and re-request answers must be dropped so the copy stays
+    // fully inject-driven and deterministic. Installing the faults
+    // after the emits would race their pushes.
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: Option<Ledger>,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: hint.map(Box::new),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Rita registers SN0 on direct rights: a lone Create with no aux
+    // applies through the single path without recording any proof.
+    let create_zero = alice
+        .test_get_tracker_ledger(subject_id.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("create event");
+    inject_with_hint(&rita, &alice_key, vec![create_zero], true, None).await;
+    get_subject(&rita, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "a lone create on direct rights holds nothing back"
+    );
+
+    // Revoke Rita's witness grant while every link is unfaulted:
+    // lifting the faults for the governance round keeps the sync
+    // deterministic (no dropped witness/offer traffic), and no
+    // tracker traffic exists yet that could slip in meanwhile.
+    // Faults go back up before Alice emits anything new.
+    alice.test_clear_faults().await.unwrap();
+    let gov_before = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    for _ in 0..200 {
+        let alice_gov_sn =
+            get_subject(&alice, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if alice_gov_sn > gov_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    assert!(
+        gov_sn > gov_before,
+        "alice must sync the revoking governance version first"
+    );
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    for _ in 0..200 {
+        let rita_gov_sn =
+            get_subject(&rita, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if rita_gov_sn >= gov_sn {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        get_subject(&rita, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .sn,
+        gov_sn,
+        "rita must sync the revoking governance version first"
+    );
+
+    // Faults go back up before Alice emits anything new: pushes
+    // and re-request answers must be dropped so the copy stays
+    // fully inject-driven and deterministic.
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    let find = |sn: u64| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("history event")
+            .clone()
+    };
+    let fact1 = find(1);
+    let fact2 = find(2);
+    let transfer = find(3);
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to Rita must succeed"
+    );
+
+    // Gap plus distant aux with no rights: SN1 waits deferred while
+    // the cursor advances over it, and nothing is applied or proven.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact1.clone()],
+        false,
+        Some(transfer.clone()),
+    )
+    .await;
+    for _ in 0..30 {
+        assert_eq!(
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+            0,
+            "a gapped prefix must not advance the copy"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 1), "one staged event");
+    assert!(bytes > 0, "retained bytes must be accounted");
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "an unproven aux records no proof"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        1,
+        "the first missing aux rebuilds once"
+    );
+
+    // Evicting only the cursor must not lose the staged prefix: the
+    // rebuild has to rejoin it instead of stalling on the gap.
+    rita.test_evict_verify_cursor(subject_id.clone()).await.unwrap();
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 1), "eviction keeps the staged entry");
+    assert!(bytes > 0, "retained bytes must be accounted");
+
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact2.clone()],
+        false,
+        Some(transfer.clone()),
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the rejoined prefix applies and holds nothing back"
+    );
+    assert_eq!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((3, alice_key.clone())),
+        "the rejoined chain records its proof"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        2,
+        "the evicted cursor forces a rebuild, not a silent miss"
+    );
+
+    // The transfer itself applies through the recorded proof, which
+    // is consumed single-use on application: nothing lingers.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![transfer.clone()],
+        true,
+        Some(transfer.clone()),
+    )
+    .await;
+    get_subject(&rita, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "a completed copy holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// A Version-capped window denies past its boundary without ever
+/// stepping up to a global pass: after a witness revoke the held
+/// prefix plus each new tail stay deferred, retention grows by the
+/// tail only, and no proof is recorded.
+#[test(tokio::test)]
+async fn remote_without_aux_denies_past_version_window() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let dave_signer = Ed25519Signer::generate().unwrap();
+    let dave_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        dave_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                    {"name": "Dave", "key": dave_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Rita",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Dave",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    for api in [&alice, &rita] {
+        api.add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    // Silence Alice toward Rita before any tracker traffic: pushes
+    // and re-request answers must be dropped so the copy stays
+    // fully inject-driven and deterministic.
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: Option<Ledger>,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: hint.map(Box::new),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Rita registers SN0 on direct rights before the revoke.
+    let create_zero = alice
+        .test_get_tracker_ledger(subject_id.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("create event");
+    inject_with_hint(&rita, &alice_key, vec![create_zero], true, None).await;
+    get_subject(&rita, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    // Revoke Rita's witness grant while every link is unfaulted.
+    let gov_before = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "change": {
+                            "creator": [
+                                {
+                                    "actual_name": "Alice",
+                                    "actual_namespace": [],
+                                    "new_witnesses": []
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    for _ in 0..200 {
+        let alice_gov_sn =
+            get_subject(&alice, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if alice_gov_sn > gov_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    assert!(
+        gov_sn > gov_before,
+        "alice must sync the revoking governance version first"
+    );
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    for _ in 0..200 {
+        let rita_gov_sn =
+            get_subject(&rita, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if rita_gov_sn >= gov_sn {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        get_subject(&rita, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .sn,
+        gov_sn,
+        "rita must sync the revoking governance version first"
+    );
+
+    // New events run under the revoking version; the transfer goes
+    // to Dave so Rita never becomes the new owner (which would
+    // reopen an Infinity window and vacate this test). The aux
+    // stays one event beyond every injected tail so its evidence
+    // never completes: each delivery denies on rights and defers
+    // instead of proving the aux and failing without staging.
+    for api in [&alice] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), dave_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 4)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 5);
+    let find = |sn: u64| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("history event")
+            .clone()
+    };
+    let fact1 = find(1);
+    let fact2 = find(2);
+    let transfer = find(4);
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to Dave must succeed"
+    );
+
+    // Past the closed window every tail denies: the first tail
+    // waits deferred with no apply and no proof. The aux stays
+    // incomplete (SN3 never arrives), so the verdict is Missing
+    // and the batch is held instead of failing without staging.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact1.clone()],
+        false,
+        Some(transfer.clone()),
+    )
+    .await;
+    for _ in 0..30 {
+        assert_eq!(
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+            0,
+            "a window-capped tail must not advance the copy"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 1), "one staged event");
+    assert!(bytes > 0, "retained bytes must be accounted");
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a denied tail records no proof"
+    );
+
+    // The continuation denies too without stepping up to a global
+    // pass: retention grows by the tail only and the subject still
+    // sits at SN0 with no proof.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![fact2.clone()],
+        false,
+        Some(transfer.clone()),
+    )
+    .await;
+    for _ in 0..30 {
+        assert_eq!(
+            rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+            0,
+            "the second capped tail must not advance the copy either"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (subjects, events, bytes) =
+        rita.test_deferred_stats().await.unwrap();
+    assert_eq!((subjects, events), (1, 2), "two staged events");
+    assert!(bytes > 0, "retained bytes must be accounted");
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a twice-denied tail still records no proof"
+    );
+    let (_, visited, _) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        visited <= 12 * 2,
+        "deferred plus auth visits stay linear in the new tails"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// Opaque prefix replays incrementally to `Unverifiable` while the
+/// same checkable-but-wrong evidence over a clear prefix stays
+/// `Refuted`: the downgrade only applies under `Opaque` trust, and
+/// the second delivery in both phases is a suffix replay, not a
+/// rebuild.
+#[test(tokio::test)]
+async fn remote_opaque_suffix_stays_unverifiable_while_clear_refutes() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let dave_signer = Ed25519Signer::generate().unwrap();
+    let dave_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        dave_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Dave", "key": dave_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Dave",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let rita_public =
+        PublicKey::from_str(rita.public_key()).expect("node key");
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    fn mask_and_reseal(
+        event: &Ledger,
+        prev_hash: &DigestIdentifier,
+        signer: &ave_common::identity::keys::KeyPair,
+    ) -> Ledger {
+        let mut masked = event
+            .to_tracker_opaque()
+            .expect("premise: the fact must project to opaque");
+        masked.prev_ledger_event_hash = prev_hash.clone();
+        let masked_protocols_hash = masked
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap();
+        masked.ledger_seal_signature = Signature::new(
+            &LedgerSeal {
+                gov_version: masked.gov_version,
+                sn: masked.sn,
+                prev_ledger_event_hash: masked.prev_ledger_event_hash.clone(),
+                protocols_hash: masked_protocols_hash,
+            },
+            signer,
+        )
+        .unwrap();
+        masked
+    }
+    fn forge_aux(
+        transfer: &Ledger,
+        ok_result: &ave_core::model::event::EvaluationData,
+        prev_hash: &DigestIdentifier,
+        signer: &ave_common::identity::keys::KeyPair,
+    ) -> Ledger {
+        let mut forged = transfer.clone();
+        match &mut forged.protocols {
+            Protocols::Transfer { evaluation, .. } => {
+                let old_hash = match &evaluation.response {
+                    EvaluationResponse::Ok { result_hash, .. }
+                    | EvaluationResponse::Error { result_hash, .. } => {
+                        result_hash.clone()
+                    }
+                };
+                evaluation.response = EvaluationResponse::Ok {
+                    result: ok_result
+                        .evaluator_response_ok()
+                        .expect("premise: ok evaluation result"),
+                    result_hash: old_hash,
+                };
+            }
+            _ => panic!("expected a transfer event"),
+        }
+        forged.prev_ledger_event_hash = prev_hash.clone();
+        let protocols_hash = forged
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap();
+        forged.ledger_seal_signature = Signature::new(
+            &LedgerSeal {
+                gov_version: forged.gov_version,
+                sn: forged.sn,
+                prev_ledger_event_hash: forged.prev_ledger_event_hash.clone(),
+                protocols_hash,
+            },
+            signer,
+        )
+        .unwrap();
+        forged
+    }
+
+    // Opaque subject: the evidence can not be rebuilt through the
+    // masked steps, so a wrong aux degrades to Unverifiable.
+    let (opaque_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        opaque_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        opaque_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, opaque_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, opaque_id.clone(), Some(3), true).await.unwrap();
+    let opaque_history = alice
+        .test_get_tracker_ledger(opaque_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(opaque_history.len(), 4);
+    let ofind = |sn: u64| {
+        opaque_history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("opaque history event")
+            .clone()
+    };
+    let ocreate = ofind(0);
+    let ofact1 = ofind(1);
+    let otransfer = ofind(3);
+    assert!(
+        otransfer.protocols.is_success(),
+        "premise: the opaque transfer must succeed"
+    );
+    let ok_result = match &ofact1.protocols {
+        Protocols::TrackerFactFull { evaluation, .. } => evaluation.clone(),
+        _ => panic!("expected a full fact event"),
+    };
+    let omasked1 = mask_and_reseal(
+        &ofact1,
+        &ocreate.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+    let omasked2 = mask_and_reseal(
+        &ofind(2),
+        &omasked1.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+    let mut ohinted = otransfer.clone();
+    ohinted.prev_ledger_event_hash =
+        omasked2.ledger_hash(HashAlgorithm::Blake3).unwrap();
+    let ohinted_hash = ohinted
+        .protocols
+        .hash_for_ledger(&HashAlgorithm::Blake3)
+        .unwrap();
+    ohinted.ledger_seal_signature = Signature::new(
+        &LedgerSeal {
+            gov_version: ohinted.gov_version,
+            sn: ohinted.sn,
+            prev_ledger_event_hash: ohinted.prev_ledger_event_hash.clone(),
+            protocols_hash: ohinted_hash,
+        },
+        &alice_keys,
+    )
+    .unwrap();
+    let oforged = forge_aux(
+        &ohinted,
+        &ok_result,
+        &omasked2.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+
+    // Phase one leaves the opaque cursor at SN1: the incomplete
+    // chain can not prove the aux but its envelope opens passage,
+    // so SN1 applies with no proof recorded.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![ocreate.clone(), omasked1.clone()],
+        false,
+        &ohinted,
+    )
+    .await;
+    get_subject(&rita, opaque_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, opaque_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "an unverifiable passage records no proof"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(opaque_id.clone()).await.unwrap(),
+        1,
+        "the first missing aux rebuilds once"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the applied envelope holds nothing back"
+    );
+
+    // Phase two replays only the suffix and degrades to
+    // Unverifiable: the envelope opens passage with no proof,
+    // no refutation and no rollback.
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![omasked2.clone()],
+        false,
+        &oforged,
+    )
+    .await;
+    get_subject(&rita, opaque_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, opaque_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "an unverifiable passage records no proof"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(opaque_id.clone()).await.unwrap(),
+        1,
+        "the suffix replays incrementally instead of rebuilding"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the applied envelope holds nothing back"
+    );
+
+    // Clear subject: the same checkable-but-wrong shape over
+    // reproducible evidence stays Refuted.
+    let (clear_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        clear_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &alice,
+        clear_id.clone(),
+        json!({"ModTwo": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, clear_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, clear_id.clone(), Some(3), true).await.unwrap();
+    let clear_history = alice
+        .test_get_tracker_ledger(clear_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(clear_history.len(), 4);
+    let cfind = |sn: u64| {
+        clear_history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("clear history event")
+            .clone()
+    };
+    let ccreate = cfind(0);
+    let cfact1 = cfind(1);
+    let cfact2 = cfind(2);
+    let ctransfer = cfind(3);
+    assert!(
+        ctransfer.protocols.is_success(),
+        "premise: the clear transfer must succeed"
+    );
+    let cok_result = match &cfact1.protocols {
+        Protocols::TrackerFactFull { evaluation, .. } => evaluation.clone(),
+        _ => panic!("expected a full fact event"),
+    };
+    let cforged = forge_aux(
+        &ctransfer,
+        &cok_result,
+        &cfact2.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        &alice_keys,
+    );
+
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![ccreate.clone(), cfact1.clone()],
+        false,
+        &cforged,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(clear_id.clone()).await.is_err(),
+            "an incomplete clear prefix must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        rita.test_full_rebuilds(clear_id.clone()).await.unwrap(),
+        1,
+        "the first missing aux rebuilds once"
+    );
+
+    inject_with_hint(
+        &rita,
+        &alice_key,
+        vec![cfact2.clone()],
+        false,
+        &cforged,
+    )
+    .await;
+    for _ in 0..30 {
+        assert!(
+            rita.get_subject_state(clear_id.clone()).await.is_err(),
+            "a refuted suffix must not register the subject"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, clear_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a refutation records no proof"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(clear_id.clone()).await.unwrap(),
+        1,
+        "the refuting suffix replays incrementally instead of rebuilding"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "a refuted chain holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
 }

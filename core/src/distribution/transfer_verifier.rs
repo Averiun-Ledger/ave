@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(feature = "test")]
+use std::sync::atomic::AtomicU8;
 
 use ave_actors::{ActorContext, ActorError};
 use ave_common::{
@@ -19,11 +21,11 @@ use crate::model::event::{
     EvaluationData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
 };
 use crate::node::SubjectData;
-use crate::node::subject_manager::{SubjectManager, SubjectManagerMessage};
 use crate::subject::Metadata;
 use crate::subject::RequestSubjectData;
 use crate::validation::response::ValidationRes;
 use crate::validation::worker::{EventAnchor, check_evaluation};
+use tracing::warn;
 
 use super::error::DistributorError;
 
@@ -88,6 +90,68 @@ pub(crate) enum CursorTrust {
     Opaque,
 }
 
+/// Bounded evaluation-role cache keyed by (gov version,
+/// schema, namespace). Roles resolve per version, so a long
+/// chain replays with one lookup each; the LRU bound keeps a
+/// cursor that outlives many governance versions from pinning
+/// every register it ever saw. Eviction only costs a future
+/// re-resolution, never correctness: a missing entry resolves
+/// again, and resolution failures are never cached (the caller
+/// only inserts on success; the envelope path handles the rest).
+pub(crate) struct RoleCache {
+    entries:
+        HashMap<(u64, SchemaType, Namespace), (RoleDataRegister, u64)>,
+    seq: u64,
+}
+
+impl RoleCache {
+    pub(crate) const MAX_ROLES: usize = 8;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            seq: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn get_mut(
+        &mut self,
+        key: &(u64, SchemaType, Namespace),
+    ) -> Option<&mut RoleDataRegister> {
+        self.seq = self.seq.wrapping_add(1);
+        let seq = self.seq;
+        self.entries.get_mut(key).map(|(register, last_used)| {
+            *last_used = seq;
+            register
+        })
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        key: (u64, SchemaType, Namespace),
+        value: RoleDataRegister,
+    ) {
+        self.seq = self.seq.wrapping_add(1);
+        let seq = self.seq;
+        if !self.entries.contains_key(&key)
+            && self.entries.len() >= Self::MAX_ROLES
+            && let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(id, _)| id.clone())
+        {
+            self.entries.remove(&victim);
+        }
+        self.entries.insert(key, (value, seq));
+    }
+}
+
 /// Saved replay state for one subject chain: lets later aux
 /// checks resume `verify_chain` from the tip instead of
 /// rebuilding from genesis. Volatile (worker RAM only, never
@@ -101,7 +165,7 @@ pub(crate) struct VerifyCursor {
     tip_hash: DigestIdentifier,
     local_tip: Option<u64>,
     trust: CursorTrust,
-    roles: HashMap<(u64, SchemaType, Namespace), RoleDataRegister>,
+    roles: RoleCache,
     // (aux sn, aux bytes hash, chain tip hash, suffix fingerprint):
     // a verdict is only reusable for the exact replay inputs that
     // produced it, so a new batch can never inherit the verdict of
@@ -178,6 +242,11 @@ impl VerifyCursorStore {
 pub(crate) struct VerifyStatsRegistry {
     processed: HashMap<DigestIdentifier, u64>,
     reloads: HashMap<DigestIdentifier, u64>,
+    full_rebuilds: HashMap<DigestIdentifier, u64>,
+    buffer_cloned: HashMap<DigestIdentifier, u64>,
+    buffer_visited: HashMap<DigestIdentifier, u64>,
+    buffer_reordered: HashMap<DigestIdentifier, u64>,
+    roles_resolved: HashMap<DigestIdentifier, u64>,
 }
 
 #[cfg(feature = "test")]
@@ -198,17 +267,72 @@ impl VerifyStatsRegistry {
         *self.reloads.entry(subject_id.clone()).or_default() += 1;
     }
 
+    pub(crate) fn add_full_rebuild(&mut self, subject_id: &DigestIdentifier) {
+        *self.full_rebuilds.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn full_rebuilds(&self, subject_id: &DigestIdentifier) -> u64 {
+        self.full_rebuilds.get(subject_id).copied().unwrap_or(0)
+    }
+
+    /// Suffix assembly work: cloned events, examined source
+    /// events and reordered elements per delivery. The merge emits
+    /// in ascending order by construction and the partition probes
+    /// skip whole verified prefixes logarithmically, so all stay
+    /// linear in the new events instead of rescanning the prefix.
+    /// The full-path rebuild sorts once and counts its length as
+    /// reordered; the incremental merge never reorders.
+    pub(crate) fn add_buffer_work(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        cloned: u64,
+        visited: u64,
+        reordered: u64,
+    ) {
+        *self.buffer_cloned.entry(subject_id.clone()).or_default() += cloned;
+        *self.buffer_visited.entry(subject_id.clone()).or_default() += visited;
+        if reordered > 0 {
+            *self.buffer_reordered.entry(subject_id.clone()).or_default() +=
+                reordered;
+        }
+    }
+
     pub(crate) fn snapshot(&self, subject_id: &DigestIdentifier) -> (u64, u64) {
         (
             self.processed.get(subject_id).copied().unwrap_or(0),
             self.reloads.get(subject_id).copied().unwrap_or(0),
         )
     }
+
+    pub(crate) fn buffer_snapshot(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> (u64, u64, u64) {
+        (
+            self.buffer_cloned.get(subject_id).copied().unwrap_or(0),
+            self.buffer_visited.get(subject_id).copied().unwrap_or(0),
+            self.buffer_reordered.get(subject_id).copied().unwrap_or(0),
+        )
+    }
+
+    pub(crate) fn add_roles_resolved(&mut self, subject_id: &DigestIdentifier) {
+        *self.roles_resolved.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn roles_resolved(&self, subject_id: &DigestIdentifier) -> u64 {
+        self.roles_resolved.get(subject_id).copied().unwrap_or(0)
+    }
 }
 
 pub(crate) struct TransferVerifier {
     hash: HashAlgorithm,
     our_key: Arc<PublicKey>,
+    /// Test-only one-shot fault: fail the tracker resolve right
+    /// after a successful `Up` in `load_local_ledger`, proving the
+    /// lease is released on that path. 0 idle, 1 armed; consumed
+    /// once. Production never arms it.
+    #[cfg(feature = "test")]
+    pub(crate) test_tracker_resolve_fault: AtomicU8,
 }
 
 impl TransferVerifier {
@@ -216,7 +340,12 @@ impl TransferVerifier {
         hash: HashAlgorithm,
         our_key: Arc<PublicKey>,
     ) -> Self {
-        Self { hash, our_key }
+        Self {
+            hash,
+            our_key,
+            #[cfg(feature = "test")]
+            test_tracker_resolve_fault: AtomicU8::new(0),
+        }
     }
 
     /// Lightweight cryptographic check of a Transfer event.
@@ -497,19 +626,25 @@ impl TransferVerifier {
         &self,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         governance_id: &DigestIdentifier,
+        _subject_id: &DigestIdentifier,
         ledger: &[Ledger],
     ) -> HashSet<u64> {
         let mut ordered = ledger.to_vec();
         ordered.sort_by_key(|event| event.sn);
+        #[cfg(feature = "test")]
+        Self::note_buffer_work(
+            ctx,
+            _subject_id,
+            ordered.len() as u64,
+            ordered.len() as u64,
+            ordered.len() as u64,
+        );
         let Some(mut cursor) = Self::genesis_metadata(&ordered) else {
             return HashSet::new();
         };
         // Roles repeat per governance version, not per event: cache
         // them so a long first-copy batch costs one lookup.
-        let mut roles_cache: HashMap<
-            (u64, SchemaType, Namespace),
-            RoleDataRegister,
-        > = HashMap::new();
+        let mut roles_cache = RoleCache::new();
         let (proven, _, _, _) = self
             .verify_chain(
                 ctx,
@@ -523,7 +658,7 @@ impl TransferVerifier {
     }
 
     /// Genesis pre-state of a Create-led batch, if usable.
-    fn genesis_metadata(ordered: &[Ledger]) -> Option<Metadata> {
+    pub(crate) fn genesis_metadata(ordered: &[Ledger]) -> Option<Metadata> {
         let create = ordered.first().filter(|e| e.is_create_event())?;
         if create.sn != 0 {
             return None;
@@ -575,11 +710,79 @@ impl TransferVerifier {
         }
     }
 
+    /// Test-only buffer workload counters: cloned events,
+    /// merge/dedup visits and reordered elements per suffix
+    /// assembly and full rebuild. The merge emits in ascending
+    /// order by construction and the partition probes skip whole
+    /// verified prefixes logarithmically, so all stay linear in
+    /// the new events. Zero cost in production: every increment is
+    /// `cfg(test)`-gated.
+    #[cfg(feature = "test")]
+    fn note_buffer_work(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+        cloned: u64,
+        visited: u64,
+        reordered: u64,
+    ) {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
+            let mut guard = stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cloned > 0 || visited > 0 || reordered > 0 {
+                guard.add_buffer_work(subject_id, cloned, visited, reordered);
+            }
+        }
+    }
+
+    /// Test-only full-rebuild counter: counts authoritative
+    /// rebuilds from genesis, so a test can tell an incremental
+    /// suffix replay apart from a full scan.
+    #[cfg(feature = "test")]
+    fn note_full_rebuild(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
+            stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .add_full_rebuild(subject_id);
+        }
+    }
+
+    /// Test-only role-resolution counter: successful evaluation
+    /// role lookups per subject. Proves repeated events resolve
+    /// once per cached version instead of hitting the register
+    /// per event. Zero cost in production: `cfg(test)`-gated.
+    #[cfg(feature = "test")]
+    fn note_roles_resolved(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
+            let mut guard = stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.add_roles_resolved(subject_id);
+        }
+    }
+
     /// Reloads one applied-ledger window for the evidence replay.
     /// `lo_sn` is exclusive: events after it up to `hi_sn` come
     /// back. Any failure (missing tracker, failed read) is `None`:
     /// callers fail closed instead of judging on a partial chain.
+    /// The reload runs inside a subject lease: every exit after a
+    /// successful `Up` releases the requester, so a failed resolve
+    /// can never pin `aux-evidence` until reboot.
     async fn load_local_ledger(
+        &self,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
         subject_id: &DigestIdentifier,
         lo_sn: Option<u64>,
@@ -591,7 +794,6 @@ impl TransferVerifier {
         // An idle tracker is already stopped: only live
         // requesters keep it running, so reload it for the read
         // and release the lease right away.
-        let mut reloaded = false;
         let tracker = match ctx
             .system()
             .get_actor::<crate::tracker::Tracker>(&path)
@@ -599,55 +801,73 @@ impl TransferVerifier {
         {
             Ok(tracker) => tracker,
             Err(_) => {
-                let manager_path =
-                    ave_actors::ActorPath::from("/user/node/subject_manager");
-                let Ok(manager) = ctx
-                    .system()
-                    .get_actor::<SubjectManager>(&manager_path)
-                    .await
-                else {
-                    return None;
-                };
-                if manager
-                    .ask(SubjectManagerMessage::Up {
-                        subject_id: subject_id.clone(),
-                        requester: "aux-evidence".to_owned(),
-                        create_ledger: None,
-                    })
-                    .await
-                    .is_err()
+                // Test-only one-shot fault: fail the resolve after
+                // a successful Up, proving the lease is released on
+                // that path too. Consumed once, when armed.
+                #[cfg(feature = "test")]
+                let fail_resolve = self
+                    .test_tracker_resolve_fault
+                    .swap(0, std::sync::atomic::Ordering::SeqCst)
+                    != 0;
+                #[cfg(not(feature = "test"))]
+                let fail_resolve = false;
+                let lease = match crate::model::common::subject::acquire_subject(
+                    ctx,
+                    subject_id,
+                    "aux-evidence".to_owned(),
+                    None,
+                    true,
+                )
+                .await
                 {
-                    return None;
-                }
-                reloaded = true;
-                let Ok(tracker) = ctx
-                    .system()
-                    .get_actor::<crate::tracker::Tracker>(&path)
-                    .await
-                else {
-                    return None;
+                    Ok(lease) => lease,
+                    // Up failed: nothing was registered, so there
+                    // is no lease to release.
+                    Err(_) => return None,
                 };
-                tracker
+                let loaded = if fail_resolve {
+                    None
+                } else {
+                    match ctx
+                        .system()
+                        .get_actor::<crate::tracker::Tracker>(&path)
+                        .await
+                    {
+                        Err(_) => None,
+                        Ok(tracker) => {
+                            match tracker
+                                .ask(crate::tracker::TrackerMessage::GetLedger {
+                                    lo_sn,
+                                    hi_sn,
+                                })
+                                .await
+                            {
+                                Ok(crate::tracker::TrackerResponse::Ledger {
+                                    ledger,
+                                    ..
+                                }) => Some(ledger),
+                                _ => None,
+                            }
+                        }
+                    }
+                };
+                // A release failure is logged, never confused with
+                // evidence: the verdict below only depends on the
+                // read itself.
+                if let Err(error) = lease.finish(ctx).await {
+                    warn!(
+                        msg_type = "AuxEvidenceReload",
+                        subject_id = %subject_id,
+                        error = %error,
+                        "Failed to release aux-evidence requester",
+                    );
+                }
+                return loaded;
             }
         };
         let fetched = tracker
             .ask(crate::tracker::TrackerMessage::GetLedger { lo_sn, hi_sn })
             .await;
-        if reloaded
-            && let Ok(manager) = ctx
-                .system()
-                .get_actor::<SubjectManager>(&ave_actors::ActorPath::from(
-                    "/user/node/subject_manager",
-                ))
-                .await
-        {
-            let _ = manager
-                .ask(SubjectManagerMessage::Finish {
-                    subject_id: subject_id.clone(),
-                    requester: "aux-evidence".to_owned(),
-                })
-                .await;
-        }
         match fetched {
             Ok(crate::tracker::TrackerResponse::Ledger { ledger, .. }) => {
                 Some(ledger)
@@ -673,6 +893,48 @@ impl TransferVerifier {
             parts.push((event.sn, event.ledger_hash(self.hash).ok()?));
         }
         hash_borsh(&*self.hash.hasher(), &parts).ok()
+    }
+
+    /// Merges individually ascending runs into one ascending
+    /// chain, keeping the first copy on ties: precedence runs
+    /// delta, held, sender, aux, i.e. authoritative order. A linear
+    /// merge replaces the full re-sort: nothing already ordered is
+    /// ever reordered. Runs must arrive ascending (ingress sorts
+    /// the sender batch, staged batches only append past the tip,
+    /// the store reads ascending); a misordered run fails closed
+    /// downstream, with a debug assertion catching it in tests.
+    fn merge_runs(runs: [&[Ledger]; 4]) -> Vec<Ledger> {
+        #[cfg(debug_assertions)]
+        for run in runs {
+            debug_assert!(
+                run.windows(2).all(|w| w[0].sn <= w[1].sn),
+                "merge inputs must arrive ascending"
+            );
+        }
+        let total: usize = runs.iter().map(|run| run.len()).sum();
+        let mut out: Vec<Ledger> = Vec::with_capacity(total);
+        let mut idx = [0usize; 4];
+        loop {
+            let mut best: Option<usize> = None;
+            for (run, events) in runs.iter().enumerate() {
+                let Some(head) = events.get(idx[run]) else {
+                    continue;
+                };
+                let is_earlier = match best {
+                    None => true,
+                    Some(kept) => head.sn < runs[kept][idx[kept]].sn,
+                };
+                if is_earlier {
+                    best = Some(run);
+                }
+            }
+            let Some(take) = best else {
+                break;
+            };
+            out.push(runs[take][idx[take]].clone());
+            idx[take] += 1;
+        }
+        out
     }
 
     /// Incremental aux check: replays only the events past the
@@ -727,9 +989,18 @@ impl TransferVerifier {
         // The aux itself is always judged, even when it travels
         // outside the sender batch; a held copy of the same SN
         // wins, exactly like the full-path dedup order.
-        let mut fresh: Vec<Ledger> = Vec::new();
+        // Assemble the suffix to replay from ascending runs: the
+        // applied local delta, the held batches, the sender batch
+        // and the aux itself. Every run arrives sorted (ingress
+        // sorts the batch, staged events only append past the tip,
+        // the store reads ascending), so a linear merge replaces
+        // the full re-sort: nothing already ordered is ever
+        // reordered. Precedence on ties is authoritative order
+        // (delta, held, sender, aux): the first copy wins the
+        // identity check below, exactly like the full path.
+        let mut delta: Vec<Ledger> = Vec::new();
         if local_sn.is_some_and(|current| Some(current) > covered) {
-            let Some(delta) = Self::load_local_ledger(
+            let Some(loaded) = self.load_local_ledger(
                 ctx,
                 subject_id,
                 covered,
@@ -741,19 +1012,26 @@ impl TransferVerifier {
             };
             // A first delta with no coverage at all is a full
             // reload, like the full path.
-            fresh.extend(delta);
+            delta = loaded;
         }
-        fresh.extend(buffered.iter().cloned());
-        fresh.extend(
-            sender_ledger
-                .iter()
-                .filter(|event| event.sn < transfer_event.sn)
-                .cloned(),
-        );
-        if !fresh.iter().any(|event| event.sn == transfer_event.sn) {
-            fresh.push(transfer_event.clone());
-        }
-        fresh.sort_by_key(|event| event.sn);
+        let hold_from = buffered.partition_point(|event| event.sn < tip_sn);
+        let held_window = &buffered[hold_from..];
+        let sender_from =
+            sender_ledger.partition_point(|event| event.sn < tip_sn);
+        let sender_to =
+            sender_ledger.partition_point(|event| event.sn < transfer_event.sn);
+        let sender_window = sender_ledger
+            .get(sender_from..sender_to)
+            .unwrap_or(&[]);
+        // Only the uncovered tail is cloned: the partitions above
+        // skip whole verified prefixes with logarithmic probes
+        // instead of scanning them.
+        let mut fresh: Vec<Ledger> = Self::merge_runs([
+            delta.as_slice(),
+            held_window,
+            sender_window,
+            std::slice::from_ref(transfer_event),
+        ]);
         // Merge by identity with authoritative precedence: the
         // first copy wins, so an exact re-send replays once
         // instead of stalling the chain. The same SN with
@@ -762,6 +1040,8 @@ impl TransferVerifier {
         // instead of borrowing the forged bytes. Unmeasurable
         // bytes never dedup and never diverge on their own: the
         // replay below decides over them.
+        #[cfg(feature = "test")]
+        let merged_len = fresh.len();
         let mut deduped: Vec<Ledger> = Vec::with_capacity(fresh.len());
         for event in fresh {
             let duplicate = match deduped.last() {
@@ -789,6 +1069,19 @@ impl TransferVerifier {
             }
         }
         fresh = deduped;
+        // Buffer work stays linear in the new events: every merged
+        // event is cloned once, and the dedup pass visits each of
+        // them once. Partition probes are logarithmic and stay
+        // uncounted; dropped history was never cloned. The merge
+        // never reorders: inputs arrive ascending and emit ascending.
+        #[cfg(feature = "test")]
+        Self::note_buffer_work(
+            ctx,
+            subject_id,
+            merged_len as u64,
+            (merged_len + fresh.len()) as u64,
+            0,
+        );
         // Drop what the cursor already covers: history below the
         // tip never replays. The tip itself replays only if it is
         // gone, which the hash tells apart from a quiet re-send:
@@ -910,6 +1203,7 @@ impl TransferVerifier {
         };
         // A first delta with no coverage at all counts as a full
         // reload, like the full path; later deltas are uncounted.
+        #[cfg(feature = "test")]
         let full_load = cursor.local_tip.is_none() && local_sn.is_some();
         let (proven, refuted, skipped_opaque, used_envelope) = self
             .verify_chain(
@@ -928,9 +1222,16 @@ impl TransferVerifier {
             CursorTrust::Proven
         };
         cursor.trust = trust;
+        // A transfer that does not reproduce over incomplete
+        // properties stays unproven, never refuted: opaque steps
+        // below the replayed suffix may hold the patch its check
+        // needs. Downgrade-only trust keeps that verdict stable
+        // across incremental replays and full rebuilds alike.
         let verdict = if proven.contains(&transfer_event.sn) {
             AuxEvidence::Proven
-        } else if refuted.contains(&transfer_event.sn) {
+        } else if refuted.contains(&transfer_event.sn)
+            && trust != CursorTrust::Opaque
+        {
             AuxEvidence::Refuted
         } else if cursor.metadata.sn == transfer_event.sn {
             AuxEvidence::Unverifiable
@@ -1043,7 +1344,7 @@ impl TransferVerifier {
         let mut combined: Vec<Ledger> = Vec::new();
         let mut tip: Option<u64> = None;
         if local_sn.is_some() {
-            let Some(ledger) = Self::load_local_ledger(
+            let Some(ledger) = self.load_local_ledger(
                 ctx,
                 subject_id,
                 None,
@@ -1085,16 +1386,26 @@ impl TransferVerifier {
         combined.extend(needed);
         // Own events win on overlap: they are what this node
         // already committed, never the sender's claim about them.
+        // This authoritative rebuild happens at most once per
+        // cursor lifetime: later batches resume incrementally.
         combined.sort_by_key(|event| event.sn);
         combined.dedup_by_key(|event| event.sn);
+        #[cfg(feature = "test")]
+        {
+            Self::note_buffer_work(
+                ctx,
+                subject_id,
+                combined.len() as u64,
+                combined.len() as u64,
+                combined.len() as u64,
+            );
+            Self::note_full_rebuild(ctx, subject_id);
+        }
         let Some(mut cursor) = Self::genesis_metadata(&combined) else {
             return AuxEvidence::Missing;
         };
         let (_, tail) = combined.split_at(1);
-        let mut roles_cache: HashMap<
-            (u64, SchemaType, Namespace),
-            RoleDataRegister,
-        > = HashMap::new();
+        let mut roles_cache = RoleCache::new();
         let (proven, refuted, skipped_opaque, used_envelope) = self
             .verify_chain(
                 ctx,
@@ -1201,10 +1512,7 @@ impl TransferVerifier {
         governance_id: &DigestIdentifier,
         cursor: &mut Metadata,
         events: &[Ledger],
-        roles_cache: &mut HashMap<
-            (u64, SchemaType, Namespace),
-            RoleDataRegister,
-        >,
+        roles_cache: &mut RoleCache,
     ) -> (HashSet<u64>, HashSet<u64>, bool, bool) {
         use json_patch::{Patch, patch};
         fn apply_patch(
@@ -1282,8 +1590,8 @@ impl TransferVerifier {
                 cursor.schema_id.clone(),
                 cursor.namespace.clone(),
             );
-            let eval_data = match roles_cache.get(&roles_key) {
-                Some(cached) => Some(cached.clone()),
+            let eval_data = match roles_cache.get_mut(&roles_key).cloned() {
+                Some(cached) => Some(cached),
                 None => {
                     match get_actual_roles_register(
                         ctx,
@@ -1299,6 +1607,11 @@ impl TransferVerifier {
                     .await
                     {
                         Ok((fetched, _, _)) => {
+                            #[cfg(feature = "test")]
+                            Self::note_roles_resolved(
+                                ctx,
+                                &cursor.subject_id,
+                            );
                             roles_cache.insert(roles_key, fetched.clone());
                             Some(fetched)
                         }
@@ -1531,6 +1844,61 @@ impl TransferVerifier {
             Ok(TransferSimulationResult::Witness)
         } else {
             Ok(TransferSimulationResult::NotWitness)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::governance::model::Quorum;
+
+    fn test_roles() -> RoleDataRegister {
+        RoleDataRegister {
+            workers: HashSet::new(),
+            quorum: Quorum::Majority,
+        }
+    }
+
+    fn test_key(version: u64) -> (u64, SchemaType, Namespace) {
+        (
+            version,
+            SchemaType::Type("Example".to_owned()),
+            Namespace::from("test"),
+        )
+    }
+
+    #[test]
+    fn roles_cache_evicts_least_recently_used() {
+        let mut cache = RoleCache::new();
+        for version in 0..RoleCache::MAX_ROLES as u64 {
+            cache.insert(test_key(version), test_roles());
+        }
+        assert_eq!(cache.len(), RoleCache::MAX_ROLES);
+        // Touch version 0 so version 1 becomes the victim.
+        assert!(cache.get_mut(&test_key(0)).is_some());
+        cache.insert(test_key(RoleCache::MAX_ROLES as u64), test_roles());
+        assert_eq!(cache.len(), RoleCache::MAX_ROLES);
+        assert!(cache.get_mut(&test_key(0)).is_some());
+        assert!(cache.get_mut(&test_key(1)).is_none());
+        // An evicted version resolves again instead of reusing
+        // another version's register.
+        cache.insert(test_key(1), test_roles());
+        assert!(cache.get_mut(&test_key(1)).is_some());
+        assert_eq!(cache.len(), RoleCache::MAX_ROLES);
+    }
+
+    #[test]
+    fn roles_cache_reinsert_does_not_evict() {
+        let mut cache = RoleCache::new();
+        for version in 0..RoleCache::MAX_ROLES as u64 {
+            cache.insert(test_key(version), test_roles());
+        }
+        // Refreshing an existing entry must not evict anything.
+        cache.insert(test_key(0), test_roles());
+        assert_eq!(cache.len(), RoleCache::MAX_ROLES);
+        for version in 0..RoleCache::MAX_ROLES as u64 {
+            assert!(cache.get_mut(&test_key(version)).is_some());
         }
     }
 }

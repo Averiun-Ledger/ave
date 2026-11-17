@@ -23,7 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// Sane upper bounds: pages and batches above these exhaust memory or
 /// bandwidth long before they help throughput.
-const MAX_LEDGER_BATCH_SIZE: usize = 1_000_000;
+pub(crate) const MAX_DISTRIBUTION_LEDGER_EVENTS: usize = 10_000;
 const MAX_SYNC_PAGE_SIZE: usize = 10_000;
 
 /// Canonical production paths.
@@ -326,10 +326,12 @@ impl SyncConfig {
                 reason: "must be greater than zero".to_string(),
             });
         }
-        if self.ledger_batch_size > MAX_LEDGER_BATCH_SIZE {
+        if self.ledger_batch_size > MAX_DISTRIBUTION_LEDGER_EVENTS {
             return Err(Error::InvalidConfiguration {
                 component: "sync.ledger_batch_size".to_string(),
-                reason: format!("must not exceed {MAX_LEDGER_BATCH_SIZE}"),
+                reason: format!(
+                    "must not exceed {MAX_DISTRIBUTION_LEDGER_EVENTS}"
+                ),
             });
         }
 
@@ -1359,5 +1361,24 @@ mod tests {
     #[test]
     fn default_config_validates() {
         assert!(ApprovalConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn sync_batch_size_accepts_shared_max() {
+        let mut config = SyncConfig::default();
+        config.ledger_batch_size = MAX_DISTRIBUTION_LEDGER_EVENTS;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn sync_batch_size_rejects_above_shared_max() {
+        let mut config = SyncConfig::default();
+        config.ledger_batch_size = MAX_DISTRIBUTION_LEDGER_EVENTS + 1;
+        let Err(Error::InvalidConfiguration { component, .. }) =
+            config.validate()
+        else {
+            panic!("oversized batch size must fail validation");
+        };
+        assert_eq!(component, "sync.ledger_batch_size");
     }
 }

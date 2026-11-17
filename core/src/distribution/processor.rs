@@ -80,7 +80,8 @@ impl DistriWorker {
         // pruned; anything genuinely new keeps its original order.
         let applied_tip =
             get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
-        let mut prefix = self.deferred_prefix(&subject_id, applied_tip);
+        let mut prefix =
+            self.take_deferred_prefix(ctx, &subject_id, applied_tip);
         if !prefix.is_empty() {
             prefix.extend(pending_ledger);
             pending_ledger = prefix;
@@ -662,7 +663,7 @@ impl DistriWorker {
         // The chain this aux belongs to just proved forged: drop
         // anything we held back for it before deciding about the
         // purge below.
-        self.drop_deferred(subject_id);
+        self.drop_deferred(ctx, subject_id);
         let speculative = matches!(
             crate::model::common::get_verified_transfer_detail(
                 ctx,
@@ -816,7 +817,7 @@ impl DistriWorker {
         // The failed copy is being torn down: anything held back
         // for it is stale by definition and must not be applied
         // later.
-        self.drop_deferred(subject_id);
+        self.drop_deferred(ctx, subject_id);
         // Test barrier: pause here while a test interleaves a valid
         // copy on another worker. Production never arms it.
         #[cfg(feature = "test")]

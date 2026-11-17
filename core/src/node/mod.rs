@@ -465,8 +465,9 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
-                        deferred: std::collections::HashMap::new(),
+                        deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                        pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
@@ -492,8 +493,9 @@ impl Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
-                        deferred: std::collections::HashMap::new(),
+                        deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                        pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
@@ -1218,8 +1220,9 @@ impl Actor for Node {
                         ledger_batch_size: self.ledger_batch_size,
                         transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                         hash,
-                        deferred: std::collections::HashMap::new(),
+                        deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                        pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
@@ -1330,8 +1333,9 @@ impl Handler<Self> for Node {
                             ledger_batch_size: self.ledger_batch_size,
                             transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
-                            deferred: std::collections::HashMap::new(),
+                            deferred: crate::distribution::deferred::DeferredStore::new(),
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                        pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             #[cfg(feature = "test")]
                             test_modes_fault:
@@ -1368,8 +1372,9 @@ impl Handler<Self> for Node {
                             ledger_batch_size: self.ledger_batch_size,
                             transfer_verifier: crate::distribution::transfer_verifier::TransferVerifier::new(hash, self.our_key.clone()),
                             hash,
-                            deferred: std::collections::HashMap::new(),
+                            deferred: crate::distribution::deferred::DeferredStore::new(),
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
+                        pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             #[cfg(feature = "test")]
                             test_modes_fault:

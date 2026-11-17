@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -66,13 +66,20 @@ pub struct DistriWorker {
     /// verify; refutation or a fresh copy discards them. Memory-only:
     /// never persisted, so a reboot starts clean. Keyed by subject
     /// because the node-level worker multiplexes many of them.
-    pub(crate) deferred: HashMap<DigestIdentifier, Vec<Ledger>>,
+    /// Bounded by count, events and bytes (see `DeferredStore`):
+    /// overflow evicts whole chains instead of growing forever.
+    pub(crate) deferred: super::deferred::DeferredStore,
     /// Saved verification prefixes, keyed by subject: later aux
     /// checks resume the replay from the tip instead of reloading
     /// and re-scanning the whole prefix. Volatile like `deferred`;
     /// identity-checked on every use, LRU-bounded, and dropped on
     /// rollback so no purge ever reuses a stale chain.
     pub(crate) verify_cursors: super::transfer_verifier::VerifyCursorStore,
+    /// Incremental authorization state for staged chains: lets the
+    /// `without_aux` check process only the new tail per delivery
+    /// instead of rebuilding ownership and evidence over the whole
+    /// retained prefix. Dropped with the staged prefix it covers.
+    pub(crate) pending_auth: HashMap<DigestIdentifier, PendingAuthState>,
     pub(crate) attempt_clock: Arc<AtomicU64>,
     /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
     /// Atomic so the shared `&self` receipt helpers can consume it;
@@ -91,6 +98,58 @@ pub(crate) struct CheckAuthCommon {
     pub(crate) namespace: String,
     pub(crate) is_gov: bool,
     pub(crate) gov_version: u64,
+}
+
+/// Incremental authorization state for one staged chain: the
+/// chain-derived facts already evaluated over the held prefix, so
+/// each new batch only processes its own tail. The access decision
+/// itself is never cached: every delivery re-runs the witness
+/// check against current governance. Invalidated whenever the
+/// staged prefix is dropped, taken, evicted or proved divergent.
+pub(crate) struct PendingAuthState {
+    tip_sn: Option<u64>,
+    tip_hash: Option<DigestIdentifier>,
+    is_register: bool,
+    max_gov_version: u64,
+    first_confirm_reject: Option<u64>,
+    has_inline_transfer: bool,
+    /// Whether the retained chain is known to contain the Create
+    /// event: computed once per rebuild and extended with the new
+    /// tail only, so link checks never rescan the prefix.
+    has_create: bool,
+    transfer_data: Option<crate::governance::witnesses_register::TransferData>,
+    proven_inline: HashSet<u64>,
+    auth_metadata: Option<crate::subject::Metadata>,
+    auth_roles: super::transfer_verifier::RoleCache,
+    broken: bool,
+    /// Frozen gov-window boundary for one limit version: once the
+    /// retained chain outgrows a `Version` limit, later events can
+    /// only share the same or a higher gov version (chain order),
+    /// so the boundary never moves again until the entry is dropped
+    /// (prune, take, eviction) or the limit version changes. This
+    /// keeps the exceeding corner O(1) per delivery instead of
+    /// rescanning the retained prefix each time.
+    frozen_gov_window: Option<(u64, Option<u64>)>,
+}
+
+impl PendingAuthState {
+    fn fresh(is_register: bool) -> Self {
+        Self {
+            tip_sn: None,
+            tip_hash: None,
+            is_register,
+            max_gov_version: 0,
+            first_confirm_reject: None,
+            has_inline_transfer: false,
+            has_create: false,
+            transfer_data: None,
+            proven_inline: HashSet::new(),
+            auth_metadata: None,
+            auth_roles: super::transfer_verifier::RoleCache::new(),
+            broken: false,
+            frozen_gov_window: None,
+        }
+    }
 }
 
 pub(crate) struct TransferBatch<'a> {
@@ -115,6 +174,87 @@ pub(crate) struct DistributionRange {
 }
 
 impl DistriWorker {
+    /// Snapshots one subject's staged prefix into the test-only
+    /// stats helper, live and stored. Called after every mutation
+    /// so the exact accounting the tests assert can never drift
+    /// silently. Test-only: production pays nothing here.
+    #[cfg(feature = "test")]
+    fn note_deferred_stats(
+        ctx: &mut ActorContext<Self>,
+        store: &super::deferred::DeferredStore,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) =
+            ctx.system().get_helper::<super::deferred::SharedDeferredStats>(
+                "deferred_stats",
+            )
+        {
+            let (live_events, live_bytes) = store.live(subject_id);
+            let (stored_events, stored_bytes) = store.retained(subject_id);
+            stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .note(
+                    subject_id,
+                    live_events,
+                    live_bytes,
+                    stored_events,
+                    stored_bytes,
+                );
+        }
+    }
+
+    /// Sender-side batch budget, clamped to the shared inbound
+    /// limit: a configured size above it must shrink the window,
+    /// never emit a batch the receiver drops on sight.
+    pub(crate) fn capped_batch_size(configured: u64) -> u64 {
+        configured
+            .min(crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64)
+    }
+
+    /// Test-only auth work counter: visits over new tail events
+    /// during the incremental `without_aux` check. Keeps the total
+    /// buffer/auth work linear instead of rescanning the retained
+    /// prefix per delivery.
+    #[cfg(feature = "test")]
+    fn note_auth_work(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        visited: u64,
+    ) {
+        use super::transfer_verifier::SharedVerifyStats;
+        if visited == 0 {
+            return;
+        }
+        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+            stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .add_buffer_work(subject_id, 0, visited, 0);
+        }
+    }
+
+    /// Test-only buffer clone counter for the worker side: the
+    /// screened ownership copy duplicates the batch once instead
+    /// of rescanning it per delivery.
+    #[cfg(feature = "test")]
+    fn note_buffer_cloned(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        cloned: u64,
+    ) {
+        use super::transfer_verifier::SharedVerifyStats;
+        if cloned == 0 {
+            return;
+        }
+        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+            stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .add_buffer_work(subject_id, cloned, 0, 0);
+        }
+    }
+
     fn concrete_hi_sn_limit(
         limit: HiSnLimit,
         offered_hi_sn: u64,
@@ -506,6 +646,9 @@ impl DistriWorker {
         // The suffix must not run ahead of our governance: the first
         // event check in check_auth_common is not enough, an inline
         // transfer could otherwise smuggle a newer gov_version.
+        // Counted as visits: the scan is linear in the batch.
+        #[cfg(feature = "test")]
+        Self::note_auth_work(ctx, subject_id, ledger.len() as u64);
         if ledger.iter().any(|e| e.gov_version > *gov_version) {
             let their = ledger
                 .iter()
@@ -604,7 +747,10 @@ impl DistriWorker {
             // they grant no ownership (the rebuild below only opens
             // it on success), so only the success proof requires
             // an Ok evaluation. Each transfer is also linked to
-            // its batch predecessor up front.
+            // its batch predecessor up front. The map build below
+            // visits every event once: counted, not moved off-book.
+            #[cfg(feature = "test")]
+            Self::note_auth_work(ctx, subject_id, ledger.len() as u64);
             let by_sn: HashMap<u64, &Ledger> = ledger
                 .iter()
                 .map(|event| (event.sn, event))
@@ -649,7 +795,12 @@ impl DistriWorker {
             let transfer_data = if has_inline_transfer {
                 let proven = self
                     .transfer_verifier
-                    .verified_inline_transfers(ctx, governance_id, ledger)
+                    .verified_inline_transfers(
+                        ctx,
+                        governance_id,
+                        subject_id,
+                        ledger,
+                    )
                     .await;
                 if ledger.iter().all(|event| {
                     !matches!(
@@ -662,6 +813,12 @@ impl DistriWorker {
                     )?)
                 } else {
                     let mut screened = ledger.to_vec();
+                    #[cfg(feature = "test")]
+                    Self::note_buffer_cloned(
+                        ctx,
+                        subject_id,
+                        screened.len() as u64,
+                    );
                     for event in screened.iter_mut().filter(|event| {
                         matches!(
                             event.get_event_request_type(),
@@ -738,8 +895,12 @@ impl DistriWorker {
             receiver_limit.min(offered_hi_sn)
         };
 
-        // Seguridad: capar en Confirm/Reject para evitar distribución más allá de
-        // cambios de ownership.
+        // Cap at Confirm/Reject so distribution never runs past
+        // ownership changes. The scan below visits every event
+        // once per check: counted so optimizing the merge can not
+        // hide work here.
+        #[cfg(feature = "test")]
+        Self::note_auth_work(ctx, subject_id, ledger.len() as u64);
         let safe_hi_sn = ledger
             .iter()
             .find_map(|event| {
@@ -756,6 +917,639 @@ impl DistriWorker {
             is_register,
             safe_hi_sn,
         })
+    }
+
+    /// Incremental `without_aux` authorization over staged prefix plus
+    /// current batch, without flattening or rescanning the retained
+    /// chain per delivery. Chain-derived facts (ownership, inline
+    /// proofs, gov max, first boundary) are cached per subject and
+    /// extended only with the new tail; the access decision itself
+    /// is re-evaluated every time against current governance. The
+    /// `offered_hi` is always the last SN of the current batch, so
+    /// the current batch participates in the decision instead of
+    /// authorizing only the already-held prefix.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_auth_without_aux_incremental(
+        ctx: &mut ActorContext<Self>,
+        verifier: &super::transfer_verifier::TransferVerifier,
+        hash: HashAlgorithm,
+        our_key: &PublicKey,
+        pending_auth: &mut HashMap<DigestIdentifier, PendingAuthState>,
+        sender: PublicKey,
+        held: &[Ledger],
+        current: &[Ledger],
+        offered_hi: u64,
+        common: &CheckAuthCommon,
+    ) -> Result<DistributionAuth, ActorError> {
+        use crate::governance::witnesses_register::WitnessesRegister;
+        use ave_common::bridge::request::EventRequestType;
+
+        if common.is_gov {
+            return Ok(DistributionAuth {
+                is_gov: true,
+                is_register: common.subject_data.is_some(),
+                safe_hi_sn: offered_hi,
+            });
+        }
+        let subject_id = &common.subject_id;
+        let is_register = if common.subject_data.is_none() {
+            get_subject_data(ctx, subject_id).await?.is_some()
+        } else {
+            true
+        };
+        // Gov versions must not run ahead: compare cached max plus
+        // the new tail instead of rescanning the held prefix.
+        let held_tip_sn = held.last().map(|event| event.sn);
+        let held_tip_hash = held
+            .last()
+            .and_then(|event| event.ledger_hash(hash).ok());
+        let state_needs_rebuild = match pending_auth.get(subject_id) {
+            Some(state) => {
+                state.is_register != is_register
+                    || state.tip_sn != held_tip_sn
+                    || match (&state.tip_hash, &held_tip_hash) {
+                        (Some(cached), Some(held_hash)) => cached != held_hash,
+                        _ => false,
+                    }
+            }
+            None => true,
+        };
+        if state_needs_rebuild {
+            let mut fresh = PendingAuthState::fresh(is_register);
+            let mut max_gov = 0u64;
+            let mut first_boundary: Option<u64> = None;
+            let mut has_inline = false;
+            let mut has_create = false;
+            for event in held.iter() {
+                max_gov = max_gov.max(event.gov_version);
+                if event.is_create_event() {
+                    has_create = true;
+                }
+                if matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Confirm | EventRequestType::Reject
+                ) && first_boundary.is_none()
+                {
+                    first_boundary = Some(event.sn);
+                }
+                if matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Transfer
+                ) {
+                    has_inline = true;
+                }
+            }
+            fresh.max_gov_version = max_gov;
+            fresh.first_confirm_reject = first_boundary;
+            fresh.has_inline_transfer = has_inline;
+            fresh.has_create = has_create;
+            fresh.tip_sn = held_tip_sn;
+            fresh.tip_hash = held_tip_hash.clone();
+            if !is_register && !held.is_empty() {
+                let Some(create) =
+                    held.iter().find(|event| event.is_create_event())
+                else {
+                    fresh.broken = true;
+                    pending_auth.insert(subject_id.clone(), fresh);
+                    #[cfg(feature = "test")]
+                    Self::note_auth_work(ctx, subject_id, held.len() as u64);
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                };
+                let Some(mut metadata) =
+                    super::transfer_verifier::TransferVerifier::genesis_metadata(
+                        held,
+                    )
+                else {
+                    fresh.broken = true;
+                    pending_auth.insert(subject_id.clone(), fresh);
+                    #[cfg(feature = "test")]
+                    Self::note_auth_work(ctx, subject_id, held.len() as u64);
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                };
+                let mut roles = super::transfer_verifier::RoleCache::new();
+                let tail = if held.first().is_some_and(|first| first.sn == 0) {
+                    &held[1..]
+                } else {
+                    &held[..]
+                };
+                let (proven, _, _, _) = verifier
+                    .verify_chain(
+                        ctx,
+                        &common.governance_id,
+                        &mut metadata,
+                        tail,
+                        &mut roles,
+                    )
+                    .await;
+                let mut data =
+                    WitnessesRegister::init_transfer_data(create);
+                for event in held.iter() {
+                    if event.sn == create.sn {
+                        continue;
+                    }
+                    let allow = matches!(
+                        event.get_event_request_type(),
+                        EventRequestType::Transfer
+                    ) && proven.contains(&event.sn);
+                    // Non-transfer events always apply their close
+                    // logic; transfers only open when proven.
+                    if matches!(
+                        event.get_event_request_type(),
+                        EventRequestType::Transfer
+                    ) {
+                        WitnessesRegister::apply_transfer_data_event(
+                            &mut data,
+                            event,
+                            allow,
+                        );
+                    } else {
+                        WitnessesRegister::apply_transfer_data_event(
+                            &mut data, event, false,
+                        );
+                    }
+                }
+                fresh.transfer_data = Some(data);
+                fresh.proven_inline = proven;
+                fresh.auth_metadata = Some(metadata);
+                fresh.auth_roles = roles;
+            }
+            pending_auth.insert(subject_id.clone(), fresh);
+            #[cfg(feature = "test")]
+            Self::note_auth_work(ctx, subject_id, held.len() as u64);
+        }
+        // Extend the cached chain facts with the current tail only.
+        let current_max: u64;
+        {
+            let state = pending_auth
+                .get_mut(subject_id)
+                .ok_or(DistributorError::ReceiverNoAccess)?;
+            for event in current.iter() {
+                state.max_gov_version =
+                    state.max_gov_version.max(event.gov_version);
+                if state.first_confirm_reject.is_none()
+                    && matches!(
+                        event.get_event_request_type(),
+                        EventRequestType::Confirm | EventRequestType::Reject
+                    )
+                {
+                    state.first_confirm_reject = Some(event.sn);
+                }
+                if matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Transfer
+                ) {
+                    state.has_inline_transfer = true;
+                }
+                if event.is_create_event() {
+                    state.has_create = true;
+                }
+            }
+            current_max = state.max_gov_version;
+            // Cryptographic link for new transfers only: the previous
+            // event is either earlier in the current batch or the held
+            // tip, never a rescan of the whole prefix.
+            let held_has_create = state.has_create;
+            for (idx, event) in current.iter().enumerate() {
+                if !matches!(
+                    event.get_event_request_type(),
+                    EventRequestType::Transfer
+                ) {
+                    continue;
+                }
+                let prev = if idx > 0 {
+                    Some(&current[idx - 1])
+                } else {
+                    held.last()
+                };
+                // verify_light needs the batch Create for metadata
+                // when the subject is still unknown: prefer the held
+                // Create, else the current one.
+                let light_ledger = if held_has_create {
+                    held.first().unwrap_or(&current[0])
+                } else {
+                    &current[0]
+                };
+                if verifier
+                    .verify_light(
+                        ctx,
+                        event,
+                        subject_id,
+                        light_ledger,
+                        false,
+                        prev,
+                    )
+                    .await
+                    .is_err()
+                {
+                    // A forged inline transfer fails the batch before
+                    // any ownership is rebuilt from it. Count the tail
+                    // scanned so far: the failure below must not hide
+                    // work already spent.
+                    #[cfg(feature = "test")]
+                    Self::note_auth_work(
+                        ctx,
+                        subject_id,
+                        current.len() as u64,
+                    );
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
+            }
+            if !is_register && !state.broken {
+                // Ensure a genesis pre-state exists: either already
+                // cached from the held prefix or starting in the
+                // current batch.
+                if state.auth_metadata.is_none() {
+                    let combined_starts_with_create = held
+                        .first()
+                        .is_some_and(|first| {
+                            first.is_create_event() && first.sn == 0
+                        })
+                        || current.first().is_some_and(|first| {
+                            first.is_create_event() && first.sn == 0
+                        });
+                    if !combined_starts_with_create {
+                        #[cfg(feature = "test")]
+                        Self::note_auth_work(
+                            ctx,
+                            subject_id,
+                            current.len() as u64,
+                        );
+                        return Err(
+                            DistributorError::ReceiverNoAccess.into()
+                        );
+                    }
+                    let combined_for_genesis: Vec<Ledger> = held
+                        .iter()
+                        .chain(current.iter())
+                        .cloned()
+                        .collect();
+                    let Some(metadata) =
+                        super::transfer_verifier::TransferVerifier::genesis_metadata(
+                            &combined_for_genesis,
+                        )
+                    else {
+                        state.broken = true;
+                        #[cfg(feature = "test")]
+                        Self::note_auth_work(
+                            ctx,
+                            subject_id,
+                            current.len() as u64,
+                        );
+                        return Err(
+                            DistributorError::ReceiverNoAccess.into()
+                        );
+                    };
+                    let Some(create) = combined_for_genesis
+                        .iter()
+                        .find(|event| event.is_create_event())
+                        .cloned()
+                    else {
+                        state.broken = true;
+                        #[cfg(feature = "test")]
+                        Self::note_auth_work(
+                            ctx,
+                            subject_id,
+                            current.len() as u64,
+                        );
+                        return Err(
+                            DistributorError::ReceiverNoAccess.into()
+                        );
+                    };
+                    state.auth_metadata = Some(metadata);
+                    state.auth_roles =
+                        super::transfer_verifier::RoleCache::new();
+                    state.transfer_data = Some(
+                        WitnessesRegister::init_transfer_data(&create),
+                    );
+                    // Replay any held events past genesis that were
+                    // skipped because metadata was missing: they are
+                    // at most the held prefix once, right after the
+                    // Create becomes available.
+                    if !held.is_empty() {
+                        let held_tail = if held.first().is_some_and(|first| {
+                            first.sn == 0 && first.is_create_event()
+                        }) {
+                            &held[1..]
+                        } else {
+                            &held[..]
+                        };
+                        if !held_tail.is_empty() {
+                            let metadata_ref = state
+                                .auth_metadata
+                                .as_mut()
+                                .ok_or(DistributorError::ReceiverNoAccess)?;
+                            let roles_ref = &mut state.auth_roles;
+                            let (proven, _, _, _) = verifier
+                                .verify_chain(
+                                    ctx,
+                                    &common.governance_id,
+                                    metadata_ref,
+                                    held_tail,
+                                    roles_ref,
+                                )
+                                .await;
+                            for sn in proven.iter() {
+                                state.proven_inline.insert(*sn);
+                            }
+                            if let Some(data) =
+                                state.transfer_data.as_mut()
+                            {
+                                for event in held_tail.iter() {
+                                    let allow = matches!(
+                                        event.get_event_request_type(),
+                                        EventRequestType::Transfer
+                                    ) && state.proven_inline.contains(&event.sn);
+                                    if matches!(
+                                        event.get_event_request_type(),
+                                        EventRequestType::Transfer
+                                    ) {
+                                        WitnessesRegister::apply_transfer_data_event(
+                                            data, event, allow,
+                                        );
+                                    } else {
+                                        WitnessesRegister::apply_transfer_data_event(
+                                            data, event, false,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(metadata) = state.auth_metadata.as_mut() {
+                    let roles = &mut state.auth_roles;
+                    // Replay only the uncovered tail: the batch may
+                    // still carry genesis or already-verified events
+                    // (first delivery, or a sender re-send), which
+                    // must be skipped instead of breaking the chain.
+                    let skip = current.partition_point(|event| {
+                        event.sn <= metadata.sn
+                    });
+                    let (proven, refuted, _, _) = verifier
+                        .verify_chain(
+                            ctx,
+                            &common.governance_id,
+                            metadata,
+                            &current[skip..],
+                            roles,
+                        )
+                        .await;
+                    for sn in proven.iter() {
+                        state.proven_inline.insert(*sn);
+                    }
+                    if !refuted.is_empty() {
+                        state.broken = true;
+                    }
+                    // Extend ownership with the new tail only,
+                    // screening unverified transfers.
+                    if let Some(data) = state.transfer_data.as_mut() {
+                        for event in current.iter() {
+                            let allow = matches!(
+                                event.get_event_request_type(),
+                                EventRequestType::Transfer
+                            ) && state.proven_inline.contains(&event.sn);
+                            if matches!(
+                                event.get_event_request_type(),
+                                EventRequestType::Transfer
+                            ) {
+                                WitnessesRegister::apply_transfer_data_event(
+                                    data, event, allow,
+                                );
+                            } else {
+                                WitnessesRegister::apply_transfer_data_event(
+                                    data, event, false,
+                                );
+                            }
+                        }
+                    }
+                    state.tip_sn = current.last().map(|event| event.sn);
+                    state.tip_hash = current
+                        .last()
+                        .and_then(|event| event.ledger_hash(hash).ok());
+                }
+            } else if is_register {
+                state.tip_sn = current.last().map(|event| event.sn);
+                state.tip_hash = current
+                    .last()
+                    .and_then(|event| event.ledger_hash(hash).ok());
+            }
+            #[cfg(feature = "test")]
+            Self::note_auth_work(ctx, subject_id, current.len() as u64);
+        }
+        if current_max > common.gov_version {
+            return Err(DistributorError::GovernanceVersionMismatch {
+                our_version: common.gov_version,
+                their_version: current_max,
+            }
+            .into());
+        }
+        let is_register_now = if common.subject_data.is_none() {
+            get_subject_data(ctx, subject_id).await?.is_some()
+        } else {
+            true
+        };
+        if is_register_now {
+            let receiver_status = check_witness_status(
+                ctx,
+                &common.governance_id,
+                (*our_key).clone(),
+                Some(subject_id.clone()),
+                TrackerIdentity {
+                    namespace: common.namespace.clone(),
+                    schema_id: common.schema_id.clone(),
+                },
+                OwnerContext {
+                    owner: None,
+                    gov_version: None,
+                },
+            )
+            .await?;
+            // Gov-version window over the combined chain without
+            // rescanning held: if the cached max fits, only the new
+            // tail decides; the exceeding corner reuses a frozen
+            // boundary per limit version instead of rescanning on
+            // every delivery.
+            let (receiver_limit, _window_scanned) = {
+                let state = pending_auth
+                    .get_mut(subject_id)
+                    .ok_or(DistributorError::ReceiverNoAccess)?;
+                Self::gov_window_limit_combined(
+                    state,
+                    held,
+                    current,
+                    receiver_status.gov_version_limit,
+                    offered_hi,
+                )
+            };
+            #[cfg(feature = "test")]
+            Self::note_auth_work(ctx, subject_id, _window_scanned);
+            let Some(receiver_limit) = receiver_limit else {
+                return Err(DistributorError::ReceiverNoAccess.into());
+            };
+            let mut safe_hi_sn = receiver_limit.min(offered_hi);
+            let boundary = pending_auth
+                .get(subject_id)
+                .and_then(|state| state.first_confirm_reject);
+            if let Some(boundary) = boundary {
+                safe_hi_sn = safe_hi_sn.min(boundary);
+            }
+            return Ok(DistributionAuth {
+                is_gov: false,
+                is_register: true,
+                safe_hi_sn,
+            });
+        }
+        // Unregistered: rebuild-free ownership from the cache,
+        // re-evaluated against current governance every delivery.
+        let (transfer_data, first_event) = {
+            let state = pending_auth
+                .get(subject_id)
+                .ok_or(DistributorError::ReceiverNoAccess)?;
+            let Some(data) = state.transfer_data.clone() else {
+                return Err(DistributorError::ReceiverNoAccess.into());
+            };
+            let first = held
+                .first()
+                .or_else(|| current.first())
+                .cloned()
+                .ok_or(DistributorError::ReceiverNoAccess)?;
+            (data, first)
+        };
+        let owner = first_event.ledger_seal_signature.signer.clone();
+        let gov_version = first_event.gov_version;
+        let (witness_status, receiver_window_sn, ..) =
+            check_witness_status_and_window(
+                ctx,
+                &common.governance_id,
+                subject_id,
+                Some(transfer_data),
+                TrackerPeers {
+                    node: (*our_key).clone(),
+                    sender: sender.clone(),
+                },
+                TrackerParams {
+                    namespace: common.namespace.clone(),
+                    schema_id: common.schema_id.clone(),
+                    actual_sn: None,
+                },
+                OwnerContext {
+                    owner: Some(owner),
+                    gov_version: Some(gov_version),
+                },
+            )
+            .await?;
+        let receiver_hi_limit =
+            Self::concrete_hi_sn_limit(witness_status.hi_sn_limit, offered_hi);
+        let (receiver_create_gov_limit, _window_scanned) = {
+            let state = pending_auth
+                .get_mut(subject_id)
+                .ok_or(DistributorError::ReceiverNoAccess)?;
+            Self::gov_window_limit_combined(
+                state,
+                held,
+                current,
+                witness_status.create_gov_version_limit,
+                offered_hi,
+            )
+        };
+        #[cfg(feature = "test")]
+        Self::note_auth_work(ctx, subject_id, _window_scanned);
+        let raw_receiver_limit = [
+            receiver_hi_limit,
+            receiver_create_gov_limit,
+            receiver_window_sn,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let Some(receiver_limit) = raw_receiver_limit else {
+            return Err(DistributorError::ReceiverNoAccess.into());
+        };
+        let mut safe_hi_sn = receiver_limit.min(offered_hi);
+        if let Some(boundary) = pending_auth
+            .get(subject_id)
+            .and_then(|state| state.first_confirm_reject)
+        {
+            safe_hi_sn = safe_hi_sn.min(boundary);
+        }
+        Ok(DistributionAuth {
+            is_gov: false,
+            is_register: false,
+            safe_hi_sn,
+        })
+    }
+
+    /// Gov-version window over held plus current without flattening:
+    /// when every held event fits, only the new tail is scanned
+    /// (`partition_point` over `current`, logarithmic probes
+    /// uncounted). Once the retained chain outgrows the limit, later
+    /// events can only share the same or a higher gov version
+    /// (chain order), so the boundary is frozen per limit version
+    /// and reused O(1) instead of rescanning the retained prefix
+    /// on every delivery. Prune, take, drop and eviction discard
+    /// the whole auth cache entry, so a frozen boundary can never
+    /// outlive the prefix it was computed over; a narrower limit
+    /// after a governance change recomputes once. Returns the
+    /// limit and the number of scanned events, so the single scan
+    /// stays instrumented instead of moving work off-counters.
+    #[allow(clippy::too_many_arguments)]
+    fn gov_window_limit_combined(
+        state: &mut PendingAuthState,
+        held: &[Ledger],
+        current: &[Ledger],
+        limit: GovVersionLimit,
+        offered_hi_sn: u64,
+    ) -> (Option<u64>, u64) {
+        match limit {
+            GovVersionLimit::None => (None, 0),
+            GovVersionLimit::Infinity => (Some(offered_hi_sn), 0),
+            GovVersionLimit::Version(version) => {
+                if state.max_gov_version <= version {
+                    let idx = current
+                        .partition_point(|event| event.gov_version <= version);
+                    if idx == 0 {
+                        if held.is_empty() {
+                            (None, 0)
+                        } else {
+                            (
+                                held.last()
+                                    .map(|event| event.sn.min(offered_hi_sn)),
+                                0,
+                            )
+                        }
+                    } else {
+                        (
+                            current
+                                .get(idx - 1)
+                                .map(|event| event.sn.min(offered_hi_sn)),
+                            0,
+                        )
+                    }
+                } else if let Some((cached_version, cached)) =
+                    state.frozen_gov_window
+                    && cached_version == version
+                {
+                    (cached.map(|sn| sn.min(offered_hi_sn)), 0)
+                } else {
+                    // Single full scan per limit version: it breaks at
+                    // the first event past the window (fail-closed on
+                    // non-monotonic input), and later deliveries reuse
+                    // the frozen result above.
+                    let mut combined_sn: Option<u64> = None;
+                    let mut scanned = 0u64;
+                    for event in held.iter().chain(current.iter()) {
+                        scanned += 1;
+                        if event.gov_version <= version {
+                            combined_sn = Some(event.sn);
+                        } else {
+                            break;
+                        }
+                    }
+                    state.frozen_gov_window = Some((version, combined_sn));
+                    (combined_sn.map(|sn| sn.min(offered_hi_sn)), scanned)
+                }
+            }
+        }
     }
 
     pub(crate) async fn check_auth_single(
@@ -810,8 +1604,7 @@ impl DistriWorker {
             // plus simulation, not simulation alone. An unproven aux
             // grants nothing and fails closed without writing; a
             // refuted one rolls back and fails.
-            let single_buffered =
-                self.deferred.get(&subject_id).cloned().unwrap_or_default();
+            let single_buffered = self.deferred.view(&subject_id);
             match self
                 .transfer_verifier
                 .verify_and_simulate(
@@ -820,7 +1613,7 @@ impl DistriWorker {
                     &subject_id,
                     ledger,
                     first_ledger,
-                    &single_buffered,
+                    single_buffered,
                 )
                 .await?
             {
@@ -1259,7 +2052,9 @@ impl DistriWorker {
 
                 let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
                 let batch_hi_sn = from_sn
-                    .saturating_add(self.ledger_batch_size)
+                    .saturating_add(Self::capped_batch_size(
+                        self.ledger_batch_size,
+                    ))
                     .saturating_sub(1)
                     .min(window_sn);
                 let preferred_hi_sn = clear_sn
@@ -1329,7 +2124,9 @@ impl DistriWorker {
 
                 let from_sn = actual_sn.map_or(0, |sn| sn.saturating_add(1));
                 let batch_hi_sn = from_sn
-                    .saturating_add(self.ledger_batch_size)
+                    .saturating_add(Self::capped_batch_size(
+                        self.ledger_batch_size,
+                    ))
                     .saturating_sub(1)
                     .min(witness_hi_sn);
                 let batch_hi_sn =
@@ -1353,56 +2150,111 @@ impl DistriWorker {
         &self,
         subject_id: &DigestIdentifier,
     ) -> Option<u64> {
-        self.deferred
-            .get(subject_id)
-            .and_then(|buffered| buffered.last().map(|event| event.sn))
+        self.deferred.tip(subject_id)
+    }
+
+    /// Prunes staged events at or below the applied tip, then
+    /// reports the retained counters for the test-only stats. The
+    /// prune itself is a partition over the ascending buffer, not
+    /// a re-sort. A prune that drops events invalidates the
+    /// incremental auth state covering them.
+    pub(crate) fn prune_deferred(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        applied_tip: Option<u64>,
+    ) {
+        let dropped = self.deferred.prune(subject_id, applied_tip);
+        if dropped > 0 {
+            self.pending_auth.remove(subject_id);
+        }
+        #[cfg(feature = "test")]
+        {
+            Self::note_deferred_stats(ctx, &self.deferred, subject_id);
+            if dropped > 0 {
+                Self::note_auth_work(ctx, subject_id, dropped);
+            }
+        }
+        let _ = ctx;
     }
 
     /// Stages a batch whose aux can not be checked yet: it is held
     /// unapplied (deduplicated, pruned past the applied tip) until
-    /// a later batch completes the evidence chain. Only events past
-    /// the applied tip are kept, so the buffer stays window-bounded.
+    /// a later batch completes the evidence chain. The ingress
+    /// `ensure` gate only lets the direct continuation through, so
+    /// every incoming event is newer than everything staged:
+    /// appending keeps the order with no scan and no re-sort.
     pub(crate) fn stage_deferred(
         &mut self,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         batch: Vec<Ledger>,
         applied_tip: Option<u64>,
-    ) {
-        let buffered = self.deferred.entry(subject_id.clone()).or_default();
-        for event in batch {
-            if applied_tip.is_none_or(|tip| event.sn > tip)
-                && !buffered.iter().any(|staged| staged.sn == event.sn)
-            {
-                buffered.push(event);
-            }
+    ) -> Vec<DigestIdentifier> {
+        debug_assert!(
+            batch.windows(2).all(|w| w[0].sn < w[1].sn),
+            "staged batches must arrive strictly ascending"
+        );
+        #[cfg(feature = "test")]
+        let staged_len = batch.len() as u64;
+        let evicted =
+            self.deferred.stage(subject_id, batch, applied_tip);
+        for evicted_subject in &evicted {
+            self.verify_cursors.invalidate(evicted_subject);
+            self.pending_auth.remove(evicted_subject);
         }
-        buffered.sort_by_key(|event| event.sn);
+        #[cfg(feature = "test")]
+        {
+            Self::note_deferred_stats(ctx, &self.deferred, subject_id);
+            for evicted_subject in &evicted {
+                Self::note_deferred_stats(ctx, &self.deferred, evicted_subject);
+            }
+            Self::note_auth_work(ctx, subject_id, staged_len);
+        }
+        let _ = ctx;
+        evicted
     }
 
-    /// Pruned deferred prefix: what this node holds but has not
-    /// applied yet, past the applied tip. Stale entries vanish here,
-    /// so a completed copy never replays them.
-    pub(crate) fn deferred_prefix(
+    /// Moves the live staged prefix out for the apply path. The
+    /// store forgets it: every exit from the apply loop either
+    /// applied it, rolled the copy back (which drops leftovers),
+    /// or fails the batch (whose sender re-sends anything still
+    /// needed). The incremental auth state covering it goes with
+    /// it: the next delivery rebuilds from the new tip.
+    pub(crate) fn take_deferred_prefix(
         &mut self,
+        ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         applied_tip: Option<u64>,
     ) -> Vec<Ledger> {
-        if let Some(buffered) = self.deferred.get_mut(subject_id) {
-            buffered
-                .retain(|event| applied_tip.is_none_or(|tip| event.sn > tip));
-            buffered.sort_by_key(|event| event.sn);
-            if buffered.is_empty() {
-                self.deferred.remove(subject_id);
-            }
+        let (prefix, _moved) = self.deferred.take(subject_id, applied_tip);
+        self.pending_auth.remove(subject_id);
+        #[cfg(feature = "test")]
+        {
+            Self::note_deferred_stats(ctx, &self.deferred, subject_id);
+            // The take drains the dead head in place: surviving
+            // events shift once, and only when a dead head exists.
+            // Count the real moves as visits so the buffer totals
+            // stay exact instead of hiding work.
+            Self::note_auth_work(ctx, subject_id, _moved);
         }
-        self.deferred.get(subject_id).cloned().unwrap_or_default()
+        let _ = ctx;
+        prefix
     }
 
     /// Drops deferred state for a subject: its chain proved forged
     /// or its copy is being rolled back, so nothing staged may be
     /// applied later. The sender re-sends anything still needed.
-    pub(crate) fn drop_deferred(&mut self, subject_id: &DigestIdentifier) {
-        self.deferred.remove(subject_id);
+    pub(crate) fn drop_deferred(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        self.deferred.drop(subject_id);
+        self.pending_auth.remove(subject_id);
+        #[cfg(feature = "test")]
+        Self::note_deferred_stats(ctx, &self.deferred, subject_id);
+        let _ = ctx;
     }
 
     pub(crate) async fn request_ledger_from_sender(
@@ -1737,10 +2589,13 @@ impl DistriWorker {
             }
             return Err(DistributorError::EmptyEvents.into());
         }
-        // Bound inbound batch size before spending auth/verify CPU: the
-        // store itself rejects ranges over 10k events, and honest batches
-        // stay near ledger_batch_size. Oversized batches are dropped.
-        if ledger.len() > 10_000 {
+        // Bound inbound batch size before spending auth/verify CPU:
+        // the store itself rejects oversized ranges, and honest
+        // batches stay near ledger_batch_size. Oversized batches
+        // are dropped.
+        if ledger.len()
+            > crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS
+        {
             warn!(
                 msg_type = "LedgerDistribution",
                 sender = %sender,
@@ -1807,36 +2662,39 @@ impl DistriWorker {
         }
 
         // A continuation past a held prefix carries its Create in
-        // the buffer: authorize the combined chain so a Fact-only
+        // the buffer: authorize against the held chain so a Fact-only
         // tail can still be gated and flushed in order instead of
-        // failing for a missing subject it never creates alone.
-        // This covers tails with and without their own aux: without
-        // it the combined chain still decides rights correctly.
-        let mut combined_auth: Option<Vec<Ledger>> = None;
-        if first_sn != 0
-            && self.deferred.contains_key(&subject_id)
-            && let Ok(None) = get_subject_data(ctx, &subject_id).await
+        // failing for a missing subject it never creates alone. The
+        // held view is pruned once here and borrowed below for both
+        // authorization and evidence; nothing re-reads or clones
+        // the buffer again in this delivery. Registered subjects
+        // keep their local metadata for auth but still hand the
+        // held prefix to the evidence check, so a cursor eviction
+        // can never hide staged events from the rebuild.
+        let applied_for_held =
+            get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
+        self.prune_deferred(ctx, &subject_id, applied_for_held);
+        let held_view = self.deferred.view(&subject_id);
+        let held_prefix: &[Ledger] = if held_view
+            .last()
+            .is_some_and(|last| last.sn.saturating_add(1) == first_sn)
         {
-            let applied =
-                get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
-            let held = self.deferred_prefix(&subject_id, applied);
-            if !held.is_empty()
-                && held
-                    .last()
-                    .is_some_and(|last| last.sn.saturating_add(1) == first_sn)
-            {
-                let mut combined = held;
-                for event in &ledger {
-                    if !combined.iter().any(|staged| staged.sn == event.sn) {
-                        combined.push(event.clone());
-                    }
-                }
-                combined.sort_by_key(|event| event.sn);
-                combined_auth = Some(combined);
-            }
-        }
-        let common = if let Some(ref combined) = combined_auth {
-            self.check_auth_common(ctx, sender.clone(), &info, combined)
+            held_view
+        } else {
+            &[]
+        };
+        // Hold the registration flag for the auth-source choice
+        // below: an unknown subject needs the held Create to
+        // resolve its metadata, a registered one authenticates
+        // from its local record while the verifier still sees the
+        // staged prefix.
+        let has_subject = get_subject_data(ctx, &subject_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let common = if !held_prefix.is_empty() && !has_subject {
+            self.check_auth_common(ctx, sender.clone(), &info, held_prefix)
                 .await?
         } else {
             self.check_auth_common(ctx, sender.clone(), &info, &ledger)
@@ -1856,10 +2714,8 @@ impl DistriWorker {
                     .into());
                 }
                 // Deferred batches held for this subject count as
-                // prefix when rechecking the aux below.
-                let applied_tip =
-                    get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
-                let buffered = self.deferred_prefix(&subject_id, applied_tip);
+                // prefix when rechecking the aux below. The view was
+                // pruned once above and is borrowed, not cloned.
                 match self
                     .transfer_verifier
                     .verify_and_simulate(
@@ -1868,7 +2724,7 @@ impl DistriWorker {
                         &subject_id,
                         &ledger,
                         transfer_event,
-                        &buffered,
+                        held_prefix,
                     )
                     .await?
                 {
@@ -1891,7 +2747,7 @@ impl DistriWorker {
                     // Drop any held prefix it poisoned, then fail
                     // without writing anything new.
                     TransferSimulationResult::Refuted => {
-                        self.drop_deferred(&subject_id);
+                        self.drop_deferred(ctx, &subject_id);
                         self.rollback_refuted_aux(
                             ctx,
                             &common.governance_id,
@@ -1912,7 +2768,6 @@ impl DistriWorker {
         } else {
             None
         };
-
         // An unproven aux never opens passage nor records
         // anything, however the sender flags the batch. When the
         // prefix is authorized on its own rights, copy it now
@@ -1920,26 +2775,32 @@ impl DistriWorker {
         // otherwise hold the batch unapplied and ask for the
         // continuation instead. A later batch with the full chain
         // verifies or refutes; silence leaves no trace behind.
+        // The decision covers staged prefix plus current batch in
+        // order, with the current tail end as the offered tip, and
+        // runs incrementally over the new tail only.
         if transfer_simulation
             == Some(TransferSimulationResult::WitnessUnproven)
         {
-            let auth_ledger = combined_auth.as_ref().unwrap_or(&ledger);
-            let offered_hi =
-                auth_ledger.last().map(|event| event.sn).unwrap_or(first_sn);
-            let without_aux = self
-                .check_auth_batch(
-                    ctx,
-                    sender.clone(),
-                    auth_ledger,
-                    offered_hi,
-                    &common,
-                    TransferBatch {
-                        event: None,
-                        simulation: None,
-                        verified_sn: None,
-                    },
-                )
-                .await;
+            let offered_hi = ledger
+                .last()
+                .map(|event| event.sn)
+                .unwrap_or(first_sn);
+            // Borrow disjoint fields at once: the held view for the
+            // chain, the verifier and keys for the check, and the
+            // auth cache mutably for the incremental state.
+            let without_aux = Self::check_auth_without_aux_incremental(
+                ctx,
+                &self.transfer_verifier,
+                self.hash,
+                &self.our_key,
+                &mut self.pending_auth,
+                sender.clone(),
+                held_prefix,
+                &ledger,
+                offered_hi,
+                &common,
+            )
+            .await;
             let prefix_open = matches!(without_aux, Ok(auth)
                 if auth.safe_hi_sn >= first_sn);
             if prefix_open {
@@ -1947,7 +2808,16 @@ impl DistriWorker {
             } else {
                 let applied_tip =
                     get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
-                self.stage_deferred(&subject_id, ledger, applied_tip);
+                let evicted = self.stage_deferred(
+                    ctx,
+                    &subject_id,
+                    ledger,
+                    applied_tip,
+                );
+                for evicted_subject in &evicted {
+                    self.verify_cursors.invalidate(evicted_subject);
+                    self.pending_auth.remove(evicted_subject);
+                }
                 let from_sn = applied_tip.max(self.deferred_tip(&subject_id));
                 self.request_ledger_from_sender(
                     ctx,
@@ -2083,6 +2953,28 @@ pub enum DistriWorkerMessage {
     /// One-shot and local to this worker; production never sets it.
     #[cfg(feature = "test")]
     TestFailNextModes { empty: bool },
+    /// Test-only fault injection: the next evidence-ledger reload
+    /// fails its tracker resolve right after a successful `Up`,
+    /// exercising the lease release on that path. One-shot and
+    /// local to this worker; production never sets it.
+    #[cfg(feature = "test")]
+    TestFailNextTrackerResolve,
+    /// Test-only deferred-store bounds: replaces this worker's
+    /// limits (subjects, events and bytes, per subject and global)
+    /// so a test can trigger overflow with a handful of events.
+    /// Production always uses the compiled-in defaults.
+    #[cfg(feature = "test")]
+    TestSetDeferredLimits {
+        limits: super::deferred::DeferredLimits,
+    },
+    /// Test-only cursor eviction: drops the saved verification
+    /// prefix for one subject, with the same effect as an LRU
+    /// eviction, while keeping any staged prefix. Lets a test
+    /// prove the rebuild path rejoins the deferred chain.
+    #[cfg(feature = "test")]
+    TestEvictVerifyCursor {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for DistriWorkerMessage {}
@@ -2254,8 +3146,177 @@ impl Handler<Self> for DistriWorker {
                     "Armed one-shot visibility fault"
                 );
             }
+            #[cfg(feature = "test")]
+            DistriWorkerMessage::TestSetDeferredLimits { limits } => {
+                let evicted = self.deferred.set_limits(limits);
+                for evicted_subject in &evicted {
+                    self.verify_cursors.invalidate(evicted_subject);
+                    self.pending_auth.remove(evicted_subject);
+                }
+                for subject_id in evicted {
+                    Self::note_deferred_stats(ctx, &self.deferred, &subject_id);
+                }
+                debug!(
+                    msg_type = "TestSetDeferredLimits",
+                    max_subjects = limits.max_subjects,
+                    max_events_per_subject = limits.max_events_per_subject,
+                    max_bytes_per_subject = limits.max_bytes_per_subject,
+                    max_events_global = limits.max_events_global,
+                    max_bytes_global = limits.max_bytes_global,
+                    "Deferred store bounds replaced for tests"
+                );
+            }
+            #[cfg(feature = "test")]
+            DistriWorkerMessage::TestFailNextTrackerResolve => {
+                self.transfer_verifier.test_tracker_resolve_fault.store(
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                debug!(
+                    msg_type = "TestFailNextTrackerResolve",
+                    "Armed one-shot tracker resolve fault"
+                );
+            }
+            #[cfg(feature = "test")]
+            DistriWorkerMessage::TestEvictVerifyCursor { subject_id } => {
+                self.verify_cursors.invalidate(&subject_id);
+                debug!(
+                    msg_type = "TestEvictVerifyCursor",
+                    subject_id = %subject_id,
+                    "Verify cursor evicted for tests"
+                );
+            }
         };
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use ave_common::identity::{
+        TimeStamp,
+        keys::{DSAlgorithm, SignatureIdentifier},
+    };
+
+    use crate::model::event::{
+        EvaluationDataOpaque, EvaluationResponseOpaque, OpaqueData,
+        ValidationData, ValidationMetadata,
+    };
+
+    fn window_ledger(sn: u64, gov_version: u64) -> Ledger {
+        let key = PublicKey::new(DSAlgorithm::Ed25519, vec![0u8; 32]).unwrap();
+        let sig = ave_common::identity::Signature {
+            signer: key.clone(),
+            timestamp: TimeStamp::from_nanos(0),
+            content_hash: DigestIdentifier::default(),
+            value: SignatureIdentifier::new(
+                DSAlgorithm::Ed25519,
+                vec![0u8; 64],
+            )
+            .unwrap(),
+        };
+        Ledger {
+            gov_version,
+            sn,
+            prev_ledger_event_hash: DigestIdentifier::default(),
+            ledger_seal_signature: sig.clone(),
+            protocols: Protocols::TrackerFactOpaque {
+                event_request_hash: DigestIdentifier::default(),
+                evaluation: EvaluationDataOpaque {
+                    eval_req_signature: sig.clone(),
+                    eval_req_hash: DigestIdentifier::default(),
+                    evaluators_signatures: Vec::new(),
+                    viewpoints: BTreeSet::new(),
+                    response: EvaluationResponseOpaque::Ok {
+                        result_hash: DigestIdentifier::default(),
+                    },
+                },
+                validation: ValidationData {
+                    validation_req_signature: sig.clone(),
+                    validation_req_hash: DigestIdentifier::default(),
+                    validators_signatures: Vec::new(),
+                    validation_metadata:
+                        ValidationMetadata::ModifiedHash {
+                            modified_metadata_without_propierties_hash:
+                                DigestIdentifier::default(),
+                            propierties_hash: DigestIdentifier::default(),
+                            event_request_hash: DigestIdentifier::default(),
+                            viewpoints_hash: DigestIdentifier::default(),
+                        },
+                },
+                data: OpaqueData {
+                    subject_id: DigestIdentifier::default(),
+                    event_request_timestamp: TimeStamp::from_nanos(0),
+                    signer: key,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn frozen_gov_window_scans_once_then_reuses() {
+        let mut state = PendingAuthState::fresh(false);
+        state.max_gov_version = 2;
+        let held =
+            vec![window_ledger(0, 1), window_ledger(1, 2)];
+        let current = vec![window_ledger(2, 2)];
+        let (first, scanned) = DistriWorker::gov_window_limit_combined(
+            &mut state,
+            &held,
+            &current,
+            GovVersionLimit::Version(1),
+            2,
+        );
+        assert_eq!(first, Some(0), "the boundary stops before gov 2");
+        assert!(scanned > 0, "the first exceeding scan is counted");
+        let (second, rescanned) = DistriWorker::gov_window_limit_combined(
+            &mut state,
+            &held,
+            &current,
+            GovVersionLimit::Version(1),
+            2,
+        );
+        assert_eq!(second, first, "the frozen boundary is stable");
+        assert_eq!(rescanned, 0, "the hit is O(1)");
+        let (wider, _) = DistriWorker::gov_window_limit_combined(
+            &mut state,
+            &held,
+            &current,
+            GovVersionLimit::Version(2),
+            2,
+        );
+        assert_eq!(wider, Some(2), "a new limit version recomputes");
+    }
+
+    #[test]
+    fn capped_batch_size_never_exceeds_shared_max() {
+        assert_eq!(
+            DistriWorker::capped_batch_size(100),
+            100,
+            "honest sizes pass through unchanged"
+        );
+        assert_eq!(
+            DistriWorker::capped_batch_size(
+                crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64
+            ),
+            crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64,
+            "the shared max itself is accepted"
+        );
+        assert_eq!(
+            DistriWorker::capped_batch_size(
+                crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64 + 1
+            ),
+            crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64,
+            "an unvalidated larger size clamps instead of emitting an oversized batch"
+        );
+        assert_eq!(
+            DistriWorker::capped_batch_size(u64::MAX),
+            crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64,
+            "no configured value can produce a batch the receiver drops on sight"
+        );
     }
 }

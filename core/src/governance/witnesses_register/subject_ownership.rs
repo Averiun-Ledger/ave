@@ -152,4 +152,98 @@ impl WitnessesRegister {
 
         Ok(data)
     }
+
+    /// Initial ownership state from a Create event, without replaying
+    /// any tail. Lets the incremental authorization cache start from
+    /// genesis and extend with new events only.
+    pub(crate) fn init_transfer_data(first_ledger: &Ledger) -> TransferData {
+        let mut data = TransferData {
+            actual_owner: first_ledger.ledger_seal_signature.signer.clone(),
+            actual_new_owner_data: None,
+            sn: first_ledger.sn,
+            gov_version: first_ledger.gov_version,
+            old_owners: HashMap::new(),
+            ownership_transitions: Vec::new(),
+            visibility_state: TrackerVisibilityState::default(),
+        };
+        data.visibility_state.record_event(
+            0,
+            TrackerStoredVisibility::Full,
+            TrackerEventVisibility::NonFact,
+        );
+        data
+    }
+
+    /// Applies one ledger event to an ownership state built by
+    /// `init_transfer_data`. A Transfer only stages pending
+    /// ownership when `allow_transfer` holds: the caller passes
+    /// whether its Ok evaluation genuinely reproduced, so
+    /// unverified Transfers stay failed history without cloning a
+    /// screened copy. Confirm and Reject close pending ownership
+    /// exactly like the full rebuild.
+    pub(crate) fn apply_transfer_data_event(
+        data: &mut TransferData,
+        event: &Ledger,
+        allow_transfer: bool,
+    ) {
+        data.sn = event.sn;
+        match event.get_event_request() {
+            Some(EventRequest::Transfer(transfer_request)) => {
+                let ok = matches!(&event.protocols,
+                    Protocols::Transfer { evaluation, .. }
+                    if evaluation.evaluator_response_ok().is_some());
+                if ok && allow_transfer {
+                    data.actual_new_owner_data = Some((
+                        transfer_request.new_owner,
+                        event.gov_version,
+                    ));
+                }
+            }
+            Some(EventRequest::Confirm(..)) => {
+                if let Some((new_owner, new_owner_gov_version)) =
+                    data.actual_new_owner_data.take()
+                {
+                    let entry = data
+                        .old_owners
+                        .entry(data.actual_owner.clone())
+                        .or_default();
+                    entry.sn = event.sn;
+                    entry.interval_gov_version.insert(Interval {
+                        lo: data.gov_version,
+                        hi: event.gov_version,
+                    });
+                    data.ownership_transitions.push(OwnershipStint {
+                        owner: data.actual_owner.clone(),
+                        incoming_transfer_sn: event.sn.saturating_sub(1),
+                        exit_sn: event.sn,
+                        outcome: OwnershipStintOutcome::Confirmed,
+                    });
+                    data.actual_owner = new_owner;
+                    data.gov_version = new_owner_gov_version;
+                }
+            }
+            Some(EventRequest::Reject(..)) => {
+                if let Some((new_owner, new_owner_gov_version)) =
+                    data.actual_new_owner_data.take()
+                {
+                    let entry = data
+                        .old_owners
+                        .entry(new_owner.clone())
+                        .or_default();
+                    entry.sn = event.sn;
+                    entry.interval_gov_version.insert(Interval {
+                        lo: new_owner_gov_version,
+                        hi: event.gov_version,
+                    });
+                    data.ownership_transitions.push(OwnershipStint {
+                        owner: new_owner,
+                        incoming_transfer_sn: event.sn.saturating_sub(1),
+                        exit_sn: event.sn,
+                        outcome: OwnershipStintOutcome::Rejected,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
 }
