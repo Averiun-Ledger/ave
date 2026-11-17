@@ -1477,8 +1477,188 @@ impl DistriWorker {
                             state.cached_without_aux.as_ref()
                         && cached.sender == sender
                         && cached.gov_version == common.gov_version
-                        && cached.status.is_some()
                     {
+                        // Outsider path: a cached denial evolves with at
+                        // most the new delta. Transfers carry no new old
+                        // entry and cannot involve the receiver here, so
+                        // the denial stands without any engine call.
+                        // Confirm/Reject closes one old entry owned by
+                        // someone else: recheck just that entry and keep
+                        // the denial (or adopt a grant, monotonically).
+                        // Each close costs one entry, never the history.
+                        if cached.status.is_none() {
+                            use ave_common::bridge::request::EventRequestType;
+                            let new_key: Option<PublicKey> =
+                                match current[0].get_event_request_type() {
+                                    EventRequestType::Confirm => before
+                                        .as_ref()
+                                        .map(|(actual, _, _, _, _)| {
+                                            actual.clone()
+                                        }),
+                                    EventRequestType::Reject => before
+                                        .as_ref()
+                                        .and_then(|(_, pending, _, _, _)| {
+                                            pending.as_ref().map(
+                                                |(owner, _)| owner.clone(),
+                                            )
+                                        }),
+                                    _ => None,
+                                };
+                            let minimal = state.transfer_data.as_ref().and_then(
+                                |data| {
+                                    let mut olds = HashMap::new();
+                                    if let Some(key) = new_key.as_ref()
+                                        && let Some(entry) =
+                                            data.old_owners.get(key)
+                                    {
+                                        olds.insert(
+                                            key.clone(),
+                                            entry.clone(),
+                                        );
+                                    }
+                                    Some(
+                                        crate::governance::witnesses_register::TransferData {
+                                            actual_owner: data
+                                                .actual_owner
+                                                .clone(),
+                                            actual_new_owner_data: data
+                                                .actual_new_owner_data
+                                                .clone(),
+                                            sn: data.sn,
+                                            gov_version: data.gov_version,
+                                            old_owners: olds,
+                                            ownership_transitions: Vec::new(),
+                                            visibility_state: data
+                                                .visibility_state
+                                                .clone(),
+                                        },
+                                    )
+                                },
+                            );
+                            if let Some(light) = minimal
+                                && !light.old_owners.is_empty()
+                            {
+                                let _delta_len =
+                                    light.old_owners.len() as u64;
+                                let gov_version = common.gov_version;
+                                let governance_id =
+                                    common.governance_id.clone();
+                                let namespace =
+                                    common.namespace.clone();
+                                let schema_id = common.schema_id.clone();
+                                let sender_key = sender.clone();
+                                let our_key_owned =
+                                    (*our_key).clone();
+                                let first = held
+                                    .first()
+                                    .or_else(|| current.first())
+                                    .cloned()
+                                    .ok_or(
+                                        DistributorError::ReceiverNoAccess,
+                                    )?;
+                                let owner_ctx_owner = first
+                                    .ledger_seal_signature
+                                    .signer
+                                    .clone();
+                                let owner_ctx_gov = first.gov_version;
+                                let outcome =
+                                    check_witness_status_and_window(
+                                        ctx,
+                                        &governance_id,
+                                        subject_id,
+                                        Some(light),
+                                        TrackerPeers {
+                                            node: our_key_owned,
+                                            sender: sender_key.clone(),
+                                        },
+                                        TrackerParams {
+                                            namespace,
+                                            schema_id,
+                                            actual_sn: None,
+                                        },
+                                        OwnerContext {
+                                            owner: Some(owner_ctx_owner),
+                                            gov_version: Some(owner_ctx_gov),
+                                        },
+                                    )
+                                    .await;
+                                #[cfg(feature = "test")]
+                                Self::note_ownership_work(
+                                    ctx,
+                                    subject_id,
+                                    _delta_len,
+                                    _delta_len,
+                                );
+                                if let Ok((
+                                    new_status,
+                                    new_window,
+                                    ..
+                                )) = outcome
+                                {
+                                    if let Some(state) = pending_auth
+                                        .get_mut(subject_id)
+                                    {
+                                        state.ownership_version =
+                                            new_version;
+                                        state.cached_without_aux = Some(
+                                            CachedWithoutAux {
+                                                sender: sender_key,
+                                                gov_version,
+                                                ownership_version:
+                                                    new_version,
+                                                status: Some(new_status),
+                                                window_sn: new_window,
+                                            },
+                                        );
+                                        incremental_done = true;
+                                    }
+                                } else if let Some(state) = pending_auth
+                                    .get_mut(subject_id)
+                                {
+                                    state.ownership_version = new_version;
+                                    state.cached_without_aux = Some(
+                                        CachedWithoutAux {
+                                            sender: sender_key,
+                                            gov_version,
+                                            ownership_version: new_version,
+                                            status: None,
+                                            window_sn: None,
+                                        },
+                                    );
+                                    incremental_done = true;
+                                }
+                                // Re-borrow for the trailing bookkeeping below.
+                                state = pending_auth
+                                    .get_mut(subject_id)
+                                    .ok_or(
+                                        DistributorError::ReceiverNoAccess,
+                                    )?;
+                            } else {
+                                let sender_key = sender.clone();
+                                let gov_version = common.gov_version;
+                                if let Some(state) =
+                                    pending_auth.get_mut(subject_id)
+                                {
+                                    state.ownership_version = new_version;
+                                    state.cached_without_aux = Some(
+                                        CachedWithoutAux {
+                                            sender: sender_key,
+                                            gov_version,
+                                            ownership_version: new_version,
+                                            status: None,
+                                            window_sn: None,
+                                        },
+                                    );
+                                    incremental_done = true;
+                                }
+                                // Re-borrow for the trailing bookkeeping below.
+                                state = pending_auth
+                                    .get_mut(subject_id)
+                                    .ok_or(
+                                        DistributorError::ReceiverNoAccess,
+                                    )?;
+                            }
+                        } else {
                         // New old key, if Confirm/Reject closed one entry.
                         let new_key: Option<PublicKey> = {
                             use ave_common::bridge::request::EventRequestType;
@@ -1651,6 +1831,7 @@ impl DistriWorker {
                                 .ok_or(
                                     DistributorError::ReceiverNoAccess,
                                 )?;
+                        }
                         }
                     }
                     if !incremental_done {

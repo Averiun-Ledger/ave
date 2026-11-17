@@ -1993,26 +1993,69 @@ impl PersistentActor for WitnessesRegister {
                 owner,
                 gov_version,
             } => {
-                let data =
-                    inner.subjects.entry(subject_id.clone()).or_default();
-
-                data.actual_owner = owner.clone();
-                data.gov_version = *gov_version;
-                data.visibility_state = TrackerVisibilityState::default();
-                data.visibility_state.record_event(
-                    0,
-                    TrackerStoredVisibility::Full,
-                    TrackerEventVisibility::NonFact,
-                );
-
-                debug!(
-                    msg_type = "Create",
-                    event_type = "Create",
-                    subject_id = %subject_id,
-                    owner = %owner,
-                    gov_version = gov_version,
-                    "Transfer entry created"
-                );
+                use std::collections::hash_map::Entry;
+                match inner.subjects.entry(subject_id.clone()) {
+                    Entry::Vacant(vacant) => {
+                        let data = vacant.insert(TransferData::default());
+                        data.actual_owner = owner.clone();
+                        data.gov_version = *gov_version;
+                        data.visibility_state =
+                            TrackerVisibilityState::default();
+                        data.visibility_state.record_event(
+                            0,
+                            TrackerStoredVisibility::Full,
+                            TrackerEventVisibility::NonFact,
+                        );
+                        debug!(
+                            msg_type = "Create",
+                            event_type = "Create",
+                            subject_id = %subject_id,
+                            owner = %owner,
+                            gov_version = gov_version,
+                            "Transfer entry created"
+                        );
+                    }
+                    Entry::Occupied(mut occupied) => {
+                        // A replayed genesis must not reset live
+                        // ownership once transfers closed: keep the
+                        // actual owner, history and visibility. An
+                        // entry without any closed stint or old owner
+                        // has no live ownership yet, so refreshing
+                        // the genesis values is harmless and lets a
+                        // wiped entry heal before its replay lands.
+                        let data = occupied.get_mut();
+                        if data.ownership_transitions.is_empty()
+                            && data.old_owners.is_empty()
+                        {
+                            data.actual_owner = owner.clone();
+                            data.gov_version = *gov_version;
+                            data.visibility_state =
+                                TrackerVisibilityState::default();
+                            data.visibility_state.record_event(
+                                0,
+                                TrackerStoredVisibility::Full,
+                                TrackerEventVisibility::NonFact,
+                            );
+                            debug!(
+                                msg_type = "Create",
+                                event_type = "Create",
+                                subject_id = %subject_id,
+                                owner = %owner,
+                                gov_version = gov_version,
+                                "Transfer entry refreshed before any close"
+                            );
+                        } else {
+                            debug!(
+                                msg_type = "Create",
+                                event_type = "Create",
+                                subject_id = %subject_id,
+                                owner = %owner,
+                                gov_version = gov_version,
+                                "Duplicate create ignored, entry has history"
+                            );
+                        }
+                    }
+                }
             }
             WitnessesRegisterEvent::Transfer {
                 subject_id,
