@@ -12940,6 +12940,476 @@ async fn remote_unique_owners_stay_linear() {
     }
 }
 
+/// A replayed genesis must not wipe visibility once events landed.
+/// Create+Fact (no closes), a pending Transfer, a reboot with the same
+/// storage, a stints control and a fresh entry at SN 0: the duplicate
+/// Create is ignored whenever the tip advanced, and only refreshes a
+/// history-free entry at genesis.
+#[test(tokio::test)]
+async fn remote_create_replay_keeps_visibility_across_restart() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let alice_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut alice_node, alice_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{alice_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let alice = alice_node.api.clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    node_running(&alice).await.unwrap();
+
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let bob = bob_node.api.clone();
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    node_running(&bob).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Bob", "key": bob.public_key()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Alice", "namespace": []},
+                                {"name": "Bob", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Phase A: Create + Fact, no closes. The Fact visibility must
+    // land before snapshotting: poll by state, never by timing.
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let vis_create = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut vis_fact = vis_create.clone();
+    for _ in 0..100 {
+        let vis = alice
+            .test_get_tracker_visibility(
+                governance_id.clone(),
+                subject_id.clone(),
+            )
+            .await
+            .unwrap();
+        if vis != vis_create {
+            vis_fact = vis;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_ne!(
+        vis_fact, vis_create,
+        "the Fact visibility must land in the register"
+    );
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let (owner_a, pending_a, olds_a, stints_a) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_a, Some(alice_key.clone()));
+    assert!(pending_a.is_none());
+    assert!(olds_a.is_empty() && stints_a == 0);
+    let genesis_gov = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.sn == 0)
+        .expect("genesis event")
+        .gov_version;
+
+    // A replayed genesis with events applied must be ignored: the
+    // Fact ranges stay, owner and tip are untouched.
+    alice
+        .test_witnesses_create(
+            &governance_id,
+            subject_id.clone(),
+            alice_key.clone(),
+            genesis_gov,
+        )
+        .await
+        .unwrap();
+    let vis_replay = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vis_replay, vis_fact,
+        "replayed create must not reset Fact visibility"
+    );
+    let (owner_b, pending_b, olds_b, stints_b) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_b, Some(alice_key.clone()));
+    assert!(pending_b.is_none());
+    assert!(olds_b.is_empty() && stints_b == 0);
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Phase B: reboot with the same storage. Volatile state goes
+    // away, persisted visibility and ownership come back identical.
+    // The original TempDirs stay alive so the rebooted node really
+    // reopens this storage.
+    let keys = alice_node.keys.clone();
+    let local_db = alice_dirs[0].path().to_path_buf();
+    let ext_db = alice_dirs[1].path().to_path_buf();
+    alice_node.token.cancel();
+    join_all(alice_node.handler.iter_mut()).await;
+    drop(alice_node);
+    let alice_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut alice_node, _alice_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{alice_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    let alice = alice_node.api.clone();
+    node_running(&alice).await.unwrap();
+    for _ in 0..100 {
+        if !alice
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !alice
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "the tracker must go idle after boot"
+    );
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let vis_boot = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vis_boot, vis_fact, "reboot must preserve Fact visibility");
+    let (owner_c, pending_c, olds_c, stints_c) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_c, Some(alice_key.clone()));
+    assert!(pending_c.is_none());
+    assert!(olds_c.is_empty() && stints_c == 0);
+
+    // Phase C: pending Transfer. The replay must keep owner,
+    // pending, tip and visibility: nothing closes, nothing resets.
+    emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let vis_pending = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    let (owner_d, pending_d, olds_d, stints_d) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_d, Some(alice_key.clone()));
+    assert_eq!(pending_d, Some(bob_key.clone()));
+    assert!(olds_d.is_empty() && stints_d == 0);
+    alice
+        .test_witnesses_create(
+            &governance_id,
+            subject_id.clone(),
+            alice_key.clone(),
+            genesis_gov,
+        )
+        .await
+        .unwrap();
+    let vis_pending_replay = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vis_pending_replay, vis_pending,
+        "replayed create must not reset pending visibility"
+    );
+    let (owner_e, pending_e, olds_e, stints_e) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_e, Some(alice_key.clone()));
+    assert_eq!(
+        pending_e,
+        Some(bob_key.clone()),
+        "replayed create must not clear the pending transfer"
+    );
+    assert!(olds_e.is_empty() && stints_e == 0);
+
+    // Phase D: stints control. With a closed stint the duplicate
+    // create was already ignored before R14; it must stay so.
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    alice.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    let vis_closed = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    let (owner_f, pending_f, olds_f, stints_f) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_f, Some(bob_key.clone()));
+    assert!(pending_f.is_none());
+    assert_eq!(stints_f, 1);
+    assert_eq!(olds_f.len(), 1);
+    alice
+        .test_witnesses_create(
+            &governance_id,
+            subject_id.clone(),
+            alice_key.clone(),
+            genesis_gov,
+        )
+        .await
+        .unwrap();
+    let vis_closed_replay = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vis_closed_replay, vis_closed,
+        "replayed create must not touch closed history"
+    );
+    let (owner_g, pending_g, olds_g, stints_g) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_g, Some(bob_key.clone()));
+    assert!(pending_g.is_none());
+    assert_eq!(stints_g, 1);
+    assert_eq!(olds_g.len(), 1);
+
+    // Phase E: fresh entry at SN 0 still heals through the genesis
+    // refresh path: owner and Create visibility register sanely.
+    let (subject2_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    get_subject(&alice, subject2_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    let vis_fresh = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject2_id.clone(),
+        )
+        .await
+        .unwrap();
+    let genesis2_gov = alice
+        .test_get_tracker_ledger(subject2_id.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.sn == 0)
+        .expect("genesis event")
+        .gov_version;
+    alice
+        .test_witnesses_create(
+            &governance_id,
+            subject2_id.clone(),
+            alice_key.clone(),
+            genesis2_gov,
+        )
+        .await
+        .unwrap();
+    let vis_fresh_replay = alice
+        .test_get_tracker_visibility(
+            governance_id.clone(),
+            subject2_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vis_fresh_replay, vis_fresh,
+        "genesis refresh on a fresh entry stays idempotent"
+    );
+    let (owner_h, pending_h, olds_h, stints_h) = alice
+        .test_witnesses_ownership(&governance_id, subject2_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_h, Some(alice_key.clone()));
+    assert!(pending_h.is_none());
+    assert!(olds_h.is_empty() && stints_h == 0);
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    alice_node.token.cancel();
+    bob_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(alice_node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(alice_node);
+    drop(_alice_dirs);
+    drop(alice_dirs);
+    drop(bob_node);
+    drop(bob_dirs);
+}
+
 /// Six distinct owners: Create plus six Transfer+Confirm pairs with a new
 /// owner each, plus the final Transfer. Same shape as
 /// `remote_unique_owners_stay_linear` at half length (N=14): linear growth,

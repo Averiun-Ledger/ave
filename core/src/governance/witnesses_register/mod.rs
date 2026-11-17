@@ -2020,12 +2020,15 @@ impl PersistentActor for WitnessesRegister {
                         // ownership once transfers closed: keep the
                         // actual owner, history and visibility. An
                         // entry without any closed stint or old owner
-                        // has no live ownership yet, so refreshing
-                        // the genesis values is harmless and lets a
-                        // wiped entry heal before its replay lands.
+                        // is still only refreshable at genesis: any
+                        // applied event (fact or pending transfer)
+                        // advances the tip, and a late create must
+                        // leave owner, pending, governance and
+                        // visibility alone.
                         let data = occupied.get_mut();
                         if data.ownership_transitions.is_empty()
                             && data.old_owners.is_empty()
+                            && data.sn == 0
                         {
                             data.actual_owner = owner.clone();
                             data.gov_version = *gov_version;
@@ -2042,7 +2045,7 @@ impl PersistentActor for WitnessesRegister {
                                 subject_id = %subject_id,
                                 owner = %owner,
                                 gov_version = gov_version,
-                                "Transfer entry refreshed before any close"
+                                "Transfer entry refreshed at genesis"
                             );
                         } else {
                             debug!(

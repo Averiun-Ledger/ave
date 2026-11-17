@@ -3246,6 +3246,37 @@ impl Api {
         }
     }
 
+    /// Tells a raw ownership creation straight to this node's
+    /// witnesses register (see `test_witnesses_transfer`): replays
+    /// the genesis a boot-recovery re-send would repeat.
+    pub async fn test_witnesses_create(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        owner: PublicKey,
+        gov_version: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::Create {
+                subject_id,
+                owner,
+                gov_version,
+            })
+            .await?
+        {
+            WitnessesRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Tells a raw ownership confirmation straight to this node's
     /// witnesses register (see `test_witnesses_transfer`).
     pub async fn test_witnesses_confirm(
