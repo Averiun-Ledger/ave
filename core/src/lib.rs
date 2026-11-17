@@ -3624,7 +3624,7 @@ impl Api {
                 reason: "Distributor actor not found".to_owned(),
             })?;
         actor
-            .tell(DistriWorkerMessage::TestEvictVerifyCursor { subject_id })
+            .ask(DistriWorkerMessage::TestEvictVerifyCursor { subject_id })
             .await
             .map_err(|_| Error::MissingResource {
                 name: "distributor".to_owned(),
@@ -3673,6 +3673,28 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .roles_resolved(&subject_id))
+    }
+
+    /// Ownership work for the incremental access projection: cloned
+    /// entries and visited entries, in that order. Fact-only tails
+    /// reuse the cached decision and add nothing.
+    pub async fn test_ownership_stats(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::transfer_verifier::SharedVerifyStats>(
+                "verify_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "verify_stats".to_owned(),
+                reason: "Verify stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ownership_snapshot(&subject_id))
     }
 
     /// Read-only view of the last successful copy attempt for a

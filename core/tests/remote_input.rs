@@ -9856,7 +9856,7 @@ async fn remote_registered_prefix_rejoins_after_cursor_eviction() {
     .await
     .unwrap();
     alice.update_subject(governance_id.clone()).await.unwrap();
-    for _ in 0..200 {
+    for i in 0..400 {
         let alice_gov_sn =
             get_subject(&alice, governance_id.clone(), None, true)
                 .await
@@ -9864,6 +9864,9 @@ async fn remote_registered_prefix_rejoins_after_cursor_eviction() {
                 .sn;
         if alice_gov_sn > gov_before {
             break;
+        }
+        if i % 20 == 19 {
+            alice.update_subject(governance_id.clone()).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -9876,7 +9879,7 @@ async fn remote_registered_prefix_rejoins_after_cursor_eviction() {
         "alice must sync the revoking governance version first"
     );
     rita.update_subject(governance_id.clone()).await.unwrap();
-    for _ in 0..200 {
+    for i in 0..400 {
         let rita_gov_sn =
             get_subject(&rita, governance_id.clone(), None, true)
                 .await
@@ -9884,6 +9887,9 @@ async fn remote_registered_prefix_rejoins_after_cursor_eviction() {
                 .sn;
         if rita_gov_sn >= gov_sn {
             break;
+        }
+        if i % 20 == 19 {
+            rita.update_subject(governance_id.clone()).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -10311,7 +10317,7 @@ async fn remote_without_aux_denies_past_version_window() {
     .await
     .unwrap();
     alice.update_subject(governance_id.clone()).await.unwrap();
-    for _ in 0..200 {
+    for i in 0..400 {
         let alice_gov_sn =
             get_subject(&alice, governance_id.clone(), None, true)
                 .await
@@ -10319,6 +10325,9 @@ async fn remote_without_aux_denies_past_version_window() {
                 .sn;
         if alice_gov_sn > gov_before {
             break;
+        }
+        if i % 20 == 19 {
+            alice.update_subject(governance_id.clone()).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -10331,7 +10340,7 @@ async fn remote_without_aux_denies_past_version_window() {
         "alice must sync the revoking governance version first"
     );
     rita.update_subject(governance_id.clone()).await.unwrap();
-    for _ in 0..200 {
+    for i in 0..400 {
         let rita_gov_sn =
             get_subject(&rita, governance_id.clone(), None, true)
                 .await
@@ -10339,6 +10348,9 @@ async fn remote_without_aux_denies_past_version_window() {
                 .sn;
         if rita_gov_sn >= gov_sn {
             break;
+        }
+        if i % 20 == 19 {
+            rita.update_subject(governance_id.clone()).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -11030,4 +11042,1806 @@ async fn remote_opaque_suffix_stays_unverifiable_while_clear_refutes() {
     drop(dirs);
     drop(rita_node);
     drop(rita_dirs);
+}
+
+/// Incremental ownership stays linear across several transfers with
+/// a reject in between: fact-only tails reuse the cached witness
+/// decision, while ownership, sender and governance changes each
+/// recompute once. Batches of one maximize the number of decisions.
+#[test(tokio::test)]
+async fn remote_ownership_projection_stays_linear_across_transfers() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let w_signer = Ed25519Signer::generate().unwrap();
+    let w_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        w_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let x_signer = Ed25519Signer::generate().unwrap();
+    let x_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        x_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Bob", "key": bob_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                    {"name": "W", "key": w_key.to_string()},
+                    {"name": "X", "key": x_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "Bob",
+                                            "viewpoints": ["AllViewpoints"]
+                                        },
+                                        {
+                                            "name": "Rita",
+                                            "viewpoints": ["AllViewpoints"]
+                                        },
+                                        {
+                                            "name": "W",
+                                            "viewpoints": ["AllViewpoints"]
+                                        },
+                                        {
+                                            "name": "X",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "W",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "W",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "X",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Alice", "namespace": []},
+                                {"name": "Bob", "namespace": []},
+                                {"name": "W", "namespace": []},
+                                {"name": "X", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
+        ..Default::default()
+    })
+    .await;
+    let bob = bob_node.api.clone();
+    node_running(&bob).await.unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&bob, subject_id.clone(), w_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    let w_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut w_node, w_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{w_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(w_signer)),
+        ..Default::default()
+    })
+    .await;
+    let w = w_node.api.clone();
+    node_running(&w).await.unwrap();
+    w.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    w.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&w, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    w.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(bob.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    w.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    emit_reject(&w, subject_id.clone(), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&bob, subject_id.clone(), x_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+
+    let x_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut x_node, x_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{x_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(x_signer)),
+        ..Default::default()
+    })
+    .await;
+    let x = x_node.api.clone();
+    node_running(&x).await.unwrap();
+    x.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    x.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&x, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    x.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(bob.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    x.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&x, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    emit_confirm(&x, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    emit_fact(
+        &x,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 4}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&x, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&x, subject_id.clone(), Some(11), true)
+        .await
+        .unwrap();
+    let history = x
+        .test_get_tracker_ledger(subject_id.clone(), 11)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 12);
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 11)
+        .expect("pending transfer")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the pending transfer must succeed"
+    );
+    let chain_len = history.len() as u64;
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    rita
+        .add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let x_public = PublicKey::from_str(x.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    for api in [&alice, &bob, &x, &w] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    let batches: Vec<Vec<Ledger>> =
+        history[..11].chunks(1).map(<[Ledger]>::to_vec).collect();
+    assert_eq!(batches.len(), 11);
+    for batch in &batches[..5] {
+        inject_with_hint(&rita, &alice_key, batch.clone(), false, &transfer)
+            .await;
+    }
+    alice.test_clear_faults().await.unwrap();
+    bob.test_clear_faults().await.unwrap();
+    x.test_clear_faults().await.unwrap();
+    w.test_clear_faults().await.unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [{"name": "Carol", "key": alice.public_key()}]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    for i in 0..400 {
+        let rita_gov_sn =
+            get_subject(&rita, governance_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+        if rita_gov_sn >= gov_sn {
+            break;
+        }
+        if i % 20 == 19 {
+            rita.update_subject(governance_id.clone()).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        get_subject(&rita, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .sn,
+        gov_sn,
+        "rita must sync the new governance version first"
+    );
+    for api in [&alice, &bob, &x, &w] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    for batch in &batches[5..] {
+        inject_with_hint(&rita, &x_public, batch.clone(), false, &transfer)
+            .await;
+    }
+    get_subject(&rita, subject_id.clone(), Some(10), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((11, x_public.clone())),
+        "the genuine hint must record its proof from the last sender"
+    );
+    let (processed, reloads) =
+        rita.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        reloads <= 2,
+        "at most one reload plus one for the governance rotation, then only deltas: {reloads}"
+    );
+    assert!(
+        processed <= 3 * chain_len,
+        "processed {processed} events over a {chain_len}-event chain"
+    );
+    let (cloned, visited, reordered) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
+    let (owned_cloned, owned_visited) =
+        rita.test_ownership_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        owned_cloned <= 2 * chain_len,
+        "cloned {owned_cloned} ownership entries over a {chain_len}-event chain"
+    );
+    assert!(
+        owned_visited <= 4 * chain_len,
+        "visited {owned_visited} ownership entries over a {chain_len}-event chain"
+    );
+    inject_with_hint(&rita, &x_public, vec![transfer.clone()], true, &transfer)
+        .await;
+    get_subject(&rita, subject_id.clone(), Some(11), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    let (owned_cloned, owned_visited) =
+        rita.test_ownership_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        owned_cloned <= 2 * chain_len,
+        "cloned {owned_cloned} ownership entries over a {chain_len}-event chain"
+    );
+    assert!(
+        owned_visited <= 4 * chain_len,
+        "visited {owned_visited} ownership entries over a {chain_len}-event chain"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the granted prefix applies and holds nothing back"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    bob_node.token.cancel();
+    rita_node.token.cancel();
+    w_node.token.cancel();
+    x_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut())
+            .chain(w_node.handler.iter_mut())
+            .chain(x_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(bob_node);
+    drop(bob_dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+    drop(w_node);
+    drop(w_dirs);
+    drop(x_node);
+    drop(x_dirs);
+}
+
+/// Ownership deltas stay linear with many closes: twelve Transfer+Confirm
+/// pairs alternating the same two owners, plus a final Transfer for the
+/// receiver. Batches of one, fixed sender and governance, so the count
+/// cannot hide behind contextual rebuilds.
+#[test(tokio::test)]
+async fn remote_ownership_changes_stay_linear() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Bob", "key": bob_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Alice", "namespace": []},
+                                {"name": "Bob", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
+        ..Default::default()
+    })
+    .await;
+    let bob = bob_node.api.clone();
+    node_running(&bob).await.unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let mut current_owner_is_alice = true;
+    let mut sn = 1u64;
+    for _ in 0..12 {
+        let (from_api, to_key) = if current_owner_is_alice {
+            (&alice, bob_key.clone())
+        } else {
+            (&bob, alice_key.clone())
+        };
+        emit_transfer(from_api, subject_id.clone(), to_key, true)
+            .await
+            .unwrap();
+        let other_api = if current_owner_is_alice { &bob } else { &alice };
+        other_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(other_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        emit_confirm(other_api, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+        sn += 1;
+        from_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(from_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        sn += 1;
+        current_owner_is_alice = !current_owner_is_alice;
+    }
+    assert_eq!(sn, 25u64);
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(25), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 25)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 26);
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 25)
+        .expect("pending transfer")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the pending transfer must succeed"
+    );
+    let (owner_now, pending_now, old_owners_now, stints_now) = alice
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(owner_now, Some(alice_key.clone()));
+    assert!(
+        pending_now == Some(rita_key.clone()),
+        "premise: the final transfer must stay pending"
+    );
+    assert_eq!(old_owners_now.len(), 2);
+    assert_eq!(stints_now, 12);
+    let chain_len = history.len() as u64;
+    assert_eq!(chain_len, 26);
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    rita
+        .add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    for api in [&alice, &bob] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    let batches: Vec<Vec<Ledger>> =
+        history[..25].chunks(1).map(<[Ledger]>::to_vec).collect();
+    assert_eq!(batches.len(), 25);
+    for batch in &batches {
+        inject_with_hint(&rita, &alice_key, batch.clone(), false, &transfer)
+            .await;
+    }
+    get_subject(&rita, subject_id.clone(), Some(24), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((25, alice_key.clone())),
+        "the genuine hint must record its proof from the fixed sender"
+    );
+    let (processed, reloads) =
+        rita.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        reloads <= 1,
+        "at most one full local reload, then only deltas: {reloads}"
+    );
+    assert!(
+        processed <= 3 * chain_len,
+        "processed {processed} events over a {chain_len}-event chain"
+    );
+    let (cloned, visited, reordered) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
+    let (owned_cloned, owned_visited) =
+        rita.test_ownership_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        owned_cloned > 0 && owned_visited > 0,
+        "counters must record real ownership work, not stay empty"
+    );
+    assert!(
+        owned_cloned <= 2 * chain_len,
+        "cloned {owned_cloned} ownership entries over a {chain_len}-event chain"
+    );
+    assert!(
+        owned_visited <= 4 * chain_len,
+        "visited {owned_visited} ownership entries over a {chain_len}-event chain"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        1,
+        "no rebuild per Transfer/Confirm, only the initial one"
+    );
+    inject_with_hint(&rita, &alice_key, vec![transfer.clone()], true, &transfer)
+        .await;
+    get_subject(&rita, subject_id.clone(), Some(25), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the copy holds nothing back"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        1,
+        "the covered tail needs no second rebuild"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    bob_node.token.cancel();
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(bob_node);
+    drop(bob_dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// Half-size twin of the 26-event regression: six Transfer+Confirm pairs
+/// alternating two owners, plus the final Transfer. Proves the total grows
+/// linearly (not triangularly) when N doubles.
+#[test(tokio::test)]
+async fn remote_ownership_changes_stay_linear_half() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Bob", "key": bob_key.to_string()},
+                    {"name": "Rita", "key": rita_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Bob",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Rita",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Alice", "namespace": []},
+                                {"name": "Bob", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
+        ..Default::default()
+    })
+    .await;
+    let bob = bob_node.api.clone();
+    node_running(&bob).await.unwrap();
+    bob.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&bob, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let mut current_owner_is_alice = true;
+    let mut sn = 1u64;
+    for _ in 0..6 {
+        let (from_api, to_key) = if current_owner_is_alice {
+            (&alice, bob_key.clone())
+        } else {
+            (&bob, alice_key.clone())
+        };
+        emit_transfer(from_api, subject_id.clone(), to_key, true)
+            .await
+            .unwrap();
+        let other_api = if current_owner_is_alice { &bob } else { &alice };
+        other_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(other_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        emit_confirm(other_api, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+        sn += 1;
+        from_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(from_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        sn += 1;
+        current_owner_is_alice = !current_owner_is_alice;
+    }
+    assert_eq!(sn, 13u64);
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(13), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 13)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 14);
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 13)
+        .expect("pending transfer")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the pending transfer must succeed"
+    );
+    let chain_len = history.len() as u64;
+    assert_eq!(chain_len, 14);
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    rita
+        .add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    for api in [&alice, &bob] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    let batches: Vec<Vec<Ledger>> =
+        history[..13].chunks(1).map(<[Ledger]>::to_vec).collect();
+    assert_eq!(batches.len(), 13);
+    for batch in &batches {
+        inject_with_hint(&rita, &alice_key, batch.clone(), false, &transfer)
+            .await;
+    }
+    get_subject(&rita, subject_id.clone(), Some(12), true)
+        .await
+        .unwrap();
+    let (owned_cloned, owned_visited) =
+        rita.test_ownership_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        owned_cloned > 0 && owned_visited > 0,
+        "counters must record real ownership work, not stay empty"
+    );
+    assert!(
+        owned_cloned <= 2 * chain_len,
+        "cloned {owned_cloned} ownership entries over a {chain_len}-event chain"
+    );
+    assert!(
+        owned_visited <= 4 * chain_len,
+        "visited {owned_visited} ownership entries over a {chain_len}-event chain"
+    );
+    inject_with_hint(&rita, &alice_key, vec![transfer.clone()], true, &transfer)
+        .await;
+    get_subject(&rita, subject_id.clone(), Some(13), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    bob_node.token.cancel();
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(bob_node);
+    drop(bob_dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// Owners distintos: doce pares Transfer+Confirm con un owner nuevo cada
+/// vez, más el Transfer final. Demuestra coste independiente del
+/// historial aunque `old_owners` crezca.
+#[test(tokio::test)]
+async fn remote_unique_owners_stay_linear() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    const EXTRA_OWNERS: usize = 11;
+    let mut owner_keys: Vec<PublicKey> = Vec::new();
+    let mut owner_signers = Vec::new();
+    {
+        let alice_key =
+            PublicKey::from_str(alice.public_key()).unwrap();
+        owner_keys.push(alice_key);
+    }
+    let bob_signer = Ed25519Signer::generate().unwrap();
+    let bob_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        bob_signer.public_key_bytes(),
+    )
+    .unwrap();
+    owner_keys.push(bob_key.clone());
+    for _ in 0..EXTRA_OWNERS {
+        let signer = Ed25519Signer::generate().unwrap();
+        let key = PublicKey::new(
+            ave_common::identity::keys::DSAlgorithm::Ed25519,
+            signer.public_key_bytes(),
+        )
+        .unwrap();
+        owner_keys.push(key);
+        owner_signers.push(signer);
+    }
+    // owner_keys: [Alice, Bob, O3..O13] = 13 owners O1..O13.
+    assert_eq!(owner_keys.len(), 13);
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let mut member_adds = Vec::new();
+    member_adds.push(json!({"name": "Alice", "key": alice.public_key()}));
+    member_adds.push(json!({"name": "Bob", "key": owner_keys[1].to_string()}));
+    for (idx, key) in owner_keys.iter().enumerate().skip(2) {
+        member_adds.push(
+            json!({"name": format!("O{}", idx + 1), "key": key.to_string()}),
+        );
+    }
+    member_adds.push(json!({"name": "Rita", "key": rita_key.to_string()}));
+    let mut creators = Vec::new();
+    creators.push(json!({
+        "name": "Alice", "namespace": [], "quantity": "infinity"
+    }));
+    creators.push(json!({
+        "name": "Bob", "namespace": [], "quantity": "infinity"
+    }));
+    for idx in 2..owner_keys.len() {
+        creators.push(json!({
+            "name": format!("O{}", idx + 1),
+            "namespace": [],
+            "quantity": "infinity"
+        }));
+    }
+    creators.push(json!({
+        "name": "Rita", "namespace": [], "quantity": "infinity"
+    }));
+    let mut issuers = Vec::new();
+    issuers.push(json!({"name": "Alice", "namespace": []}));
+    issuers.push(json!({"name": "Bob", "namespace": []}));
+    for idx in 2..owner_keys.len() {
+        issuers.push(json!({"name": format!("O{}", idx + 1), "namespace": []}));
+    }
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": member_adds},
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": creators,
+                            "issuer": issuers
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+
+    let bob_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut bob_node, bob_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{bob_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(bob_signer)),
+        ..Default::default()
+    })
+    .await;
+    let mut owner_apis = vec![alice.clone(), bob_node.api.clone()];
+    node_running(&bob_node.api).await.unwrap();
+    bob_node
+        .api
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    bob_node
+        .api
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(
+        &bob_node.api,
+        governance_id.clone(),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+
+    struct ExtraNode {
+        api: ave_core::Api,
+        node: crate::common::NodeData,
+        dirs: Vec<tempfile::TempDir>,
+    }
+    let mut extras: Vec<ExtraNode> = Vec::new();
+    for signer in owner_signers.into_iter() {
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, node_dirs) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            keys: Some(ave_common::identity::keys::KeyPair::Ed25519(signer)),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        node.api
+            .authorize_governance(
+                governance_id.clone(),
+                ave_core::auth::AuthWitness::One(
+                    PublicKey::from_str(owner.public_key()).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        node.api
+            .update_subject(governance_id.clone())
+            .await
+            .unwrap();
+        get_subject(&node.api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+        owner_apis.push(node.api.clone());
+        extras.push(ExtraNode {
+            api: node.api.clone(),
+            node,
+            dirs: node_dirs,
+        });
+    }
+    // owner_apis[0..13] = O1..O13 (Alice, Bob, O3..O13).
+    assert_eq!(owner_apis.len(), 13);
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let mut sn = 1u64;
+    for pair in 0..12 {
+        let from_api = owner_apis[pair].clone();
+        let to_key = owner_keys[pair + 1].clone();
+        emit_transfer(&from_api, subject_id.clone(), to_key, true)
+            .await
+            .unwrap();
+        let to_api = owner_apis[pair + 1].clone();
+        to_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(&to_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        emit_confirm(&to_api, subject_id.clone(), None, true)
+            .await
+            .unwrap();
+        sn += 1;
+        from_api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(&from_api, subject_id.clone(), Some(sn), true)
+            .await
+            .unwrap();
+        sn += 1;
+    }
+    assert_eq!(sn, 25u64);
+    let last_owner_api = owner_apis[12].clone();
+    emit_transfer(
+        &last_owner_api,
+        subject_id.clone(),
+        rita_key.clone(),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&last_owner_api, subject_id.clone(), Some(25), true)
+        .await
+        .unwrap();
+    let history = last_owner_api
+        .test_get_tracker_ledger(subject_id.clone(), 25)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 26);
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 25)
+        .expect("pending transfer")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the pending transfer must succeed"
+    );
+    // The register trails the tracker (independent tells): poll the
+    // authoritative ownership until the twelve closes land.
+    let mut owner_now = None;
+    let mut pending_now = None;
+    let mut old_owners_now = Vec::new();
+    let mut stints_now = 0usize;
+    for _ in 0..100 {
+        let (owner, pending, olds, stints) = last_owner_api
+            .test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+            .unwrap();
+        owner_now = owner;
+        pending_now = pending;
+        old_owners_now = olds;
+        stints_now = stints;
+        if old_owners_now.len() == 12 && stints_now == 12 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(owner_now, Some(owner_keys[12].clone()));
+    assert!(
+        pending_now == Some(rita_key.clone()),
+        "premise: the final transfer must stay pending"
+    );
+    assert_eq!(old_owners_now.len(), 12);
+    assert_eq!(stints_now, 12);
+    let chain_len = history.len() as u64;
+    assert_eq!(chain_len, 26);
+
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    rita
+        .add_sync_peer(
+            governance_id.clone(),
+            vec![PublicKey::from_str(owner.public_key()).unwrap()],
+        )
+        .await
+        .unwrap();
+
+    let last_sender_key = owner_keys[12].clone();
+    let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
+    {
+        let mut fault_apis: Vec<&ave_core::Api> = vec![&alice, &bob_node.api];
+        for extra in extras.iter() {
+            fault_apis.push(&extra.api);
+        }
+        for api in fault_apis {
+            for message in [
+                FaultMessage::DistributionLedgerRes,
+                FaultMessage::DistributionLastEventReq,
+            ] {
+                api.test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(rita_public.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    async fn inject_with_hint(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hint: &Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all,
+                    transfer_event: Some(Box::new(hint.clone())),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    let batches: Vec<Vec<Ledger>> =
+        history[..25].chunks(1).map(<[Ledger]>::to_vec).collect();
+    assert_eq!(batches.len(), 25);
+    for batch in &batches {
+        inject_with_hint(&rita, &last_sender_key, batch.clone(), false, &transfer)
+            .await;
+    }
+    get_subject(&rita, subject_id.clone(), Some(24), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        Some((25, last_sender_key.clone())),
+        "the genuine hint must record its proof from the fixed sender"
+    );
+    let (processed, reloads) =
+        rita.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        reloads <= 1,
+        "at most one full local reload, then only deltas: {reloads}"
+    );
+    assert!(
+        processed <= 3 * chain_len,
+        "processed {processed} events over a {chain_len}-event chain"
+    );
+    let (cloned, visited, reordered) =
+        rita.test_buffer_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        cloned <= 4 * chain_len,
+        "cloned {cloned} events over a {chain_len}-event chain"
+    );
+    assert!(
+        visited <= 12 * chain_len,
+        "visited {visited} events over a {chain_len}-event chain"
+    );
+    assert!(
+        reordered <= 2 * chain_len,
+        "reordered {reordered} events over a {chain_len}-event chain"
+    );
+    let (owned_cloned, owned_visited) =
+        rita.test_ownership_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        owned_cloned > 0 && owned_visited > 0,
+        "counters must record real ownership work, not stay empty"
+    );
+    assert!(
+        owned_cloned <= 2 * chain_len,
+        "cloned {owned_cloned} ownership entries over a {chain_len}-event chain"
+    );
+    assert!(
+        owned_visited <= 4 * chain_len,
+        "visited {owned_visited} ownership entries over a {chain_len}-event chain"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        1,
+        "no rebuild per Transfer/Confirm, only the initial one"
+    );
+    inject_with_hint(&rita, &last_sender_key, vec![transfer.clone()], true, &transfer)
+        .await;
+    get_subject(&rita, subject_id.clone(), Some(25), true)
+        .await
+        .unwrap();
+    assert!(
+        rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    assert_eq!(
+        rita.test_deferred_stats().await.unwrap(),
+        (0, 0, 0),
+        "the copy holds nothing back"
+    );
+    assert_eq!(
+        rita.test_full_rebuilds(subject_id.clone()).await.unwrap(),
+        1,
+        "the covered tail needs no second rebuild"
+    );
+    node_running(&rita).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    bob_node.token.cancel();
+    rita_node.token.cancel();
+    for extra in extras.iter_mut() {
+        extra.node.token.cancel();
+    }
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(bob_node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut())
+            .chain(
+                extras
+                    .iter_mut()
+                    .flat_map(|extra| extra.node.handler.iter_mut()),
+            ),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(bob_node);
+    drop(bob_dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+    for extra in extras {
+        drop(extra.node);
+        drop(extra.dirs);
+    }
 }

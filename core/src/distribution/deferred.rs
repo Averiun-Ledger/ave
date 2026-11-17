@@ -748,7 +748,10 @@ mod tests {
         assert_eq!(moved, 1, "pruning one event shifts the survivor once");
         assert_eq!(taken[0].sn, 1);
         assert_eq!(store.live(&id), (0, 0));
-        assert!(store.stage(&id, vec![synthetic_ledger(2, 0)], None).is_empty() || true);
+        let evicted = store.stage(&id, vec![synthetic_ledger(2, 0)], None);
+        assert!(evicted.is_empty());
+        assert_eq!(store.live(&id).0, 1);
+        assert_eq!(store.retained(&id).0, 1);
         store.drop(&id);
         assert_eq!(store.live(&id), (0, 0));
         assert_eq!(store.retained(&id), (0, 0));

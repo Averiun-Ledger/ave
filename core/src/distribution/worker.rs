@@ -22,7 +22,7 @@ use crate::{
         model::{HashThisRole, RoleTypes},
         witnesses_register::{
             GovVersionLimit, HiSnLimit, TrackerDeliveryMode,
-            TrackerDeliveryRange, WitnessesRegister,
+            TrackerDeliveryRange, WitnessStatus, WitnessesRegister,
         },
     },
     helpers::network::{delivery_of, service::NetworkSender},
@@ -102,10 +102,12 @@ pub(crate) struct CheckAuthCommon {
 
 /// Incremental authorization state for one staged chain: the
 /// chain-derived facts already evaluated over the held prefix, so
-/// each new batch only processes its own tail. The access decision
-/// itself is never cached: every delivery re-runs the witness
-/// check against current governance. Invalidated whenever the
-/// staged prefix is dropped, taken, evicted or proved divergent.
+/// each new batch only processes its own tail. The witness decision
+/// for the unregistered path is cached by sender, governance version
+/// and ownership version: fact-only tails reuse it without cloning
+/// or re-scanning ownership, while ownership, governance or peer
+/// changes recompute. Invalidated whenever the staged prefix is
+/// dropped, taken, evicted or proved divergent.
 pub(crate) struct PendingAuthState {
     tip_sn: Option<u64>,
     tip_hash: Option<DigestIdentifier>,
@@ -130,6 +132,26 @@ pub(crate) struct PendingAuthState {
     /// keeps the exceeding corner O(1) per delivery instead of
     /// rescanning the retained prefix each time.
     frozen_gov_window: Option<(u64, Option<u64>)>,
+    /// Ownership version: bumped only when the tail actually changes
+    /// ownership (allowed transfer, confirm or reject closing
+    /// pending). Fact tails leave it alone so the cached witness
+    /// decision below stays valid.
+    ownership_version: u64,
+    /// Cached witness decision for the unregistered path, keyed by
+    /// sender, governance version and ownership version. `status`
+    /// `None` caches a prior denial so fact-only tails fail closed
+    /// without re-scanning. Recomputed on ownership, governance or
+    /// sender change; never inherited across chains.
+    cached_without_aux: Option<CachedWithoutAux>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedWithoutAux {
+    sender: PublicKey,
+    gov_version: u64,
+    ownership_version: u64,
+    status: Option<WitnessStatus>,
+    window_sn: Option<u64>,
 }
 
 impl PendingAuthState {
@@ -148,6 +170,8 @@ impl PendingAuthState {
             auth_roles: super::transfer_verifier::RoleCache::new(),
             broken: false,
             frozen_gov_window: None,
+            ownership_version: 0,
+            cached_without_aux: None,
         }
     }
 }
@@ -252,6 +276,60 @@ impl DistriWorker {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .add_buffer_work(subject_id, cloned, 0, 0);
+        }
+    }
+
+    /// Test-only ownership work counter: entries duplicated for a
+    /// witness check and entries examined while deciding. Cached
+    /// fact-only tails add nothing.
+    #[cfg(feature = "test")]
+    fn note_ownership_work(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        cloned: u64,
+        visited: u64,
+    ) {
+        use super::transfer_verifier::SharedVerifyStats;
+        if cloned == 0 && visited == 0 {
+            return;
+        }
+        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+            stats
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .add_ownership_work(subject_id, cloned, visited);
+        }
+    }
+
+    /// Best high-water mark across incremental witness checks: a new
+    /// owner can only extend access, never shrink it, while the
+    /// receiver stays out of actual/pending/old.
+    fn max_hi(first: HiSnLimit, second: HiSnLimit) -> HiSnLimit {
+        match (first, second) {
+            (HiSnLimit::Infinity, _) | (_, HiSnLimit::Infinity) => {
+                HiSnLimit::Infinity
+            }
+            (HiSnLimit::Sn(a), HiSnLimit::Sn(b)) => HiSnLimit::Sn(a.max(b)),
+            (HiSnLimit::Sn(n), HiSnLimit::None)
+            | (HiSnLimit::None, HiSnLimit::Sn(n)) => HiSnLimit::Sn(n),
+            (HiSnLimit::None, HiSnLimit::None) => HiSnLimit::None,
+        }
+    }
+
+    /// Best governance ceiling across incremental checks, same
+    /// monotonic rule as the high-water mark.
+    fn max_gov(first: GovVersionLimit, second: GovVersionLimit) -> GovVersionLimit {
+        match (first, second) {
+            (GovVersionLimit::Infinity, _)
+            | (_, GovVersionLimit::Infinity) => GovVersionLimit::Infinity,
+            (GovVersionLimit::Version(a), GovVersionLimit::Version(b)) => {
+                GovVersionLimit::Version(a.max(b))
+            }
+            (GovVersionLimit::Version(v), GovVersionLimit::None)
+            | (GovVersionLimit::None, GovVersionLimit::Version(v)) => {
+                GovVersionLimit::Version(v)
+            }
+            (GovVersionLimit::None, GovVersionLimit::None) => GovVersionLimit::None,
         }
     }
 
@@ -1080,9 +1158,21 @@ impl DistriWorker {
         // Extend the cached chain facts with the current tail only.
         let current_max: u64;
         {
-            let state = pending_auth
+            let mut state = pending_auth
                 .get_mut(subject_id)
                 .ok_or(DistributorError::ReceiverNoAccess)?;
+            // Snapshot ownership before the tail: fact-only tails must
+            // leave the version (and the cached witness decision)
+            // alone, while transfers, confirms and rejects bump it.
+            let before = state.transfer_data.as_ref().map(|data| {
+                (
+                    data.actual_owner.clone(),
+                    data.actual_new_owner_data.clone(),
+                    data.old_owners.len(),
+                    data.ownership_transitions.len(),
+                    data.gov_version,
+                )
+            });
             for event in current.iter() {
                 state.max_gov_version =
                     state.max_gov_version.max(event.gov_version);
@@ -1333,6 +1423,242 @@ impl DistriWorker {
                     .last()
                     .and_then(|event| event.ledger_hash(hash).ok());
             }
+            // Bump the ownership version only when the tail really
+            // changed ownership: fact tails keep the cached witness
+            // decision valid without re-scanning.
+            {
+                let after = state.transfer_data.as_ref().map(|data| {
+                    (
+                        data.actual_owner.clone(),
+                        data.actual_new_owner_data.clone(),
+                        data.old_owners.len(),
+                        data.ownership_transitions.len(),
+                        data.gov_version,
+                    )
+                });
+                if after != before {
+                    let involves = {
+                        let actual_before_eq = before.as_ref().is_some_and(
+                            |(actual, _, _, _, _)| actual == our_key,
+                        );
+                        let actual_after_eq = after.as_ref().is_some_and(
+                            |(actual, _, _, _, _)| actual == our_key,
+                        );
+                        let pending_before_eq = before.as_ref().is_some_and(
+                            |(_, pending, _, _, _)| {
+                                pending.as_ref().is_some_and(
+                                    |(owner, _)| owner == our_key,
+                                )
+                            },
+                        );
+                        let pending_after_eq = after.as_ref().is_some_and(
+                            |(_, pending, _, _, _)| {
+                                pending.as_ref().is_some_and(
+                                    |(owner, _)| owner == our_key,
+                                )
+                            },
+                        );
+                        actual_before_eq
+                            || actual_after_eq
+                            || pending_before_eq
+                            || pending_after_eq
+                    };
+                    let new_version =
+                        state.ownership_version.wrapping_add(1);
+                    // Fast path for single-event tails that do not involve
+                    // the receiver: refresh the cached decision with only
+                    // the new delta instead of rescanning all old owners.
+                    // Full recompute stays for involving changes, context
+                    // switches and multi-event tails.
+                    let mut incremental_done = false;
+                    if !involves
+                        && current.len() == 1
+                        && let Some(cached) =
+                            state.cached_without_aux.as_ref()
+                        && cached.sender == sender
+                        && cached.gov_version == common.gov_version
+                        && cached.status.is_some()
+                    {
+                        // New old key, if Confirm/Reject closed one entry.
+                        let new_key: Option<PublicKey> = {
+                            use ave_common::bridge::request::EventRequestType;
+                            match current[0].get_event_request_type() {
+                                EventRequestType::Confirm => before.as_ref().map(
+                                    |(actual, _, _, _, _)| actual.clone(),
+                                ),
+                                EventRequestType::Reject => before.as_ref().and_then(
+                                    |(_, pending, _, _, _)| {
+                                        pending.as_ref().map(
+                                            |(owner, _)| owner.clone(),
+                                        )
+                                    },
+                                ),
+                                _ => None,
+                            }
+                        };
+                        // Minimal projection: new actual/pending plus at
+                        // most one old entry. Transfers carry no new old.
+                        let minimal = state.transfer_data.as_ref().and_then(
+                            |data| {
+                                let mut olds = HashMap::new();
+                                if let Some(key) = new_key.as_ref()
+                                    && let Some(entry) =
+                                        data.old_owners.get(key)
+                                {
+                                    olds.insert(
+                                        key.clone(),
+                                        entry.clone(),
+                                    );
+                                }
+                                Some(
+                                    crate::governance::witnesses_register::TransferData {
+                                        actual_owner: data.actual_owner.clone(),
+                                        actual_new_owner_data: data
+                                            .actual_new_owner_data
+                                            .clone(),
+                                        sn: data.sn,
+                                        gov_version: data.gov_version,
+                                        old_owners: olds,
+                                        ownership_transitions: Vec::new(),
+                                        visibility_state: data
+                                            .visibility_state
+                                            .clone(),
+                                    },
+                                )
+                            },
+                        );
+                        if let Some(light) = minimal {
+                            let _delta_len =
+                                light.old_owners.len() as u64;
+                            // Snapshot the cached best before releasing
+                            // the borrow for the witness call.
+                            let prev_status =
+                                cached.status.clone().expect(
+                                    "checked Some above",
+                                );
+                            let prev_window = cached.window_sn;
+                            let gov_version = common.gov_version;
+                            let governance_id =
+                                common.governance_id.clone();
+                            let namespace =
+                                common.namespace.clone();
+                            let schema_id = common.schema_id.clone();
+                            let sender_key = sender.clone();
+                            let our_key_owned =
+                                (*our_key).clone();
+                            let first = held
+                                .first()
+                                .or_else(|| current.first())
+                                .cloned()
+                                .ok_or(
+                                    DistributorError::ReceiverNoAccess,
+                                )?;
+                            let owner_ctx_owner = first
+                                .ledger_seal_signature
+                                .signer
+                                .clone();
+                            let owner_ctx_gov = first.gov_version;
+                            let outcome = check_witness_status_and_window(
+                                ctx,
+                                &governance_id,
+                                subject_id,
+                                Some(light),
+                                TrackerPeers {
+                                    node: our_key_owned,
+                                    sender: sender_key.clone(),
+                                },
+                                TrackerParams {
+                                    namespace,
+                                    schema_id,
+                                    actual_sn: None,
+                                },
+                                OwnerContext {
+                                    owner: Some(owner_ctx_owner),
+                                    gov_version: Some(owner_ctx_gov),
+                                },
+                            )
+                            .await;
+                            #[cfg(feature = "test")]
+                            Self::note_ownership_work(
+                                ctx,
+                                subject_id,
+                                _delta_len,
+                                _delta_len,
+                            );
+                            if let Ok((
+                                new_status,
+                                new_window,
+                                ..
+                            )) = outcome
+                            {
+                                if let Some(state) = pending_auth
+                                    .get_mut(subject_id)
+                                {
+                                    state.ownership_version =
+                                        new_version;
+                                    state.cached_without_aux = Some(
+                                        CachedWithoutAux {
+                                            sender: sender_key,
+                                            gov_version,
+                                            ownership_version:
+                                                new_version,
+                                            status: Some(
+                                                crate::governance::witnesses_register::WitnessStatus {
+                                                    access_sn: prev_status
+                                                        .access_sn
+                                                        .or(new_status
+                                                            .access_sn),
+                                                    hi_sn_limit:
+                                                        Self::max_hi(
+                                                            prev_status
+                                                                .hi_sn_limit,
+                                                            new_status
+                                                                .hi_sn_limit,
+                                                        ),
+                                                    gov_version_limit:
+                                                        Self::max_gov(
+                                                            prev_status
+                                                                .gov_version_limit,
+                                                            new_status
+                                                                .gov_version_limit,
+                                                        ),
+                                                    create_access:
+                                                        prev_status
+                                                            .create_access
+                                                            || new_status
+                                                                .create_access,
+                                                    create_gov_version_limit:
+                                                        Self::max_gov(
+                                                            prev_status
+                                                                .create_gov_version_limit,
+                                                            new_status
+                                                                .create_gov_version_limit,
+                                                        ),
+                                                },
+                                            ),
+                                            window_sn: prev_window
+                                                .into_iter()
+                                                .chain(new_window)
+                                                .max(),
+                                        },
+                                    );
+                                    incremental_done = true;
+                                }
+                            }
+                            // Re-borrow for the trailing bookkeeping below.
+                            state = pending_auth
+                                .get_mut(subject_id)
+                                .ok_or(
+                                    DistributorError::ReceiverNoAccess,
+                                )?;
+                        }
+                    }
+                    if !incremental_done {
+                        state.ownership_version = new_version;
+                        state.cached_without_aux = None;
+                    }
+                }
+            }
             #[cfg(feature = "test")]
             Self::note_auth_work(ctx, subject_id, current.len() as u64);
         }
@@ -1399,47 +1725,142 @@ impl DistriWorker {
                 safe_hi_sn,
             });
         }
-        // Unregistered: rebuild-free ownership from the cache,
-        // re-evaluated against current governance every delivery.
-        let (transfer_data, first_event) = {
+        // Unregistered: incremental ownership from the cache with a
+        // cached witness decision. Fact-only tails reuse the prior
+        // limits without cloning or re-scanning ownership; ownership,
+        // governance or sender changes recompute once.
+        let cached_hit = {
             let state = pending_auth
                 .get(subject_id)
                 .ok_or(DistributorError::ReceiverNoAccess)?;
-            let Some(data) = state.transfer_data.clone() else {
+            match &state.cached_without_aux {
+                Some(cached)
+                    if cached.sender == sender
+                        && cached.gov_version == common.gov_version
+                        && cached.ownership_version == state.ownership_version =>
+                {
+                    Some(cached.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(cached) = cached_hit {
+            let Some(status) = cached.status else {
                 return Err(DistributorError::ReceiverNoAccess.into());
             };
+            let receiver_hi_limit =
+                Self::concrete_hi_sn_limit(status.hi_sn_limit, offered_hi);
+            let (receiver_create_gov_limit, _window_scanned) = {
+                let state = pending_auth
+                    .get_mut(subject_id)
+                    .ok_or(DistributorError::ReceiverNoAccess)?;
+                Self::gov_window_limit_combined(
+                    state,
+                    held,
+                    current,
+                    status.create_gov_version_limit,
+                    offered_hi,
+                )
+            };
+            #[cfg(feature = "test")]
+            Self::note_auth_work(ctx, subject_id, _window_scanned);
+            let raw_receiver_limit = [
+                receiver_hi_limit,
+                receiver_create_gov_limit,
+                cached.window_sn,
+            ]
+            .into_iter()
+            .flatten()
+            .max();
+            let Some(receiver_limit) = raw_receiver_limit else {
+                return Err(DistributorError::ReceiverNoAccess.into());
+            };
+            let mut safe_hi_sn = receiver_limit.min(offered_hi);
+            if let Some(boundary) = pending_auth
+                .get(subject_id)
+                .and_then(|state| state.first_confirm_reject)
+            {
+                safe_hi_sn = safe_hi_sn.min(boundary);
+            }
+            return Ok(DistributionAuth {
+                is_gov: false,
+                is_register: false,
+                safe_hi_sn,
+            });
+        }
+        // Ownership deltas never resend the stint log: transfer stints
+        // only decide the ignored `transfer_sn` below, while hi/gov/window
+        // come from actual/pending/old-owners. Sending the growing log
+        // would reintroduce triangular cost per ownership change.
+        let (transfer_data, first_event, _ownership_size) = {
+            let state = pending_auth
+                .get(subject_id)
+                .ok_or(DistributorError::ReceiverNoAccess)?;
+            let Some(data) = state.transfer_data.as_ref() else {
+                return Err(DistributorError::ReceiverNoAccess.into());
+            };
+            let size = data.old_owners.len() as u64;
             let first = held
                 .first()
                 .or_else(|| current.first())
                 .cloned()
                 .ok_or(DistributorError::ReceiverNoAccess)?;
-            (data, first)
+            let light = crate::governance::witnesses_register::TransferData {
+                actual_owner: data.actual_owner.clone(),
+                actual_new_owner_data: data.actual_new_owner_data.clone(),
+                sn: data.sn,
+                gov_version: data.gov_version,
+                old_owners: data.old_owners.clone(),
+                ownership_transitions: Vec::new(),
+                visibility_state: data.visibility_state.clone(),
+            };
+            (light, first, size)
         };
+        #[cfg(feature = "test")]
+        Self::note_ownership_work(ctx, subject_id, _ownership_size, 0);
         let owner = first_event.ledger_seal_signature.signer.clone();
         let gov_version = first_event.gov_version;
-        let (witness_status, receiver_window_sn, ..) =
-            check_witness_status_and_window(
-                ctx,
-                &common.governance_id,
-                subject_id,
-                Some(transfer_data),
-                TrackerPeers {
-                    node: (*our_key).clone(),
-                    sender: sender.clone(),
-                },
-                TrackerParams {
-                    namespace: common.namespace.clone(),
-                    schema_id: common.schema_id.clone(),
-                    actual_sn: None,
-                },
-                OwnerContext {
-                    owner: Some(owner),
-                    gov_version: Some(gov_version),
-                },
-            )
-            .await?;
-        let receiver_hi_limit =
-            Self::concrete_hi_sn_limit(witness_status.hi_sn_limit, offered_hi);
+        let witness_outcome = check_witness_status_and_window(
+            ctx,
+            &common.governance_id,
+            subject_id,
+            Some(transfer_data),
+            TrackerPeers {
+                node: (*our_key).clone(),
+                sender: sender.clone(),
+            },
+            TrackerParams {
+                namespace: common.namespace.clone(),
+                schema_id: common.schema_id.clone(),
+                actual_sn: None,
+            },
+            OwnerContext {
+                owner: Some(owner),
+                gov_version: Some(gov_version),
+            },
+        )
+        .await;
+        #[cfg(feature = "test")]
+        Self::note_ownership_work(ctx, subject_id, 0, _ownership_size);
+        let (witness_status, receiver_window_sn, ..) = match witness_outcome {
+            Ok(ok) => ok,
+            Err(_) => {
+                if let Some(state) = pending_auth.get_mut(subject_id) {
+                    state.cached_without_aux = Some(CachedWithoutAux {
+                        sender: sender.clone(),
+                        gov_version: common.gov_version,
+                        ownership_version: state.ownership_version,
+                        status: None,
+                        window_sn: None,
+                    });
+                }
+                return Err(DistributorError::ReceiverNoAccess.into());
+            }
+        };
+        let receiver_hi_limit = Self::concrete_hi_sn_limit(
+            witness_status.hi_sn_limit.clone(),
+            offered_hi,
+        );
         let (receiver_create_gov_limit, _window_scanned) = {
             let state = pending_auth
                 .get_mut(subject_id)
@@ -1448,7 +1869,7 @@ impl DistriWorker {
                 state,
                 held,
                 current,
-                witness_status.create_gov_version_limit,
+                witness_status.create_gov_version_limit.clone(),
                 offered_hi,
             )
         };
@@ -1457,12 +1878,21 @@ impl DistriWorker {
         let raw_receiver_limit = [
             receiver_hi_limit,
             receiver_create_gov_limit,
-            receiver_window_sn,
+            receiver_window_sn.clone(),
         ]
         .into_iter()
         .flatten()
         .max();
         let Some(receiver_limit) = raw_receiver_limit else {
+            if let Some(state) = pending_auth.get_mut(subject_id) {
+                state.cached_without_aux = Some(CachedWithoutAux {
+                    sender: sender.clone(),
+                    gov_version: common.gov_version,
+                    ownership_version: state.ownership_version,
+                    status: None,
+                    window_sn: None,
+                });
+            }
             return Err(DistributorError::ReceiverNoAccess.into());
         };
         let mut safe_hi_sn = receiver_limit.min(offered_hi);
@@ -1471,6 +1901,15 @@ impl DistriWorker {
             .and_then(|state| state.first_confirm_reject)
         {
             safe_hi_sn = safe_hi_sn.min(boundary);
+        }
+        if let Some(state) = pending_auth.get_mut(subject_id) {
+            state.cached_without_aux = Some(CachedWithoutAux {
+                sender: sender.clone(),
+                gov_version: common.gov_version,
+                ownership_version: state.ownership_version,
+                status: Some(witness_status),
+                window_sn: receiver_window_sn,
+            });
         }
         Ok(DistributionAuth {
             is_gov: false,

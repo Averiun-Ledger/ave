@@ -247,6 +247,8 @@ pub(crate) struct VerifyStatsRegistry {
     buffer_visited: HashMap<DigestIdentifier, u64>,
     buffer_reordered: HashMap<DigestIdentifier, u64>,
     roles_resolved: HashMap<DigestIdentifier, u64>,
+    ownership_cloned: HashMap<DigestIdentifier, u64>,
+    ownership_visited: HashMap<DigestIdentifier, u64>,
 }
 
 #[cfg(feature = "test")]
@@ -321,6 +323,31 @@ impl VerifyStatsRegistry {
 
     pub(crate) fn roles_resolved(&self, subject_id: &DigestIdentifier) -> u64 {
         self.roles_resolved.get(subject_id).copied().unwrap_or(0)
+    }
+
+    /// Incremental access projection work: ownership entries
+    /// duplicated for a witness check and entries examined while
+    /// deciding. Fact-only tails reuse the cached decision and add
+    /// nothing; ownership deltas add only their own size.
+    pub(crate) fn add_ownership_work(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        cloned: u64,
+        visited: u64,
+    ) {
+        *self.ownership_cloned.entry(subject_id.clone()).or_default() += cloned;
+        *self.ownership_visited.entry(subject_id.clone()).or_default() +=
+            visited;
+    }
+
+    pub(crate) fn ownership_snapshot(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> (u64, u64) {
+        (
+            self.ownership_cloned.get(subject_id).copied().unwrap_or(0),
+            self.ownership_visited.get(subject_id).copied().unwrap_or(0),
+        )
     }
 }
 
