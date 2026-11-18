@@ -93,6 +93,11 @@ pub enum SubjectRegisterMessage {
     GetSubjectsByOwnerSchemaBatch {
         queries: Vec<(PublicKey, SchemaType, String)>,
     },
+    /// Read-only presence check for a subject entry, for tests
+    /// proving a rollback really cleared the external row.
+    HasSubject {
+        subject_id: DigestIdentifier,
+    },
     RegisterData {
         gov_version: u64,
         data: Vec<(PublicKey, SchemaType, String, CreatorQuantity)>,
@@ -127,6 +132,7 @@ impl Message for SubjectRegisterMessage {
             | Self::UpdateSubject { .. } => true,
             Self::Check { .. }
             | Self::GetSubjectsByOwnerSchemaBatch { .. }
+            | Self::HasSubject { .. }
             | Self::GetMaxVersion => false,
         }
     }
@@ -137,6 +143,7 @@ pub enum SubjectRegisterResponse {
     Ok,
     SubjectsBatch(Vec<Vec<DigestIdentifier>>),
     MaxVersion(u64),
+    SubjectPresent(bool),
 }
 
 impl Response for SubjectRegisterResponse {}
@@ -263,6 +270,12 @@ impl Handler<Self> for SubjectRegister {
                     .max()
                     .unwrap_or(0);
                 return Ok(SubjectRegisterResponse::MaxVersion(max));
+            }
+            SubjectRegisterMessage::HasSubject { subject_id } => {
+                let present = self.register.values().any(|(_, subjects)| {
+                    subjects.contains(&subject_id)
+                });
+                return Ok(SubjectRegisterResponse::SubjectPresent(present));
             }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {
                 let data_count = data.len();

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use ave_common::identity::keys::{DSA, Ed25519Signer};
 use ave_common::identity::{
-    DigestIdentifier, HashAlgorithm, PublicKey, Signature, Signed, TimeStamp,
-    hash_borsh,
+    DigestIdentifier, Hash, HashAlgorithm, PublicKey, Signature, Signed,
+    TimeStamp, hash_borsh,
 };
 use ave_common::request::{EventRequest, TransferRequest};
 use ave_core::helpers::network::test_faults::{
@@ -4401,6 +4401,2377 @@ async fn remote_rollback_keeps_concurrent_valid_copy() {
     drop(dirs);
     drop(w_node);
     drop(w_dirs);
+}
+
+/// An out-of-order single push that the tracker skips must not
+/// register success: the skipped event writes nothing, so the
+/// failed first copy it interleaves with must still purge.
+#[test(tokio::test)]
+async fn remote_out_of_order_push_does_not_shield_rollback() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    // R is created up front so it can join the governance as a
+    // member below. From this point R is deaf to spontaneous sync:
+    // every batch below is injected by the test, so any emission
+    // would only mask a missing injection. The governance
+    // catch-up still works: it negotiates versions and pulls
+    // batches through messages no fault rule matches.
+    let r_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r_node, r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{r_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let r = r_node.api.clone();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+    node_running(&r).await.unwrap();
+
+    let carol_signer = Ed25519Signer::generate().unwrap();
+    let carol_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        carol_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "Carol", "key": carol_key.to_string()},
+                    {"name": "R", "key": r.public_key()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Carol",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "R",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // R joins cleanly, before any fault is armed.
+    r.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    r.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&r, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Both nodes go deaf before the subject exists: alice would
+    // otherwise push the genuine history to R while emitting it,
+    // and R would pull it on its own. Every batch below is injected
+    // by the test. Local emits only need evaluation traffic, which
+    // stays open.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLedgerReq,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::TrackerSyncReq,
+        FaultMessage::TrackerSyncRes,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::UpdateOffer,
+        FaultMessage::GovernanceVersionReq,
+        FaultMessage::GovernanceVersionRes,
+    ] {
+        r.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Genuine history on alice: Create SN 0, Fact SN 1, pending
+    // Transfer SN 2 to R. A second genuine Transfer SN 3 acts as
+    // the aux for the interleaved copy below.
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to the receiver must succeed"
+    );
+
+    // The aux replays the genuine transfer chain one event ahead:
+    // same seal link, fresh sequence number, same owner signature.
+    // Its chain has a gap behind it on purpose, so evidence stays
+    // unprovable until the missing prefix arrives.
+    let mut aux = transfer.clone();
+    aux.sn = 3;
+    let aux_seal = LedgerSeal {
+        gov_version: aux.gov_version,
+        sn: aux.sn,
+        prev_ledger_event_hash: aux.prev_ledger_event_hash.clone(),
+        protocols_hash: aux
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    aux.ledger_seal_signature = Signature::new(&aux_seal, &alice_keys).unwrap();
+
+    // A runs on the node-level worker and parks in rollback
+    // after applying Create: the forged fact fails later, after B
+    // already interleaved. The rollback barrier is armed, so the
+    // shielding checks run while A is parked there, the only point
+    // where A applied Create but holds no requester. A must not run
+    // on the per-subject worker: the node stops that worker as part
+    // of the purge while the rollback handler still awaits the
+    // reply, which deadlocks the tail.
+    r.test_pause_rollback(true).await.unwrap();
+    // A carries a forged fact: same request, evaluation, links and
+    // validation as the genuine one, so the evidence checks pass
+    // and the genuine inline transfer authorizes the prefix without
+    // any receiver privilege. Only the seal timestamp is forged,
+    // beyond the SQLite INTEGER range: no evidence check looks at
+    // seal timestamps, but the tracker rejects the event, after
+    // Create is already persisted and the tip is still SN 0.
+    let (forged_fact, transfer_a) =
+        forge_ts_batch(&fact, &transfer, &alice_keys, &alice_key);
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create.clone(), forged_fact, transfer_a],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    // A must fail its apply and park in rollback: without the hold
+    // the batch would either never start or purge past the
+    // interleaving point.
+    for _ in 0..60 {
+        if r.test_rollback_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_hold_count().await.unwrap(),
+        1,
+        "A must park exactly once in rollback"
+    );
+    let attempt_a = r
+        .test_rollback_attempt()
+        .await
+        .unwrap()
+        .expect("parked rollback attempt");
+    // Only the Create applied: the tip stays at SN 0.
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "only Create may be applied while A is parked"
+    );
+
+    // B runs on the per-subject worker with its own request ids,
+    // while A is parked in rollback on the node-level worker. First
+    // the Fact prefix stages unapplied behind the unproven aux.
+    let sub_path = format!("/user/node/distributor_{subject_id}");
+    r.test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: "B-fact".to_owned(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: sub_path.clone(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![fact.clone()],
+                is_all: false,
+                transfer_event: Some(Box::new(aux.clone())),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        let (subjects, events, _) = r.test_deferred_stats().await.unwrap();
+        if subjects == 1 && events == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_deferred_stats().await.unwrap().1,
+        1,
+        "the Fact prefix must stage exactly once (tip={:?})",
+        r.test_get_tracker_ledger(subject_id.clone(), 5).await.map(|l| l.iter().map(|e| e.sn).collect::<Vec<_>>()),
+    );
+
+    // Then the genuine Transfer SN 2 arrives as a single push. The
+    // evidence is complete (local SN 0 plus deferred SN 1) so it
+    // authorizes, but the tracker expects SN 1 and skips the event
+    // without writing anything.
+    r.test_pause_single_updated(true).await.unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: "B-push".to_owned(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: sub_path.clone(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(transfer.clone()),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    // The push must really go through the update decision (applied
+    // or skipped): without this barrier the asserts below could
+    // pass vacuously, before the push even landed.
+    for _ in 0..60 {
+        if r.test_single_updated_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_single_updated_hold_count().await.unwrap(),
+        1,
+        "the skipped push must go through the update decision exactly once"
+    );
+    let attempt_b = r
+        .test_single_push_attempt(subject_id.clone())
+        .await
+        .unwrap()
+        .expect("single push attempt");
+    assert_ne!(
+        attempt_a, attempt_b,
+        "the interleaved push runs under its own attempt"
+    );
+    r.test_pause_single_updated(false).await.unwrap();
+    // The single carries no proof registration: the transfer is the
+    // pushed event itself, not an aux. What matters is what the
+    // push did not do: no write and no success record.
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the skipped push must not advance the tip"
+    );
+    assert_eq!(
+        r.test_get_last_success(subject_id.clone()).await.unwrap(),
+        None,
+        "a skipped push must not register success"
+    );
+    assert!(
+        r.test_should_purge(subject_id.clone(), attempt_a)
+            .await
+            .unwrap(),
+        "nothing shields the failed copy"
+    );
+
+    // A is already parked in rollback with its lease released
+    // from the failed apply. Every shielding check runs here, the
+    // only point where A applied Create but holds no requester
+    // while B already interleaved.
+    assert_eq!(
+        r.test_rollback_hold_count().await.unwrap(),
+        1,
+        "the failed copy must park exactly once in rollback"
+    );
+    // The released push still needs a round to finish releasing
+    // its lease: poll the requesters instead of sleeping for it.
+    // A itself holds none here, released on the failed apply.
+    for _ in 0..60 {
+        if !r
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        !r.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
+        "neither the failed copy nor the skipped push may hold a lease"
+    );
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the skipped push must not advance the tip"
+    );
+    assert_eq!(
+        r.test_get_last_success(subject_id.clone()).await.unwrap(),
+        None,
+        "a skipped push must not register success"
+    );
+    assert!(
+        r.test_should_purge(subject_id.clone(), attempt_a)
+            .await
+            .unwrap(),
+        "nothing shields the failed copy"
+    );
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..120 {
+        if r.get_subject_state(subject_id.clone()).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        r.get_subject_state(subject_id.clone()).await.is_err(),
+        "the forged prefix must be purged"
+    );
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "purged copies leave no ledger behind"
+    );
+    assert!(
+        r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "purged copies leave no proof behind"
+    );
+    assert_eq!(
+        r.test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        (None, None, vec![], 0),
+        "purged copies leave no ownership behind"
+    );
+    assert!(
+        !r.test_has_subject_entry(
+            governance_id.clone(),
+            subject_id.clone()
+        )
+        .await
+        .unwrap(),
+        "purged copies leave no external row behind"
+    );
+    assert_eq!(
+        r.test_get_last_success(subject_id.clone()).await.unwrap(),
+        None,
+        "no success may be recorded for anyone"
+    );
+    node_running(&r).await.unwrap();
+
+    // A genuinely contiguous copy still registers its own
+    // success: the fix only drops the skipped-push record, never a
+    // real one. Parked at post-success so the record is observable
+    // before the attempt lifecycle cleans it up. The purge stopped
+    // the per-subject worker, so ensure it again first.
+    r.test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
+    r.test_pause_post_success(true).await.unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: format!(
+                    "/user/node/distributor_{subject_id}"
+                ),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create.clone(), fact.clone(), transfer.clone()],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if r.test_post_success_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_post_success_hold_count().await.unwrap(),
+        1,
+        "the genuine copy must record success exactly once"
+    );
+    let attempt_c = r
+        .test_post_success_attempt()
+        .await
+        .unwrap()
+        .expect("genuine copy attempt");
+    assert_eq!(
+        r.test_get_last_success(subject_id.clone()).await.unwrap(),
+        Some(attempt_c),
+        "a really applied copy must register success"
+    );
+    // An unrelated attempt id stays declined while the genuine
+    // success stands: concurrent copies keep their shield.
+    assert!(
+        !r.test_should_purge(subject_id.clone(), u64::MAX)
+            .await
+            .unwrap(),
+        "a foreign attempt must not purge the genuine copy"
+    );
+    r.test_pause_post_success(false).await.unwrap();
+    get_subject(&r, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let copied = r
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 3);
+    assert!(
+        copied
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "the genuine transfer must stay applied"
+    );
+    // The finished copy closes its attempt: no success record or
+    // in-flight attempt is retained for a settled subject.
+    for _ in 0..60 {
+        let last_len = r.test_last_success_len().await.unwrap_or(usize::MAX);
+        let active_len =
+            r.test_active_attempts_len().await.unwrap_or(usize::MAX);
+        if last_len == 0 && active_len == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_last_success_len().await.unwrap(),
+        0,
+        "settled copies retain no success record"
+    );
+    assert_eq!(
+        r.test_active_attempts_len().await.unwrap(),
+        0,
+        "settled copies retain no active attempt"
+    );
+    node_running(&r).await.unwrap();
+
+    // A contiguous single push applies and advances the tip: the
+    // applied arm is untouched by the fix. A second genuine history
+    // keeps the main subject (with its pending transfer) out of the
+    // way: R copies its prefix with the transfer as aux evidence,
+    // then the transfer itself arrives as a push.
+    let (subject_c, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_c.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_c.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_c.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history_c = alice
+        .test_get_tracker_ledger(subject_c.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(history_c.len(), 3);
+    let create_c = history_c
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact_c = history_c
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let transfer_c = history_c
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer_c.protocols.is_success(),
+        "premise: the control transfer must succeed"
+    );
+    // Prefix [Create, Fact] with the transfer as aux: the chain is
+    // complete, so the aux proves and the prefix applies.
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: "C-prefix".to_owned(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create_c.clone(), fact_c.clone()],
+                is_all: false,
+                transfer_event: Some(Box::new(transfer_c.clone())),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&r, subject_c.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let single_holds_before =
+        r.test_single_updated_hold_count().await.unwrap();
+    r.test_pause_single_updated(true).await.unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: "C-push".to_owned(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLastEventReq {
+                ledger: Box::new(transfer_c.clone()),
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if r.test_single_updated_hold_count().await.unwrap_or(0)
+            >= single_holds_before + 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_single_updated_hold_count().await.unwrap(),
+        single_holds_before + 1,
+        "the contiguous push must go through the update decision"
+    );
+    r.test_pause_single_updated(false).await.unwrap();
+    get_subject(&r, subject_c.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let pushed = r
+        .test_get_tracker_ledger(subject_c.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(pushed.len(), 3, "the contiguous push must advance the tip");
+    assert!(
+        pushed
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("pushed transfer event")
+            .protocols
+            .is_success(),
+        "the contiguously pushed transfer must stay applied"
+    );
+    for _ in 0..60 {
+        let last_len = r.test_last_success_len().await.unwrap_or(usize::MAX);
+        let active_len =
+            r.test_active_attempts_len().await.unwrap_or(usize::MAX);
+        if last_len == 0 && active_len == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_last_success_len().await.unwrap(),
+        0,
+        "settled pushes retain no success record"
+    );
+    assert_eq!(
+        r.test_active_attempts_len().await.unwrap(),
+        0,
+        "settled pushes retain no active attempt"
+    );
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// Shared fixture: owner + alice nodes, R (member, creator and schema
+/// witness), governance synced everywhere and R deaf to spontaneous
+/// sync. Witness rights let R receive bare batches; every subject
+/// below is still created on alice and injected by the test.
+#[allow(clippy::type_complexity)]
+async fn h17_setup() -> (
+    Vec<crate::common::NodeData>,
+    Vec<tempfile::TempDir>,
+    ave_core::Api,
+    ave_core::Api,
+    ave_common::identity::keys::KeyPair,
+    (
+        crate::common::NodeData,
+        Vec<tempfile::TempDir>,
+        ave_core::Api,
+    ),
+    DigestIdentifier,
+) {
+    let (nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    let r_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (r_node, r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{r_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let r = r_node.api.clone();
+    node_running(&r).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "R", "key": r.public_key()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [
+                                {"name": "Owner", "namespace": []},
+                                {"name": "R", "namespace": []}
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "R",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // R joins cleanly, before any fault is armed.
+    r.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    r.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&r, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Both nodes go deaf before any subject exists: alice would
+    // otherwise push every history to R while emitting it, and R
+    // would pull on its own. Every batch below is injected by the
+    // test; local emits only need evaluation traffic, which stays
+    // open.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLedgerReq,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::TrackerSyncReq,
+        FaultMessage::TrackerSyncRes,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::UpdateOffer,
+        FaultMessage::GovernanceVersionReq,
+        FaultMessage::GovernanceVersionRes,
+    ] {
+        r.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    (
+        nodes,
+        dirs,
+        owner,
+        alice,
+        alice_keys,
+        (r_node, r_dirs, r),
+        governance_id,
+    )
+}
+
+/// Forges a timestamp out of the SQLite INTEGER range on a copy of
+/// `fact` and re-links a copy of `transfer` to it. Evidence checks
+/// never look at seal timestamps, so the prefix authorizes through
+/// the genuine transfer; only the tracker rejects the event.
+fn forge_ts_batch(
+    fact: &Ledger,
+    transfer: &Ledger,
+    alice_keys: &ave_common::identity::keys::KeyPair,
+    alice_key: &PublicKey,
+) -> (Ledger, Ledger) {
+    let mut forged_fact = fact.clone();
+    let forged_seal = LedgerSeal {
+        gov_version: forged_fact.gov_version,
+        sn: forged_fact.sn,
+        prev_ledger_event_hash: forged_fact.prev_ledger_event_hash.clone(),
+        protocols_hash: forged_fact
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    let forged_timestamp = TimeStamp::from_nanos(u64::MAX);
+    let seal_payload =
+        borsh::to_vec(&(&forged_seal, &forged_timestamp)).unwrap();
+    let seal_hash =
+        ave_common::identity::BLAKE3_HASHER.hash(&seal_payload);
+    let seal_value = alice_keys
+        .sign(seal_hash.hash_bytes())
+        .expect("seal signature");
+    forged_fact.ledger_seal_signature = Signature {
+        signer: alice_key.clone(),
+        timestamp: forged_timestamp,
+        content_hash: seal_hash,
+        value: seal_value,
+    };
+    let mut transfer_a = transfer.clone();
+    transfer_a.prev_ledger_event_hash = forged_fact
+        .ledger_hash(HashAlgorithm::Blake3)
+        .expect("forged fact ledger hash");
+    let transfer_a_seal = LedgerSeal {
+        gov_version: transfer_a.gov_version,
+        sn: transfer_a.sn,
+        prev_ledger_event_hash: transfer_a.prev_ledger_event_hash.clone(),
+        protocols_hash: transfer_a
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    transfer_a.ledger_seal_signature =
+        Signature::new(&transfer_a_seal, alice_keys).unwrap();
+    (forged_fact, transfer_a)
+}
+
+/// Polls until no success record and no active attempt remain.
+async fn wait_attempts_drained(api: &ave_core::Api) {
+    for _ in 0..60 {
+        let last_len = api.test_last_success_len().await.unwrap_or(usize::MAX);
+        let active_len =
+            api.test_active_attempts_len().await.unwrap_or(usize::MAX);
+        if last_len == 0 && active_len == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        api.test_last_success_len().await.unwrap(),
+        0,
+        "finished copies retain no success record"
+    );
+    assert_eq!(
+        api.test_active_attempts_len().await.unwrap(),
+        0,
+        "finished copies retain no active attempt"
+    );
+}
+
+/// Finished Create-only copies leave no attempt behind: both the
+/// success record and the active set return to zero.
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_create_only_copies_clean_up() {
+    let (mut nodes, dirs, _owner, alice, _alice_keys, (mut r_node, r_dirs, r), governance_id) =
+        h17_setup().await;
+
+    let mut subjects = Vec::new();
+    for _ in 0..3 {
+        let (subject_id, _) =
+            create_subject(&alice, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        let create = alice
+            .test_get_tracker_ledger(subject_id.clone(), 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.sn == 0)
+            .expect("create event");
+        inject_ledger_batch(
+            &r,
+            &PublicKey::from_str(alice.public_key()).unwrap(),
+            vec![create],
+            None,
+        )
+        .await;
+        get_subject(&r, subject_id.clone(), Some(0), true)
+            .await
+            .unwrap();
+        subjects.push(subject_id);
+    }
+    assert_eq!(subjects.len(), 3);
+    for subject_id in &subjects {
+        assert_eq!(
+            r.test_get_tracker_ledger(subject_id.clone(), 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "each Create-only copy must apply"
+        );
+    }
+    wait_attempts_drained(&r).await;
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// While A is parked in rollback, a valid copy B applies and
+/// finishes: `last_success == B` shields the valid state until A
+/// ends, then both counters drain to zero.
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_rollback_in_flight_keeps_success() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+
+    // R exists before the governance so its key joins as member
+    // and creator, but it only joins after the history below is
+    // already committed: nothing is pushed to it spontaneously.
+    let r_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r_node, r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{r_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    let r = r_node.api.clone();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+    node_running(&r).await.unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "R", "key": r.public_key()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "R",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Block spontaneous batch traffic while the forged copy runs:
+    // the valid copy below arrives through update_subject instead.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to the receiver must succeed"
+    );
+
+    // R joins only now: the forged batch below is its only source.
+    r.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    r.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&r, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // A forged first copy parks in rollback on the node-level
+    // worker: purging from there never stops the worker itself.
+    r.test_pause_rollback(true).await.unwrap();
+    let (forged_fact, transfer_a) =
+        forge_ts_batch(&fact, &transfer, &alice_keys, &alice_key);
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create.clone(), forged_fact, transfer_a],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_hold_count().await.unwrap(),
+        1,
+        "the forged copy must park exactly once in rollback"
+    );
+    let attempt_a = r
+        .test_rollback_attempt()
+        .await
+        .unwrap()
+        .expect("parked rollback attempt");
+
+    // B completes through the live update path while A stays parked.
+    alice.test_clear_faults().await.unwrap();
+    r.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(alice_key.clone()),
+    )
+    .await
+    .unwrap();
+    r.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&r, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // While A is still active, B's success shields the valid copy.
+    let last_success = r
+        .test_get_last_success(subject_id.clone())
+        .await
+        .unwrap()
+        .expect("the valid copy must record success");
+    assert_ne!(
+        attempt_a, last_success,
+        "the valid copy runs under its own attempt"
+    );
+    assert!(
+        !r.test_should_purge(subject_id.clone(), attempt_a)
+            .await
+            .unwrap(),
+        "the in-flight rollback must not purge the valid copy"
+    );
+    assert_eq!(
+        r.test_last_success_len().await.unwrap(),
+        1,
+        "one subject holds a success record while A is active"
+    );
+    assert_eq!(
+        r.test_active_attempts_len().await.unwrap(),
+        1,
+        "only A stays active after B finished"
+    );
+
+    // A ends: it backs off, and both counters drain to zero.
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_skip_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_skip_count().await.unwrap(),
+        1,
+        "the stale rollback must back off exactly once"
+    );
+    wait_attempts_drained(&r).await;
+    let copied = r
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 3, "the valid copy must stay applied");
+    assert!(
+        copied
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "the genuine transfer must stay applied"
+    );
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// Early exits open no attempt that outlives them: empty and
+/// non-contiguous batches, a forged link rejected before any write
+/// and a stale replay are all followed by the valid copy that proves
+/// the node still works, and every step drains both counters.
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_early_errors_leave_no_attempt() {
+    let (mut nodes, dirs, _owner, alice, alice_keys, (mut r_node, r_dirs, r), governance_id) =
+        h17_setup().await;
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+
+    // Empty batch: rejected before any attempt opens.
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    wait_attempts_drained(&r).await;
+
+    // Genuine history to forge the gap and link probes from.
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+
+    // Non-contiguous batch, then the valid Create on the same
+    // worker: the applied Create proves the gap rejection ran first.
+    let mut fact_sn2 = fact.clone();
+    fact_sn2.sn = 2;
+    let gap_seal = LedgerSeal {
+        gov_version: fact_sn2.gov_version,
+        sn: fact_sn2.sn,
+        prev_ledger_event_hash: fact_sn2.prev_ledger_event_hash.clone(),
+        protocols_hash: fact_sn2
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    fact_sn2.ledger_seal_signature =
+        Signature::new(&gap_seal, &alice_keys).unwrap();
+    for batch in [vec![create.clone(), fact_sn2], vec![create.clone()]] {
+        r.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: PublicKey::from_str(r.public_key())
+                        .expect("node key"),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: batch,
+                    is_all: true,
+                    transfer_event: None,
+                },
+            ),
+            &alice_key,
+        )
+        .await
+        .unwrap();
+    }
+    get_subject(&r, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 0)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the valid Create must apply after the gap rejection"
+    );
+    wait_attempts_drained(&r).await;
+
+    // Forged fact link on a fresh subject: the tracker rejects the
+    // event after applying Create, the rollback purges the prefix,
+    // and the valid Create after proves the cleanup. The rollback
+    // barrier proves the forged batch ran instead of passing
+    // vacuously.
+    let (subject_id2, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id2.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id2.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let history2 = alice
+        .test_get_tracker_ledger(subject_id2.clone(), 1)
+        .await
+        .unwrap();
+    let create2 = history2
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact2 = history2
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let mut forged_fact2 = fact2.clone();
+    forged_fact2.prev_ledger_event_hash = DigestIdentifier::default();
+    let forged_seal2 = LedgerSeal {
+        gov_version: forged_fact2.gov_version,
+        sn: forged_fact2.sn,
+        prev_ledger_event_hash: forged_fact2.prev_ledger_event_hash.clone(),
+        protocols_hash: forged_fact2
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    forged_fact2.ledger_seal_signature =
+        Signature::new(&forged_seal2, &alice_keys).unwrap();
+    r.test_pause_rollback(true).await.unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create2.clone(), forged_fact2],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_hold_count().await.unwrap(),
+        1,
+        "the forged link must park exactly once in rollback"
+    );
+    assert!(
+        r.get_subject_state(subject_id2.clone()).await.is_ok(),
+        "Create applies before the forged link fails"
+    );
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..60 {
+        if r.get_subject_state(subject_id2.clone()).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        r.get_subject_state(subject_id2.clone()).await.is_err(),
+        "the forged link must leave nothing behind"
+    );
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create2.clone()],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&r, subject_id2.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id2.clone(), 0)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the valid Create must apply after the link rejection"
+    );
+    wait_attempts_drained(&r).await;
+
+    // Forged inline transfer link: the batch fails before any tracker
+    // is even acquired. The valid Create after proves the node still
+    // works and closes every attempt it opened.
+    let (subject_id3, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id3.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id3.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id3.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history3 = alice
+        .test_get_tracker_ledger(subject_id3.clone(), 2)
+        .await
+        .unwrap();
+    let create3 = history3
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact3 = history3
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let transfer3 = history3
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    let mut forged_transfer = transfer3.clone();
+    forged_transfer.prev_ledger_event_hash = DigestIdentifier::default();
+    let forged_seal3 = LedgerSeal {
+        gov_version: forged_transfer.gov_version,
+        sn: forged_transfer.sn,
+        prev_ledger_event_hash: forged_transfer.prev_ledger_event_hash.clone(),
+        protocols_hash: forged_transfer
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    forged_transfer.ledger_seal_signature =
+        Signature::new(&forged_seal3, &alice_keys).unwrap();
+    for batch in [
+        vec![create3.clone(), fact3.clone(), forged_transfer],
+        vec![create3.clone()],
+    ] {
+        r.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: PublicKey::from_str(r.public_key())
+                        .expect("node key"),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: batch,
+                    is_all: true,
+                    transfer_event: None,
+                },
+            ),
+            &alice_key,
+        )
+        .await
+        .unwrap();
+    }
+    get_subject(&r, subject_id3.clone(), Some(0), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id3.clone(), 0)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the valid Create must apply after the inline link rejection"
+    );
+    wait_attempts_drained(&r).await;
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// Attempts are volatile: after a reboot no old attempt survives,
+/// and replaying the genuine copy neither purges it nor leaks.
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_restart_clears_attempts() {
+    let (mut nodes, dirs, _owner, alice, _alice_keys, (mut r_node, r_dirs, r), governance_id) =
+        h17_setup().await;
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    let batch: Vec<Ledger> = history.clone();
+    assert_eq!(batch.len(), 2);
+    inject_ledger_batch(&r, &alice_key, batch.clone(), None).await;
+    get_subject(&r, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    wait_attempts_drained(&r).await;
+
+    // Reboot with the same storage: volatile attempts go away with
+    // the process, the valid copy comes back identical.
+    let keys = r_node.keys.clone();
+    let local_db = r_dirs[0].path().to_path_buf();
+    let ext_db = r_dirs[1].path().to_path_buf();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    r_node.token.cancel();
+    join_all(r_node.handler.iter_mut()).await;
+    drop(r_node);
+    let r_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r_node, _r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{r_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer,
+            address: vec![boot_addr],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    let r = r_node.api.clone();
+    node_running(&r).await.unwrap();
+
+    // No attempt survived the reboot, and the valid copy is intact:
+    // the lifecycle never confuses a restart with protection state.
+    wait_attempts_drained(&r).await;
+    let copied = r
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 2, "the reboot must keep the valid copy");
+    assert!(
+        copied
+            .iter()
+            .find(|event| event.sn == 1)
+            .expect("fact event")
+            .protocols
+            .is_success(),
+        "the genuine fact must stay applied"
+    );
+
+    // Replaying the same genuine batch purges nothing and leaks no
+    // attempt either.
+    inject_ledger_batch(&r, &alice_key, batch, None).await;
+    get_subject(&r, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    wait_attempts_drained(&r).await;
+    assert_eq!(
+        r.test_get_tracker_ledger(subject_id.clone(), 1)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the replay must not purge the valid copy"
+    );
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// A third successful copy keeps its own entry while an older
+/// attempt stays active: C applies after A parked in rollback, so
+/// C's success shields the valid state; the stale rollback backs
+/// off instead of purging, and everything drains once done.
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_third_attempt_keeps_shield() {
+    let (mut nodes, dirs, _owner, alice, alice_keys, (mut r_node, r_dirs, r), governance_id) =
+        h17_setup().await;
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), r_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    let create = history
+        .iter()
+        .find(|event| event.sn == 0)
+        .expect("create event")
+        .clone();
+    let fact = history
+        .iter()
+        .find(|event| event.sn == 1)
+        .expect("fact event")
+        .clone();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "premise: the transfer to the receiver must succeed"
+    );
+
+    // A forged first copy parks in rollback on the node-level
+    // worker. C applies afterwards and parks post-success on the
+    // per-subject worker: C's success shields the valid prefix while
+    // both attempts stay active.
+    r.test_pause_rollback(true).await.unwrap();
+    let (forged_fact, transfer_a) =
+        forge_ts_batch(&fact, &transfer, &alice_keys, &alice_key);
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![create.clone(), forged_fact, transfer_a],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_hold_count().await.unwrap(),
+        1,
+        "the forged copy must park exactly once in rollback"
+    );
+    let attempt_a = r
+        .test_rollback_attempt()
+        .await
+        .unwrap()
+        .expect("parked rollback attempt");
+
+    // C applies the genuine fact on the per-subject worker. Its
+    // success record stays while A remains active, even though C
+    // itself already finished.
+    r.test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
+    let sub_path = format!("/user/node/distributor_{subject_id}");
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver: PublicKey::from_str(r.public_key())
+                    .expect("node key"),
+                receiver_actor: sub_path.clone(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![fact.clone()],
+                is_all: true,
+                transfer_event: None,
+            },
+        ),
+        &alice_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&r, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for _ in 0..60 {
+        if r.test_active_attempts_len().await.unwrap_or(usize::MAX) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_active_attempts_len().await.unwrap(),
+        1,
+        "only A stays active after C finished"
+    );
+    let last_success = r
+        .test_get_last_success(subject_id.clone())
+        .await
+        .unwrap()
+        .expect("C keeps its success record while A stays active");
+    assert_ne!(
+        attempt_a, last_success,
+        "the finished copy runs under its own attempt"
+    );
+    assert!(
+        !r.test_should_purge(subject_id.clone(), u64::MAX)
+            .await
+            .unwrap(),
+        "a foreign attempt must not purge C's valid copy while A is active"
+    );
+
+    // Releasing A backs off on C's success and closes A's attempt.
+    // C's entry shielded the valid state; with no attempts left the
+    // record itself is cleaned, but the copy stays intact.
+    let skips_before = r.test_rollback_skip_count().await.unwrap();
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_skip_count().await.unwrap_or(0) >= skips_before + 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_skip_count().await.unwrap(),
+        skips_before + 1,
+        "the stale rollback must back off on C's success"
+    );
+    // Both attempts closed after A finished, and the skip above
+    // proves A ran instead of passing vacuously.
+    assert_eq!(
+        r.test_active_attempts_len().await.unwrap(),
+        0,
+        "both attempts closed after A finished"
+    );
+    assert_eq!(
+        r.test_get_last_success(subject_id.clone()).await.unwrap(),
+        None,
+        "no success record survives without active attempts"
+    );
+
+    // The copy itself stays intact.
+    wait_attempts_drained(&r).await;
+    let copied = r
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 2, "the valid copy must stay applied");
+    assert!(
+        copied
+            .iter()
+            .find(|event| event.sn == 1)
+            .expect("fact event")
+            .protocols
+            .is_success(),
+        "the genuine fact must stay applied"
+    );
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
+}
+
+/// Every rollback skip path closes its attempt: live requesters,
+/// rotated ownership and a tracker that moved under the rollback all
+/// back off and drain both counters. (A dedicated progress-gate case
+/// is unreachable by construction: any tip advance a rollback could
+/// observe arrives through a recorded success, so the attempt gate
+/// fires first; the atomic `PurgeIfUnchanged` recheck covers the
+/// moved-tracker race.)
+#[test(tokio::test)]
+async fn remote_attempt_lifecycle_rollback_skips_clean_up() {
+    let (mut nodes, dirs, _owner, alice, alice_keys, (mut r_node, r_dirs, r), governance_id) =
+        h17_setup().await;
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+
+    // Four subjects with genuine histories on alice. S_own carries
+    // a pending transfer at SN 1 so the ownership gate can fire.
+    async fn genuine_history(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        r_key: &PublicKey,
+        with_fact: bool,
+    ) -> (DigestIdentifier, Vec<Ledger>) {
+        let (subject_id, _) =
+            create_subject(api, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        if with_fact {
+            emit_fact(
+                api,
+                subject_id.clone(),
+                serde_json::json!({"ModOne": {"data": 1}}),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        emit_transfer(api, subject_id.clone(), r_key.clone(), true)
+            .await
+            .unwrap();
+        let top = if with_fact { 2 } else { 1 };
+        get_subject(api, subject_id.clone(), Some(top), true)
+            .await
+            .unwrap();
+        let history = api
+            .test_get_tracker_ledger(subject_id.clone(), top)
+            .await
+            .unwrap();
+        (subject_id, history)
+    }
+    let (s_req, hist_req) =
+        genuine_history(&alice, &governance_id, &r_key, true).await;
+    let (s_own, hist_own) =
+        genuine_history(&alice, &governance_id, &r_key, false).await;
+    let (s_purge, hist_purge) =
+        genuine_history(&alice, &governance_id, &r_key, true).await;
+    let get = |history: &[Ledger], sn| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("history event")
+            .clone()
+    };
+
+    // Forged first copies always run on the node-level worker: the
+    // purge path stops the per-subject worker while awaiting it.
+    // Batches below address the distributor directly.
+    let node_path = "/user/node/distributor".to_owned();
+    async fn inject_batch(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        receiver_actor: String,
+        request_id: &str,
+    ) {
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: request_id.to_owned(),
+                    version: 0,
+                    receiver: PublicKey::from_str(api.public_key())
+                        .expect("node key"),
+                    receiver_actor,
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all: true,
+                    transfer_event: None,
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn wait_rollback_hold(api: &ave_core::Api, baseline: u64) {
+        for _ in 0..60 {
+            if api.test_rollback_hold_count().await.unwrap_or(0)
+                > baseline
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(
+            api.test_rollback_hold_count().await.unwrap(),
+            baseline + 1,
+            "the forged copy must park exactly once in rollback"
+        );
+    }
+
+    // (a) Live requesters: the held lease forces the skip, the
+    // forged Create stays applied, and the attempt still closes.
+    let (forged_fact_a, transfer_a) = forge_ts_batch(
+        &get(&hist_req, 1),
+        &get(&hist_req, 2),
+        &alice_keys,
+        &alice_key,
+    );
+    r.test_pause_rollback(true).await.unwrap();
+    inject_batch(
+        &r,
+        &alice_key,
+        vec![get(&hist_req, 0), forged_fact_a, transfer_a],
+        node_path.clone(),
+        "",
+    )
+    .await;
+    let holds_before = r.test_rollback_hold_count().await.unwrap();
+    wait_rollback_hold(&r, holds_before).await;
+    let skips_before = r.test_rollback_skip_count().await.unwrap();
+    r.test_hold_requester(s_req.clone()).await.unwrap();
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_skip_count().await.unwrap_or(0) >= skips_before + 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_skip_count().await.unwrap(),
+        skips_before + 1,
+        "the requester-held rollback must skip"
+    );
+    r.test_release_requester(s_req.clone()).await.unwrap();
+    wait_attempts_drained(&r).await;
+    assert_eq!(
+        r.test_get_tracker_ledger(s_req.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a skipped rollback keeps the applied Create"
+    );
+
+    // (b) Rotated ownership: the genuine pending transfer inside A's
+    // own chunk trips the ownership gate with no success recorded.
+    let transfer_own = get(&hist_own, 1);
+    let mut fact_sn2 = get(&hist_own, 0);
+    fact_sn2.sn = 2;
+    fact_sn2.prev_ledger_event_hash = transfer_own
+        .ledger_hash(HashAlgorithm::Blake3)
+        .expect("transfer ledger hash");
+    let own_seal = LedgerSeal {
+        gov_version: fact_sn2.gov_version,
+        sn: fact_sn2.sn,
+        prev_ledger_event_hash: fact_sn2.prev_ledger_event_hash.clone(),
+        protocols_hash: fact_sn2
+            .protocols
+            .hash_for_ledger(&HashAlgorithm::Blake3)
+            .unwrap(),
+    };
+    let own_ts = TimeStamp::from_nanos(u64::MAX);
+    let own_payload = borsh::to_vec(&(&own_seal, &own_ts)).unwrap();
+    let own_hash = ave_common::identity::BLAKE3_HASHER.hash(&own_payload);
+    let own_sig = alice_keys
+        .sign(own_hash.hash_bytes())
+        .expect("seal signature");
+    fact_sn2.ledger_seal_signature = Signature {
+        signer: alice_key.clone(),
+        timestamp: own_ts,
+        content_hash: own_hash,
+        value: own_sig,
+    };
+    r.test_pause_rollback(true).await.unwrap();
+    inject_batch(
+        &r,
+        &alice_key,
+        vec![get(&hist_own, 0), transfer_own.clone(), fact_sn2],
+        node_path.clone(),
+        "",
+    )
+    .await;
+    let holds_before = r.test_rollback_hold_count().await.unwrap();
+    wait_rollback_hold(&r, holds_before).await;
+    let skips_before = r.test_rollback_skip_count().await.unwrap();
+    r.test_pause_rollback(false).await.unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_skip_count().await.unwrap_or(0) >= skips_before + 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_skip_count().await.unwrap(),
+        skips_before + 1,
+        "the ownership-moved rollback must skip"
+    );
+    wait_attempts_drained(&r).await;
+    assert_eq!(
+        r.test_get_tracker_ledger(s_own.clone(), 5)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "a skipped rollback keeps the applied prefix"
+    );
+    assert_eq!(
+        r.test_witnesses_ownership(&governance_id, s_own.clone())
+            .await
+            .unwrap()
+            .1,
+        Some(r_key.clone()),
+        "the pending transfer must stay pending"
+    );
+
+    // (c) Moved tracker: B applies between the metadata read and the
+    // atomic purge, so the purge backs off instead of deleting.
+    let (forged_fact_d, transfer_d) = forge_ts_batch(
+        &get(&hist_purge, 1),
+        &get(&hist_purge, 2),
+        &alice_keys,
+        &alice_key,
+    );
+    r.test_pause_rollback(true).await.unwrap();
+    r.test_pause_pre_purge(true).await.unwrap();
+    inject_batch(
+        &r,
+        &alice_key,
+        vec![get(&hist_purge, 0), forged_fact_d, transfer_d],
+        node_path.clone(),
+        "",
+    )
+    .await;
+    let holds_before = r.test_rollback_hold_count().await.unwrap();
+    wait_rollback_hold(&r, holds_before).await;
+    r.test_pause_rollback(false).await.unwrap();
+    // A runs to the pre-purge barrier with a stale tip read.
+    let pre_purge_before = r.test_pre_purge_hold_count().await.unwrap();
+    for _ in 0..60 {
+        if r.test_pre_purge_hold_count().await.unwrap_or(0)
+            > pre_purge_before
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_pre_purge_hold_count().await.unwrap(),
+        pre_purge_before + 1,
+        "the rollback must park exactly once before purging"
+    );
+    r.test_ensure_distributor(s_purge.clone()).await.unwrap();
+    inject_batch(
+        &r,
+        &alice_key,
+        vec![get(&hist_purge, 1), get(&hist_purge, 2)],
+        format!("/user/node/distributor_{s_purge}"),
+        "B-purge",
+    )
+    .await;
+    get_subject(&r, s_purge.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let skips_before = r.test_rollback_skip_count().await.unwrap();
+    r.test_pause_pre_purge(false).await.unwrap();
+    for _ in 0..60 {
+        if r.test_rollback_skip_count().await.unwrap_or(0) >= skips_before + 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        r.test_rollback_skip_count().await.unwrap(),
+        skips_before + 1,
+        "the moved tracker must force a purge backoff"
+    );
+    wait_attempts_drained(&r).await;
+    let copied = r
+        .test_get_tracker_ledger(s_purge.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(copied.len(), 3, "the valid copy must stay applied");
+    assert!(
+        copied
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("transfer event")
+            .protocols
+            .is_success(),
+        "the genuine transfer must stay applied"
+    );
+    node_running(&r).await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    r_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(r_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(r_node);
+    drop(r_dirs);
 }
 
 #[test(tokio::test)]

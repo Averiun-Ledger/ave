@@ -3191,11 +3191,46 @@ impl DistriWorker {
     async fn handle_ledger_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        transfer_event: Option<Box<Ledger>>,
+        info: ComunicateInfo,
+        sender: PublicKey,
+    ) -> Result<(), ActorError> {
+        // Attempt lifecycle: every batch owns an attempt from here
+        // until this entry point returns, including parked
+        // rollbacks. Batches without a subject never open one.
+        let maybe_subject = ledger.first().map(|e| e.get_subject_id());
+        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
+        if let Some(subject_id) = &maybe_subject {
+            Self::begin_attempt(ctx, subject_id, attempt).await;
+        }
+        let result = self
+            .run_ledger_distribution(
+                ctx,
+                ledger,
+                is_all,
+                transfer_event,
+                info,
+                sender,
+                attempt,
+            )
+            .await;
+        if let Some(subject_id) = &maybe_subject {
+            Self::end_attempt(ctx, subject_id, attempt).await;
+        }
+        result
+    }
+
+    async fn run_ledger_distribution(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
         mut ledger: Vec<Ledger>,
         is_all: bool,
         transfer_event: Option<Box<Ledger>>,
         info: ComunicateInfo,
         sender: PublicKey,
+        attempt: u64,
     ) -> Result<(), ActorError> {
         {}
         if ledger.is_empty() {
@@ -3266,7 +3301,6 @@ impl DistriWorker {
         let subject_id = ledger[0].get_subject_id();
         let ledger_count = ledger.len();
         let first_sn = ledger[0].sn;
-        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(

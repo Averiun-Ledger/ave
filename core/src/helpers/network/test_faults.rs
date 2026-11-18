@@ -190,10 +190,19 @@ pub struct TestFaultRegistry {
     rollback_holds: u64,
     rollback_skips: u64,
     rollback_paused: bool,
+    rollback_attempt: Option<u64>,
     before_apply_holds: u64,
     before_apply_paused: bool,
     before_apply_attempt: Option<u64>,
     before_apply_worker: Option<String>,
+    post_success_holds: u64,
+    post_success_paused: bool,
+    post_success_attempt: Option<u64>,
+    single_updated_holds: u64,
+    single_updated_paused: bool,
+    single_push_attempts: std::collections::HashMap<String, u64>,
+    pre_purge_holds: u64,
+    pre_purge_paused: bool,
 }
 
 impl TestFaultRegistry {
@@ -206,10 +215,19 @@ impl TestFaultRegistry {
             rollback_holds: 0,
             rollback_skips: 0,
             rollback_paused: false,
+            rollback_attempt: None,
             before_apply_holds: 0,
             before_apply_paused: false,
             before_apply_attempt: None,
             before_apply_worker: None,
+            post_success_holds: 0,
+            post_success_paused: false,
+            post_success_attempt: None,
+            single_updated_holds: 0,
+            single_updated_paused: false,
+            single_push_attempts: std::collections::HashMap::new(),
+            pre_purge_holds: 0,
+            pre_purge_paused: false,
         }
     }
 
@@ -235,9 +253,18 @@ impl TestFaultRegistry {
 
     /// Records a first-copy rollback barrier hit, so a test can
     /// prove the interleaving really happened instead of passing
-    /// vacuously when the rollback never ran.
-    pub fn note_rollback_hold(&mut self) {
+    /// vacuously when the rollback never ran. Keeps the latest
+    /// attempt: a test with several parked rollbacks reads back the
+    /// one that parked last.
+    pub fn note_rollback_hold(&mut self, attempt: u64) {
         self.rollback_holds += 1;
+        self.rollback_attempt = Some(attempt);
+    }
+
+    /// Attempt id captured when the rollback barrier last fired:
+    /// lets a test prove which parked copy it is asserting on.
+    pub fn rollback_attempt(&self) -> Option<u64> {
+        self.rollback_attempt
     }
 
     /// How many times a rollback barrier was hit on this node.
@@ -295,6 +322,76 @@ impl TestFaultRegistry {
 
     pub fn before_apply_paused(&self) -> bool {
         self.before_apply_paused
+    }
+
+    pub fn note_post_success_hold(&mut self, attempt: u64) {
+        self.post_success_holds += 1;
+        self.post_success_attempt.get_or_insert(attempt);
+    }
+
+    pub fn post_success_attempt(&self) -> Option<u64> {
+        self.post_success_attempt
+    }
+
+    pub fn post_success_hold_count(&self) -> u64 {
+        self.post_success_holds
+    }
+
+    pub fn set_post_success_paused(&mut self, paused: bool) {
+        self.post_success_paused = paused;
+    }
+
+    pub fn post_success_paused(&self) -> bool {
+        self.post_success_paused
+    }
+
+    pub fn note_single_updated_hold(&mut self) {
+        self.single_updated_holds += 1;
+    }
+
+    pub fn single_updated_hold_count(&self) -> u64 {
+        self.single_updated_holds
+    }
+
+    pub fn set_single_updated_paused(&mut self, paused: bool) {
+        self.single_updated_paused = paused;
+    }
+
+    pub fn single_updated_paused(&self) -> bool {
+        self.single_updated_paused
+    }
+
+    /// Records the attempt a single-push entry point assigned for a
+    /// subject, so a test can tell the skipped push apart from the
+    /// parked batch it interleaves with. First assignment wins:
+    /// retries reuse the recorded one.
+    pub fn note_single_push_attempt(
+        &mut self,
+        subject_id: String,
+        attempt: u64,
+    ) {
+        self.single_push_attempts.entry(subject_id).or_insert(attempt);
+    }
+
+    /// Attempt assigned to the single push for a subject, if any.
+    pub fn single_push_attempt(&self, subject_id: &str) -> Option<u64> {
+        self.single_push_attempts.get(subject_id).copied()
+    }
+
+    pub fn note_pre_purge_hold(&mut self) {
+        self.pre_purge_holds += 1;
+    }
+
+    pub fn pre_purge_hold_count(&self) -> u64 {
+        self.pre_purge_holds
+    }
+
+    pub fn set_pre_purge_paused(&mut self, paused: bool) {
+        self.pre_purge_paused = paused;
+    }
+
+    pub fn pre_purge_paused(&self) -> bool {
+        self.pre_purge_paused
     }
 
     /// Clones of the outbound messages currently held, so a test can

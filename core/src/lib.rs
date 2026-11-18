@@ -3472,6 +3472,16 @@ impl Api {
         Ok(count)
     }
 
+    /// Attempt id captured when the rollback barrier last fired:
+    /// lets a test prove which parked copy it is asserting on.
+    pub async fn test_rollback_attempt(&self) -> Result<Option<u64>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rollback_attempt())
+    }
+
     pub async fn test_pause_before_apply(
         &self,
         pause: bool,
@@ -3515,6 +3525,116 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .before_apply_worker())
+    }
+
+    /// Parks (`pause == true`) or releases the post-success barrier
+    /// on this node: while paused, a per-subject worker whose copy
+    /// just recorded success waits before its flow returns, so a
+    /// test can hold a successful attempt active while another
+    /// attempt finishes. The flag lives in the shared test
+    /// registry, never in a worker mailbox.
+    pub async fn test_pause_post_success(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_post_success_paused(pause);
+        Ok(())
+    }
+
+    /// How many times the post-success barrier was hit on this node:
+    /// proves the held copy really recorded its success first.
+    pub async fn test_post_success_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .post_success_hold_count();
+        Ok(count)
+    }
+
+    /// Attempt id captured when the post-success barrier first
+    /// fired, if any: lets a test prove which successful attempt it
+    /// is holding active.
+    pub async fn test_post_success_attempt(
+        &self,
+    ) -> Result<Option<u64>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .post_success_attempt())
+    }
+
+    /// Parks (`pause == true`) or releases the single-push
+    /// post-update barrier on this node: while paused, a pushed
+    /// event waits right after the update decision (applied or
+    /// skipped) so a test can pin that the push landed before
+    /// asserting on what it recorded. The flag lives in the shared
+    /// test registry, never in a worker mailbox.
+    pub async fn test_pause_single_updated(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_single_updated_paused(pause);
+        Ok(())
+    }
+
+    /// How many times the single-push post-update barrier was hit on
+    /// this node: proves the push really went through the update
+    /// decision instead of passing vacuously.
+    pub async fn test_single_updated_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .single_updated_hold_count();
+        Ok(count)
+    }
+
+    /// Attempt the single-push entry point assigned for a subject,
+    /// if any: lets a test tell the skipped push apart from the
+    /// parked batch it interleaves with.
+    pub async fn test_single_push_attempt(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<Option<u64>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .single_push_attempt(&subject_id.to_string()))
+    }
+
+    /// Parks (`pause == true`) or releases the pre-purge barrier on
+    /// this node: while paused, a first-copy rollback waits after
+    /// its metadata read but before the atomic purge, so a test can
+    /// interleave a valid apply and prove the purge backs off. The
+    /// flag lives in the shared test registry, never in a worker
+    /// mailbox.
+    pub async fn test_pause_pre_purge(&self, pause: bool) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_pre_purge_paused(pause);
+        Ok(())
+    }
+
+    /// How many times the pre-purge barrier was hit on this node:
+    /// proves the rollback really reached the purge gate with a
+    /// stale tip instead of passing vacuously.
+    pub async fn test_pre_purge_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pre_purge_hold_count();
+        Ok(count)
     }
 
     /// Verification workload for a subject: events fed to the aux
@@ -3758,6 +3878,40 @@ impl Api {
         }
     }
 
+    /// Test-only: whether the external subject row still exists
+    /// for a subject. Lets rollback tests prove the purge cleared
+    /// the register instead of only the tracker state.
+    pub async fn test_has_subject_entry(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        use crate::governance::subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/subject_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject register".to_owned(),
+                reason: "Subject register not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectRegisterMessage::HasSubject { subject_id })
+            .await?
+        {
+            SubjectRegisterResponse::SubjectPresent(present) => Ok(present),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_register".to_owned(),
+                expected: "SubjectPresent".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Test-only: ensure the per-subject distributor actor
     /// exists without touching any subject state. Lets a test park
     /// a first copy on its own worker while another worker applies
@@ -3814,6 +3968,125 @@ impl Api {
             _ => Err(Error::UnexpectedResponse {
                 actor: "subject_manager".to_owned(),
                 expected: "HasLiveRequesters".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: how many subjects hold a success record right
+    /// now. Finished copies must leave this at zero instead of
+    /// leaking one entry per historical subject.
+    pub async fn test_last_success_len(&self) -> Result<usize, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::GetLastSuccessLen)
+            .await?
+        {
+            SubjectManagerResponse::LastSuccessLen(len) => Ok(len),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "LastSuccessLen".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: how many copy attempts are in flight right now.
+    /// Successful and failed paths alike must close theirs.
+    pub async fn test_active_attempts_len(&self) -> Result<usize, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::GetActiveAttemptsLen)
+            .await?
+        {
+            SubjectManagerResponse::ActiveAttemptsLen(len) => Ok(len),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "ActiveAttemptsLen".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: hold a subject requester directly, so a rollback
+    /// can be proven to back off on live requesters. Release with
+    /// `test_release_requester`.
+    pub async fn test_hold_requester(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::Up {
+                subject_id,
+                requester: "test-hold".to_owned(),
+                create_ledger: None,
+            })
+            .await?
+        {
+            SubjectManagerResponse::Up => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "Up".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: release the requester held by
+    /// `test_hold_requester`.
+    pub async fn test_release_requester(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::Finish {
+                subject_id,
+                requester: "test-hold".to_owned(),
+            })
+            .await?
+        {
+            SubjectManagerResponse::Finish => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "Finish".to_owned(),
                 received: "other".to_owned(),
             }),
         }

@@ -62,11 +62,31 @@ pub enum SubjectManagerMessage {
         subject_id: DigestIdentifier,
         attempt: u64,
     },
+    /// Marks a copy attempt as started for a subject: while any
+    /// attempt stays active the success record is kept, so a
+    /// concurrent rollback can never drop another copy's shield.
+    BeginAttempt {
+        subject_id: DigestIdentifier,
+        attempt: u64,
+    },
+    /// Marks a copy attempt as finished for a subject: with no
+    /// active attempts left both the attempt set and the success
+    /// record for the subject are dropped. Idempotent.
+    EndAttempt {
+        subject_id: DigestIdentifier,
+        attempt: u64,
+    },
     /// Read-only view of the last successful copy attempt, for
     /// tests proving attempt-owned rollback decisions.
     GetLastSuccess {
         subject_id: DigestIdentifier,
     },
+    /// Test-only count of subjects holding a success record: proves
+    /// finished copies release their entry instead of leaking it.
+    GetLastSuccessLen,
+    /// Test-only count of in-flight copy attempts: proves attempts
+    /// open and close around every path, including rollbacks.
+    GetActiveAttemptsLen,
 }
 
 impl Message for SubjectManagerMessage {}
@@ -81,6 +101,9 @@ pub enum SubjectManagerResponse {
     NoteSuccess,
     ShouldPurge(bool),
     LastSuccess(Option<u64>),
+    LastSuccessLen(usize),
+    ActiveAttemptsLen(usize),
+    Ok,
 }
 
 impl Response for SubjectManagerResponse {}
@@ -97,6 +120,11 @@ pub struct SubjectManager {
     only_clear_events: bool,
     subjects: HashMap<DigestIdentifier, SubjectEntry>,
     last_success: HashMap<DigestIdentifier, u64>,
+    /// In-flight copy attempts per subject: an attempt stays here
+    /// from its batch/single assignment until its flow returns,
+    /// including a parked rollback. Volatile like `last_success`:
+    /// a reboot starts empty and needs no persistence.
+    active_attempts: HashMap<DigestIdentifier, HashSet<u64>>,
     /// Last-shutdown dirtiness, cached from `UpGovernances`
     /// (unknown reads as dirty: safe direction). Transient: this
     /// actor is not persistent, so every boot starts unknown.
@@ -120,6 +148,7 @@ impl SubjectManager {
             only_clear_events,
             subjects: HashMap::new(),
             last_success: HashMap::new(),
+            active_attempts: HashMap::new(),
             dirty_boot: None,
             reconciled: HashSet::new(),
         }
@@ -317,6 +346,7 @@ impl SubjectManager {
 
         self.subjects.remove(&subject_id);
         self.last_success.remove(&subject_id);
+        self.active_attempts.remove(&subject_id);
 
         let governance_id = match ctx.get_parent::<Node>().await {
             Ok(node) => match node
@@ -513,6 +543,7 @@ impl SubjectManager {
 
         self.subjects.remove(&subject_id);
         self.last_success.remove(&subject_id);
+        self.active_attempts.remove(&subject_id);
 
         if cleanup_errors.is_empty() {
             Ok(())
@@ -917,6 +948,40 @@ impl Handler<Self> for SubjectManager {
                     .get(&subject_id)
                     .is_none_or(|last| *last == attempt);
                 Ok(SubjectManagerResponse::ShouldPurge(owned))
+            }
+            SubjectManagerMessage::BeginAttempt {
+                subject_id,
+                attempt,
+            } => {
+                self.active_attempts
+                    .entry(subject_id)
+                    .or_default()
+                    .insert(attempt);
+                Ok(SubjectManagerResponse::Ok)
+            }
+            SubjectManagerMessage::EndAttempt {
+                subject_id,
+                attempt,
+            } => {
+                if let Some(active) = self.active_attempts.get_mut(&subject_id)
+                {
+                    active.remove(&attempt);
+                    if active.is_empty() {
+                        self.active_attempts.remove(&subject_id);
+                        self.last_success.remove(&subject_id);
+                    }
+                }
+                Ok(SubjectManagerResponse::Ok)
+            }
+            SubjectManagerMessage::GetLastSuccessLen => {
+                Ok(SubjectManagerResponse::LastSuccessLen(
+                    self.last_success.len(),
+                ))
+            }
+            SubjectManagerMessage::GetActiveAttemptsLen => {
+                Ok(SubjectManagerResponse::ActiveAttemptsLen(
+                    self.active_attempts.values().map(HashSet::len).sum(),
+                ))
             }
             SubjectManagerMessage::GetLastSuccess { subject_id } => {
                 Ok(SubjectManagerResponse::LastSuccess(

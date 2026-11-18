@@ -422,6 +422,38 @@ impl DistriWorker {
                         )
                         .await;
 
+                        #[cfg(feature = "test")]
+                        {
+                            // Post-success barrier: only a per-subject
+                            // worker pauses here, after its success was
+                            // recorded but before its flow returns, and
+                            // only for injected batches (empty request
+                            // id). Lets a test hold a successful copy
+                            // active while another attempt finishes, to
+                            // prove the shield survives. Production
+                            // never arms it.
+                            if !is_register
+                                && dist_ctx.info.request_id.is_empty()
+                                && !Self::worker_path(ctx)
+                                    .ends_with("/distributor")
+                            {
+                                let mut noted = false;
+                                while Self::post_success_paused(ctx) {
+                                    if !noted {
+                                        Self::note_post_success_hold(
+                                            ctx,
+                                            dist_ctx.attempt,
+                                        );
+                                        noted = true;
+                                    }
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(100),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+
                         if !remaining_ledger.is_empty() {
                             pending_ledger = remaining_ledger;
                             continue;
@@ -595,6 +627,68 @@ impl DistriWorker {
         }
 
         Ok(())
+    }
+
+    /// Records a copy attempt as started so the success record
+    /// survives while the attempt is in flight, including a parked
+    /// rollback. Best-effort like `note_copy_success`: a registry
+    /// failure must not fail the copy itself.
+    pub(crate) async fn begin_attempt(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        attempt: u64,
+    ) {
+        if let Ok(manager) = ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            && let Err(error) = manager
+                .ask(SubjectManagerMessage::BeginAttempt {
+                    subject_id: subject_id.clone(),
+                    attempt,
+                })
+                .await
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Failed to note copy attempt start",
+            );
+        }
+    }
+
+    /// Records a copy attempt as finished: when no attempt stays
+    /// active the attempt set and the success record for the subject
+    /// are dropped. Best-effort; runs on every exit path via the
+    /// entry-point wrappers, never skipped on early returns.
+    pub(crate) async fn end_attempt(
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        attempt: u64,
+    ) {
+        if let Ok(manager) = ctx
+            .system()
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            && let Err(error) = manager
+                .ask(SubjectManagerMessage::EndAttempt {
+                    subject_id: subject_id.clone(),
+                    attempt,
+                })
+                .await
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Failed to note copy attempt end",
+            );
+        }
     }
 
     /// Records a successful copy step under this batch attempt
@@ -778,6 +872,106 @@ impl DistriWorker {
             .unwrap_or(false)
     }
 
+    /// Test-only post-success barrier hit: lets a test hold a copy
+    /// whose success is already recorded while another attempt
+    /// finishes. Production never arms it.
+    #[cfg(feature = "test")]
+    fn post_success_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.post_success_paused())
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_post_success_hold(ctx: &ActorContext<Self>, attempt: u64) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_post_success_hold(attempt);
+        }
+    }
+
+    /// Test-only post-update barrier for single pushes: lets a
+    /// test pin that the pushed event went through the update
+    /// decision (applied or skipped) before asserting on it.
+    /// Production never arms it.
+    #[cfg(feature = "test")]
+    fn single_updated_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.single_updated_paused())
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_single_updated_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_single_updated_hold();
+        }
+    }
+
+    /// Test-only record of the attempt a single push owns: lets a
+    /// test tell the skipped push apart from the parked batch it
+    /// interleaves with. Production never reads it.
+    #[cfg(feature = "test")]
+    fn note_single_push_attempt(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        attempt: u64,
+    ) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_single_push_attempt(subject_id.to_string(), attempt);
+        }
+    }
+
+    /// Test-only pre-purge barrier hit: lets a test interleave a
+    /// valid apply between the rollback metadata read and the
+    /// atomic purge. Production never arms it.
+    #[cfg(feature = "test")]
+    fn pre_purge_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| faults.pre_purge_paused())
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_pre_purge_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) =
+            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_pre_purge_hold();
+        }
+    }
+
     #[cfg(feature = "test")]
     fn note_before_apply_hold(ctx: &ActorContext<Self>, attempt: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
@@ -794,14 +988,14 @@ impl DistriWorker {
     /// interleaving really happened instead of passing vacuously.
     /// Production never arms it.
     #[cfg(feature = "test")]
-    fn note_rollback_hold(ctx: &ActorContext<Self>) {
+    fn note_rollback_hold(ctx: &ActorContext<Self>, attempt: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
         if let Some(registry) = ctx
             .system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
-            faults.note_rollback_hold();
+            faults.note_rollback_hold(attempt);
         }
     }
 
@@ -825,7 +1019,7 @@ impl DistriWorker {
             let mut noted = false;
             while Self::rollback_paused(ctx) {
                 if !noted {
-                    Self::note_rollback_hold(ctx);
+                    Self::note_rollback_hold(ctx, attempt);
                     noted = true;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1054,6 +1248,21 @@ impl DistriWorker {
         }
         // Atomic check-and-purge: the tracker refuses when it moved
         // past the observed tip after this check.
+        #[cfg(feature = "test")]
+        {
+            // Pre-purge barrier: pauses after the metadata read but
+            // before the atomic purge, so a test can interleave a
+            // valid apply and prove the purge backs off instead of
+            // deleting. Production never arms it.
+            let mut noted = false;
+            while Self::pre_purge_paused(ctx) {
+                if !noted {
+                    Self::note_pre_purge_hold(ctx);
+                    noted = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
         match tracker
             .ask(TrackerMessage::PurgeIfUnchanged {
                 expected_sn: current_sn,
@@ -1519,13 +1728,35 @@ impl DistriWorker {
     pub(crate) async fn process_last_event_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        mut ledger: Ledger,
+        ledger: Ledger,
         info: ComunicateInfo,
         sender: PublicKey,
     ) -> Result<(), ActorError> {
+        // Attempt lifecycle: every pushed event owns an attempt
+        // from here until this entry point returns, including error
+        // paths that never reach the tracker.
+        let subject_id = ledger.get_subject_id();
+        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
+        Self::begin_attempt(ctx, &subject_id, attempt).await;
+        #[cfg(feature = "test")]
+        Self::note_single_push_attempt(ctx, &subject_id, attempt);
+        let result = self
+            .run_last_event_distribution(ctx, ledger, info, sender, attempt)
+            .await;
+        Self::end_attempt(ctx, &subject_id, attempt).await;
+        result
+    }
+
+    pub(crate) async fn run_last_event_distribution(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        mut ledger: Ledger,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        attempt: u64,
+    ) -> Result<(), ActorError> {
         let subject_id = ledger.get_subject_id();
         let sn = ledger.sn;
-        let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1711,6 +1942,23 @@ impl DistriWorker {
             )
             .await;
 
+            #[cfg(feature = "test")]
+            {
+                // Test-only barrier right after the single-push
+                // update decision (applied or skipped): lets a test
+                // pin that the push landed before asserting on what
+                // it did or did not record. Production never arms it.
+                let mut noted = false;
+                while Self::single_updated_paused(ctx) {
+                    if !noted {
+                        Self::note_single_updated_hold(ctx);
+                        noted = true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100))
+                        .await;
+                }
+            }
+
             if let Some(lease) = lease.clone()
                 && update_result.is_err()
             {
@@ -1719,7 +1967,6 @@ impl DistriWorker {
 
             match update_result {
                 Ok((last_sn, _, _)) if last_sn < ledger.sn => {
-                    Self::note_copy_success(ctx, &subject_id, attempt).await;
                     debug!(
                         msg_type = "LastEventDistribution",
                         subject_id = %subject_id,
