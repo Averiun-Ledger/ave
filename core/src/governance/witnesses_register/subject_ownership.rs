@@ -193,10 +193,8 @@ impl WitnessesRegister {
                     Protocols::Transfer { evaluation, .. }
                     if evaluation.evaluator_response_ok().is_some());
                 if ok && allow_transfer {
-                    data.actual_new_owner_data = Some((
-                        transfer_request.new_owner,
-                        event.gov_version,
-                    ));
+                    data.actual_new_owner_data =
+                        Some((transfer_request.new_owner, event.gov_version));
                 }
             }
             Some(EventRequest::Confirm(..)) => {
@@ -226,10 +224,8 @@ impl WitnessesRegister {
                 if let Some((new_owner, new_owner_gov_version)) =
                     data.actual_new_owner_data.take()
                 {
-                    let entry = data
-                        .old_owners
-                        .entry(new_owner.clone())
-                        .or_default();
+                    let entry =
+                        data.old_owners.entry(new_owner.clone()).or_default();
                     entry.sn = event.sn;
                     entry.interval_gov_version.insert(Interval {
                         lo: new_owner_gov_version,

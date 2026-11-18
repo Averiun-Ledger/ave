@@ -892,8 +892,9 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn note_post_success_hold(ctx: &ActorContext<Self>, attempt: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_post_success_hold(attempt);
@@ -921,8 +922,9 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn note_single_updated_hold(ctx: &ActorContext<Self>) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_single_updated_hold();
@@ -939,8 +941,9 @@ impl DistriWorker {
         attempt: u64,
     ) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_single_push_attempt(subject_id.to_string(), attempt);
@@ -964,8 +967,9 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn note_pre_purge_hold(ctx: &ActorContext<Self>) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
-        if let Some(registry) =
-            ctx.system().get_helper::<SharedFaultRegistry>("test_faults")
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_pre_purge_hold();

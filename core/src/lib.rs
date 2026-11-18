@@ -3666,7 +3666,9 @@ impl Api {
     /// pin the deferred-store budget exactly instead of inferring
     /// retention from side effects. Test deliveries address the
     /// node-level distributor, which always exists.
-    pub async fn test_deferred_stats(&self) -> Result<(usize, u64, u64), Error> {
+    pub async fn test_deferred_stats(
+        &self,
+    ) -> Result<(usize, u64, u64), Error> {
         let stats = self
             .system
             .get_helper::<crate::distribution::deferred::SharedDeferredStats>(
@@ -3987,10 +3989,7 @@ impl Api {
                 name: "subject_manager".to_owned(),
                 reason: "Subject manager not found".to_owned(),
             })?;
-        match actor
-            .ask(SubjectManagerMessage::GetLastSuccessLen)
-            .await?
-        {
+        match actor.ask(SubjectManagerMessage::GetLastSuccessLen).await? {
             SubjectManagerResponse::LastSuccessLen(len) => Ok(len),
             _ => Err(Error::UnexpectedResponse {
                 actor: "subject_manager".to_owned(),

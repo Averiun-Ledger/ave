@@ -973,11 +973,9 @@ impl Handler<Self> for SubjectManager {
                 }
                 Ok(SubjectManagerResponse::Ok)
             }
-            SubjectManagerMessage::GetLastSuccessLen => {
-                Ok(SubjectManagerResponse::LastSuccessLen(
-                    self.last_success.len(),
-                ))
-            }
+            SubjectManagerMessage::GetLastSuccessLen => Ok(
+                SubjectManagerResponse::LastSuccessLen(self.last_success.len()),
+            ),
             SubjectManagerMessage::GetActiveAttemptsLen => {
                 Ok(SubjectManagerResponse::ActiveAttemptsLen(
                     self.active_attempts.values().map(HashSet::len).sum(),

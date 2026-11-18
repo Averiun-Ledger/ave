@@ -116,7 +116,10 @@ impl DeferredStore {
     /// budget no longer covers, oldest first. Test-only entry
     /// point: production always uses the compiled-in defaults.
     #[cfg(feature = "test")]
-    pub(crate) fn set_limits(&mut self, limits: DeferredLimits) -> Vec<DigestIdentifier> {
+    pub(crate) fn set_limits(
+        &mut self,
+        limits: DeferredLimits,
+    ) -> Vec<DigestIdentifier> {
         self.limits = limits;
         let mut evicted = Vec::new();
         while self.over_global_budget() {
@@ -135,7 +138,8 @@ impl DeferredStore {
             .entries
             .iter()
             .filter(|(_, entry)| {
-                entry.stored_len() as u64 > self.limits.max_events_per_subject as u64
+                entry.stored_len() as u64
+                    > self.limits.max_events_per_subject as u64
                     || entry.stored_bytes() > self.limits.max_bytes_per_subject
             })
             .map(|(id, _)| id.clone())
@@ -205,10 +209,10 @@ impl DeferredStore {
         let live = &entry.events[entry.live_from..];
         let drop = live.partition_point(|event| event.sn <= tip);
         if drop > 0 {
-            let dropped: u64 =
-                entry.sizes[entry.live_from..entry.live_from + drop]
-                    .iter()
-                    .sum();
+            let dropped: u64 = entry.sizes
+                [entry.live_from..entry.live_from + drop]
+                .iter()
+                .sum();
             self.live_events -= drop as u64;
             self.live_bytes -= dropped;
             entry.live_from += drop;
@@ -228,9 +232,9 @@ impl DeferredStore {
     /// Live staged events for a subject. Prune first: this is a
     /// read-only view over the retained range.
     pub(crate) fn view(&self, subject_id: &DigestIdentifier) -> &[Ledger] {
-        self.entries.get(subject_id).map_or(&[], |entry| {
-            &entry.events[entry.live_from..]
-        })
+        self.entries
+            .get(subject_id)
+            .map_or(&[], |entry| &entry.events[entry.live_from..])
     }
 
     /// Stages a batch whose aux can not be checked yet. Only the
@@ -257,9 +261,7 @@ impl DeferredStore {
             let Ok(len) = object_length(event) else {
                 self.remove(subject_id);
                 if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_distribution_failure(
-                        "deferred_overflow",
-                    );
+                    metrics.observe_distribution_failure("deferred_overflow");
                 }
                 return vec![subject_id.clone()];
             };
@@ -287,17 +289,18 @@ impl DeferredStore {
             }
             return evicted;
         }
-        let entry = self.entries.entry(subject_id.clone()).or_insert_with(
-            || DeferredEntry {
-                events: Vec::new(),
-                sizes: Vec::new(),
-                live_from: 0,
-                live_bytes: 0,
-                stored_bytes: 0,
-                pruned_through: None,
-                last_used: 0,
-            },
-        );
+        let entry =
+            self.entries.entry(subject_id.clone()).or_insert_with(|| {
+                DeferredEntry {
+                    events: Vec::new(),
+                    sizes: Vec::new(),
+                    live_from: 0,
+                    live_bytes: 0,
+                    stored_bytes: 0,
+                    pruned_through: None,
+                    last_used: 0,
+                }
+            });
         debug_assert!(
             entry.events[entry.live_from..]
                 .last()
@@ -317,9 +320,11 @@ impl DeferredStore {
         self.seq = self.seq.wrapping_add(1);
         entry.last_used = self.seq;
         #[cfg(debug_assertions)]
-        debug_assert!(entry.events[entry.live_from..]
-            .windows(2)
-            .all(|w| w[0].sn < w[1].sn));
+        debug_assert!(
+            entry.events[entry.live_from..]
+                .windows(2)
+                .all(|w| w[0].sn < w[1].sn)
+        );
         evicted
     }
 
@@ -380,8 +385,11 @@ impl DeferredStore {
         });
         stored.0 + staged_events > self.limits.max_events_per_subject as u64
             || stored.1 + staged_bytes > self.limits.max_bytes_per_subject
-            || self.entries.len() + usize::from(!self.entries.contains_key(subject_id)) > self.limits.max_subjects
-            || self.stored_events + staged_events > self.limits.max_events_global as u64
+            || self.entries.len()
+                + usize::from(!self.entries.contains_key(subject_id))
+                > self.limits.max_subjects
+            || self.stored_events + staged_events
+                > self.limits.max_events_global as u64
             || self.stored_bytes + staged_bytes > self.limits.max_bytes_global
     }
 
@@ -403,8 +411,7 @@ impl DeferredStore {
     /// and live, freed without rescanning.
     fn compact_if_due(&mut self, subject_id: &DigestIdentifier) {
         let dominated = self.entries.get(subject_id).is_some_and(|entry| {
-            entry.live_from >= 1024
-                && entry.live_from * 2 >= entry.events.len()
+            entry.live_from >= 1024 && entry.live_from * 2 >= entry.events.len()
         });
         if !dominated {
             return;
@@ -437,8 +444,8 @@ mod tests {
     };
 
     use crate::model::event::{
-        EvaluationDataOpaque, EvaluationResponseOpaque, OpaqueData,
-        Protocols, ValidationData, ValidationMetadata,
+        EvaluationDataOpaque, EvaluationResponseOpaque, OpaqueData, Protocols,
+        ValidationData, ValidationMetadata,
     };
 
     fn dummy_pubkey() -> PublicKey {
@@ -480,14 +487,13 @@ mod tests {
                     validation_req_signature: dummy_sig(),
                     validation_req_hash: DigestIdentifier::default(),
                     validators_signatures: Vec::new(),
-                    validation_metadata:
-                        ValidationMetadata::ModifiedHash {
-                            modified_metadata_without_propierties_hash:
-                                DigestIdentifier::default(),
-                            propierties_hash: DigestIdentifier::default(),
-                            event_request_hash: DigestIdentifier::default(),
-                            viewpoints_hash: DigestIdentifier::default(),
-                        },
+                    validation_metadata: ValidationMetadata::ModifiedHash {
+                        modified_metadata_without_propierties_hash:
+                            DigestIdentifier::default(),
+                        propierties_hash: DigestIdentifier::default(),
+                        event_request_hash: DigestIdentifier::default(),
+                        viewpoints_hash: DigestIdentifier::default(),
+                    },
                 },
                 data: OpaqueData {
                     subject_id: DigestIdentifier::default(),
@@ -623,8 +629,16 @@ mod tests {
         });
         let a = subject_id(14);
         let b = subject_id(15);
-        assert!(store.stage(&a, vec![synthetic_ledger(0, 1)], None).is_empty());
-        assert!(store.stage(&b, vec![synthetic_ledger(0, 1)], None).is_empty());
+        assert!(
+            store
+                .stage(&a, vec![synthetic_ledger(0, 1)], None)
+                .is_empty()
+        );
+        assert!(
+            store
+                .stage(&b, vec![synthetic_ledger(0, 1)], None)
+                .is_empty()
+        );
         assert_eq!(store.stored_bytes, one_len * 2);
         let c = subject_id(16);
         let evicted = store.stage(&c, vec![synthetic_ledger(0, 1)], None);
@@ -761,8 +775,16 @@ mod tests {
         assert_eq!(store.stored_bytes, 0);
         let a = subject_id(41);
         let b = subject_id(42);
-        assert!(store.stage(&a, vec![synthetic_ledger(0, 0)], None).is_empty());
-        assert!(store.stage(&b, vec![synthetic_ledger(0, 0)], None).is_empty());
+        assert!(
+            store
+                .stage(&a, vec![synthetic_ledger(0, 0)], None)
+                .is_empty()
+        );
+        assert!(
+            store
+                .stage(&b, vec![synthetic_ledger(0, 0)], None)
+                .is_empty()
+        );
         let evicted = store.set_limits(DeferredLimits {
             max_subjects: 1,
             max_events_per_subject: 8,
@@ -802,7 +824,8 @@ impl DeferredStatsRegistry {
             self.live.remove(subject_id);
             self.stored.remove(subject_id);
         } else {
-            self.live.insert(subject_id.clone(), (live_events, live_bytes));
+            self.live
+                .insert(subject_id.clone(), (live_events, live_bytes));
             self.stored
                 .insert(subject_id.clone(), (stored_events, stored_bytes));
         }

@@ -102,8 +102,7 @@ impl Intermediary {
         system.add_helper(
             "deferred_stats",
             Arc::new(std::sync::Mutex::new(
-                crate::distribution::deferred::DeferredStatsRegistry::default(
-                ),
+                crate::distribution::deferred::DeferredStatsRegistry::default(),
             )),
         );
 

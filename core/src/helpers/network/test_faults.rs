@@ -370,7 +370,9 @@ impl TestFaultRegistry {
         subject_id: String,
         attempt: u64,
     ) {
-        self.single_push_attempts.entry(subject_id).or_insert(attempt);
+        self.single_push_attempts
+            .entry(subject_id)
+            .or_insert(attempt);
     }
 
     /// Attempt assigned to the single push for a subject, if any.

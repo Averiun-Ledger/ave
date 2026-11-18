@@ -99,8 +99,7 @@ pub(crate) enum CursorTrust {
 /// again, and resolution failures are never cached (the caller
 /// only inserts on success; the envelope path handles the rest).
 pub(crate) struct RoleCache {
-    entries:
-        HashMap<(u64, SchemaType, Namespace), (RoleDataRegister, u64)>,
+    entries: HashMap<(u64, SchemaType, Namespace), (RoleDataRegister, u64)>,
     seq: u64,
 }
 
@@ -336,8 +335,10 @@ impl VerifyStatsRegistry {
         visited: u64,
     ) {
         *self.ownership_cloned.entry(subject_id.clone()).or_default() += cloned;
-        *self.ownership_visited.entry(subject_id.clone()).or_default() +=
-            visited;
+        *self
+            .ownership_visited
+            .entry(subject_id.clone())
+            .or_default() += visited;
     }
 
     pub(crate) fn ownership_snapshot(
@@ -838,31 +839,33 @@ impl TransferVerifier {
                     != 0;
                 #[cfg(not(feature = "test"))]
                 let fail_resolve = false;
-                let lease = match crate::model::common::subject::acquire_subject(
-                    ctx,
-                    subject_id,
-                    "aux-evidence".to_owned(),
-                    None,
-                    true,
-                )
-                .await
-                {
-                    Ok(lease) => lease,
-                    // Up failed: nothing was registered, so there
-                    // is no lease to release.
-                    Err(_) => return None,
-                };
-                let loaded = if fail_resolve {
-                    None
-                } else {
-                    match ctx
-                        .system()
-                        .get_actor::<crate::tracker::Tracker>(&path)
-                        .await
+                let lease =
+                    match crate::model::common::subject::acquire_subject(
+                        ctx,
+                        subject_id,
+                        "aux-evidence".to_owned(),
+                        None,
+                        true,
+                    )
+                    .await
                     {
-                        Err(_) => None,
-                        Ok(tracker) => {
-                            match tracker
+                        Ok(lease) => lease,
+                        // Up failed: nothing was registered, so there
+                        // is no lease to release.
+                        Err(_) => return None,
+                    };
+                let loaded =
+                    if fail_resolve {
+                        None
+                    } else {
+                        match ctx
+                            .system()
+                            .get_actor::<crate::tracker::Tracker>(&path)
+                            .await
+                        {
+                            Err(_) => None,
+                            Ok(tracker) => {
+                                match tracker
                                 .ask(crate::tracker::TrackerMessage::GetLedger {
                                     lo_sn,
                                     hi_sn,
@@ -875,9 +878,9 @@ impl TransferVerifier {
                                 }) => Some(ledger),
                                 _ => None,
                             }
+                            }
                         }
-                    }
-                };
+                    };
                 // A release failure is logged, never confused with
                 // evidence: the verdict below only depends on the
                 // read itself.
@@ -1027,13 +1030,14 @@ impl TransferVerifier {
         // identity check below, exactly like the full path.
         let mut delta: Vec<Ledger> = Vec::new();
         if local_sn.is_some_and(|current| Some(current) > covered) {
-            let Some(loaded) = self.load_local_ledger(
-                ctx,
-                subject_id,
-                covered,
-                local_sn.unwrap_or(0),
-            )
-            .await
+            let Some(loaded) = self
+                .load_local_ledger(
+                    ctx,
+                    subject_id,
+                    covered,
+                    local_sn.unwrap_or(0),
+                )
+                .await
             else {
                 return Some(AuxEvidence::Missing);
             };
@@ -1047,9 +1051,8 @@ impl TransferVerifier {
             sender_ledger.partition_point(|event| event.sn < tip_sn);
         let sender_to =
             sender_ledger.partition_point(|event| event.sn < transfer_event.sn);
-        let sender_window = sender_ledger
-            .get(sender_from..sender_to)
-            .unwrap_or(&[]);
+        let sender_window =
+            sender_ledger.get(sender_from..sender_to).unwrap_or(&[]);
         // Only the uncovered tail is cloned: the partitions above
         // skip whole verified prefixes with logarithmic probes
         // instead of scanning them.
@@ -1371,13 +1374,9 @@ impl TransferVerifier {
         let mut combined: Vec<Ledger> = Vec::new();
         let mut tip: Option<u64> = None;
         if local_sn.is_some() {
-            let Some(ledger) = self.load_local_ledger(
-                ctx,
-                subject_id,
-                None,
-                local_sn.unwrap_or(0),
-            )
-            .await
+            let Some(ledger) = self
+                .load_local_ledger(ctx, subject_id, None, local_sn.unwrap_or(0))
+                .await
             else {
                 return AuxEvidence::Missing;
             };
@@ -1635,10 +1634,7 @@ impl TransferVerifier {
                     {
                         Ok((fetched, _, _)) => {
                             #[cfg(feature = "test")]
-                            Self::note_roles_resolved(
-                                ctx,
-                                &cursor.subject_id,
-                            );
+                            Self::note_roles_resolved(ctx, &cursor.subject_id);
                             roles_cache.insert(roles_key, fetched.clone());
                             Some(fetched)
                         }

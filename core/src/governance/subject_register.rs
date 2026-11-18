@@ -272,9 +272,10 @@ impl Handler<Self> for SubjectRegister {
                 return Ok(SubjectRegisterResponse::MaxVersion(max));
             }
             SubjectRegisterMessage::HasSubject { subject_id } => {
-                let present = self.register.values().any(|(_, subjects)| {
-                    subjects.contains(&subject_id)
-                });
+                let present = self
+                    .register
+                    .values()
+                    .any(|(_, subjects)| subjects.contains(&subject_id));
                 return Ok(SubjectRegisterResponse::SubjectPresent(present));
             }
             SubjectRegisterMessage::RegisterData { gov_version, data } => {

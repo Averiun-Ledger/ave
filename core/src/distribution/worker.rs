@@ -208,8 +208,9 @@ impl DistriWorker {
         store: &super::deferred::DeferredStore,
         subject_id: &DigestIdentifier,
     ) {
-        if let Some(stats) =
-            ctx.system().get_helper::<super::deferred::SharedDeferredStats>(
+        if let Some(stats) = ctx
+            .system()
+            .get_helper::<super::deferred::SharedDeferredStats>(
                 "deferred_stats",
             )
         {
@@ -232,8 +233,7 @@ impl DistriWorker {
     /// limit: a configured size above it must shrink the window,
     /// never emit a batch the receiver drops on sight.
     pub(crate) fn capped_batch_size(configured: u64) -> u64 {
-        configured
-            .min(crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64)
+        configured.min(crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64)
     }
 
     /// Test-only auth work counter: visits over new tail events
@@ -250,7 +250,9 @@ impl DistriWorker {
         if visited == 0 {
             return;
         }
-        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
             stats
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -271,7 +273,9 @@ impl DistriWorker {
         if cloned == 0 {
             return;
         }
-        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
             stats
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -293,7 +297,9 @@ impl DistriWorker {
         if cloned == 0 && visited == 0 {
             return;
         }
-        if let Some(stats) = ctx.system().get_helper::<SharedVerifyStats>("verify_stats") {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedVerifyStats>("verify_stats")
+        {
             stats
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -318,10 +324,14 @@ impl DistriWorker {
 
     /// Best governance ceiling across incremental checks, same
     /// monotonic rule as the high-water mark.
-    fn max_gov(first: GovVersionLimit, second: GovVersionLimit) -> GovVersionLimit {
+    fn max_gov(
+        first: GovVersionLimit,
+        second: GovVersionLimit,
+    ) -> GovVersionLimit {
         match (first, second) {
-            (GovVersionLimit::Infinity, _)
-            | (_, GovVersionLimit::Infinity) => GovVersionLimit::Infinity,
+            (GovVersionLimit::Infinity, _) | (_, GovVersionLimit::Infinity) => {
+                GovVersionLimit::Infinity
+            }
             (GovVersionLimit::Version(a), GovVersionLimit::Version(b)) => {
                 GovVersionLimit::Version(a.max(b))
             }
@@ -329,7 +339,9 @@ impl DistriWorker {
             | (GovVersionLimit::None, GovVersionLimit::Version(v)) => {
                 GovVersionLimit::Version(v)
             }
-            (GovVersionLimit::None, GovVersionLimit::None) => GovVersionLimit::None,
+            (GovVersionLimit::None, GovVersionLimit::None) => {
+                GovVersionLimit::None
+            }
         }
     }
 
@@ -1038,9 +1050,8 @@ impl DistriWorker {
         // Gov versions must not run ahead: compare cached max plus
         // the new tail instead of rescanning the held prefix.
         let held_tip_sn = held.last().map(|event| event.sn);
-        let held_tip_hash = held
-            .last()
-            .and_then(|event| event.ledger_hash(hash).ok());
+        let held_tip_hash =
+            held.last().and_then(|event| event.ledger_hash(hash).ok());
         let state_needs_rebuild = match pending_auth.get(subject_id) {
             Some(state) => {
                 state.is_register != is_register
@@ -1119,8 +1130,7 @@ impl DistriWorker {
                         &mut roles,
                     )
                     .await;
-                let mut data =
-                    WitnessesRegister::init_transfer_data(create);
+                let mut data = WitnessesRegister::init_transfer_data(create);
                 for event in held.iter() {
                     if event.sn == create.sn {
                         continue;
@@ -1136,9 +1146,7 @@ impl DistriWorker {
                         EventRequestType::Transfer
                     ) {
                         WitnessesRegister::apply_transfer_data_event(
-                            &mut data,
-                            event,
-                            allow,
+                            &mut data, event, allow,
                         );
                     } else {
                         WitnessesRegister::apply_transfer_data_event(
@@ -1236,11 +1244,7 @@ impl DistriWorker {
                     // scanned so far: the failure below must not hide
                     // work already spent.
                     #[cfg(feature = "test")]
-                    Self::note_auth_work(
-                        ctx,
-                        subject_id,
-                        current.len() as u64,
-                    );
+                    Self::note_auth_work(ctx, subject_id, current.len() as u64);
                     return Err(DistributorError::ReceiverNoAccess.into());
                 }
             }
@@ -1249,12 +1253,10 @@ impl DistriWorker {
                 // cached from the held prefix or starting in the
                 // current batch.
                 if state.auth_metadata.is_none() {
-                    let combined_starts_with_create = held
-                        .first()
-                        .is_some_and(|first| {
+                    let combined_starts_with_create =
+                        held.first().is_some_and(|first| {
                             first.is_create_event() && first.sn == 0
-                        })
-                        || current.first().is_some_and(|first| {
+                        }) || current.first().is_some_and(|first| {
                             first.is_create_event() && first.sn == 0
                         });
                     if !combined_starts_with_create {
@@ -1264,15 +1266,10 @@ impl DistriWorker {
                             subject_id,
                             current.len() as u64,
                         );
-                        return Err(
-                            DistributorError::ReceiverNoAccess.into()
-                        );
+                        return Err(DistributorError::ReceiverNoAccess.into());
                     }
-                    let combined_for_genesis: Vec<Ledger> = held
-                        .iter()
-                        .chain(current.iter())
-                        .cloned()
-                        .collect();
+                    let combined_for_genesis: Vec<Ledger> =
+                        held.iter().chain(current.iter()).cloned().collect();
                     let Some(metadata) =
                         super::transfer_verifier::TransferVerifier::genesis_metadata(
                             &combined_for_genesis,
@@ -1301,16 +1298,13 @@ impl DistriWorker {
                             subject_id,
                             current.len() as u64,
                         );
-                        return Err(
-                            DistributorError::ReceiverNoAccess.into()
-                        );
+                        return Err(DistributorError::ReceiverNoAccess.into());
                     };
                     state.auth_metadata = Some(metadata);
                     state.auth_roles =
                         super::transfer_verifier::RoleCache::new();
-                    state.transfer_data = Some(
-                        WitnessesRegister::init_transfer_data(&create),
-                    );
+                    state.transfer_data =
+                        Some(WitnessesRegister::init_transfer_data(&create));
                     // Replay any held events past genesis that were
                     // skipped because metadata was missing: they are
                     // at most the held prefix once, right after the
@@ -1341,14 +1335,14 @@ impl DistriWorker {
                             for sn in proven.iter() {
                                 state.proven_inline.insert(*sn);
                             }
-                            if let Some(data) =
-                                state.transfer_data.as_mut()
-                            {
+                            if let Some(data) = state.transfer_data.as_mut() {
                                 for event in held_tail.iter() {
                                     let allow = matches!(
                                         event.get_event_request_type(),
                                         EventRequestType::Transfer
-                                    ) && state.proven_inline.contains(&event.sn);
+                                    ) && state
+                                        .proven_inline
+                                        .contains(&event.sn);
                                     if matches!(
                                         event.get_event_request_type(),
                                         EventRequestType::Transfer
@@ -1372,9 +1366,8 @@ impl DistriWorker {
                     // still carry genesis or already-verified events
                     // (first delivery, or a sender re-send), which
                     // must be skipped instead of breaking the chain.
-                    let skip = current.partition_point(|event| {
-                        event.sn <= metadata.sn
-                    });
+                    let skip = current
+                        .partition_point(|event| event.sn <= metadata.sn);
                     let (proven, refuted, _, _) = verifier
                         .verify_chain(
                             ctx,
@@ -1394,10 +1387,11 @@ impl DistriWorker {
                     // screening unverified transfers.
                     if let Some(data) = state.transfer_data.as_mut() {
                         for event in current.iter() {
-                            let allow = matches!(
-                                event.get_event_request_type(),
-                                EventRequestType::Transfer
-                            ) && state.proven_inline.contains(&event.sn);
+                            let allow =
+                                matches!(
+                                    event.get_event_request_type(),
+                                    EventRequestType::Transfer
+                                ) && state.proven_inline.contains(&event.sn);
                             if matches!(
                                 event.get_event_request_type(),
                                 EventRequestType::Transfer
@@ -1446,16 +1440,16 @@ impl DistriWorker {
                         );
                         let pending_before_eq = before.as_ref().is_some_and(
                             |(_, pending, _, _, _)| {
-                                pending.as_ref().is_some_and(
-                                    |(owner, _)| owner == our_key,
-                                )
+                                pending
+                                    .as_ref()
+                                    .is_some_and(|(owner, _)| owner == our_key)
                             },
                         );
                         let pending_after_eq = after.as_ref().is_some_and(
                             |(_, pending, _, _, _)| {
-                                pending.as_ref().is_some_and(
-                                    |(owner, _)| owner == our_key,
-                                )
+                                pending
+                                    .as_ref()
+                                    .is_some_and(|(owner, _)| owner == our_key)
                             },
                         );
                         actual_before_eq
@@ -1463,8 +1457,7 @@ impl DistriWorker {
                             || pending_before_eq
                             || pending_after_eq
                     };
-                    let new_version =
-                        state.ownership_version.wrapping_add(1);
+                    let new_version = state.ownership_version.wrapping_add(1);
                     // Fast path for single-event tails that do not involve
                     // the receiver: refresh the cached decision with only
                     // the new delta instead of rescanning all old owners.
@@ -1473,8 +1466,7 @@ impl DistriWorker {
                     let mut incremental_done = false;
                     if !involves
                         && current.len() == 1
-                        && let Some(cached) =
-                            state.cached_without_aux.as_ref()
+                        && let Some(cached) = state.cached_without_aux.as_ref()
                         && cached.sender == sender
                         && cached.gov_version == common.gov_version
                     {
@@ -1488,22 +1480,21 @@ impl DistriWorker {
                         // Each close costs one entry, never the history.
                         if cached.status.is_none() {
                             use ave_common::bridge::request::EventRequestType;
-                            let new_key: Option<PublicKey> =
-                                match current[0].get_event_request_type() {
-                                    EventRequestType::Confirm => before
-                                        .as_ref()
-                                        .map(|(actual, _, _, _, _)| {
-                                            actual.clone()
-                                        }),
-                                    EventRequestType::Reject => before
-                                        .as_ref()
-                                        .and_then(|(_, pending, _, _, _)| {
-                                            pending.as_ref().map(
-                                                |(owner, _)| owner.clone(),
-                                            )
-                                        }),
-                                    _ => None,
-                                };
+                            let new_key: Option<PublicKey> = match current[0]
+                                .get_event_request_type()
+                            {
+                                EventRequestType::Confirm => before
+                                    .as_ref()
+                                    .map(|(actual, _, _, _, _)| actual.clone()),
+                                EventRequestType::Reject => before
+                                    .as_ref()
+                                    .and_then(|(_, pending, _, _, _)| {
+                                        pending
+                                            .as_ref()
+                                            .map(|(owner, _)| owner.clone())
+                                    }),
+                                _ => None,
+                            };
                             let minimal = state.transfer_data.as_ref().and_then(
                                 |data| {
                                     let mut olds = HashMap::new();
@@ -1538,17 +1529,14 @@ impl DistriWorker {
                             if let Some(light) = minimal
                                 && !light.old_owners.is_empty()
                             {
-                                let _delta_len =
-                                    light.old_owners.len() as u64;
+                                let _delta_len = light.old_owners.len() as u64;
                                 let gov_version = common.gov_version;
                                 let governance_id =
                                     common.governance_id.clone();
-                                let namespace =
-                                    common.namespace.clone();
+                                let namespace = common.namespace.clone();
                                 let schema_id = common.schema_id.clone();
                                 let sender_key = sender.clone();
-                                let our_key_owned =
-                                    (*our_key).clone();
+                                let our_key_owned = (*our_key).clone();
                                 let first = held
                                     .first()
                                     .or_else(|| current.first())
@@ -1556,81 +1544,67 @@ impl DistriWorker {
                                     .ok_or(
                                         DistributorError::ReceiverNoAccess,
                                     )?;
-                                let owner_ctx_owner = first
-                                    .ledger_seal_signature
-                                    .signer
-                                    .clone();
+                                let owner_ctx_owner =
+                                    first.ledger_seal_signature.signer.clone();
                                 let owner_ctx_gov = first.gov_version;
-                                let outcome =
-                                    check_witness_status_and_window(
-                                        ctx,
-                                        &governance_id,
-                                        subject_id,
-                                        Some(light),
-                                        TrackerPeers {
-                                            node: our_key_owned,
-                                            sender: sender_key.clone(),
-                                        },
-                                        TrackerParams {
-                                            namespace,
-                                            schema_id,
-                                            actual_sn: None,
-                                        },
-                                        OwnerContext {
-                                            owner: Some(owner_ctx_owner),
-                                            gov_version: Some(owner_ctx_gov),
-                                        },
-                                    )
-                                    .await;
+                                let outcome = check_witness_status_and_window(
+                                    ctx,
+                                    &governance_id,
+                                    subject_id,
+                                    Some(light),
+                                    TrackerPeers {
+                                        node: our_key_owned,
+                                        sender: sender_key.clone(),
+                                    },
+                                    TrackerParams {
+                                        namespace,
+                                        schema_id,
+                                        actual_sn: None,
+                                    },
+                                    OwnerContext {
+                                        owner: Some(owner_ctx_owner),
+                                        gov_version: Some(owner_ctx_gov),
+                                    },
+                                )
+                                .await;
                                 #[cfg(feature = "test")]
                                 Self::note_ownership_work(
-                                    ctx,
-                                    subject_id,
-                                    _delta_len,
-                                    _delta_len,
+                                    ctx, subject_id, _delta_len, _delta_len,
                                 );
-                                if let Ok((
-                                    new_status,
-                                    new_window,
-                                    ..
-                                )) = outcome
+                                if let Ok((new_status, new_window, ..)) =
+                                    outcome
                                 {
-                                    if let Some(state) = pending_auth
-                                        .get_mut(subject_id)
+                                    if let Some(state) =
+                                        pending_auth.get_mut(subject_id)
                                     {
-                                        state.ownership_version =
-                                            new_version;
-                                        state.cached_without_aux = Some(
-                                            CachedWithoutAux {
+                                        state.ownership_version = new_version;
+                                        state.cached_without_aux =
+                                            Some(CachedWithoutAux {
                                                 sender: sender_key,
                                                 gov_version,
-                                                ownership_version:
-                                                    new_version,
+                                                ownership_version: new_version,
                                                 status: Some(new_status),
                                                 window_sn: new_window,
-                                            },
-                                        );
+                                            });
                                         incremental_done = true;
                                     }
-                                } else if let Some(state) = pending_auth
-                                    .get_mut(subject_id)
+                                } else if let Some(state) =
+                                    pending_auth.get_mut(subject_id)
                                 {
                                     state.ownership_version = new_version;
-                                    state.cached_without_aux = Some(
-                                        CachedWithoutAux {
+                                    state.cached_without_aux =
+                                        Some(CachedWithoutAux {
                                             sender: sender_key,
                                             gov_version,
                                             ownership_version: new_version,
                                             status: None,
                                             window_sn: None,
-                                        },
-                                    );
+                                        });
                                     incremental_done = true;
                                 }
                                 // Re-borrow for the trailing bookkeeping below.
-                                state = pending_auth
-                                    .get_mut(subject_id)
-                                    .ok_or(
+                                state =
+                                    pending_auth.get_mut(subject_id).ok_or(
                                         DistributorError::ReceiverNoAccess,
                                     )?;
                             } else {
@@ -1640,45 +1614,45 @@ impl DistriWorker {
                                     pending_auth.get_mut(subject_id)
                                 {
                                     state.ownership_version = new_version;
-                                    state.cached_without_aux = Some(
-                                        CachedWithoutAux {
+                                    state.cached_without_aux =
+                                        Some(CachedWithoutAux {
                                             sender: sender_key,
                                             gov_version,
                                             ownership_version: new_version,
                                             status: None,
                                             window_sn: None,
-                                        },
-                                    );
+                                        });
                                     incremental_done = true;
                                 }
                                 // Re-borrow for the trailing bookkeeping below.
-                                state = pending_auth
-                                    .get_mut(subject_id)
-                                    .ok_or(
+                                state =
+                                    pending_auth.get_mut(subject_id).ok_or(
                                         DistributorError::ReceiverNoAccess,
                                     )?;
                             }
                         } else {
-                        // New old key, if Confirm/Reject closed one entry.
-                        let new_key: Option<PublicKey> = {
-                            use ave_common::bridge::request::EventRequestType;
-                            match current[0].get_event_request_type() {
-                                EventRequestType::Confirm => before.as_ref().map(
-                                    |(actual, _, _, _, _)| actual.clone(),
-                                ),
-                                EventRequestType::Reject => before.as_ref().and_then(
-                                    |(_, pending, _, _, _)| {
-                                        pending.as_ref().map(
-                                            |(owner, _)| owner.clone(),
-                                        )
-                                    },
-                                ),
-                                _ => None,
-                            }
-                        };
-                        // Minimal projection: new actual/pending plus at
-                        // most one old entry. Transfers carry no new old.
-                        let minimal = state.transfer_data.as_ref().and_then(
+                            // New old key, if Confirm/Reject closed one entry.
+                            let new_key: Option<PublicKey> = {
+                                use ave_common::bridge::request::EventRequestType;
+                                match current[0].get_event_request_type() {
+                                    EventRequestType::Confirm => before
+                                        .as_ref()
+                                        .map(|(actual, _, _, _, _)| {
+                                            actual.clone()
+                                        }),
+                                    EventRequestType::Reject => before
+                                        .as_ref()
+                                        .and_then(|(_, pending, _, _, _)| {
+                                            pending
+                                                .as_ref()
+                                                .map(|(owner, _)| owner.clone())
+                                        }),
+                                    _ => None,
+                                }
+                            };
+                            // Minimal projection: new actual/pending plus at
+                            // most one old entry. Transfers carry no new old.
+                            let minimal = state.transfer_data.as_ref().and_then(
                             |data| {
                                 let mut olds = HashMap::new();
                                 if let Some(key) = new_key.as_ref()
@@ -1707,76 +1681,64 @@ impl DistriWorker {
                                 )
                             },
                         );
-                        if let Some(light) = minimal {
-                            let _delta_len =
-                                light.old_owners.len() as u64;
-                            // Snapshot the cached best before releasing
-                            // the borrow for the witness call.
-                            let prev_status =
-                                cached.status.clone().expect(
-                                    "checked Some above",
+                            if let Some(light) = minimal {
+                                let _delta_len = light.old_owners.len() as u64;
+                                // Snapshot the cached best before releasing
+                                // the borrow for the witness call.
+                                let prev_status = cached
+                                    .status
+                                    .clone()
+                                    .expect("checked Some above");
+                                let prev_window = cached.window_sn;
+                                let gov_version = common.gov_version;
+                                let governance_id =
+                                    common.governance_id.clone();
+                                let namespace = common.namespace.clone();
+                                let schema_id = common.schema_id.clone();
+                                let sender_key = sender.clone();
+                                let our_key_owned = (*our_key).clone();
+                                let first = held
+                                    .first()
+                                    .or_else(|| current.first())
+                                    .cloned()
+                                    .ok_or(
+                                        DistributorError::ReceiverNoAccess,
+                                    )?;
+                                let owner_ctx_owner =
+                                    first.ledger_seal_signature.signer.clone();
+                                let owner_ctx_gov = first.gov_version;
+                                let outcome = check_witness_status_and_window(
+                                    ctx,
+                                    &governance_id,
+                                    subject_id,
+                                    Some(light),
+                                    TrackerPeers {
+                                        node: our_key_owned,
+                                        sender: sender_key.clone(),
+                                    },
+                                    TrackerParams {
+                                        namespace,
+                                        schema_id,
+                                        actual_sn: None,
+                                    },
+                                    OwnerContext {
+                                        owner: Some(owner_ctx_owner),
+                                        gov_version: Some(owner_ctx_gov),
+                                    },
+                                )
+                                .await;
+                                #[cfg(feature = "test")]
+                                Self::note_ownership_work(
+                                    ctx, subject_id, _delta_len, _delta_len,
                                 );
-                            let prev_window = cached.window_sn;
-                            let gov_version = common.gov_version;
-                            let governance_id =
-                                common.governance_id.clone();
-                            let namespace =
-                                common.namespace.clone();
-                            let schema_id = common.schema_id.clone();
-                            let sender_key = sender.clone();
-                            let our_key_owned =
-                                (*our_key).clone();
-                            let first = held
-                                .first()
-                                .or_else(|| current.first())
-                                .cloned()
-                                .ok_or(
-                                    DistributorError::ReceiverNoAccess,
-                                )?;
-                            let owner_ctx_owner = first
-                                .ledger_seal_signature
-                                .signer
-                                .clone();
-                            let owner_ctx_gov = first.gov_version;
-                            let outcome = check_witness_status_and_window(
-                                ctx,
-                                &governance_id,
-                                subject_id,
-                                Some(light),
-                                TrackerPeers {
-                                    node: our_key_owned,
-                                    sender: sender_key.clone(),
-                                },
-                                TrackerParams {
-                                    namespace,
-                                    schema_id,
-                                    actual_sn: None,
-                                },
-                                OwnerContext {
-                                    owner: Some(owner_ctx_owner),
-                                    gov_version: Some(owner_ctx_gov),
-                                },
-                            )
-                            .await;
-                            #[cfg(feature = "test")]
-                            Self::note_ownership_work(
-                                ctx,
-                                subject_id,
-                                _delta_len,
-                                _delta_len,
-                            );
-                            if let Ok((
-                                new_status,
-                                new_window,
-                                ..
-                            )) = outcome
-                            {
-                                if let Some(state) = pending_auth
-                                    .get_mut(subject_id)
+                                if let Ok((new_status, new_window, ..)) =
+                                    outcome
                                 {
-                                    state.ownership_version =
-                                        new_version;
-                                    state.cached_without_aux = Some(
+                                    if let Some(state) =
+                                        pending_auth.get_mut(subject_id)
+                                    {
+                                        state.ownership_version = new_version;
+                                        state.cached_without_aux = Some(
                                         CachedWithoutAux {
                                             sender: sender_key,
                                             gov_version,
@@ -1822,16 +1784,15 @@ impl DistriWorker {
                                                 .max(),
                                         },
                                     );
-                                    incremental_done = true;
+                                        incremental_done = true;
+                                    }
                                 }
+                                // Re-borrow for the trailing bookkeeping below.
+                                state =
+                                    pending_auth.get_mut(subject_id).ok_or(
+                                        DistributorError::ReceiverNoAccess,
+                                    )?;
                             }
-                            // Re-borrow for the trailing bookkeeping below.
-                            state = pending_auth
-                                .get_mut(subject_id)
-                                .ok_or(
-                                    DistributorError::ReceiverNoAccess,
-                                )?;
-                        }
                         }
                     }
                     if !incremental_done {
@@ -1918,7 +1879,8 @@ impl DistriWorker {
                 Some(cached)
                     if cached.sender == sender
                         && cached.gov_version == common.gov_version
-                        && cached.ownership_version == state.ownership_version =>
+                        && cached.ownership_version
+                            == state.ownership_version =>
                 {
                     Some(cached.clone())
                 }
@@ -2817,8 +2779,7 @@ impl DistriWorker {
         );
         #[cfg(feature = "test")]
         let staged_len = batch.len() as u64;
-        let evicted =
-            self.deferred.stage(subject_id, batch, applied_tip);
+        let evicted = self.deferred.stage(subject_id, batch, applied_tip);
         for evicted_subject in &evicted {
             self.verify_cursors.invalidate(evicted_subject);
             self.pending_auth.remove(evicted_subject);
@@ -3248,9 +3209,7 @@ impl DistriWorker {
         // the store itself rejects oversized ranges, and honest
         // batches stay near ledger_batch_size. Oversized batches
         // are dropped.
-        if ledger.len()
-            > crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS
-        {
+        if ledger.len() > crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS {
             warn!(
                 msg_type = "LedgerDistribution",
                 sender = %sender,
@@ -3435,10 +3394,8 @@ impl DistriWorker {
         if transfer_simulation
             == Some(TransferSimulationResult::WitnessUnproven)
         {
-            let offered_hi = ledger
-                .last()
-                .map(|event| event.sn)
-                .unwrap_or(first_sn);
+            let offered_hi =
+                ledger.last().map(|event| event.sn).unwrap_or(first_sn);
             // Borrow disjoint fields at once: the held view for the
             // chain, the verifier and keys for the check, and the
             // auth cache mutably for the incremental state.
@@ -3462,12 +3419,8 @@ impl DistriWorker {
             } else {
                 let applied_tip =
                     get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
-                let evicted = self.stage_deferred(
-                    ctx,
-                    &subject_id,
-                    ledger,
-                    applied_tip,
-                );
+                let evicted =
+                    self.stage_deferred(ctx, &subject_id, ledger, applied_tip);
                 for evicted_subject in &evicted {
                     self.verify_cursors.invalidate(evicted_subject);
                     self.pending_auth.remove(evicted_subject);
@@ -3626,9 +3579,7 @@ pub enum DistriWorkerMessage {
     /// eviction, while keeping any staged prefix. Lets a test
     /// prove the rebuild path rejoins the deferred chain.
     #[cfg(feature = "test")]
-    TestEvictVerifyCursor {
-        subject_id: DigestIdentifier,
-    },
+    TestEvictVerifyCursor { subject_id: DigestIdentifier },
 }
 
 impl Message for DistriWorkerMessage {}
@@ -3822,10 +3773,9 @@ impl Handler<Self> for DistriWorker {
             }
             #[cfg(feature = "test")]
             DistriWorkerMessage::TestFailNextTrackerResolve => {
-                self.transfer_verifier.test_tracker_resolve_fault.store(
-                    1,
-                    std::sync::atomic::Ordering::SeqCst,
-                );
+                self.transfer_verifier
+                    .test_tracker_resolve_fault
+                    .store(1, std::sync::atomic::Ordering::SeqCst);
                 debug!(
                     msg_type = "TestFailNextTrackerResolve",
                     "Armed one-shot tracker resolve fault"
@@ -3893,14 +3843,13 @@ mod tests {
                     validation_req_signature: sig.clone(),
                     validation_req_hash: DigestIdentifier::default(),
                     validators_signatures: Vec::new(),
-                    validation_metadata:
-                        ValidationMetadata::ModifiedHash {
-                            modified_metadata_without_propierties_hash:
-                                DigestIdentifier::default(),
-                            propierties_hash: DigestIdentifier::default(),
-                            event_request_hash: DigestIdentifier::default(),
-                            viewpoints_hash: DigestIdentifier::default(),
-                        },
+                    validation_metadata: ValidationMetadata::ModifiedHash {
+                        modified_metadata_without_propierties_hash:
+                            DigestIdentifier::default(),
+                        propierties_hash: DigestIdentifier::default(),
+                        event_request_hash: DigestIdentifier::default(),
+                        viewpoints_hash: DigestIdentifier::default(),
+                    },
                 },
                 data: OpaqueData {
                     subject_id: DigestIdentifier::default(),
@@ -3915,8 +3864,7 @@ mod tests {
     fn frozen_gov_window_scans_once_then_reuses() {
         let mut state = PendingAuthState::fresh(false);
         state.max_gov_version = 2;
-        let held =
-            vec![window_ledger(0, 1), window_ledger(1, 2)];
+        let held = vec![window_ledger(0, 1), window_ledger(1, 2)];
         let current = vec![window_ledger(2, 2)];
         let (first, scanned) = DistriWorker::gov_window_limit_combined(
             &mut state,
