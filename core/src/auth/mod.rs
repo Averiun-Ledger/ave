@@ -664,11 +664,20 @@ impl Handler<Self> for SubjectAccess {
                         description: "The subject has no witnesses to try to ask for an update".to_owned(),
                     });
                 } else {
+                    // The run carries the snapshot this call just
+                    // computed: a live update adopts the new
+                    // witnesses, local sn and kind instead of
+                    // repeating its initial sweep.
+                    let run = UpdateMessage::Run {
+                        witnesses: witnesses.clone(),
+                        our_sn: actual_sn,
+                        subject_kind_hint,
+                    };
                     let data = UpdateNew {
                         network,
                         subject_id: subject_id.clone(),
                         our_sn: actual_sn,
-                        witnesses,
+                        witnesses: witnesses.clone(),
                         update_type: UpdateType::Auth,
                         subject_kind_hint,
                         round_retry_interval_secs: self
@@ -683,7 +692,7 @@ impl Handler<Self> for SubjectAccess {
                     if let Ok(child) =
                         ctx.create_child(&subject_id.to_string(), updater).await
                     {
-                        if let Err(e) = child.tell(UpdateMessage::Run).await {
+                        if let Err(e) = child.tell(run).await {
                             error!(
                                 msg_type = "Update",
                                 subject_id = %subject_id,
@@ -715,8 +724,13 @@ impl Handler<Self> for SubjectAccess {
                             .await
                         {
                             Ok(running) => {
-                                if let Err(e) =
-                                    running.tell(UpdateMessage::Run).await
+                                if let Err(e) = running
+                                    .tell(UpdateMessage::Run {
+                                        witnesses: witnesses.clone(),
+                                        our_sn: actual_sn,
+                                        subject_kind_hint,
+                                    })
+                                    .await
                                 {
                                     error!(
                                         msg_type = "Update",

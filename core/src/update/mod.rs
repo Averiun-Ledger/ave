@@ -270,6 +270,7 @@ impl Update {
 
     async fn request_distribution(
         &self,
+        ctx: &ActorContext<Self>,
         witness: PublicKey,
         target_sn: Option<u64>,
         already_verified_transfer_sn: Option<u64>,
@@ -277,18 +278,36 @@ impl Update {
         let info = ComunicateInfo {
             receiver: witness,
             request_id: String::default(),
-            version: 0,
+            // Generation of the requesting sweep: the receiver
+            // echoes it back on every batch, so the completion can
+            // only stop this round, never a restarted one.
+            version: self.retry_round,
             receiver_actor: format!(
                 "/user/node/distributor_{}",
                 self.subject_id
             ),
         };
 
+        // Scope the copy to our own governance: the receiver
+        // rejects any Create outside it before writing.
+        let expected_governance_id =
+            match get_subject_data(ctx, &self.subject_id).await.ok().flatten()
+            {
+                Some(SubjectData::Tracker { governance_id, .. }) => {
+                    Some(governance_id)
+                }
+                Some(SubjectData::Governance { .. }) => {
+                    Some(self.subject_id.clone())
+                }
+                None => None,
+            };
+
         let message = ActorMessage::DistributionLedgerReq {
             actual_sn: self.our_sn,
             target_sn,
             subject_id: self.subject_id.clone(),
             already_verified_transfer_sn,
+            expected_governance_id,
         };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
@@ -403,7 +422,11 @@ impl Update {
 
 #[derive(Debug, Clone)]
 pub enum UpdateMessage {
-    Run,
+    Run {
+        witnesses: HashSet<PublicKey>,
+        our_sn: Option<u64>,
+        subject_kind_hint: Option<UpdateSubjectKind>,
+    },
     RetryRound {
         expected_target_sn: u64,
         round: u64,
@@ -417,6 +440,7 @@ pub enum UpdateMessage {
     },
     DistributionDone {
         sn: u64,
+        round: u64,
     },
 }
 
@@ -450,7 +474,11 @@ impl Handler<Self> for Update {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         match msg {
-            UpdateMessage::Run => {
+            UpdateMessage::Run {
+                witnesses,
+                our_sn,
+                subject_kind_hint,
+            } => {
                 self.retry_attempt = 0;
                 // A restart must not inherit the previous round's
                 // timer: drop it and invalidate its token, or a stale
@@ -459,6 +487,15 @@ impl Handler<Self> for Update {
                     ctx.cancel_timer(key);
                 }
                 self.retry_token = self.retry_token.saturating_add(1);
+                // Every run opens a new generation, restarts included:
+                // child names, offer rounds, copy versions and
+                // completions all move together, so a retained answer
+                // from the previous sweep never passes the new
+                // filters.
+                self.retry_round = self.retry_round.saturating_add(1);
+                self.all_witnesses = witnesses;
+                self.our_sn = our_sn;
+                self.subject_kind_hint = subject_kind_hint;
                 self.reset_round();
                 let start_mode = match self.create_updates(ctx).await {
                     Ok(start_mode) => start_mode,
@@ -626,6 +663,7 @@ impl Handler<Self> for Update {
                             }
                             if let Err(e) = self
                                 .request_distribution(
+                                    ctx,
                                     better_node.clone(),
                                     Some(target_sn),
                                     verified_sn,
@@ -780,7 +818,13 @@ impl Handler<Self> for Update {
                     );
                 }
             }
-            UpdateMessage::DistributionDone { sn } => {
+            UpdateMessage::DistributionDone { sn, round } => {
+                // A completion from another generation must not stop
+                // this round: only the sweep that requested the copy
+                // may close its own timer.
+                if round != self.retry_round {
+                    return Ok(());
+                }
                 // Fast stop on proven completion: the distributor
                 // reached the supervised target, so the retry timer
                 // is moot. Anything below the target is a partial

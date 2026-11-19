@@ -220,8 +220,11 @@ pub async fn update_ledger_network(
     let request = ActorMessage::DistributionLedgerReq {
         actual_sn: Some(data.sn),
         target_sn: None,
-        subject_id: data.subject_id,
+        subject_id: data.subject_id.clone(),
         already_verified_transfer_sn: None,
+        // Governance catch-up is always scoped to the governance
+        // being fetched, which is the subject itself.
+        expected_governance_id: Some(data.subject_id),
     };
 
     let info = ComunicateInfo {

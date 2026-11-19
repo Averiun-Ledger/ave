@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
     Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
+    TimerKey,
 };
-use ave_common::identity::PublicKey;
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
 
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
     helpers::network::service::NetworkSender,
     metrics::try_core_metrics,
     model::{common::crash_system, event::Ledger, network::RetryNetwork},
+    system::ConfigHelper,
 };
 
 use tracing::{Span, debug, error, info_span, warn};
@@ -22,6 +24,26 @@ use super::{Distribution, DistributionMessage, error::DistributorError};
 pub struct DistriCoordinator {
     pub node_key: PublicKey,
     pub network: Arc<NetworkSender>,
+    /// Hash of the exact event bytes sent on this route, computed
+    /// with the configured algorithm. A response is accepted only
+    /// when it names this hash: the sender alone can not close a
+    /// newer generation with an older ack, while a resent ack for
+    /// this same event stays idempotent.
+    pub(crate) expected_event_hash: Option<DigestIdentifier>,
+    /// Fragments of an oversized event awaiting their ack, with the
+    /// resend timer and tries left. `None` in single-message mode.
+    pub(crate) frag_pending: Option<FragSendState>,
+    pub(crate) frag_timer: Option<TimerKey>,
+}
+
+/// Resend state for an oversized pushed event: the fragments go out
+/// together and are resent together until the hash-verified ack
+/// arrives or the tries run out.
+pub(crate) struct FragSendState {
+    frags: Vec<ActorMessage>,
+    request_id: String,
+    receiver_actor: String,
+    tries_left: u32,
 }
 
 #[async_trait]
@@ -44,20 +66,232 @@ impl Actor for DistriCoordinator {
 #[derive(Debug, Clone)]
 pub enum DistriCoordinatorMessage {
     EndRetry,
+    FragRetry,
     // Enviar a un nodo la replicación.
     NetworkDistribution {
         request_id: String,
         ledger: Box<Ledger>,
     },
-    // El nodo al que le enviamos la replica la recivió, parar los reintentos.
+    // The node the replica was sent to acknowledged receipt,
+    // naming the event it received. Only the matching generation
+    // completes; anything else is a stale or forged ack that must
+    // leave the retry alive.
     NetworkResponse {
         sender: PublicKey,
+        event_hash: DigestIdentifier,
     },
 }
 
 impl Message for DistriCoordinatorMessage {}
 
 impl NotPersistentActor for DistriCoordinator {}
+
+impl DistriCoordinator {
+    /// Shared timeout close for both modes: the retry (or the
+    /// fragments) never got their verified ack, so the witness
+    /// leaves the pending set recorded as unacked.
+    async fn finish_with_timeout(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if let Some(key) = self.frag_timer.take() {
+            ctx.cancel_timer(key);
+        }
+        self.frag_pending = None;
+        if let Some(metrics) = try_core_metrics() {
+            metrics.observe_protocol_event("distribution", "witness_timeout");
+        }
+        warn!(
+            msg_type = "Coordinator",
+            node_key = %self.node_key,
+            "Retry exhausted, notifying parent and stopping"
+        );
+
+        match ctx.get_parent::<Distribution>().await {
+            Ok(distribution_actor) => {
+                if let Err(e) = distribution_actor
+                    .tell(DistributionMessage::Timeout {
+                        sender: self.node_key.clone(),
+                    })
+                    .await
+                {
+                    error!(
+                        msg_type = "Coordinator",
+                        node_key = %self.node_key,
+                        "Failed to notify parent distribution actor after retry exhausted"
+                    );
+                    crash_system(ctx, e).await;
+                } else {
+                    debug!(
+                        msg_type = "Coordinator",
+                        node_key = %self.node_key,
+                        "Parent distribution actor notified of retry exhaustion"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    msg_type = "Coordinator",
+                    node_key = %self.node_key,
+                    error = %e,
+                    "Failed to get parent distribution actor after retry exhausted"
+                );
+                crash_system(ctx, e).await;
+            }
+        }
+
+        ctx.stop(None).await;
+        Ok(())
+    }
+
+    /// Arms the fragment resend timer with the same cadence as the
+    /// single-message retry.
+    fn arm_frag_timer(
+        &mut self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<(), ActorError> {
+        if let Some(key) = self.frag_timer.take() {
+            ctx.cancel_timer(key);
+        }
+        #[cfg(any(test, feature = "test"))]
+        let interval = Duration::from_secs(2);
+        #[cfg(not(any(test, feature = "test")))]
+        let interval = Duration::from_secs(30);
+        let key =
+            ctx.schedule_once(interval, DistriCoordinatorMessage::FragRetry)?;
+        self.frag_timer = Some(key);
+        Ok(())
+    }
+
+    /// Sends every fragment with the route identity the ack must
+    /// come back on. Each frame is validated by the sender check,
+    /// so an oversize computation here fails loud instead of
+    /// looping.
+    async fn send_frags(
+        &self,
+        frags: &[ActorMessage],
+        request_id: &str,
+        receiver_actor: &str,
+    ) -> Result<(), ActorError> {
+        for frag in frags {
+            let message = NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: request_id.to_owned(),
+                    version: 0,
+                    receiver: self.node_key.clone(),
+                    receiver_actor: receiver_actor.to_owned(),
+                },
+                frag.clone(),
+            );
+            self.network
+                .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: crate::helpers::network::delivery_of(frag),
+                    message,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Fragmented send for an event that exceeds the wire cap: split
+    /// by identity, resent together until the hash-verified ack, and
+    /// closed through the same parent timeout when exhausted.
+    async fn send_fragmented(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        config: &ConfigHelper,
+        request_id: String,
+        receiver_actor: String,
+        ledger: Box<Ledger>,
+    ) -> Result<(), ActorError> {
+        use super::worker::DistriWorker;
+
+        let subject_id = ledger.get_subject_id();
+        let sn = ledger.sn;
+        let Some(expected) = self.expected_event_hash.clone() else {
+            error!(
+                msg_type = "NetworkDistribution",
+                subject_id = %subject_id,
+                sn = sn,
+                "Missing ack identity for fragmented event"
+            );
+            return Err(ActorError::Functional {
+                description: "Missing ack identity for fragmented event"
+                    .to_owned(),
+            });
+        };
+        let bytes = borsh::to_vec(&*ledger).map_err(|e| {
+            ActorError::Functional {
+                description: format!(
+                    "Can not encode fragmented event: {e}"
+                ),
+            }
+        })?;
+        let total_bytes = bytes.len() as u64;
+        let chunk_size =
+            DistriWorker::fragment_chunk_size(config.max_message_bytes);
+        let chunk_total = bytes.len().div_ceil(chunk_size) as u32;
+        if chunk_total == 0
+            || chunk_total > DistriWorker::MAX_FRAGMENTS_PER_EVENT
+        {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Fragmented event needs {chunk_total} chunks, out of bounds"
+                ),
+            });
+        }
+        let mut frags = Vec::with_capacity(chunk_total as usize);
+        for (index, piece) in bytes.chunks(chunk_size).enumerate() {
+            frags.push(ActorMessage::DistributionLedgerFrag {
+                subject_id: subject_id.clone(),
+                event_hash: expected.clone(),
+                event_sn: sn,
+                total_bytes,
+                chunk_index: index as u32,
+                chunk_total,
+                chunk: piece.to_vec(),
+                // A push carries the sender tip: it completes the
+                // response it belongs to.
+                is_all: true,
+                is_push: true,
+                // Pushes carry no pull scope.
+                expected_governance_id: None,
+            });
+        }
+        self.send_frags(&frags, &request_id, &receiver_actor).await?;
+
+        #[cfg(any(test, feature = "test"))]
+        let tries = 2u32;
+        #[cfg(not(any(test, feature = "test")))]
+        let tries = 3u32;
+        self.frag_pending = Some(FragSendState {
+            frags,
+            request_id,
+            receiver_actor,
+            tries_left: tries,
+        });
+        if let Err(e) = self.arm_frag_timer(ctx) {
+            error!(
+                msg_type = "NetworkDistribution",
+                subject_id = %subject_id,
+                sn = sn,
+                error = %e,
+                "Failed to arm fragment retry"
+            );
+            return Err(crash_system(ctx, e).await);
+        }
+
+        debug!(
+            msg_type = "NetworkDistribution",
+            subject_id = %subject_id,
+            sn = sn,
+            node_key = %self.node_key,
+            chunks = chunk_total,
+            "Oversized event fragmented for distribution"
+        );
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl Handler<Self> for DistriCoordinator {
@@ -69,52 +303,45 @@ impl Handler<Self> for DistriCoordinator {
     ) -> Result<(), ActorError> {
         match msg {
             DistriCoordinatorMessage::EndRetry => {
-                if let Some(metrics) = try_core_metrics() {
-                    metrics.observe_protocol_event(
-                        "distribution",
-                        "witness_timeout",
+                self.finish_with_timeout(ctx).await?;
+            }
+            DistriCoordinatorMessage::FragRetry => {
+                let Some(mut pending) = self.frag_pending.take() else {
+                    return Ok(());
+                };
+                if pending.tries_left == 0 {
+                    self.finish_with_timeout(ctx).await?;
+                    return Ok(());
+                }
+                pending.tries_left = pending.tries_left.saturating_sub(1);
+                // Best effort resend: a failed fragment rides the
+                // next retry, and exhaustion still closes loudly
+                // through the timeout below.
+                if let Err(e) = self
+                    .send_frags(
+                        &pending.frags,
+                        &pending.request_id,
+                        &pending.receiver_actor,
+                    )
+                    .await
+                {
+                    warn!(
+                        msg_type = "FragRetry",
+                        node_key = %self.node_key,
+                        error = %e,
+                        "Failed to resend fragments, keeping retry alive"
                     );
                 }
-                warn!(
-                    msg_type = "Coordinator",
-                    node_key = %self.node_key,
-                    "Retry exhausted, notifying parent and stopping"
-                );
-
-                match ctx.get_parent::<Distribution>().await {
-                    Ok(distribution_actor) => {
-                        if let Err(e) = distribution_actor
-                            .tell(DistributionMessage::Timeout {
-                                sender: self.node_key.clone(),
-                            })
-                            .await
-                        {
-                            error!(
-                                msg_type = "Coordinator",
-                                node_key = %self.node_key,
-                                "Failed to notify parent distribution actor after retry exhausted"
-                            );
-                            crash_system(ctx, e).await;
-                        } else {
-                            debug!(
-                                msg_type = "Coordinator",
-                                node_key = %self.node_key,
-                                "Parent distribution actor notified of retry exhaustion"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            msg_type = "Coordinator",
-                            node_key = %self.node_key,
-                            error = %e,
-                            "Failed to get parent distribution actor after retry exhausted"
-                        );
-                        crash_system(ctx, e).await;
-                    }
+                self.frag_pending = Some(pending);
+                if let Err(e) = self.arm_frag_timer(ctx) {
+                    error!(
+                        msg_type = "FragRetry",
+                        node_key = %self.node_key,
+                        error = %e,
+                        "Failed to rearm fragment retry"
+                    );
+                    return Err(crash_system(ctx, e).await);
                 }
-
-                ctx.stop(None).await;
             }
             DistriCoordinatorMessage::NetworkDistribution {
                 request_id,
@@ -123,8 +350,75 @@ impl Handler<Self> for DistriCoordinator {
                 let subject_id = ledger.get_subject_id();
                 let sn = ledger.sn;
 
+                // Bind this generation to the exact event bytes on
+                // the wire (already projected per recipient by the
+                // parent): the ack must name it back.
+                let Some(config) =
+                    ctx.system().get_helper::<ConfigHelper>("config")
+                else {
+                    error!(
+                        msg_type = "NetworkDistribution",
+                        subject_id = %subject_id,
+                        sn = sn,
+                        "Config helper not found while binding ack identity"
+                    );
+                    return Err(ActorError::Helper {
+                        name: "config".to_owned(),
+                        reason: "Not found".to_owned(),
+                    });
+                };
+                match ledger.ledger_hash(config.hash_algorithm) {
+                    Ok(event_hash) => {
+                        self.expected_event_hash = Some(event_hash);
+                    }
+                    Err(e) => {
+                        error!(
+                            msg_type = "NetworkDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            error = %e,
+                            "Failed to hash distributed event"
+                        );
+                        return Err(ActorError::Functional {
+                            description: format!(
+                                "Can not hash distributed event: {e}"
+                            ),
+                        });
+                    }
+                }
+
                 let receiver_actor =
                     format!("/user/node/distributor_{}", subject_id);
+
+                // An event that fits the cap travels whole with the
+                // usual retry; an oversized one is fragmented by
+                // identity instead of looping on a batch the
+                // transport must drop.
+                let probe = NetworkMessage::new(
+                    ComunicateInfo {
+                        request_id: request_id.to_string(),
+                        version: 0,
+                        receiver: self.node_key.clone(),
+                        receiver_actor: receiver_actor.clone(),
+                    },
+                    ActorMessage::DistributionLastEventReq {
+                        ledger: ledger.clone(),
+                    },
+                );
+                let fits = rmp_serde::to_vec(&probe)
+                    .map(|bytes| bytes.len() <= config.max_message_bytes)
+                    .unwrap_or(false);
+                if !fits {
+                    return self
+                        .send_fragmented(
+                            ctx,
+                            &config,
+                            request_id,
+                            receiver_actor,
+                            ledger,
+                        )
+                        .await;
+                }
 
                 let message = NetworkMessage::new(
                     ComunicateInfo {
@@ -198,7 +492,10 @@ impl Handler<Self> for DistriCoordinator {
                     "Distribution retry initiated"
                 );
             }
-            DistriCoordinatorMessage::NetworkResponse { sender } => {
+            DistriCoordinatorMessage::NetworkResponse {
+                sender,
+                event_hash,
+            } => {
                 if sender != self.node_key {
                     error!(
                         msg_type = "NetworkResponse",
@@ -208,6 +505,27 @@ impl Handler<Self> for DistriCoordinator {
                     );
                     return Err(DistributorError::UnexpectedSender.into());
                 }
+                if self.expected_event_hash.as_ref() != Some(&event_hash) {
+                    // Stale ack from a previous generation on this
+                    // route, or a mismatched claim: ignore it without
+                    // touching the retry, the parent or this actor.
+                    warn!(
+                        msg_type = "NetworkResponse",
+                        sender = %sender,
+                        expected = ?self.expected_event_hash,
+                        received = %event_hash,
+                        "Ignoring ack for another event generation"
+                    );
+                    return Ok(());
+                }
+
+                // The verified ack completes this generation in both
+                // modes: drop any fragment resend timer alongside the
+                // retry actor below.
+                if let Some(key) = self.frag_timer.take() {
+                    ctx.cancel_timer(key);
+                }
+                self.frag_pending = None;
 
                 match ctx.get_parent::<Distribution>().await {
                     Ok(distribution_actor) => {

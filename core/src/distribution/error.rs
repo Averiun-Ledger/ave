@@ -76,6 +76,14 @@ pub enum DistributorError {
     #[error("batch mixes events from different subjects")]
     MixedSubjectBatch,
 
+    #[error(
+        "create event declares governance {found} outside the requested scope {expected}"
+    )]
+    UnexpectedGovernance {
+        expected: DigestIdentifier,
+        found: DigestIdentifier,
+    },
+
     #[error("transfer event verification failed: {details}")]
     TransferEventInvalid { details: String },
 }
@@ -102,6 +110,7 @@ impl From<DistributorError> for ActorError {
             | DistributorError::TrackerBanned
             | DistributorError::MissingGovernanceId { .. }
             | DistributorError::MissingGovernanceIdInCreate { .. }
+            | DistributorError::UnexpectedGovernance { .. }
             | DistributorError::UpTrackerFailed { .. }
             | DistributorError::UpdateLedgerFailed { .. } => Self::Functional {
                 description: error.to_string(),

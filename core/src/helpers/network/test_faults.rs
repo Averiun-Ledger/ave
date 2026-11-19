@@ -44,6 +44,7 @@ pub enum FaultMessage {
     DistributionLastEventRes,
     DistributionLedgerReq,
     DistributionLedgerRes,
+    DistributionLedgerFrag,
     DistributionGetLastSn,
     UpdateNoOffer,
     UpdateOffer,
@@ -86,7 +87,7 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         ActorMessage::DistributionLastEventReq { .. } => {
             FaultMessage::DistributionLastEventReq
         }
-        ActorMessage::DistributionLastEventRes => {
+        ActorMessage::DistributionLastEventRes { .. } => {
             FaultMessage::DistributionLastEventRes
         }
         ActorMessage::DistributionLedgerReq { .. } => {
@@ -94,6 +95,9 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         }
         ActorMessage::DistributionLedgerRes { .. } => {
             FaultMessage::DistributionLedgerRes
+        }
+        ActorMessage::DistributionLedgerFrag { .. } => {
+            FaultMessage::DistributionLedgerFrag
         }
         ActorMessage::DistributionGetLastSn { .. } => {
             FaultMessage::DistributionGetLastSn
@@ -195,6 +199,9 @@ pub struct TestFaultRegistry {
     before_apply_paused: bool,
     before_apply_attempt: Option<u64>,
     before_apply_worker: Option<String>,
+    after_acquire_holds: u64,
+    after_acquire_paused: bool,
+    after_acquire_attempt: Option<u64>,
     post_success_holds: u64,
     post_success_paused: bool,
     post_success_attempt: Option<u64>,
@@ -220,6 +227,9 @@ impl TestFaultRegistry {
             before_apply_paused: false,
             before_apply_attempt: None,
             before_apply_worker: None,
+            after_acquire_holds: 0,
+            after_acquire_paused: false,
+            after_acquire_attempt: None,
             post_success_holds: 0,
             post_success_paused: false,
             post_success_attempt: None,
@@ -322,6 +332,30 @@ impl TestFaultRegistry {
 
     pub fn before_apply_paused(&self) -> bool {
         self.before_apply_paused
+    }
+
+    /// Records a post-acquire barrier hit: the copy owns its lease
+    /// but has not applied anything yet. Lets a test interleave a
+    /// concurrent attempt while the guard is provably held.
+    pub fn note_after_acquire_hold(&mut self, attempt: u64) {
+        self.after_acquire_holds += 1;
+        self.after_acquire_attempt.get_or_insert(attempt);
+    }
+
+    pub fn after_acquire_attempt(&self) -> Option<u64> {
+        self.after_acquire_attempt
+    }
+
+    pub fn after_acquire_hold_count(&self) -> u64 {
+        self.after_acquire_holds
+    }
+
+    pub fn set_after_acquire_paused(&mut self, paused: bool) {
+        self.after_acquire_paused = paused;
+    }
+
+    pub fn after_acquire_paused(&self) -> bool {
+        self.after_acquire_paused
     }
 
     pub fn note_post_success_hold(&mut self, attempt: u64) {

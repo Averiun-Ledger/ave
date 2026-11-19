@@ -73,6 +73,46 @@ pub struct TrackerReconcileReport {
     pub writes_resent: u64,
 }
 
+/// Test-only reconcile workload counters: the last boot report per
+/// subject, so a regression test can pin the exact replay size
+/// instead of inferring it from converged state. Same lifetime
+/// and threading as the other test-only registries.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub struct ReconcileStatsRegistry {
+    reports: std::collections::HashMap<
+        ave_common::identity::DigestIdentifier,
+        (u64, u64),
+    >,
+}
+
+/// Test-only shared reconcile counters, exposed through the
+/// `reconcile_stats` helper.
+#[cfg(feature = "test")]
+pub type SharedReconcileStats =
+    std::sync::Arc<std::sync::Mutex<ReconcileStatsRegistry>>;
+
+#[cfg(feature = "test")]
+impl ReconcileStatsRegistry {
+    fn note(
+        &mut self,
+        subject_id: &ave_common::identity::DigestIdentifier,
+        report: &TrackerReconcileReport,
+    ) {
+        self.reports.insert(
+            subject_id.clone(),
+            (report.versions_seen, report.writes_resent),
+        );
+    }
+
+    pub fn snapshot(
+        &self,
+        subject_id: &ave_common::identity::DigestIdentifier,
+    ) -> (u64, u64) {
+        self.reports.get(subject_id).copied().unwrap_or_default()
+    }
+}
+
 /// Folded replay state: the previous event (for the
 /// version-transition sn write). Every replayed write derives from
 /// the event itself, and visibility mode resolves to tip state
@@ -180,7 +220,10 @@ impl Tracker {
                 break;
             }
             for event in &events {
-                last_sn = last_sn.max(event.sn);
+                // Advance past the processed event: the store range is
+                // inclusive on both ends, so resuming at max(sn) would
+                // re-apply the boundary event (non-idempotent).
+                last_sn = last_sn.max(event.sn.saturating_add(1));
                 self.reconcile_ledger_event(
                     ctx,
                     &sn_register,
@@ -232,6 +275,14 @@ impl Tracker {
             writes_resent = report.writes_resent,
             "Tracker boot reconciliation complete"
         );
+        #[cfg(feature = "test")]
+        if let Some(stats) = ctx
+            .system()
+            .get_helper::<SharedReconcileStats>("reconcile_stats")
+            && let Ok(mut guard) = stats.lock()
+        {
+            guard.note(&self.subject_metadata.subject_id, &report);
+        }
         Ok(report)
     }
 

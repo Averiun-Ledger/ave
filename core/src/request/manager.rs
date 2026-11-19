@@ -1618,6 +1618,24 @@ impl RequestManager {
         ledger: Ledger,
         distribution_plan: Vec<DistributionPlanEntry>,
     ) -> Result<(), RequestManagerError> {
+        // Defense in depth: a new event that even fragments could
+        // not carry is rejected before commit instead of persisting
+        // an unreplicable ledger. Reassembly-bound, not wire-bound:
+        // anything below it still replicates (fragmented past the
+        // wire cap), so already-persisted larger ledgers are a
+        // replication concern, never a commit error.
+        if borsh::to_vec(&ledger).map(|bytes| bytes.len()).unwrap_or(0)
+            > crate::distribution::worker::DistriWorker::MAX_FRAGMENT_EVENT_BYTES
+        {
+            return Err(RequestManagerError::ActorError(
+                ActorError::Functional {
+                    description: format!(
+                        "New event exceeds the replicable size bound ({} bytes)",
+                        crate::distribution::worker::DistriWorker::MAX_FRAGMENT_EVENT_BYTES
+                    ),
+                },
+            ));
+        }
         if ledger.get_event_request_type().is_create_event() {
             if let Err(e) = create_subject(ctx, ledger.clone()).await {
                 // Only the creations quota maps to `CheckLimit`;
@@ -1860,6 +1878,7 @@ impl RequestManager {
                 target_sn: None,
                 subject_id: governance_id.clone(),
                 already_verified_transfer_sn: None,
+                expected_governance_id: Some(governance_id.clone()),
             };
             network
                 .send_command(ave_network::CommandHelper::SendMessage {
@@ -1892,7 +1911,7 @@ impl RequestManager {
                 network,
                 subject_id: governance_id.clone(),
                 our_sn: Some(gov_sn),
-                witnesses,
+                witnesses: witnesses.clone(),
                 update_type: UpdateType::Request {
                     subject_id: self.subject_id.clone(),
                     id: self.id.clone(),
@@ -1930,7 +1949,15 @@ impl RequestManager {
                 return Ok(());
             };
 
-            child.tell(UpdateMessage::Run).await?;
+            child
+                .tell(UpdateMessage::Run {
+                    witnesses,
+                    our_sn: Some(gov_sn),
+                    subject_kind_hint: Some(
+                        crate::update::UpdateSubjectKind::Governance,
+                    ),
+                })
+                .await?;
         }
 
         Ok(())
@@ -2833,7 +2860,6 @@ impl Actor for RequestManager {
 impl Handler<Self> for RequestManager {
     // The async state machine inlines all sub-futures and exceeds the default
     // threshold; a proper fix would require boxing every large sub-future.
-    #[allow(clippy::large_stack_frames)]
     async fn handle_message(
         &mut self,
         _: ActorPath,

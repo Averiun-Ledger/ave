@@ -7,13 +7,22 @@ mod common;
 use ave_common::{
     ValueWrapper,
     bridge::request::SinkEventsQuery,
-    identity::{KeyPair, PublicKey, keys::Ed25519Signer},
+    identity::{
+        DigestIdentifier, KeyPair, PublicKey,
+        keys::{DSA, Ed25519Signer},
+    },
     request::{ConfirmRequest, EventRequest, FactRequest},
     response::RequestState,
     sink::DataToSinkEvent,
 };
 use ave_core::auth::AuthWitness;
-use ave_network::{NodeType, RoutingNode};
+use ave_core::helpers::network::{
+    ActorMessage, NetworkMessage,
+    test_faults::{
+        FaultAction, FaultDirection, FaultMessage, FaultRule,
+    },
+};
+use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     EXAMPLE_CONTRACT, assert_tracker_fact_opaque,
     create_and_authorize_governance, create_nodes_and_connections,
@@ -8002,4 +8011,937 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
 
     witness.token.cancel();
     join_all(witness.handler.iter_mut()).await;
+}
+
+
+/// The tracker reconcile cursor is exclusive: reprocessing a page
+/// boundary would walk the frontier event twice and resend its
+/// derived writes. After wiping the derived registers and rebooting,
+/// every page must be walked exactly once, whatever the ledger size.
+#[test(tokio::test)]
+async fn tracker_reconcile_does_not_replay_page_boundary() {
+    let (mut nodes, mut dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let emitter = nodes[1].api.clone();
+
+    // Freeze background tracker pulls and auto-pushes on both
+    // emitters: every event below is committed locally, so the
+    // ledgers under test never gain a synced suffix that would
+    // move the page boundaries under test.
+    for api in [&emitter] {
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::TrackerSyncReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+
+    let carol_signer = Ed25519Signer::generate().unwrap();
+    let carol_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        carol_signer.public_key_bytes(),
+    )
+    .unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&emitter]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Emitter", "key": emitter.public_key()},
+                    {"name": "Carol", "key": carol_key.to_string()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Emitter"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Emitter",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                },
+                                {
+                                    "name": "Carol",
+                                    "namespace": [],
+                                    "quantity": "infinity"
+                                }
+                            ],
+                            "issuer": [
+                                {"name": "Owner", "namespace": []},
+                                {"name": "Emitter", "namespace": []},
+                                {"name": "Carol", "namespace": []}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    emitter.update_subject(governance_id.clone()).await.unwrap();
+
+    // A second node holds the pending side of the boundary
+    // transfer below: it confirms it, then keeps emitting the tail
+    // as the new owner.
+    let carol_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut carol_node, mut carol_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{carol_port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(KeyPair::Ed25519(carol_signer.clone())),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut carol_dirs);
+    let carol = carol_node.api.clone();
+    node_running(&carol).await.unwrap();
+    for api in [&carol] {
+        for message in [
+            FaultMessage::TrackerSyncReq,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                // Only the emitter must never observe carol's tail:
+                // anything else keeps flowing so requests complete.
+                peer: Some(
+                    PublicKey::from_str(emitter.public_key()).unwrap(),
+                ),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    carol
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::Many(vec![
+                PublicKey::from_str(owner.public_key()).unwrap(),
+                PublicKey::from_str(emitter.public_key()).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+    carol.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&carol, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Subjects sized at the page limits: 1 (genesis only), 255 and
+    // 256 (single pages, exact and short), 257 (two pages), 512 and
+    // 513 (several pages with a transfer and its confirm straddling
+    // the first page boundary at SN 256/257).
+    let mut subjects: Vec<(DigestIdentifier, u64)> = Vec::new();
+    for total in [1u64, 255, 256, 257, 512, 513] {
+        let (subject_id, _) = create_subject(
+            &emitter,
+            governance_id.clone(),
+            "Example",
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+        // Facts fire without waiting; the transfer below waits for
+        // its prefix first so it can never commit out of order.
+        let fire_facts = |api: ave_core::Api, from: u64, to: u64| {
+            let subject_id = subject_id.clone();
+            async move {
+                for sn in from..to {
+                    let request = EventRequest::Fact(FactRequest {
+                        subject_id: subject_id.clone(),
+                        payload: ValueWrapper(json!({"ModOne": {"data": sn}})),
+                        viewpoints: Default::default(),
+                    });
+                    api.own_request(request).await.unwrap();
+                }
+            }
+        };
+        if total >= 512 {
+            fire_facts(emitter.clone(), 1, 256).await;
+            get_subject(&emitter, subject_id.clone(), Some(255), true)
+                .await
+                .unwrap();
+            emit_transfer(
+                &emitter,
+                subject_id.clone(),
+                carol_key.clone(),
+                true,
+            )
+            .await
+            .unwrap();
+            // Carol takes the prefix as a first copy instead of a
+            // pull: she only needs it to confirm the transfer. No
+            // exact-SN wait here: background sync may already have
+            // moved her past SN 256, and the confirm below waits
+            // for its own apply.
+            let prefix = emitter
+                .test_get_tracker_ledger(subject_id.clone(), 256)
+                .await
+                .unwrap();
+            assert_eq!(prefix.len(), 257);
+            carol.test_ensure_distributor(subject_id.clone()).await.unwrap();
+            carol
+                .test_inject_inbound(
+                    NetworkMessage::new(
+                        ComunicateInfo {
+                            request_id: String::new(),
+                            version: 0,
+                            receiver: PublicKey::from_str(
+                                carol.public_key(),
+                            )
+                            .unwrap(),
+                            receiver_actor: "/user/node/distributor".to_owned(),
+                        },
+                        ActorMessage::DistributionLedgerRes {
+                            ledger: prefix,
+                            is_all: true,
+                            transfer_event: None,
+                            expected_governance_id: None,
+                        },
+                    ),
+                    &PublicKey::from_str(emitter.public_key()).unwrap(),
+                )
+                .await
+                .unwrap();
+            // Wait for the injected prefix: the confirm below
+            // needs the subject present locally.
+            get_subject(&carol, subject_id.clone(), Some(256), true)
+                .await
+                .unwrap();
+            emit_confirm(&carol, subject_id.clone(), None, true)
+                .await
+                .unwrap();
+            // The confirm may arrive with newer events already
+            // synced behind it; only the tip below is exact.
+            emit_fact(&carol, subject_id.clone(), json!({"ModOne": {"data": -1}}), true)
+                .await
+                .unwrap();
+            fire_facts(carol.clone(), 259, total).await;
+        } else {
+            fire_facts(emitter.clone(), 1, total).await;
+        }
+        subjects.push((subject_id, total));
+    }
+    for (subject_id, total) in &subjects {
+        // The emitter only holds its own prefix: transferred
+        // subjects stop at the transfer SN 256 here.
+        let tip = (total - 1).min(256);
+        get_subject(&emitter, subject_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    }
+    // The tail belongs to carol now: wait for her tip too.
+    for (subject_id, total) in &subjects {
+        if *total < 512 {
+            continue;
+        }
+        let tip = total.saturating_sub(1);
+        get_subject(&carol, subject_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    }
+
+    // Wipe every derived write and reboot on the same stores: the
+    // replay must walk each page exactly once.
+    emitter
+        .test_purge_register(governance_id.clone(), "sn")
+        .await
+        .unwrap();
+    emitter
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+
+    nodes[1].token.cancel();
+    join_all(nodes[1].handler.iter_mut()).await;
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut new_node, mut new_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: nodes[0].api.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[1].keys.clone()),
+        local_db: Some(dirs[2].path().to_path_buf()),
+        ext_db: Some(dirs[3].path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    node_running(&api).await.unwrap();
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so everything below observes post-boot state.
+    let evaluators = api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(
+        evaluators
+            .iter()
+            .any(|key| { key.to_string() == owner.public_key() })
+    );
+
+    // Exact replay sizes: 257 events walk 257 entries, never 258;
+    // single and exact pages never re-read their frontier. Trackers
+    // boot on first access, so touch each ledger first (which starts
+    // its boot reconcile) and then poll for the report. This node
+    // only holds the prefix its own commits wrote: the transferred
+    // subjects stop at the transfer SN 256 here.
+    for (subject_id, total) in &subjects {
+        let expected = (*total).min(257);
+        let _ = api
+            .test_get_tracker_ledger(subject_id.clone(), expected - 1)
+            .await;
+    }
+    for (subject_id, total) in &subjects {
+        let expected = (*total).min(257);
+        let mut seen = 0u64;
+        let mut resent = 0u64;
+        for _ in 0..1200 {
+            let (s, r) = api
+                .test_tracker_reconcile_report(subject_id.clone())
+                .await
+                .unwrap();
+            seen = s;
+            resent = r;
+            if seen == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            seen, expected,
+            "subject with {total} events must walk exactly {expected} entries here"
+        );
+        assert!(
+            resent > 0,
+            "the replay must resend derived writes for {total} events"
+        );
+    }
+
+    // Ownership pending converges on the emitter side: the
+    // transfer straddling the first page boundary stays pending
+    // for carol here.
+    for (subject_id, total) in &subjects {
+        if *total < 512 {
+            continue;
+        }
+        match api
+            .test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => panic!("ownership must be readable after reconcile"),
+            Ok((owner_now, pending, _, _)) => {
+                assert_eq!(
+                    owner_now,
+                    Some(PublicKey::from_str(emitter.public_key()).unwrap()),
+                    "no ownership rotation may appear here"
+                );
+                assert_eq!(
+                    pending,
+                    Some(carol_key.clone()),
+                    "the boundary transfer stays pending here"
+                );
+            }
+        }
+    }
+
+    // Carol reboots on her own stores as well: her replay must walk
+    // all 512/513 entries exactly once, with ownership and pending
+    // converged after the confirm.
+    carol
+        .test_purge_register(governance_id.clone(), "sn")
+        .await
+        .unwrap();
+    carol
+        .test_purge_register(governance_id.clone(), "witnesses")
+        .await
+        .unwrap();
+    carol_node.token.cancel();
+    join_all(carol_node.handler.iter_mut()).await;
+    let carol_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut carol_new_node, mut carol_new_dirs) =
+        create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{carol_port}"),
+            peers: vec![RoutingNode {
+                peer_id: nodes[0].api.peer_id().to_string(),
+                address: vec![nodes[0].listen_address.clone()],
+            }],
+            always_accept: true,
+            keys: Some(KeyPair::Ed25519(carol_signer)),
+            local_db: Some(dirs[4].path().to_path_buf()),
+            ext_db: Some(dirs[5].path().to_path_buf()),
+            ..Default::default()
+        })
+        .await;
+    dirs.append(&mut carol_new_dirs);
+    let carol_api = carol_new_node.api.clone();
+    node_running(&carol_api).await.unwrap();
+    let carol_evaluators = carol_api
+        .test_gov_evaluators(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(
+        carol_evaluators
+            .iter()
+            .any(|key| { key.to_string() == owner.public_key() })
+    );
+    for (subject_id, total) in &subjects {
+        if *total < 512 {
+            continue;
+        }
+        let _ = carol_api
+            .test_get_tracker_ledger(subject_id.clone(), total - 1)
+            .await;
+    }
+    for (subject_id, total) in &subjects {
+        if *total < 512 {
+            continue;
+        }
+        let mut seen = 0u64;
+        let mut resent = 0u64;
+        for _ in 0..1200 {
+            let (s, r) = carol_api
+                .test_tracker_reconcile_report(subject_id.clone())
+                .await
+                .unwrap();
+            seen = s;
+            resent = r;
+            if seen == *total {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            seen, *total,
+            "carol must walk exactly {total} entries"
+        );
+        assert!(
+            resent > 0,
+            "the replay must resend derived writes for {total} events"
+        );
+        match carol_api
+            .test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => panic!("ownership must be readable after reconcile"),
+            Ok((owner_now, pending, _, _)) => {
+                assert_eq!(
+                    owner_now,
+                    Some(carol_key.clone()),
+                    "the confirmed transfer stays applied"
+                );
+                assert_eq!(
+                    pending, None,
+                    "no pending transfer may remain after confirm"
+                );
+            }
+        }
+    }
+
+    nodes[0].token.cancel();
+    new_node.token.cancel();
+    carol_new_node.token.cancel();
+    join_all(
+        nodes[0]
+            .handler
+            .iter_mut()
+            .chain(new_node.handler.iter_mut())
+            .chain(carol_new_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(new_node);
+    drop(new_dirs);
+    drop(carol_new_node);
+}
+
+/// A manual distribution of a successful transfer reaches its new
+/// owner even when the owner witnesses nothing: that copy is what
+/// lets the pending owner learn and confirm it. A new owner that
+/// already witnesses is contacted once, never twice. A failed
+/// transfer adds nobody and opens no access.
+#[test(tokio::test)]
+async fn manual_transfer_distribution_includes_pending_owner() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let carol = nodes[2].api.clone();
+    let dave = nodes[3].api.clone();
+    let carol_key =
+        PublicKey::from_str(carol.public_key()).unwrap();
+    let dave_key = PublicKey::from_str(dave.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Carol", "key": carol.public_key()},
+                {"name": "Dave", "key": dave.public_key()},
+            ]},
+            "schemas": { "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Dave", "namespace": []}],
+                        "creator": [
+                            {"name": "Alice", "namespace": [], "quantity": "infinity"},
+                            {"name": "Carol", "namespace": [], "quantity": "infinity"},
+                            {"name": "Dave", "namespace": [], "quantity": "infinity"}
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for api in [&carol, &dave] {
+        api.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    }
+    for api in [&alice, &carol, &dave] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+
+    // Silence automatic pushes from Alice so every delivery below
+    // is manual, never ambient gossip.
+    for target in [&carol, &dave] {
+        let peer =
+            PublicKey::from_str(target.public_key()).unwrap();
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    // Main: transfer to Carol, who witnesses nothing. Without the
+    // new-owner entry she would never receive the transfer.
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        carol.get_subject_state(subject_id.clone()).await.is_err(),
+        "silenced pushes must not deliver the transfer by another path"
+    );
+    // Automatic attempts end while faults are up; clearing now lets
+    // only the manual plan below deliver.
+    alice.test_clear_faults().await.unwrap();
+    alice.manual_distribution(subject_id.clone()).await.unwrap();
+    get_subject(&carol, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&carol, subject_id.clone(), None, true).await.unwrap();
+    get_subject(&alice, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // Duplicate guard: transfer to Dave, who already witnesses. The
+    // plan merges witness and new-owner into one entry, so Dave
+    // receives exactly one copy of each event. Silence automatic
+    // pushes again so the manual plan is what delivers.
+    for target in [&dave] {
+        let peer =
+            PublicKey::from_str(target.public_key()).unwrap();
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let (subject_w, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_w.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_w.clone(), dave_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_w.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        dave.get_subject_state(subject_w.clone()).await.is_err(),
+        "silenced pushes must not deliver by another path"
+    );
+    alice.test_clear_faults().await.unwrap();
+    alice.manual_distribution(subject_w.clone()).await.unwrap();
+    get_subject(&dave, subject_w.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let events = dave
+        .test_get_tracker_ledger(subject_w.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        3,
+        "witness plus new-owner must merge into a single delivery"
+    );
+
+    // Negative: a failed transfer adds nobody and opens no access.
+    // Transfer to a stranger with no creator grant fails evaluation
+    // and commits as a failed event; Carol is neither witness nor
+    // new owner here, so neither automatic nor manual plans reach her.
+    let stranger_signer = Ed25519Signer::generate().unwrap();
+    let stranger_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        stranger_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let (subject_f, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_f.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_f.clone(), stranger_key.clone(), false)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_f.clone(), Some(2), true)
+        .await
+        .unwrap();
+    alice.manual_distribution(subject_f.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        carol.get_subject_state(subject_f.clone()).await.is_err(),
+        "a failed transfer must not deliver its new owner by manual plan"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(
+        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+}
+
+/// Transport encodes once at the origin and reuses those bytes end
+/// to end: the intermediary forwards without re-encoding, faults run
+/// before the single encode, and nothing bypasses into a fallback
+/// encode on the normal path.
+#[test(tokio::test)]
+async fn transport_single_encode_reused_end_to_end() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+            ]},
+            "schemas": { "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Bob", "namespace": []}],
+                        "creator": [
+                            {"name": "Alice", "namespace": [], "quantity": "infinity"},
+                            {"name": "Bob", "namespace": [], "quantity": "infinity"}
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}, {"name": "Bob", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for api in [&alice, &bob] {
+        api.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    // A larger batch from the owner still encodes once per message
+    // at the origin; Bob witnesses and receives it automatically.
+    for i in 2..5 {
+        emit_fact(
+            &alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": i}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    get_subject(&alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    emit_transfer(&alice, subject_id.clone(), bob_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // Normal traffic reuses the origin encoding: the intermediaries
+    // forward it instead of falling back to a second encode.
+    let (afwd, afb) = alice.test_encode_stats().await.unwrap();
+    let (bfwd, bfb) = bob.test_encode_stats().await.unwrap();
+    assert!(
+        afwd + bfwd > 0,
+        "normal traffic must forward origin encodings"
+    );
+    assert_eq!(
+        (afb, bfb),
+        (0, 0),
+        "nothing may bypass into a fallback encode on the normal path"
+    );
+
+    // Bob confirms and becomes owner; further batches keep reusing
+    // the single origin encoding.
+    emit_confirm(&bob, subject_id.clone(), None, true).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+    let (fwd_before, _) = bob.test_encode_stats().await.unwrap();
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+    let (fwd_after, fb_after) = bob.test_encode_stats().await.unwrap();
+    assert!(
+        fwd_after > fwd_before,
+        "a larger batch must keep forwarding origin encodings"
+    );
+    assert_eq!(fb_after, 0, "large batches must not fall back either");
+
+    // Faults run before the single encode: a dropped message is
+    // never encoded, and the next message still encodes once.
+    // Dropped for Alice only; Bob's own SN is unaffected.
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    bob.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerRes,
+        peer: Some(alice_key.clone()),
+        remaining: Some(1),
+        action: FaultAction::Drop,
+    })
+    .await
+    .unwrap();
+    let (fwd_pre_drop, _) = bob.test_encode_stats().await.unwrap();
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 8}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    let (fwd_post_drop, fb_post_drop) =
+        bob.test_encode_stats().await.unwrap();
+    assert_eq!(
+        fb_post_drop, 0,
+        "faulted sends must not fall back to a second encode"
+    );
+    assert!(
+        fwd_post_drop >= fwd_pre_drop,
+        "counters must never go backwards across faults"
+    );
+    bob.test_clear_faults().await.unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(
+        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
 }

@@ -87,6 +87,12 @@ pub enum SubjectManagerMessage {
     /// Test-only count of in-flight copy attempts: proves attempts
     /// open and close around every path, including rollbacks.
     GetActiveAttemptsLen,
+    /// Test-only read-only view of the live requester ids for one
+    /// subject: proves duplicate attempts own independent leases
+    /// instead of sharing one entry.
+    ListRequesters {
+        subject_id: DigestIdentifier,
+    },
 }
 
 impl Message for SubjectManagerMessage {}
@@ -103,6 +109,7 @@ pub enum SubjectManagerResponse {
     LastSuccess(Option<u64>),
     LastSuccessLen(usize),
     ActiveAttemptsLen(usize),
+    Requesters(Vec<String>),
     Ok,
 }
 
@@ -985,6 +992,17 @@ impl Handler<Self> for SubjectManager {
                 Ok(SubjectManagerResponse::LastSuccess(
                     self.last_success.get(&subject_id).copied(),
                 ))
+            }
+            SubjectManagerMessage::ListRequesters { subject_id } => {
+                let mut requesters: Vec<String> = self
+                    .subjects
+                    .get(&subject_id)
+                    .map(|entry| {
+                        entry.requesters.iter().cloned().collect()
+                    })
+                    .unwrap_or_default();
+                requesters.sort();
+                Ok(SubjectManagerResponse::Requesters(requesters))
             }
         }
     }

@@ -469,6 +469,8 @@ impl Node {
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
+                            frag_assemblies:
+                                std::collections::HashMap::new(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -497,6 +499,8 @@ impl Node {
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
+                            frag_assemblies:
+                                std::collections::HashMap::new(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -1224,6 +1228,8 @@ impl Actor for Node {
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
+                            frag_assemblies:
+                                std::collections::HashMap::new(),
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
@@ -1337,6 +1343,8 @@ impl Handler<Self> for Node {
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
+                            frag_assemblies:
+                                std::collections::HashMap::new(),
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),
@@ -1376,6 +1384,8 @@ impl Handler<Self> for Node {
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
                             attempt_clock: self.attempt_clock.clone(),
+                            frag_assemblies:
+                                std::collections::HashMap::new(),
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),

@@ -184,6 +184,11 @@ pub struct CreateNodeConfig {
     /// values (10s interval). Needed by tests that wait on the fetch
     /// tick so they do not pay the full default interval.
     pub tracker_sync: Option<TrackerSyncConfig>,
+    /// Explicit app-message wire cap in bytes; `None` uses the
+    /// default (`ave_network::MAX_APP_MESSAGE_BYTES`). Needed by
+    /// tests that prove byte-capped batching and fragment reassembly
+    /// without moving megabytes per case.
+    pub network_max_message_bytes: Option<usize>,
     /// Explicit approval timing; `None` uses the default test values
     /// (long window, fast early probes). Needed by tests that exercise
     /// the approval deadline: they set a short window explicitly.
@@ -221,6 +226,7 @@ pub async fn try_create_node(
         approval,
         toolchains,
         cargo_bin,
+        network_max_message_bytes,
     } = config;
 
     let keys =
@@ -245,12 +251,15 @@ pub async fn try_create_node(
         ext_db
     });
 
-    let network_config = NetworkConfig::new(
+    let mut network_config = NetworkConfig::new(
         node_type,
         vec![listen_address.clone()],
         vec![],
         peers,
     );
+    if let Some(cap) = network_max_message_bytes {
+        network_config.max_app_message_bytes = cap;
+    }
 
     let contracts_path = contracts_path.unwrap_or_else(|| {
         env::temp_dir().join(format!(

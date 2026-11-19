@@ -47,11 +47,23 @@ pub enum GovernanceVersionSyncMessage {
         governance_peers: HashSet<PublicKey>,
     },
     Tick,
-    RoundTimeout,
+    RoundTimeout {
+        round: u64,
+    },
     PeerVersion {
         peer: PublicKey,
         version: u64,
     },
+    /// Test-only read of the idle-round counter: proves silent or
+    /// failed rounds never certify the tip.
+    #[cfg(feature = "test")]
+    GetIdleRounds,
+    /// Test-only override of the boot-node flag: lets a test prove
+    /// silence never certifies the tip even on a node that behaves
+    /// as if it had no configured boot nodes, without changing the
+    /// real network topology (which still needs boot nodes to run).
+    #[cfg(feature = "test")]
+    SetHasBootNodes(bool),
 }
 
 impl Message for GovernanceVersionSyncMessage {}
@@ -59,6 +71,8 @@ impl Message for GovernanceVersionSyncMessage {}
 #[derive(Debug, Clone)]
 pub enum GovernanceVersionSyncResponse {
     None,
+    #[cfg(feature = "test")]
+    IdleRounds(u64),
 }
 
 impl Response for GovernanceVersionSyncResponse {}
@@ -79,6 +93,10 @@ pub struct GovernanceVersionSync {
     pending_timeout: Option<TimerKey>,
     round: u64,
     peer_backoff: SyncPeerBackoff,
+    /// Test-only count of idle certifications: silent, failed or
+    /// backed-off rounds must never increment it.
+    #[cfg(feature = "test")]
+    idle_rounds: u64,
     /// When the current `update_target` was adopted. A target that
     /// never resolves (dead peer, failed distribution) must not pin
     /// the sync forever: once stale, the next tick drops it and opens
@@ -172,6 +190,8 @@ impl GovernanceVersionSync {
             peer_backoff: SyncPeerBackoff::default(),
             target_set_at: None,
             idle_notified_at_version: None,
+            #[cfg(feature = "test")]
+            idle_rounds: 0,
         }
     }
 
@@ -193,9 +213,10 @@ impl GovernanceVersionSync {
         if let Some(key) = self.pending_timeout.take() {
             ctx.cancel_timer(key);
         }
+        let round = self.round;
         let key = ctx.schedule_once(
             self.response_timeout,
-            GovernanceVersionSyncMessage::RoundTimeout,
+            GovernanceVersionSyncMessage::RoundTimeout { round },
         )?;
         self.pending_timeout = Some(key);
         Ok(())
@@ -298,6 +319,7 @@ impl GovernanceVersionSync {
             target_sn: None,
             subject_id: self.governance_id.clone(),
             already_verified_transfer_sn: None,
+            expected_governance_id: Some(self.governance_id.clone()),
         };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
@@ -311,7 +333,11 @@ impl GovernanceVersionSync {
     /// at the tip — tell the governance actor that deferred artifact
     /// acquisitions (if any) are due. Covers a reboot with pending
     /// markers where no distribution round will ever fire.
-    async fn notify_idle_round(&self, ctx: &ActorContext<Self>) {
+    async fn notify_idle_round(&mut self, ctx: &ActorContext<Self>) {
+        #[cfg(feature = "test")]
+        {
+            self.idle_rounds = self.idle_rounds.saturating_add(1);
+        }
         match ctx.get_parent::<Governance>().await {
             Ok(governance) => {
                 if let Err(error) =
@@ -431,15 +457,19 @@ impl GovernanceVersionSync {
                 return Err(e);
             }
         };
+        let nobody_known =
+            sync_peers.is_empty() && self.governance_peers.is_empty();
         let peers = self.select_peers(sync_peers);
 
         if peers.is_empty() {
-            // Nobody to compare against. Only a node with no configured
-            // boot nodes may treat this as an idle round: it is
+            // Nobody to compare against. Only a node with no
+            // configured boot nodes and no known governance or sync
+            // peers may treat this as an idle round: it is
             // verifiably alone, so nothing newer is reachable. With
-            // configured peers the empty set proves nothing (discovery
-            // may be incomplete) and must never count as idle.
-            if !self.has_boot_nodes {
+            // configured peers (or backed-off ones) the empty set
+            // proves nothing (discovery may be incomplete, answers
+            // may be on their way) and must never count as idle.
+            if !self.has_boot_nodes && nobody_known {
                 self.maybe_notify_idle_round(ctx).await;
             }
             self.schedule_tick(ctx)?;
@@ -568,7 +598,14 @@ impl Handler<Self> for GovernanceVersionSync {
                     }
                 }
             }
-            GovernanceVersionSyncMessage::RoundTimeout => {
+            GovernanceVersionSyncMessage::RoundTimeout { round } => {
+                // A timeout queued by an older round must not touch
+                // the current one: it arrives after the new round
+                // already armed its own timer. Drop it before
+                // cancelling anything.
+                if round != self.round || !self.round_open {
+                    return Ok(GovernanceVersionSyncResponse::None);
+                }
                 self.cancel_timeout(ctx);
                 if self.round_open {
                     self.round_open = false;
@@ -579,15 +616,12 @@ impl Handler<Self> for GovernanceVersionSync {
                         self.peer_backoff.note_failure(&peer, self.round);
                     }
                     // An expired round means at least one selected peer
-                    // never answered. Silence only counts as an idle
-                    // round on a node with no configured boot nodes:
-                    // verifiably alone, nobody can be ahead. With
-                    // configured peers a silent peer may still be ahead
-                    // (partition, slow discovery), so the round may only
-                    // fire an already known update target.
-                    let notify_idle = !self.has_boot_nodes;
+                    // never answered, or every send failed: silence
+                    // never proves the tip. Only an already known
+                    // update target may fire here, never an idle
+                    // report.
                     if let Err(error) =
-                        self.trigger_update_if_needed(ctx, notify_idle).await
+                        self.trigger_update_if_needed(ctx, false).await
                     {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(
@@ -645,6 +679,16 @@ impl Handler<Self> for GovernanceVersionSync {
                         );
                     }
                 }
+            }
+            #[cfg(feature = "test")]
+            GovernanceVersionSyncMessage::GetIdleRounds => {
+                return Ok(GovernanceVersionSyncResponse::IdleRounds(
+                    self.idle_rounds,
+                ));
+            }
+            #[cfg(feature = "test")]
+            GovernanceVersionSyncMessage::SetHasBootNodes(value) => {
+                self.has_boot_nodes = value;
             }
         }
 

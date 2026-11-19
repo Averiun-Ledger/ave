@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 
 use ave_actors::{ActorContext, ActorError, ActorPath};
 use ave_common::SchemaType;
+use ave_common::bridge::request::EventRequestType;
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
 
@@ -19,6 +20,7 @@ use crate::model::common::{
 use crate::{
     distribution::error::DistributorError,
     distribution::transfer_verifier::TransferSimulationResult,
+    distribution::transfer_verifier::AuxEvidence,
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
@@ -136,7 +138,6 @@ impl DistriWorker {
                     },
                 )
                 .await?;
-
             // A proven aux records a firm proof once its chunk
             // applies, and opens verified free passage for the rest
             // of the loop. An unproven aux never reaches this loop:
@@ -186,6 +187,28 @@ impl DistriWorker {
                 );
                 return Err(DistributorError::ReceiverNoAccess.into());
             }
+
+            // Evidence preflight: every successful inline transfer in
+            // this chunk must survive the same evidence check the
+            // apply runs, over the same local prefix plus sender
+            // suffix, before the chunk becomes visible, journaled or
+            // sunk. A refuted transfer rejects the whole chunk here,
+            // so no prefix is ever persisted in clear on the word of
+            // a transfer the apply would reject right after. It runs
+            // before any acquisition, so a rejected chunk owns no
+            // lease, subject or write to release.
+            self.preflight_inline_transfers(
+                ctx,
+                &pending_ledger,
+                common,
+                TransferBatch {
+                    event: transfer_event,
+                    simulation: transfer_simulation,
+                    verified_sn: verified_transfer_sn,
+                },
+                dist_ctx.attempt,
+            )
+            .await?;
 
             self.reproject_receipt_visibility(
                 ctx,
@@ -258,9 +281,24 @@ impl DistriWorker {
                     &subject_id,
                     info,
                     &sender,
+                    dist_ctx.attempt,
                 );
 
                 let lease = if is_gov {
+                    // A governance copy is only valid for the
+                    // governance it was requested from: a Create for
+                    // another scope is rejected before any write.
+                    if let Some(expected) = &dist_ctx.expected_governance_id
+                        && *expected != subject_id
+                    {
+                        return Err(
+                            DistributorError::UnexpectedGovernance {
+                                expected: expected.clone(),
+                                found: subject_id.clone(),
+                            }
+                            .into(),
+                        );
+                    }
                     let result =
                         create_subject(ctx, create_ledger.clone()).await;
                     handle_distri_error!(
@@ -283,6 +321,23 @@ impl DistriWorker {
                                 subject_id: subject_id.clone(),
                             }
                         })?;
+
+                    // The copy was requested under a governance scope:
+                    // a Create declaring another one is rejected
+                    // before validation, ownership, workers or any
+                    // write. A legacy request without scope keeps the
+                    // hosted-governance check below.
+                    if let Some(expected) = &dist_ctx.expected_governance_id
+                        && *expected != request.governance_id
+                    {
+                        return Err(
+                            DistributorError::UnexpectedGovernance {
+                                expected: expected.clone(),
+                                found: request.governance_id.clone(),
+                            }
+                            .into(),
+                        );
+                    }
 
                     let result = check_subject_creation(
                         ctx,
@@ -330,6 +385,7 @@ impl DistriWorker {
                     &subject_id,
                     info,
                     &sender,
+                    dist_ctx.attempt,
                 );
                 if !pending_ledger.is_empty() && !is_gov {
                     match acquire_subject(
@@ -359,6 +415,34 @@ impl DistriWorker {
                     None
                 }
             };
+
+            #[cfg(feature = "test")]
+            {
+                // Test-only barrier after the lease is owned but
+                // before anything applies: lets a test prove the
+                // guard is held while a concurrent attempt runs.
+                // Only injected batches (empty request id) pause
+                // here, on any worker, so two duplicates can park at
+                // once holding their own leases; production never
+                // arms it. Unlike the pre-apply barrier it also
+                // covers continuations on registered subjects.
+                if dist_ctx.info.request_id.is_empty() {
+                    let mut noted = false;
+                    while Self::after_acquire_paused(ctx) {
+                        if !noted {
+                            Self::note_after_acquire_hold(
+                                ctx,
+                                dist_ctx.attempt,
+                            );
+                            noted = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        ))
+                        .await;
+                    }
+                }
+            }
 
             let applied_hi_sn = pending_ledger
                 .last()
@@ -494,8 +578,13 @@ impl DistriWorker {
                             self.trigger_deferred_acquisition(ctx, &subject_id)
                                 .await;
                         } else {
-                            self.notify_update_done(ctx, &subject_id, last_sn)
-                                .await;
+                            self.notify_update_done(
+                                ctx,
+                                &subject_id,
+                                last_sn,
+                                info.version,
+                            )
+                            .await;
                         }
                     }
                     Err(e) => {
@@ -519,19 +608,12 @@ impl DistriWorker {
                         // the prefix was authorized by a suffix the
                         // apply just rejected, so drop the subject
                         // created in this batch instead of keeping
-                        // its Create and valid events persisted.
+                        // its Create and valid events persisted. The
+                        // lease of this attempt already closed above:
+                        // finishing it again here would close a
+                        // duplicate attempt sharing the batch, so the
+                        // rollback below only checks the guard.
                         if !is_register && !common.is_gov {
-                            if let Some(lease) = lease {
-                                if let Err(finish_err) = lease.finish(ctx).await
-                                {
-                                    warn!(
-                                        msg_type = "LedgerDistribution",
-                                        subject_id = %subject_id,
-                                        error = %finish_err,
-                                        "Failed to release subject lease",
-                                    );
-                                }
-                            }
                             self.rollback_first_copy(
                                 ctx,
                                 &common.governance_id,
@@ -618,8 +700,13 @@ impl DistriWorker {
                     // tip: run the deferred artifact acquisition pass.
                     self.trigger_deferred_acquisition(ctx, &subject_id).await;
                 } else {
-                    self.notify_update_done(ctx, &subject_id, applied_hi_sn)
-                        .await;
+                    self.notify_update_done(
+                        ctx,
+                        &subject_id,
+                        applied_hi_sn,
+                        info.version,
+                    )
+                    .await;
                 }
             }
 
@@ -947,6 +1034,34 @@ impl DistriWorker {
             && let Ok(mut faults) = registry.lock()
         {
             faults.note_single_push_attempt(subject_id.to_string(), attempt);
+        }
+    }
+
+    /// Test-only post-acquire barrier hit: lets a test prove the
+    /// lease is owned while the copy is still parked before
+    /// applying. Production never arms it.
+    #[cfg(feature = "test")]
+    fn after_acquire_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.after_acquire_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_after_acquire_hold(ctx: &ActorContext<Self>, attempt: u64) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_after_acquire_hold(attempt);
         }
     }
 
@@ -1526,6 +1641,119 @@ impl DistriWorker {
             ),
         }
     }
+
+    /// Evidence preflight for inline transfers: every successful
+    /// transfer inside this chunk must survive the same evidence
+    /// check the apply runs, over the same local prefix plus sender
+    /// suffix, before the chunk becomes visible, journaled or sunk.
+    /// A checkable-but-refuted transfer rejects the whole chunk here
+    /// instead of letting its prefix persist in clear and fail right
+    /// after. An unjudgeable chain keeps the apply envelope
+    /// semantics (passage without proof); an incomplete chain fails
+    /// closed without writing. Transfers already judged with this
+    /// batch (proven aux, unjudgeable aux) or under a firm proof
+    /// reuse that verdict instead of replaying the prefix.
+    async fn preflight_inline_transfers(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        chunk: &[Ledger],
+        common: &CheckAuthCommon,
+        batch: TransferBatch<'_>,
+        attempt: u64,
+    ) -> Result<(), ActorError> {
+        if common.is_gov {
+            return Ok(());
+        }
+        let mut pending: Vec<&Ledger> = Vec::new();
+        for event in chunk {
+            if !matches!(
+                event.get_event_request_type(),
+                EventRequestType::Transfer
+            ) {
+                continue;
+            }
+            let Protocols::Transfer { evaluation, .. } = &event.protocols
+            else {
+                continue;
+            };
+            if !evaluation.is_ok() {
+                // Failed transfers are history without ownership
+                // effects: the apply copies them on independent
+                // rights and they can not unmask the prefix.
+                continue;
+            }
+            if batch.event.is_some_and(|aux| aux.sn == event.sn)
+                && matches!(
+                    batch.simulation,
+                    Some(
+                        TransferSimulationResult::Witness
+                            | TransferSimulationResult::WitnessUnverified
+                    )
+                )
+            {
+                continue;
+            }
+            if batch.verified_sn.is_some_and(|floor| event.sn <= floor) {
+                continue;
+            }
+            // Already covered by the validated prefix: the evidence
+            // chain through this transfer was replayed and judged
+            // when the cursor advanced past it, so rechecking could
+            // only replay work or invalidate the cursor, never learn
+            // anything new.
+            if self
+                .verify_cursors
+                .covered_tip_sn(&common.subject_id)
+                .is_some_and(|tip| event.sn <= tip)
+            {
+                continue;
+            }
+            pending.push(event);
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for transfer_event in pending {
+            // Read-only check: the verdict must not advance,
+            // invalidate or otherwise disturb the cursor the apply
+            // path resumes from. Any state the replay builds is
+            // discarded with the clone.
+            let saved_cursors = self.verify_cursors.clone();
+            let verdict = self
+                .transfer_verifier
+                .verify_aux_evidence(
+                    &mut self.verify_cursors,
+                    ctx,
+                    &common.governance_id,
+                    &common.subject_id,
+                    chunk,
+                    transfer_event,
+                    &[],
+                )
+                .await;
+            self.verify_cursors = saved_cursors;
+            match verdict {
+                AuxEvidence::Proven | AuxEvidence::Unverifiable => {}
+                AuxEvidence::Missing => {
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
+                AuxEvidence::Refuted => {
+                    self.drop_deferred(ctx, &common.subject_id);
+                    self.rollback_refuted_aux(
+                        ctx,
+                        &common.governance_id,
+                        &common.subject_id,
+                        transfer_event.sn,
+                        attempt,
+                    )
+                    .await;
+                    return Err(DistributorError::ReceiverNoAccess.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Receipt-side visibility: the sender's projection is a claim.
     /// Every full fact is re-checked event by event against our own
     /// register: opaque modes are masked locally, clear modes pass.
@@ -1718,6 +1946,7 @@ impl DistriWorker {
         ctx: &mut ActorContext<Self>,
         subject_id: &DigestIdentifier,
         sn: u64,
+        round: u64,
     ) {
         use crate::update::{Update, UpdateMessage};
         let path = ave_actors::ActorPath::from(format!(
@@ -1726,7 +1955,7 @@ impl DistriWorker {
         let Ok(actor) = ctx.system().get_actor::<Update>(&path).await else {
             return;
         };
-        let _ = actor.tell(UpdateMessage::DistributionDone { sn }).await;
+        let _ = actor.tell(UpdateMessage::DistributionDone { sn, round }).await;
     }
 
     pub(crate) async fn process_last_event_distribution(
@@ -1761,6 +1990,14 @@ impl DistriWorker {
     ) -> Result<(), ActorError> {
         let subject_id = ledger.get_subject_id();
         let sn = ledger.sn;
+        // Identity of the exact bytes the sender put on the wire,
+        // captured before any local masking: the ack must name it
+        // back so the sender only completes this generation.
+        let received_hash = ledger.ledger_hash(self.hash).map_err(|e| {
+            ActorError::Functional {
+                description: format!("Can not hash received event: {e}"),
+            }
+        })?;
 
         if !self
             .ensure_next_sn_or_request_update(
@@ -1776,7 +2013,8 @@ impl DistriWorker {
                 get_local_subject_sn(ctx, &subject_id).await?
                 && local_sn >= sn
             {
-                self.send_last_event_ack(sender.clone(), &info).await?;
+                self.send_last_event_ack(sender.clone(), &info, &received_hash)
+                    .await?;
             }
             return Ok(());
         }
@@ -1909,6 +2147,7 @@ impl DistriWorker {
                 &subject_id,
                 &info,
                 &sender,
+                attempt,
             );
             let lease = if !is_gov {
                 match acquire_subject(
@@ -2007,8 +2246,13 @@ impl DistriWorker {
                     // The received event is ours even with a gap behind:
                     // ack it so the sender stops retrying, the missing
                     // range was already re-requested above.
-                    if let Err(e) =
-                        self.send_last_event_ack(sender.clone(), &info).await
+                    if let Err(e) = self
+                        .send_last_event_ack(
+                            sender.clone(),
+                            &info,
+                            &received_hash,
+                        )
+                        .await
                     {
                         error!(
                             msg_type = "LastEventDistribution",
@@ -2050,7 +2294,10 @@ impl DistriWorker {
             }
         };
 
-        if let Err(e) = self.send_last_event_ack(sender.clone(), &info).await {
+        if let Err(e) = self
+            .send_last_event_ack(sender.clone(), &info, &received_hash)
+            .await
+        {
             error!(
                 msg_type = "LastEventDistribution",
                 subject_id = %subject_id,

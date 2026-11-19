@@ -42,6 +42,8 @@ pub struct ConfigHelper {
     pub tracking_size: usize,
     pub only_clear_events: bool,
     pub ledger_batch_size: usize,
+    pub hash_algorithm: ave_common::identity::HashAlgorithm,
+    pub max_message_bytes: usize,
     pub sync_governance: GovernanceSyncConfig,
     pub sync_tracker: TrackerSyncConfig,
     pub sync_update: UpdateSyncConfig,
@@ -118,6 +120,8 @@ impl ConfigHelper {
             sync_reboot: config.sync.reboot,
             approval: config.approval,
             has_boot_nodes,
+            hash_algorithm: config.hash_algorithm,
+            max_message_bytes: config.network.max_app_message_bytes,
             sinks,
         }
     }

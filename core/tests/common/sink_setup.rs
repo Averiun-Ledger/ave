@@ -1043,6 +1043,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         approval: None,
         toolchains: None,
         cargo_bin: None,
+        network_max_message_bytes: None,
     }
 }
 

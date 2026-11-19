@@ -121,26 +121,54 @@ impl ManualDistribution {
         namespace: ave_common::Namespace,
         event_request: &EventRequest,
         signer: &PublicKey,
+        protocols_success: bool,
     ) -> Result<Vec<DistributionPlanEntry>, ActorError> {
-        Ok(witnesses
-            .into_iter()
-            .map(|node| {
-                let mode = match event_request {
-                    EventRequest::Fact(fact_request) => {
-                        Self::tracker_fact_mode_for_creator(
-                            members,
-                            roles_ctx,
-                            &namespace,
-                            signer,
-                            &node,
-                            &fact_request.viewpoints,
-                        )
+        // Merge by node like the automatic plan: Clear wins over
+        // Opaque, so a recipient listed twice is contacted once.
+        let mut plan: std::collections::HashMap<
+            PublicKey,
+            DistributionPlanMode,
+        > = std::collections::HashMap::new();
+        for node in witnesses {
+            let mode = match event_request {
+                EventRequest::Fact(fact_request) => {
+                    Self::tracker_fact_mode_for_creator(
+                        members,
+                        roles_ctx,
+                        &namespace,
+                        signer,
+                        &node,
+                        &fact_request.viewpoints,
+                    )
+                }
+                _ => DistributionPlanMode::Clear,
+            };
+            plan.entry(node)
+                .and_modify(|current| {
+                    if matches!(mode, DistributionPlanMode::Clear) {
+                        *current = DistributionPlanMode::Clear;
                     }
-                    _ => DistributionPlanMode::Clear,
-                };
+                })
+                .or_insert(mode);
+        }
 
-                DistributionPlanEntry { node, mode }
-            })
+        // A successful transfer also reaches its new owner, even when
+        // the owner witnesses nothing: that copy is what lets the
+        // pending owner learn and confirm it. A failed transfer opens
+        // no access and adds nobody.
+        if let EventRequest::Transfer(transfer_request) = event_request
+            && protocols_success
+        {
+            plan.entry(transfer_request.new_owner.clone())
+                .and_modify(|current| {
+                    *current = DistributionPlanMode::Clear;
+                })
+                .or_insert(DistributionPlanMode::Clear);
+        }
+
+        Ok(plan
+            .into_iter()
+            .map(|(node, mode)| DistributionPlanEntry { node, mode })
             .collect())
     }
 }
@@ -437,6 +465,7 @@ impl Handler<Self> for ManualDistribution {
                         namespace,
                         &event_request,
                         signer,
+                        ledger.protocols.is_success(),
                     )?
                     .into_iter()
                     .filter(|entry| entry.node != *self.our_key)

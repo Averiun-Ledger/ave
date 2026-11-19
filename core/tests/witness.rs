@@ -10082,6 +10082,7 @@ async fn test_verified_transfer_not_reused_across_senders() {
                 ledger: vec![create, fact],
                 is_all: true,
                 transfer_event: Some(Box::new(transfer)),
+                expected_governance_id: None,
             },
         ),
         &alice_key,

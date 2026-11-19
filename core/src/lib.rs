@@ -497,6 +497,7 @@ impl Api {
             system.clone(),
             graceful_token.clone(),
             crash_token.clone(),
+            config.network.max_app_message_bytes,
         );
 
         let peer_id = worker.local_peer_id().to_string();
@@ -3527,6 +3528,47 @@ impl Api {
             .before_apply_worker())
     }
 
+    /// Parks (`pause == true`) or releases the post-acquire barrier
+    /// on this node: while paused, a per-subject worker that just
+    /// acquired its lease waits before applying, so a test can
+    /// interleave a concurrent attempt while the guard is provably
+    /// held. The flag lives in the shared test registry, never in
+    /// a worker mailbox.
+    pub async fn test_pause_after_acquire(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_after_acquire_paused(pause);
+        Ok(())
+    }
+
+    /// How many times the post-acquire barrier was hit on this node:
+    /// proves the parked copy really owns its lease.
+    pub async fn test_after_acquire_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .after_acquire_hold_count();
+        Ok(count)
+    }
+
+    /// Attempt id captured when the post-acquire barrier first
+    /// fired, if any: lets a test prove which parked attempt it is
+    /// asserting on.
+    pub async fn test_after_acquire_attempt(
+        &self,
+    ) -> Result<Option<u64>, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .after_acquire_attempt())
+    }
+
     /// Parks (`pause == true`) or releases the post-success barrier
     /// on this node: while paused, a per-subject worker whose copy
     /// just recorded success waits before its flow returns, so a
@@ -3659,6 +3701,269 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .snapshot(&subject_id))
+    }
+
+    /// Origin-encoding counters: messages forwarded with the
+    /// sender's encoding and messages encoded at the intermediary
+    /// because they bypassed the sender, in that order. Lets
+    /// transport tests prove the single serialization is reused end
+    /// to end instead of re-encoded per hop.
+    pub async fn test_encode_stats(&self) -> Result<(u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::helpers::network::intermediary::SharedEncodeStats>(
+                "encode_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "encode_stats".to_owned(),
+                reason: "Encode stats helper not found".to_owned(),
+            })?;
+        let guard = stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok((guard.forwarded, guard.fallback_encodes))
+    }
+
+    /// Test-only: idle certifications reported by the governance
+    /// version sync of one governance. Silent, failed or backed-off
+    /// rounds must never increment it; a completed round with no
+    /// superior peer reports exactly once per version.
+    pub async fn test_version_sync_idle_count(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/version_sync",
+                    governance_id
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync not found".to_owned(),
+            })?;
+        match actor
+            .ask(
+                crate::governance::version_sync::GovernanceVersionSyncMessage::GetIdleRounds,
+            )
+            .await?
+        {
+            crate::governance::version_sync::GovernanceVersionSyncResponse::IdleRounds(
+                rounds,
+            ) => Ok(rounds),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "version_sync".to_owned(),
+                expected: "IdleRounds".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: opens a governance version-sync round on demand
+    /// by delivering a tick to the actor. Lets a test drive rounds
+    /// without waiting for the configured interval.
+    pub async fn test_version_sync_tick(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/version_sync",
+                    governance_id
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync not found".to_owned(),
+            })?;
+        actor
+            .tell(
+                crate::governance::version_sync::GovernanceVersionSyncMessage::Tick,
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync tell failed".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    /// Test-only: delivers a stale round timeout to the governance
+    /// version sync of one governance. Lets a test prove an old
+    /// timeout can not close the active round, drain its peers or
+    /// cancel its timer.
+    pub async fn test_version_sync_stale_timeout(
+        &self,
+        governance_id: DigestIdentifier,
+        round: u64,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/version_sync",
+                    governance_id
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync not found".to_owned(),
+            })?;
+        actor
+            .tell(
+                crate::governance::version_sync::GovernanceVersionSyncMessage::RoundTimeout {
+                    round,
+                },
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync tell failed".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    /// Test-only: overrides the boot-node flag of the governance
+    /// version sync of one governance. Lets a test prove silence
+    /// never certifies the tip even with `has_boot_nodes == false`,
+    /// without changing the real network topology.
+    pub async fn test_version_sync_set_has_boot_nodes(
+        &self,
+        governance_id: DigestIdentifier,
+        value: bool,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/version_sync",
+                    governance_id
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync not found".to_owned(),
+            })?;
+        actor
+            .tell(
+                crate::governance::version_sync::GovernanceVersionSyncMessage::SetHasBootNodes(
+                    value,
+                ),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync tell failed".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    /// Test-only: rounds with a live updater child for one witness
+    /// of one subject's update. Lets a test prove a new sweep
+    /// addressed a peer however its requests were faulted.
+    pub async fn test_update_updater_rounds(
+        &self,
+        subject_id: DigestIdentifier,
+        witness: PublicKey,
+    ) -> Result<Vec<u64>, Error> {
+        let mut rounds = Vec::new();
+        for round in 0..=5 {
+            let path = ActorPath::from(format!(
+                "/user/node/auth/{subject_id}/{witness}_{round}"
+            ));
+            if self
+                .system
+                .get_actor::<crate::update::updater::Updater>(&path)
+                .await
+                .is_ok()
+            {
+                rounds.push(round);
+            }
+        }
+        Ok(rounds)
+    }
+
+    /// Test-only: delivers a stale completion to the update actor
+    /// of one subject. Lets a test prove a completion from another
+    /// generation never stops the live sweep.
+    pub async fn test_update_done(
+        &self,
+        subject_id: DigestIdentifier,
+        sn: u64,
+        round: u64,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::update::Update>(&ActorPath::from(format!(
+                "/user/node/auth/{subject_id}"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "update".to_owned(),
+                reason: "Update not found".to_owned(),
+            })?;
+        actor
+            .tell(crate::update::UpdateMessage::DistributionDone { sn, round })
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "update".to_owned(),
+                reason: "Update tell failed".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    /// Test-only: whether the update actor of one subject is still
+    /// alive. Lets a test prove a stale completion did not stop the
+    /// live sweep.
+    pub async fn test_update_alive(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        Ok(self
+            .system
+            .get_actor::<crate::update::Update>(&ActorPath::from(format!(
+                "/user/node/auth/{subject_id}"
+            )))
+            .await
+            .is_ok())
+    }
+
+    /// Test-only: opens a tracker sync round on demand by delivering
+    /// a tick to the actor. Lets a test drive fetch/update cycles
+    /// without waiting for the configured interval.
+    pub async fn test_tracker_sync_tick(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<crate::governance::tracker_sync::TrackerSync>(
+                &ActorPath::from(format!(
+                    "/user/node/subject_manager/{}/tracker_sync",
+                    governance_id
+                )),
+            )
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "tracker_sync".to_owned(),
+                reason: "Tracker sync not found".to_owned(),
+            })?;
+        actor
+            .tell(crate::governance::tracker_sync::TrackerSyncMessage::Tick)
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "tracker_sync".to_owned(),
+                reason: "Tracker sync tell failed".to_owned(),
+            })?;
+        Ok(())
     }
 
     /// Retained staged prefix per node: subjects holding events,
@@ -3973,6 +4278,59 @@ impl Api {
                 received: "other".to_owned(),
             }),
         }
+    }
+
+    /// Test-only: live requester ids for one subject, sorted. Lets
+    /// tests prove duplicate attempts own independent leases
+    /// instead of sharing (and double-closing) one entry.
+    pub async fn test_list_requesters(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<Vec<String>, Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::ListRequesters { subject_id })
+            .await?
+        {
+            SubjectManagerResponse::Requesters(requesters) => Ok(requesters),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "Requesters".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: the last boot reconcile report for one tracker
+    /// subject, as (events walked, derived writes re-sent). Lets a
+    /// regression test pin the exact replay size instead of
+    /// inferring it from converged state.
+    pub async fn test_tracker_reconcile_report(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::tracker::reconcile::SharedReconcileStats>(
+                "reconcile_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "reconcile_stats".to_owned(),
+                reason: "Reconcile stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot(&subject_id))
     }
 
     /// Test-only: how many subjects hold a success record right

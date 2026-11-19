@@ -54,12 +54,31 @@ use tracing::{debug, error, warn};
 
 pub struct Intermediary;
 
+/// Test-only origin-encoding counters: every outbound message is
+/// either forwarded with the sender's encoding (`forwarded`) or
+/// encoded here because it bypassed the sender (`fallback_encodes`).
+/// Zero cost in production: every increment is `cfg(test)`-gated,
+/// no locks or tasks.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub struct EncodeStats {
+    pub forwarded: u64,
+    pub fallback_encodes: u64,
+}
+
+/// Test-only shared encoding counters, exposed through the
+/// `encode_stats` helper with the same lifetime as the fault
+/// registry.
+#[cfg(feature = "test")]
+pub type SharedEncodeStats = Arc<std::sync::Mutex<EncodeStats>>;
+
 impl Intermediary {
     pub fn build(
         network_sender: mpsc::Sender<NetworkCommand>,
         system: SystemRef,
         graceful_token: CancellationToken,
         crash_token: CancellationToken,
+        max_message_bytes: usize,
     ) -> Arc<NetworkSender> {
         // Separate channels per direction so inbound bursts (bulk
         // ledger batches) never stall outbound deadline-driven votes.
@@ -106,13 +125,35 @@ impl Intermediary {
             )),
         );
 
+        // Test-only origin-encoding counters, read by the suites
+        // through the `encode_stats` helper. Proves the sender
+        // encoding is reused end to end instead of re-encoded per
+        // hop. Same lifetime and threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "encode_stats",
+            Arc::new(std::sync::Mutex::new(EncodeStats::default())),
+        );
+        // Test-only reconcile workload counters, read by the suites
+        // through the `reconcile_stats` helper. Same lifetime and
+        // threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "reconcile_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::tracker::reconcile::ReconcileStatsRegistry::default(),
+            )),
+        );
+
         #[cfg(feature = "test")]
         let service_sender =
             NetworkSender::new(outbound_sender, faults.clone())
-                .with_inbound_sender(inbound_sender.clone());
+                .with_inbound_sender(inbound_sender.clone())
+                .with_max_message_bytes(max_message_bytes);
         #[cfg(not(feature = "test"))]
         let service_sender = NetworkSender::new(outbound_sender)
-            .with_inbound_sender(inbound_sender);
+            .with_inbound_sender(inbound_sender)
+            .with_max_message_bytes(max_message_bytes);
 
         tokio::spawn(async move {
             loop {
@@ -218,18 +259,48 @@ impl Intermediary {
                         e
                     })?;
 
-                let network_message =
-                    rmp_serde::to_vec(&message).map_err(|error| {
-                        error!(
-                            receiver = %receiver,
-                            receiver_actor = %receiver_actor,
-                            error = %error,
-                            "Failed to serialize network message"
-                        );
-                        IntermediaryError::SerializationFailed {
-                            details: error.to_string(),
+                // Forward the origin encoding when present: the sender
+                // already serialized and measured this exact message,
+                // so re-encoding would pay the cost twice and risk
+                // diverging from the measured bytes. Only messages
+                // that bypassed the sender (injected by tests or
+                // legacy paths) encode here.
+                let network_message = match message.encoded {
+                    Some(bytes) => {
+                        #[cfg(feature = "test")]
+                        if let Some(stats) =
+                            system.get_helper::<SharedEncodeStats>(
+                                "encode_stats",
+                            )
+                            && let Ok(mut guard) = stats.lock()
+                        {
+                            guard.forwarded += 1;
                         }
-                    })?;
+                        bytes
+                    }
+                    None => {
+                        #[cfg(feature = "test")]
+                        if let Some(stats) =
+                            system.get_helper::<SharedEncodeStats>(
+                                "encode_stats",
+                            )
+                            && let Ok(mut guard) = stats.lock()
+                        {
+                            guard.fallback_encodes += 1;
+                        }
+                        rmp_serde::to_vec(&message).map_err(|error| {
+                            error!(
+                                receiver = %receiver,
+                                receiver_actor = %receiver_actor,
+                                error = %error,
+                                "Failed to serialize network message"
+                            );
+                            IntermediaryError::SerializationFailed {
+                                details: error.to_string(),
+                            }
+                        })?
+                    }
+                };
 
                 if let Err(error) = network_sender
                     .send(NetworkCommand::SendMessage {
@@ -277,7 +348,7 @@ impl Intermediary {
                         }
                     };
 
-                let cur = Cursor::new(message.to_vec());
+                let cur = Cursor::new(message);
                 let mut de = Deserializer::new(cur);
 
                 let message: NetworkMessage =
@@ -740,6 +811,7 @@ impl Intermediary {
                         target_sn,
                         subject_id,
                         already_verified_transfer_sn,
+                        expected_governance_id,
                     } => {
                         let actor = system
                             .get_actor::<DistriWorker>(&path)
@@ -756,6 +828,7 @@ impl Intermediary {
                                 info: message.info,
                                 sender: sender.clone(),
                                 already_verified_transfer_sn,
+                                expected_governance_id,
                             })
                             .await
                             .map_err(|e| {
@@ -1177,10 +1250,70 @@ impl Intermediary {
                                 }
                             })?;
                     }
+                    ActorMessage::DistributionLedgerFrag {
+                        subject_id,
+                        event_hash,
+                        event_sn,
+                        total_bytes,
+                        chunk_index,
+                        chunk_total,
+                        chunk,
+                        is_all,
+                        is_push,
+                        expected_governance_id,
+                    } => {
+                        let actor = match system
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                        {
+                            Ok(actor) => actor,
+                            Err(_) => {
+                                debug!(
+                                    original_path = %path,
+                                    fallback_path = "/user/node/distributor",
+                                    "Distributor not found at path, using fallback"
+                                );
+                                let path =
+                                    ActorPath::from("/user/node/distributor");
+                                system
+                                    .get_actor::<DistriWorker>(&path)
+                                    .await
+                                    .map_err(|_| {
+                                        IntermediaryError::ActorNotFound {
+                                            path: path.to_string(),
+                                        }
+                                    })?
+                            }
+                        };
+
+                        actor
+                            .tell(DistriWorkerMessage::LedgerFrag {
+                                subject_id,
+                                event_hash,
+                                event_sn,
+                                total_bytes,
+                                chunk_index,
+                                chunk_total,
+                                chunk,
+                                is_all,
+                                is_push,
+                                expected_governance_id,
+                                info: message.info,
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
+                                }
+                            })?;
+                    }
                     ActorMessage::DistributionLedgerRes {
                         ledger,
                         is_all,
                         transfer_event,
+                        expected_governance_id,
                     } => {
                         let actor = match system
                             .get_actor::<DistriWorker>(&path)
@@ -1213,6 +1346,7 @@ impl Intermediary {
                                 is_all,
                                 transfer_event,
                                 sender: sender.clone(),
+                                expected_governance_id,
                             })
                             .await
                             .map_err(|e| {
@@ -1222,7 +1356,7 @@ impl Intermediary {
                                 }
                             })?;
                     }
-                    ActorMessage::DistributionLastEventRes => {
+                    ActorMessage::DistributionLastEventRes { event_hash } => {
                         let actor = system
                             .get_actor::<DistriCoordinator>(&path)
                             .await
@@ -1232,6 +1366,7 @@ impl Intermediary {
                         actor
                             .tell(DistriCoordinatorMessage::NetworkResponse {
                                 sender: sender.clone(),
+                                event_hash,
                             })
                             .await
                             .map_err(|e| {

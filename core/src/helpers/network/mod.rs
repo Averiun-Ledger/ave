@@ -91,17 +91,52 @@ pub enum ActorMessage {
     DistributionLastEventReq {
         ledger: Box<Ledger>,
     },
-    DistributionLastEventRes,
+    DistributionLastEventRes {
+        event_hash: DigestIdentifier,
+    },
     DistributionLedgerReq {
         actual_sn: Option<u64>,
         target_sn: Option<u64>,
         subject_id: DigestIdentifier,
         already_verified_transfer_sn: Option<u64>,
+        /// Governance scope the requester is syncing: the receiver
+        /// only serves this request from that governance. New peers
+        /// always set it; a missing value is a legacy request that
+        /// predates scope binding.
+        expected_governance_id: Option<DigestIdentifier>,
     },
     DistributionLedgerRes {
         ledger: Vec<Ledger>,
         is_all: bool,
         transfer_event: Option<Box<Ledger>>,
+        /// Echo of the request scope above: the receiver validates
+        /// the served prefix (and any Create in it) against this
+        /// before writing anything.
+        expected_governance_id: Option<DigestIdentifier>,
+    },
+    /// One bounded chunk of a single event that exceeds the wire cap
+    /// (fragmented by identity, verified by hash before delivery).
+    /// New shape: older peers fail to decode it and drop it instead
+    /// of mistaking a partial payload for a valid batch.
+    DistributionLedgerFrag {
+        subject_id: DigestIdentifier,
+        /// Identity of the full event: ledger hash with the sender's
+        /// configured algorithm. Duplicates and reorders key on it.
+        event_hash: DigestIdentifier,
+        event_sn: u64,
+        total_bytes: u64,
+        chunk_index: u32,
+        chunk_total: u32,
+        chunk: Vec<u8>,
+        /// Tip-completeness of the response this event belongs to.
+        is_all: bool,
+        /// Push (last-event) delivery on completion when true, pull
+        /// (ledger batch) delivery when false.
+        is_push: bool,
+        /// Scope echoed from the pull request (`None` on pushes and
+        /// legacy requests): the receiver validates the reassembled
+        /// Create against it before writing.
+        expected_governance_id: Option<DigestIdentifier>,
     },
     DistributionGetLastSn {
         subject_id: DigestIdentifier,
@@ -182,6 +217,11 @@ pub struct NetworkMessage {
     pub message: ActorMessage,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
+    /// Wire bytes computed once at the origin: the intermediary
+    /// forwards them without re-encoding. Never serialized, so the
+    /// external bytes are identical with or without it.
+    #[serde(skip)]
+    pub encoded: Option<Vec<u8>>,
 }
 
 impl NetworkMessage {
@@ -190,6 +230,7 @@ impl NetworkMessage {
             info,
             message,
             wire_version: WIRE_VERSION,
+            encoded: None,
         }
     }
 
@@ -245,7 +286,9 @@ mod tests {
                 receiver,
                 receiver_actor: String::from("actor"),
             },
-            ActorMessage::DistributionLastEventRes,
+            ActorMessage::DistributionLastEventRes {
+                event_hash: DigestIdentifier::default(),
+            },
         )
     }
 

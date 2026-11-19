@@ -98,6 +98,7 @@ pub(crate) enum CursorTrust {
 /// re-resolution, never correctness: a missing entry resolves
 /// again, and resolution failures are never cached (the caller
 /// only inserts on success; the envelope path handles the rest).
+#[derive(Debug, Clone)]
 pub(crate) struct RoleCache {
     entries: HashMap<(u64, SchemaType, Namespace), (RoleDataRegister, u64)>,
     seq: u64,
@@ -159,6 +160,7 @@ impl RoleCache {
 /// keyed by the exact replay inputs (aux bytes, tip and suffix),
 /// so reuse can never promote `Missing` into `Proven` nor an
 /// `Unverifiable` hint into a firm proof.
+#[derive(Clone)]
 pub(crate) struct VerifyCursor {
     metadata: Metadata,
     tip_hash: DigestIdentifier,
@@ -179,6 +181,7 @@ pub(crate) struct VerifyCursor {
 /// Per-worker verification cursors, keyed by subject. Bounded
 /// with LRU eviction; eviction only costs a future rebuild,
 /// never correctness (a missing cursor rebuilds from scratch).
+#[derive(Clone, Default)]
 pub(crate) struct VerifyCursorStore {
     cursors: HashMap<DigestIdentifier, VerifyCursor>,
     seq: u64,
@@ -228,6 +231,17 @@ impl VerifyCursorStore {
 
     pub(crate) fn invalidate(&mut self, subject_id: &DigestIdentifier) {
         self.cursors.remove(subject_id);
+    }
+
+    /// Tip sn of the validated prefix, if any: a pure read that
+    /// neither disturbs the LRU order nor counts work. Lets
+    /// read-only checks skip transfers the cursor already covers
+    /// instead of replaying (or worse, invalidating) them.
+    pub(crate) fn covered_tip_sn(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> Option<u64> {
+        self.cursors.get(subject_id).map(|cursor| cursor.metadata.sn)
     }
 }
 
@@ -972,7 +986,6 @@ impl TransferVerifier {
     /// the saved tip can not be continued (divergent branch or an
     /// already-covered aux): the caller discards the cursor and
     /// rebuilds authoritatively.
-    #[allow(clippy::too_many_arguments)]
     async fn verify_aux_suffix(
         &self,
         cursors: &mut VerifyCursorStore,
@@ -1028,13 +1041,27 @@ impl TransferVerifier {
         // reordered. Precedence on ties is authoritative order
         // (delta, held, sender, aux): the first copy wins the
         // identity check below, exactly like the full path.
+        // Resume from verified coverage, not the applied tip: an
+        // Unverifiable passage can advance applied state past what
+        // the evidence reproduced, and that applied-but-unverified
+        // window must replay here. Starting the delta at the applied
+        // tip instead would skip it and fabricate a gap that never
+        // closes: every continuation would look absent past a stale
+        // tip while the missing events sit applied locally.
+        // In consistent states both tips coincide (or the verified
+        // tip leads after an ahead-of-tip proof), so the loaded
+        // window is exactly the same as before.
+        let resume_from = match covered {
+            Some(applied) => Some(applied.min(tip_sn)),
+            None => None,
+        };
         let mut delta: Vec<Ledger> = Vec::new();
-        if local_sn.is_some_and(|current| Some(current) > covered) {
+        if local_sn.is_some_and(|current| Some(current) > resume_from) {
             let Some(loaded) = self
                 .load_local_ledger(
                     ctx,
                     subject_id,
-                    covered,
+                    resume_from,
                     local_sn.unwrap_or(0),
                 )
                 .await
@@ -1212,7 +1239,6 @@ impl TransferVerifier {
     /// extended tip. The verdict is cached under the exact replay
     /// inputs; entries from older tips are pruned since the tip
     /// only moves forward and they can never match again.
-    #[allow(clippy::too_many_arguments)]
     async fn replay_suffix(
         &self,
         cursors: &mut VerifyCursorStore,
@@ -1371,8 +1397,7 @@ impl TransferVerifier {
         // opaque spans and unverifiable evidence yield Missing (the
         // aux may still prove itself once the chain is available);
         // only checkable-but-wrong evidence yields Refuted.
-        let mut combined: Vec<Ledger> = Vec::new();
-        let mut tip: Option<u64> = None;
+        let mut local_ledger: Vec<Ledger> = Vec::new();
         if local_sn.is_some() {
             let Some(ledger) = self
                 .load_local_ledger(ctx, subject_id, None, local_sn.unwrap_or(0))
@@ -1380,50 +1405,92 @@ impl TransferVerifier {
             else {
                 return AuxEvidence::Missing;
             };
-            tip = ledger.last().map(|event| event.sn);
-            combined.extend(ledger);
+            local_ledger = ledger;
         }
         // Deferred batches held locally count as prefix too: they are
         // exactly what this node already received but could not apply
         // yet for lack of evidence. Anything at or below the applied
-        // tip is stale and ignored.
-        combined.extend(
-            buffered
-                .iter()
-                .filter(|event| {
-                    local_sn.is_none_or(|applied| event.sn > applied)
-                })
-                .cloned(),
-        );
-        let buffered_tip = buffered.last().map(|event| event.sn);
-        tip = tip.max(buffered_tip);
-        // Sender events strictly after the own tip, up to the aux.
-        let after_tip = tip;
-        let mut needed: Vec<Ledger> = sender_ledger
+        // tip is stale and ignored. The sender window starts after
+        // the applied tip only, so an overlap with the held prefix
+        // stays visible for the identity check below instead of
+        // being filtered away before any hash comparison.
+        let held: Vec<Ledger> = buffered
             .iter()
             .filter(|event| {
-                after_tip.is_none_or(|tip| event.sn > tip)
-                    && event.sn <= transfer_event.sn
+                local_sn.is_none_or(|applied| event.sn > applied)
             })
             .cloned()
             .collect();
-        needed.retain(|event| event.sn != transfer_event.sn);
-        needed.push(transfer_event.clone());
-        combined.extend(needed);
+        let sender_window: Vec<Ledger> = sender_ledger
+            .iter()
+            .filter(|event| {
+                local_sn.is_none_or(|applied| event.sn > applied)
+                    && event.sn < transfer_event.sn
+            })
+            .cloned()
+            .collect();
+        let aux_run = std::slice::from_ref(transfer_event);
+        let merged = Self::merge_runs([
+            local_ledger.as_slice(),
+            held.as_slice(),
+            sender_window.as_slice(),
+            aux_run,
+        ]);
         // Own events win on overlap: they are what this node
         // already committed, never the sender's claim about them.
         // This authoritative rebuild happens at most once per
         // cursor lifetime: later batches resume incrementally.
-        combined.sort_by_key(|event| event.sn);
-        combined.dedup_by_key(|event| event.sn);
+        // Merge by identity like the incremental path: an exact
+        // re-send replays once, but the same SN with different
+        // bytes is a divergent branch, never silently edited out.
+        // Locally applied events keep precedence only for SNs
+        // they really cover; anything newer diverges instead of
+        // borrowing the wrong bytes for the verdict below.
+        #[cfg(feature = "test")]
+        let merged_len = merged.len();
+        let mut combined: Vec<Ledger> = Vec::with_capacity(merged.len());
+        for event in merged {
+            let duplicate = match combined.last() {
+                Some(prev) if prev.sn == event.sn => {
+                    match (
+                        prev.ledger_hash(self.hash),
+                        event.ledger_hash(self.hash),
+                    ) {
+                        (Ok(previous), Ok(current)) => {
+                            Some(previous == current)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match duplicate {
+                Some(true) => continue,
+                Some(false) => {
+                    #[cfg(feature = "test")]
+                    {
+                        Self::note_buffer_work(
+                            ctx,
+                            subject_id,
+                            merged_len as u64,
+                            (merged_len + combined.len()) as u64,
+                            0,
+                        );
+                        Self::note_full_rebuild(ctx, subject_id);
+                    }
+                    return AuxEvidence::Missing;
+                }
+                None => combined.push(event),
+            }
+        }
         #[cfg(feature = "test")]
         {
             Self::note_buffer_work(
                 ctx,
                 subject_id,
-                combined.len() as u64,
-                combined.len() as u64,
-                combined.len() as u64,
+                merged_len as u64,
+                (merged_len + combined.len()) as u64,
+                0,
             );
             Self::note_full_rebuild(ctx, subject_id);
         }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -200,7 +200,11 @@ impl TrackerSync {
             page_size: config.page_size.max(1),
             update_batch_size: config.update_batch_size.max(1),
             update_timeout: config.update_timeout,
-            next_nonce: 0,
+            // A fresh unpredictable start per incarnation: a retained
+            // page from a previous life shares peer and governance
+            // version but never this nonce, so it can not be mistaken
+            // for the answer to the new first request.
+            next_nonce: rand::random::<u64>(),
             round: 0,
             peer_backoff: SyncPeerBackoff::default(),
             peers: PeerSet::default(),
@@ -458,6 +462,9 @@ impl TrackerSync {
             target_sn: None,
             subject_id: subject_id.clone(),
             already_verified_transfer_sn,
+            // Scope the copy to the governance being synced: the
+            // receiver rejects any Create outside it before writing.
+            expected_governance_id: Some(self.governance_id.clone()),
         };
         self.network
             .send_command(ave_network::CommandHelper::SendMessage {
@@ -509,7 +516,24 @@ impl TrackerSync {
 
         let mut pending_items = VecDeque::new();
 
+        // Deduplicate the page by subject before any local work: a
+        // peer repeating an entry must not multiply copy requests.
+        // The highest target wins; truncating duplicates is never a
+        // page split.
+        let mut by_subject: HashMap<DigestIdentifier, CurrentWitnessSubject> =
+            HashMap::new();
         for item in items {
+            by_subject
+                .entry(item.subject_id.clone())
+                .and_modify(|kept| {
+                    if item.target_sn > kept.target_sn {
+                        *kept = item.clone();
+                    }
+                })
+                .or_insert(item);
+        }
+
+        for item in by_subject.into_values() {
             if banned_set.contains(&item.subject_id) {
                 debug!(
                     governance_id = %self.governance_id,
@@ -517,6 +541,29 @@ impl TrackerSync {
                     "Skipping banned tracker in sync"
                 );
                 continue;
+            }
+
+            // Scope check: only subjects tracked under the governance
+            // being synced may produce copy requests. Anything else
+            // (another governance, or a governance subject id) is
+            // dropped before any request. Unknown subjects stay
+            // eligible: the copy request carries the scope and the
+            // receiver validates the Create against it pre-write.
+            if let Some(data) = get_subject_data(ctx, &item.subject_id).await?
+            {
+                let in_scope = matches!(
+                    &data,
+                    SubjectData::Tracker { governance_id, .. }
+                    if *governance_id == self.governance_id
+                );
+                if !in_scope {
+                    debug!(
+                        governance_id = %self.governance_id,
+                        subject_id = %item.subject_id,
+                        "Skipping out-of-scope subject in sync"
+                    );
+                    continue;
+                }
             }
 
             let local_sn =
@@ -780,6 +827,23 @@ impl TrackerSync {
         Ok(())
     }
 
+    /// Best-effort poke to the parent governance when a page proves
+    /// we are behind: the local version must advance before any
+    /// tracker update under the higher version may run. A missing
+    /// parent just skips the poke; the version sync tick retries
+    /// on its own cadence.
+    async fn nudge_governance_update(&self, ctx: &ActorContext<Self>) {
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            self.governance_id
+        ));
+        if let Ok(governance) =
+            ctx.system().get_actor::<Governance>(&path).await
+        {
+            let _ = governance.tell(GovernanceMessage::TriggerGovUpdate).await;
+        }
+    }
+
     /// A timer or response failure must never stall the sync in a dead
     /// state with its queue silently dropped: local fatal errors crash,
     /// anything else ends the cycle loudly (the next tick retries).
@@ -976,20 +1040,25 @@ impl Handler<Self> for TrackerSync {
                     async {
                         let local_governance_version =
                             self.get_governance_version(ctx).await?;
-                        let effective_governance_version =
-                            local_governance_version.max(governance_version);
-
-                        if effective_governance_version
-                            != active_governance_version
+                        // A page is only valid for the round that
+                        // requested it: items process solely when
+                        // response, active and local versions coincide.
+                        // A higher version is never adopted as our
+                        // own and launches no updates: the page is
+                        // discarded, the governance update is nudged
+                        // first, and the round ends. An older version
+                        // is stale and dropped the same way. Neither
+                        // touches the page budget: a response can not
+                        // mint new requests.
+                        if governance_version != active_governance_version
+                            || governance_version != local_governance_version
                         {
                             Self::observe_round("gov_changed");
-                            self.start_fetch(
-                                ctx,
-                                active_peer,
-                                effective_governance_version,
-                                None,
-                            )
-                            .await?;
+                            if governance_version > local_governance_version
+                            {
+                                self.nudge_governance_update(ctx).await;
+                            }
+                            self.finish_cycle(ctx).await?;
                             return Ok(TrackerSyncResponse::None);
                         }
 

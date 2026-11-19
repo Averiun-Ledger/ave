@@ -190,6 +190,9 @@ impl Distribution {
                 DistriCoordinator {
                     node_key: signer.clone(),
                     network: self.network.clone(),
+                    expected_event_hash: None,
+                    frag_pending: None,
+                    frag_timer: None,
                 },
             )
             .await;

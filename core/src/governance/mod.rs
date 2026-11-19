@@ -1096,7 +1096,7 @@ impl Governance {
         let updater = Update::new(UpdateNew {
             network,
             subject_id: self.subject_metadata.subject_id.clone(),
-            witnesses,
+            witnesses: witnesses.clone(),
             update_type: UpdateType::Auth,
             our_sn: Some(self.subject_metadata.sn),
             subject_kind_hint: Some(UpdateSubjectKind::Governance),
@@ -1112,7 +1112,13 @@ impl Governance {
 
         match ctx.create_child("gov_manual_update", updater).await {
             Ok(child) => {
-                child.tell(UpdateMessage::Run).await?;
+                child
+                    .tell(UpdateMessage::Run {
+                        witnesses,
+                        our_sn: Some(self.subject_metadata.sn),
+                        subject_kind_hint: Some(UpdateSubjectKind::Governance),
+                    })
+                    .await?;
                 debug!(
                     governance_id = %self.subject_metadata.subject_id,
                     "Manual governance update round initiated"

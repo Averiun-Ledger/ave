@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ave_actors::{
@@ -81,6 +82,12 @@ pub struct DistriWorker {
     /// retained prefix. Dropped with the staged prefix it covers.
     pub(crate) pending_auth: HashMap<DigestIdentifier, PendingAuthState>,
     pub(crate) attempt_clock: Arc<AtomicU64>,
+    /// In-flight fragment reassemblies keyed by (subject, event
+    /// hash): bounded, memory-only, dropped on restart. A completed
+    /// event is verified by hash before any deserialization or
+    /// apply, then delivered exactly like a whole batch.
+    pub(crate) frag_assemblies:
+        HashMap<(DigestIdentifier, DigestIdentifier), FragAssembly>,
     /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
     /// Atomic so the shared `&self` receipt helpers can consume it;
     /// production never arms it.
@@ -189,12 +196,51 @@ pub(crate) struct DistributionContext {
     pub sender_is_all: bool,
     pub ledger_count: usize,
     pub attempt: u64,
+    pub expected_governance_id: Option<DigestIdentifier>,
 }
 
 pub(crate) struct DistributionRange {
     pub actual_sn: Option<u64>,
     pub target_sn: Option<u64>,
     pub already_verified_transfer_sn: Option<u64>,
+    pub expected_governance_id: Option<DigestIdentifier>,
+}
+
+/// One event being reassembled from bounded fragments: chunks are
+/// stored by index (duplicates ignored, order irrelevant) and joined
+/// only when complete. The joined bytes are hash-verified before any
+/// deserialization or apply; any failure drops the assembly with no
+/// writes.
+pub(crate) struct FragAssembly {
+    subject_id: DigestIdentifier,
+    event_sn: u64,
+    total_bytes: u64,
+    chunk_total: u32,
+    is_all: bool,
+    is_push: bool,
+    expected_governance_id: Option<DigestIdentifier>,
+    sender: PublicKey,
+    info: ComunicateInfo,
+    chunks: Vec<Option<Vec<u8>>>,
+    received_bytes: u64,
+    received: u32,
+    last_active: Instant,
+}
+
+/// Sender-side batch outcome: either a batch that fits the
+/// effective wire cap, or a single event that needs fragmentation.
+/// Both carry the tip-completeness of the response they belong to.
+pub(crate) enum BatchPayload {
+    Batch {
+        ledger: Vec<Ledger>,
+        is_all: bool,
+        hi_sn: u64,
+        transfer_event: Option<Ledger>,
+    },
+    OversizedSingle {
+        event: Ledger,
+        is_all: bool,
+    },
 }
 
 impl DistriWorker {
@@ -234,6 +280,45 @@ impl DistriWorker {
     /// never emit a batch the receiver drops on sight.
     pub(crate) fn capped_batch_size(configured: u64) -> u64 {
         configured.min(crate::config::MAX_DISTRIBUTION_LEDGER_EVENTS as u64)
+    }
+
+    /// Headroom reserved in every distribution response for the
+    /// message envelope around the event payload (routing info,
+    /// variant framing and the transfer hint wrapper). The final
+    /// frame is still validated before sending; this only keeps the
+    /// estimate conservative so the validation never trims.
+    pub(crate) const DISTRIBUTION_ENVELOPE_RESERVE_BYTES: usize = 8192;
+    /// Per-event framing slop added to each measured event (array
+    /// framing of the batch around it).
+    const DISTRIBUTION_PER_EVENT_SLOP_BYTES: usize = 32;
+    /// Payload bytes per fragment when a single event exceeds the
+    /// wire cap. Small enough to leave headroom under any
+    /// configured cap, large enough to keep the fragment count
+    /// bounded.
+    pub(crate) const FRAGMENT_CHUNK_BYTES: usize = 256 * 1024;
+    /// Assemblies kept concurrently per worker while fragments of
+    /// several events interleave. Bounded: the store never grows
+    /// with the network.
+    const MAX_CONCURRENT_FRAGMENT_ASSEMBLIES: usize = 8;
+    /// Largest reassembled event accepted: legit ledgers stay far
+    /// below, and the bound caps a lying peer's memory claim. Also
+    /// bounds locally committed events: anything above it could
+    /// never replicate, not even fragmented.
+    pub(crate) const MAX_FRAGMENT_EVENT_BYTES: usize = 16 * 1024 * 1024;
+    /// Largest fragment count accepted for one event.
+    pub(crate) const MAX_FRAGMENTS_PER_EVENT: u32 = 1024;
+    /// Idle assemblies older than this are dropped on the next
+    /// fragment: restarts clear the memory-only store outright.
+    const FRAGMENT_ASSEMBLY_TTL: Duration = Duration::from_secs(300);
+
+    /// Chunk payload size for one fragment: leaves envelope
+    /// headroom under any configured cap while keeping the fragment
+    /// count bounded.
+    pub(crate) fn fragment_chunk_size(max_message_bytes: usize) -> usize {
+        max_message_bytes
+            .saturating_sub(Self::DISTRIBUTION_ENVELOPE_RESERVE_BYTES)
+            .div_ceil(2)
+            .clamp(1024, Self::FRAGMENT_CHUNK_BYTES)
     }
 
     /// Test-only auth work counter: visits over new tail events
@@ -378,6 +463,7 @@ impl DistriWorker {
         &self,
         sender: PublicKey,
         info: &ComunicateInfo,
+        event_hash: &DigestIdentifier,
     ) -> Result<(), ActorError> {
         let new_info = self.build_response_info(
             sender,
@@ -387,7 +473,9 @@ impl DistriWorker {
 
         self.send_network_message(
             new_info,
-            ActorMessage::DistributionLastEventRes,
+            ActorMessage::DistributionLastEventRes {
+                event_hash: event_hash.clone(),
+            },
         )
         .await
     }
@@ -397,9 +485,14 @@ impl DistriWorker {
         subject_id: &DigestIdentifier,
         info: &ComunicateInfo,
         sender: &PublicKey,
+        attempt: u64,
     ) -> String {
+        // One entry per attempt, never per batch: two retransmissions
+        // of the same batch own different leases, so the failure of
+        // one can not close the guard of the other. The shared clock
+        // is already unique per attempt across workers.
         format!(
-            "{kind}:{subject_id}:{sender}:{}:{}",
+            "{kind}:{subject_id}:{sender}:{}:{}:{attempt}",
             info.request_id, info.version
         )
     }
@@ -1018,7 +1111,6 @@ impl DistriWorker {
     /// `offered_hi` is always the last SN of the current batch, so
     /// the current batch participates in the decision instead of
     /// authorizing only the already-held prefix.
-    #[allow(clippy::too_many_arguments)]
     async fn check_auth_without_aux_incremental(
         ctx: &mut ActorContext<Self>,
         verifier: &super::transfer_verifier::TransferVerifier,
@@ -2074,7 +2166,6 @@ impl DistriWorker {
     /// after a governance change recomputes once. Returns the
     /// limit and the number of scanned events, so the single scan
     /// stays instrumented instead of moving work off-counters.
-    #[allow(clippy::too_many_arguments)]
     fn gov_window_limit_combined(
         state: &mut PendingAuthState,
         held: &[Ledger],
@@ -2604,7 +2695,7 @@ impl DistriWorker {
         actual_sn: Option<u64>,
         target_sn: Option<u64>,
         already_verified_transfer_sn: Option<u64>,
-    ) -> Result<(Vec<Ledger>, bool, u64, Option<Ledger>), ActorError> {
+    ) -> Result<BatchPayload, ActorError> {
         let data = get_subject_data(ctx, subject_id).await?;
         let Some(data) = data else {
             return Err(DistributorError::SubjectNotFound.into());
@@ -2688,7 +2779,13 @@ impl DistriWorker {
 
                 let ledger = Self::project_tracker_ledger(ledger, &ranges)?;
                 let is_all = raw_is_all && hi_sn == window_sn;
-                Ok((ledger, is_all, hi_sn, transfer_event))
+                Ok(self.fit_batch_to_wire(
+                    ledger,
+                    transfer_event,
+                    is_all,
+                    hi_sn,
+                    window_sn,
+                )?)
             }
             SubjectData::Governance { .. } => {
                 let (witness_hi_sn, ..) =
@@ -2719,9 +2816,115 @@ impl DistriWorker {
                     .await?;
 
                 let is_all = raw_is_all && batch_hi_sn == witness_hi_sn;
-                Ok((ledger, is_all, batch_hi_sn, None))
+                Ok(self.fit_batch_to_wire(
+                    ledger,
+                    None,
+                    is_all,
+                    batch_hi_sn,
+                    witness_hi_sn,
+                )?)
             }
         }
+    }
+
+    /// Trims a projected batch to the effective wire cap measured in
+    /// real serialized bytes: events first, the transfer hint
+    /// reserved up front, plus envelope headroom, with the event
+    /// cap kept as a second bound. Each event is measured once and
+    /// the frame is validated by the sender before emitting, so no
+    /// response is ever built that the transport must drop. A batch
+    /// whose first event alone overflows is returned for bounded
+    /// fragmentation instead of being shrunk to nothing.
+    fn fit_batch_to_wire(
+        &self,
+        ledger: Vec<Ledger>,
+        transfer_event: Option<Ledger>,
+        raw_is_all: bool,
+        hi_sn: u64,
+        tip_sn: u64,
+    ) -> Result<BatchPayload, ActorError> {
+        if ledger.is_empty() {
+            return Ok(BatchPayload::Batch {
+                ledger,
+                is_all: raw_is_all,
+                hi_sn,
+                transfer_event,
+            });
+        }
+        let max_bytes = self.network.max_message_bytes();
+        let aux_bytes = match &transfer_event {
+            Some(aux) => rmp_serde::to_vec(aux).map_err(|e| {
+                ActorError::Functional {
+                    description: format!(
+                        "Can not measure transfer hint size: {e}"
+                    ),
+                }
+            })?,
+            None => Vec::new(),
+        };
+        if aux_bytes.len().saturating_add(Self::DISTRIBUTION_ENVELOPE_RESERVE_BYTES)
+            > max_bytes
+        {
+            // Protocol-bounded hint that still overflows the cap:
+            // loud instead of a batch the transport must drop.
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Transfer hint ({} bytes) exceeds the wire cap ({} bytes)",
+                    aux_bytes.len(),
+                    max_bytes
+                ),
+            });
+        }
+        let mut sizes: Vec<usize> = Vec::with_capacity(ledger.len());
+        for event in &ledger {
+            let bytes = rmp_serde::to_vec(event).map_err(|e| {
+                ActorError::Functional {
+                    description: format!(
+                        "Can not measure event size: {e}"
+                    ),
+                }
+            })?;
+            sizes.push(bytes.len());
+        }
+        let mut budget = aux_bytes
+            .len()
+            .saturating_add(Self::DISTRIBUTION_ENVELOPE_RESERVE_BYTES);
+        let mut take = 0usize;
+        for size in &sizes {
+            if budget
+                .saturating_add(*size)
+                .saturating_add(Self::DISTRIBUTION_PER_EVENT_SLOP_BYTES)
+                > max_bytes
+            {
+                break;
+            }
+            budget = budget
+                .saturating_add(*size)
+                .saturating_add(Self::DISTRIBUTION_PER_EVENT_SLOP_BYTES);
+            take += 1;
+        }
+        if take == 0 {
+            let mut ledger = ledger;
+            let event = ledger.remove(0);
+            return Ok(BatchPayload::OversizedSingle {
+                is_all: raw_is_all && event.sn == tip_sn,
+                event,
+            });
+        }
+        let mut ledger = ledger;
+        ledger.truncate(take);
+        let hi_sn = ledger
+            .last()
+            .map(|event| event.sn)
+            .unwrap_or(hi_sn);
+        Ok(BatchPayload::Batch {
+            ledger,
+            // Completeness is only claimed when the trimmed batch
+            // still reaches the tip the sender planned for.
+            is_all: raw_is_all && hi_sn == tip_sn,
+            hi_sn,
+            transfer_event,
+        })
     }
 
     /// Tip of the deferred (received but unapplied) prefix for a
@@ -2847,6 +3050,16 @@ impl DistriWorker {
         actual_sn: Option<u64>,
         subject_data: Option<SubjectData>,
     ) -> Result<(), ActorError> {
+        // The copy stays scoped to the local governance of this
+        // subject when known: continuations re-derive the scope
+        // instead of trusting the wire alone.
+        let expected_governance_id = match &subject_data {
+            Some(SubjectData::Tracker { governance_id, .. }) => {
+                Some(governance_id.clone())
+            }
+            Some(SubjectData::Governance { .. }) => Some(subject_id.clone()),
+            None => None,
+        };
         let verified = match subject_data {
             Some(SubjectData::Tracker { governance_id, .. }) => {
                 match get_verified_transfer_sn_firm(
@@ -2907,6 +3120,7 @@ impl DistriWorker {
                 target_sn: None,
                 subject_id: subject_id.clone(),
                 already_verified_transfer_sn,
+                expected_governance_id,
             },
         )
         .await
@@ -2998,9 +3212,12 @@ impl DistriWorker {
             }
         } else if let Some(buffered_tip) = buffered_tip {
             // Nothing applied yet, but a deferred prefix is held:
-            // only its direct continuation may proceed, and it still
-            // needs its evidence checked downstream.
-            if received_first_sn != buffered_tip.saturating_add(1) {
+            // its direct continuation proceeds, and an overlap
+            // still proceeds so the evidence check can tell an
+            // exact replay (deduplicated) from a same-SN divergence
+            // (held, never silently edited). Only a true gap
+            // re-requests here.
+            if received_first_sn > buffered_tip.saturating_add(1) {
                 debug!(
                     subject_id = %subject_id,
                     received_first_sn = received_first_sn,
@@ -3105,7 +3322,7 @@ impl DistriWorker {
         sender: PublicKey,
         range: DistributionRange,
     ) -> Result<(), ActorError> {
-        let (ledger, is_all, hi_sn, transfer_event) = self
+        let payload = self
             .build_distribution_batch(
                 ctx,
                 &subject_id,
@@ -3122,28 +3339,296 @@ impl DistriWorker {
             format!("/user/node/distributor_{}", subject_id),
         );
 
-        self.send_network_message(
-            new_info,
-            ActorMessage::DistributionLedgerRes {
-                ledger: ledger.clone(),
+        match payload {
+            BatchPayload::Batch {
+                ledger,
                 is_all,
-                transfer_event: transfer_event.map(Box::new),
-            },
-        )
-        .await?;
+                hi_sn,
+                transfer_event,
+            } => {
+                self.send_network_message(
+                    new_info,
+                    ActorMessage::DistributionLedgerRes {
+                        ledger: ledger.clone(),
+                        is_all,
+                        transfer_event: transfer_event.map(Box::new),
+                        // Echo the request scope so the receiver validates
+                        // the served prefix against it before writing.
+                        expected_governance_id: range.expected_governance_id,
+                    },
+                )
+                .await?;
 
-        debug!(
-            msg_type = "SendDistribution",
-            subject_id = %subject_id,
-            sender = %sender,
-            ledger_count = ledger.len(),
-            is_all = is_all,
-            hi_sn = hi_sn,
-            actual_sn = ?range.actual_sn,
-            "Ledger distribution sent successfully"
-        );
+                debug!(
+                    msg_type = "SendDistribution",
+                    subject_id = %subject_id,
+                    sender = %sender,
+                    ledger_count = ledger.len(),
+                    is_all = is_all,
+                    hi_sn = hi_sn,
+                    actual_sn = ?range.actual_sn,
+                    "Ledger distribution sent successfully"
+                );
+            }
+            BatchPayload::OversizedSingle { event, is_all } => {
+                self.send_fragmented_event(
+                    new_info,
+                    subject_id.clone(),
+                    event,
+                    is_all,
+                    false,
+                    range.expected_governance_id,
+                )
+                .await?;
+
+                debug!(
+                    msg_type = "SendDistribution",
+                    subject_id = %subject_id,
+                    sender = %sender,
+                    is_all = is_all,
+                    "Oversized event sent as bounded fragments"
+                );
+            }
+        }
 
         Ok(())
+    }
+
+    /// Sends one oversized event as bounded fragments: each chunk
+    /// fits the effective cap by construction and is validated by
+    /// the sender frame check, so no retry loop can rebuild an
+    /// oversize batch. The receiver reassembles by event identity,
+    /// verifies the hash before any deserialization or apply, and
+    /// delivers exactly like a whole response.
+    async fn send_fragmented_event(
+        &self,
+        info: ComunicateInfo,
+        subject_id: DigestIdentifier,
+        event: Ledger,
+        is_all: bool,
+        is_push: bool,
+        expected_governance_id: Option<DigestIdentifier>,
+    ) -> Result<(), ActorError> {
+        let event_hash = event.ledger_hash(self.hash).map_err(|e| {
+            ActorError::Functional {
+                description: format!("Can not hash fragmented event: {e}"),
+            }
+        })?;
+        let bytes = borsh::to_vec(&event).map_err(|e| {
+            ActorError::Functional {
+                description: format!("Can not encode fragmented event: {e}"),
+            }
+        })?;
+        let total_bytes = bytes.len() as u64;
+        if total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64 {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Fragmented event ({} bytes) exceeds the reassembly bound ({} bytes)",
+                    total_bytes,
+                    Self::MAX_FRAGMENT_EVENT_BYTES
+                ),
+            });
+        }
+        let chunk_size = Self::fragment_chunk_size(self.network.max_message_bytes());
+        let chunk_total = bytes.len().div_ceil(chunk_size) as u32;
+        if chunk_total == 0 || chunk_total > Self::MAX_FRAGMENTS_PER_EVENT {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Fragmented event needs {chunk_total} chunks, out of bounds"
+                ),
+            });
+        }
+        let event_sn = event.sn;
+        for (index, piece) in bytes.chunks(chunk_size).enumerate() {
+            self.send_network_message(
+                info.clone(),
+                ActorMessage::DistributionLedgerFrag {
+                    subject_id: subject_id.clone(),
+                    event_hash: event_hash.clone(),
+                    event_sn,
+                    total_bytes,
+                    chunk_index: index as u32,
+                    chunk_total,
+                    chunk: piece.to_vec(),
+                    is_all,
+                    is_push,
+                    expected_governance_id: expected_governance_id.clone(),
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Receives one fragment: bounds it, stores it by index and, on
+    /// completion, joins, hash-verifies and delivers the event. Any
+    /// failure drops the assembly with no writes; duplicates and
+    /// reorders are idempotent. The store is bounded and
+    /// memory-only: completed, failed and expired assemblies never
+    /// accumulate, and a restart clears them outright.
+    async fn handle_ledger_frag(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: DigestIdentifier,
+        event_hash: DigestIdentifier,
+        event_sn: u64,
+        total_bytes: u64,
+        chunk_index: u32,
+        chunk_total: u32,
+        chunk: Vec<u8>,
+        is_all: bool,
+        is_push: bool,
+        expected_governance_id: Option<DigestIdentifier>,
+        info: ComunicateInfo,
+        sender: PublicKey,
+    ) -> Result<(), ActorError> {
+        let max_bytes = self.network.max_message_bytes() as u64;
+        if chunk_total == 0
+            || chunk_total > Self::MAX_FRAGMENTS_PER_EVENT
+            || chunk_index >= chunk_total
+            || total_bytes == 0
+            || total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64
+            || chunk.len() as u64 > max_bytes
+        {
+            warn!(
+                msg_type = "LedgerFrag",
+                subject_id = %subject_id,
+                sender = %sender,
+                chunk_total = chunk_total,
+                chunk_index = chunk_index,
+                total_bytes = total_bytes,
+                "Dropping out-of-bounds fragment"
+            );
+            return Ok(());
+        }
+        // Expire idle assemblies first: the store stays bounded even
+        // when a sender never completes.
+        self.frag_assemblies.retain(|_, assembly| {
+            assembly.last_active.elapsed() < Self::FRAGMENT_ASSEMBLY_TTL
+        });
+        let key = (subject_id.clone(), event_hash.clone());
+        // A clashing assembly (same identity, different framing) is
+        // corrupt or mixed: drop it instead of joining garbage.
+        if self.frag_assemblies.get(&key).is_some_and(|assembly| {
+            assembly.total_bytes != total_bytes
+                || assembly.chunk_total != chunk_total
+                || assembly.event_sn != event_sn
+                || assembly.is_push != is_push
+        }) {
+            self.frag_assemblies.remove(&key);
+        }
+        if self.frag_assemblies.len() >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
+            && !self.frag_assemblies.contains_key(&key)
+        {
+            // Full of other events: evict the stalest instead of
+            // growing, so one slow sender can not wedge the rest.
+            if let Some(oldest) = self
+                .frag_assemblies
+                .iter()
+                .min_by_key(|(_, assembly)| assembly.last_active)
+                .map(|(key, _)| key.clone())
+            {
+                self.frag_assemblies.remove(&oldest);
+            }
+        }
+        self.frag_assemblies.entry(key.clone()).or_insert_with(
+            || FragAssembly {
+                subject_id: subject_id.clone(),
+                event_sn,
+                total_bytes,
+                chunk_total,
+                is_all,
+                is_push,
+                expected_governance_id: expected_governance_id.clone(),
+                sender: sender.clone(),
+                info: info.clone(),
+                chunks: (0..chunk_total).map(|_| None).collect(),
+                received_bytes: 0,
+                received: 0,
+                last_active: Instant::now(),
+            },
+        );
+        let Some(assembly) = self.frag_assemblies.get_mut(&key) else {
+            return Ok(());
+        };
+        assembly.last_active = Instant::now();
+        if assembly.chunks[chunk_index as usize].is_none() {
+            assembly.received_bytes += chunk.len() as u64;
+            assembly.received += 1;
+            assembly.chunks[chunk_index as usize] = Some(chunk);
+        }
+        if assembly.received < assembly.chunk_total {
+            return Ok(());
+        }
+        let Some(assembly) = self.frag_assemblies.remove(&key) else {
+            return Ok(());
+        };
+        if assembly.received_bytes != assembly.total_bytes {
+            warn!(
+                msg_type = "LedgerFrag",
+                subject_id = %assembly.subject_id,
+                "Dropping fragment join with mismatched size"
+            );
+            return Ok(());
+        }
+        let mut joined = Vec::with_capacity(assembly.total_bytes as usize);
+        for piece in assembly.chunks.into_iter().flatten() {
+            joined.extend_from_slice(&piece);
+        }
+        let ledger: Ledger = borsh::from_slice(&joined).map_err(|e| {
+            warn!(
+                msg_type = "LedgerFrag",
+                subject_id = %assembly.subject_id,
+                error = %e,
+                "Dropping fragment join that does not decode"
+            );
+            ActorError::Functional {
+                description: format!("Fragment join does not decode: {e}"),
+            }
+        })?;
+        // Identity before anything else: a corrupt or mixed join can
+        // never deserialise into an apply.
+        let verified = ledger
+            .ledger_hash(self.hash)
+            .is_ok_and(|hash| hash == event_hash)
+            && ledger.get_subject_id() == assembly.subject_id
+            && ledger.sn == assembly.event_sn;
+        if !verified {
+            warn!(
+                msg_type = "LedgerFrag",
+                subject_id = %assembly.subject_id,
+                "Dropping fragment join with mismatched identity"
+            );
+            return Ok(());
+        }
+        if assembly.is_push {
+            self.process_last_event_distribution(
+                ctx,
+                ledger,
+                assembly.info,
+                assembly.sender,
+            )
+            .await
+        } else {
+            // A reassembled transfer carries its own aux: the sender
+            // could not fit both, and the bytes are identical.
+            let aux = match &ledger.protocols {
+                Protocols::Transfer { evaluation, .. } if evaluation.is_ok() => {
+                    Some(Box::new(ledger.clone()))
+                }
+                _ => None,
+            };
+            self.handle_ledger_distribution(
+                ctx,
+                vec![ledger],
+                assembly.is_all,
+                aux,
+                assembly.info,
+                assembly.sender,
+                assembly.expected_governance_id,
+            )
+            .await
+        }
     }
 
     /// Processes an inbound ledger batch under the shared distribution
@@ -3157,6 +3642,7 @@ impl DistriWorker {
         transfer_event: Option<Box<Ledger>>,
         info: ComunicateInfo,
         sender: PublicKey,
+        expected_governance_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         // Attempt lifecycle: every batch owns an attempt from here
         // until this entry point returns, including parked
@@ -3175,6 +3661,7 @@ impl DistriWorker {
                 info,
                 sender,
                 attempt,
+                expected_governance_id,
             )
             .await;
         if let Some(subject_id) = &maybe_subject {
@@ -3192,6 +3679,7 @@ impl DistriWorker {
         info: ComunicateInfo,
         sender: PublicKey,
         attempt: u64,
+        expected_governance_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
         {}
         if ledger.is_empty() {
@@ -3261,6 +3749,67 @@ impl DistriWorker {
         let ledger_count = ledger.len();
         let first_sn = ledger[0].sn;
 
+        // Exact-replay fast path for an unregistered hold: an
+        // overlapping batch whose every overlapped event is
+        // byte-identical to the staged prefix is stale and dropped
+        // before any verify work, preserving linear buffer bounds.
+        // A same-SN mismatch is a divergence and must reach the
+        // evidence check below instead of being hidden here. Both
+        // runs arrive ascending (ingress sorts the batch, staged
+        // events only append past the tip), so one joint walk
+        // visits each overlapped event once instead of rescanning.
+        if let Some(buffered_tip) = self.deferred_tip(&subject_id)
+            && first_sn <= buffered_tip
+            && get_subject_data(ctx, &subject_id)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            let held_view = self.deferred.view(&subject_id);
+            let mut held = held_view.iter();
+            let mut current = held.next();
+            let mut exact = true;
+            for event in &ledger {
+                if event.sn > buffered_tip {
+                    break;
+                }
+                while current.is_some_and(|held| held.sn < event.sn) {
+                    current = held.next();
+                }
+                let Some(held) = current else {
+                    exact = false;
+                    break;
+                };
+                if held.sn != event.sn {
+                    exact = false;
+                    break;
+                }
+                match (
+                    held.ledger_hash(self.hash),
+                    event.ledger_hash(self.hash),
+                ) {
+                    (Ok(previous), Ok(current)) if previous == current => {}
+                    _ => {
+                        exact = false;
+                        break;
+                    }
+                }
+            }
+            if exact {
+                self.request_ledger_from_sender(
+                    ctx,
+                    &subject_id,
+                    sender.clone(),
+                    &info,
+                    Some(buffered_tip),
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
         if !self
             .ensure_next_sn_or_request_update(
                 ctx,
@@ -3288,9 +3837,15 @@ impl DistriWorker {
             get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
         self.prune_deferred(ctx, &subject_id, applied_for_held);
         let held_view = self.deferred.view(&subject_id);
+        // An overlapping continuation still carries the staged
+        // prefix the rebuild must see: exact replays deduplicate
+        // by identity while the same SN with different bytes is
+        // a divergence, never hidden by dropping the held view.
+        // A gapped batch (held tip + 1 < first SN) keeps the old
+        // empty view so auth fails closed and re-requests.
         let held_prefix: &[Ledger] = if held_view
             .last()
-            .is_some_and(|last| last.sn.saturating_add(1) == first_sn)
+            .is_some_and(|last| last.sn.saturating_add(1) >= first_sn)
         {
             held_view
         } else {
@@ -3419,6 +3974,27 @@ impl DistriWorker {
             } else {
                 let applied_tip =
                     get_local_subject_sn(ctx, &subject_id).await.ok().flatten();
+                // An overlapping batch never extends the staged
+                // prefix: exact replays are already held and a same-SN
+                // divergence must not overwrite them. The evidence
+                // check above already judged the overlap (rebuild
+                // counted, no proof), so keep the held bytes as they
+                // are and ask for the continuation instead of
+                // breaking the strictly-ascending stage invariant.
+                let held_tip = self.deferred_tip(&subject_id);
+                if held_tip.is_some_and(|tip| first_sn <= tip) {
+                    let from_sn = applied_tip.max(held_tip);
+                    self.request_ledger_from_sender(
+                        ctx,
+                        &subject_id,
+                        sender,
+                        &info,
+                        from_sn,
+                        common.subject_data.clone(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 let evicted =
                     self.stage_deferred(ctx, &subject_id, ledger, applied_tip);
                 for evicted_subject in &evicted {
@@ -3483,6 +4059,7 @@ impl DistriWorker {
                 sender_is_all,
                 ledger_count,
                 attempt,
+                expected_governance_id,
             },
         )
         .await?;
@@ -3540,6 +4117,7 @@ pub enum DistriWorkerMessage {
         info: ComunicateInfo,
         sender: PublicKey,
         already_verified_transfer_sn: Option<u64>,
+        expected_governance_id: Option<DigestIdentifier>,
     },
     // Nos llega una replica, guardarla en informar que la hemos recivido
     LastEventDistribution {
@@ -3551,6 +4129,24 @@ pub enum DistriWorkerMessage {
         ledger: Vec<Ledger>,
         is_all: bool,
         transfer_event: Option<Box<Ledger>>,
+        info: ComunicateInfo,
+        sender: PublicKey,
+        expected_governance_id: Option<DigestIdentifier>,
+    },
+    /// One bounded chunk of an oversized event. Reassembled by
+    /// (subject, event hash); duplicates are idempotent and order
+    /// is irrelevant. Only a hash-verified join is ever delivered.
+    LedgerFrag {
+        subject_id: DigestIdentifier,
+        event_hash: DigestIdentifier,
+        event_sn: u64,
+        total_bytes: u64,
+        chunk_index: u32,
+        chunk_total: u32,
+        chunk: Vec<u8>,
+        is_all: bool,
+        is_push: bool,
+        expected_governance_id: Option<DigestIdentifier>,
         info: ComunicateInfo,
         sender: PublicKey,
     },
@@ -3672,6 +4268,7 @@ impl Handler<Self> for DistriWorker {
                 subject_id,
                 sender,
                 already_verified_transfer_sn,
+                expected_governance_id,
             } => {
                 let result = self
                     .handle_send_distribution(
@@ -3683,6 +4280,7 @@ impl Handler<Self> for DistriWorker {
                             actual_sn,
                             target_sn,
                             already_verified_transfer_sn,
+                            expected_governance_id,
                         },
                     )
                     .await;
@@ -3711,6 +4309,7 @@ impl Handler<Self> for DistriWorker {
                 transfer_event,
                 info,
                 sender,
+                expected_governance_id,
             } => {
                 if ledger.is_empty() {
                     warn!(
@@ -3729,6 +4328,7 @@ impl Handler<Self> for DistriWorker {
                         transfer_event,
                         info,
                         sender.clone(),
+                        expected_governance_id,
                     )
                     .await;
                 handle_distri_error!(
@@ -3737,6 +4337,46 @@ impl Handler<Self> for DistriWorker {
                     "LedgerDistribution",
                     subject_id,
                     "Ledger distribution failed",
+                    sender = &sender
+                )?;
+            }
+            DistriWorkerMessage::LedgerFrag {
+                subject_id,
+                event_hash,
+                event_sn,
+                total_bytes,
+                chunk_index,
+                chunk_total,
+                chunk,
+                is_all,
+                is_push,
+                expected_governance_id,
+                info,
+                sender,
+            } => {
+                let result = self
+                    .handle_ledger_frag(
+                        ctx,
+                        subject_id.clone(),
+                        event_hash,
+                        event_sn,
+                        total_bytes,
+                        chunk_index,
+                        chunk_total,
+                        chunk,
+                        is_all,
+                        is_push,
+                        expected_governance_id,
+                        info,
+                        sender.clone(),
+                    )
+                    .await;
+                handle_distri_error!(
+                    ctx,
+                    result,
+                    "LedgerFrag",
+                    subject_id,
+                    "Ledger fragment processing failed",
                     sender = &sender
                 )?;
             }
@@ -3784,6 +4424,10 @@ impl Handler<Self> for DistriWorker {
             #[cfg(feature = "test")]
             DistriWorkerMessage::TestEvictVerifyCursor { subject_id } => {
                 self.verify_cursors.invalidate(&subject_id);
+                // A true rebuild starts with no incremental state
+                // either: staged bytes are re-read from the store,
+                // nothing is trusted from a previous sweep.
+                self.pending_auth.remove(&subject_id);
                 debug!(
                     msg_type = "TestEvictVerifyCursor",
                     subject_id = %subject_id,
