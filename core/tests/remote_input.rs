@@ -16172,7 +16172,6 @@ async fn remote_unique_owners_stay_linear_half() {
     }
 }
 
-
 /// A stale distribution ack (same sender, older event) must not
 /// complete a newer generation on the same route: only the ack
 /// naming the distributed event hash stops the retry. A resent ack
@@ -16256,7 +16255,9 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
     .await
     .unwrap();
     w.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&w, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&w, governance_id.clone(), None, true)
+        .await
+        .unwrap();
 
     let (subject_id, _) =
         create_subject(&alice, governance_id.clone(), "Example", "", true)
@@ -16299,7 +16300,9 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
     // First generation completes normally; keep a copy of its ack.
     hold_res(&w).await;
     alice.manual_distribution(subject_id.clone()).await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for _ in 0..100 {
         if held_res_count(&w).await >= 1 {
             break;
@@ -16312,10 +16315,7 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
         .unwrap_or_default()
         .into_iter()
         .find(|m| {
-            matches!(
-                &m.message,
-                ActorMessage::DistributionLastEventRes { .. }
-            )
+            matches!(&m.message, ActorMessage::DistributionLastEventRes { .. })
         })
         .expect("first generation ack held");
     w.test_release_held().await.unwrap();
@@ -16333,7 +16333,9 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
     .await
     .unwrap();
     alice.manual_distribution(subject_id.clone()).await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     for _ in 0..100 {
         if held_res_count(&w).await >= 1 {
             break;
@@ -16344,14 +16346,14 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
     // every retry earns another retained ack. The stale ack below
     // must not stop this flow; the count must keep growing.
     let held_before = held_res_count(&w).await;
-    assert!(
-        held_before >= 1,
-        "second generation ack retained"
-    );
+    assert!(held_before >= 1, "second generation ack retained");
 
     // Deliver the stale ack on the reused route: it must be ignored
     // without stopping the retry of the live generation.
-    alice.test_inject_inbound(stale_ack.clone(), &w_key).await.unwrap();
+    alice
+        .test_inject_inbound(stale_ack.clone(), &w_key)
+        .await
+        .unwrap();
     for _ in 0..100 {
         if held_res_count(&w).await > held_before {
             break;
@@ -16365,7 +16367,9 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
 
     // The genuine ack still completes the generation exactly once.
     w.test_release_held().await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     node_running(&alice).await.unwrap();
     node_running(&w).await.unwrap();
 
@@ -16382,23 +16386,23 @@ async fn remote_stale_ack_does_not_complete_new_distribution() {
     .unwrap();
     hold_res(&w).await;
     alice.manual_distribution(subject_id.clone()).await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(3), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
     w.test_release_held().await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(3), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
     node_running(&alice).await.unwrap();
     node_running(&w).await.unwrap();
 
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(
-        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
-    )
-    .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }
-
 
 /// Two duplicate copies (same subject, sender, request id and
 /// version) must own independent leases: the failed attempt closes
@@ -16497,7 +16501,10 @@ async fn remote_duplicate_attempts_have_independent_leases() {
     // W joins only now: nothing pushed to her is genuine traffic.
     let (mut w_node, w_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
-        listen_address: format!("/memory/{}", PORT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        listen_address: format!(
+            "/memory/{}",
+            PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ),
         peers: vec![RoutingNode {
             peer_id: nodes[0].api.peer_id().to_string(),
             address: vec![nodes[0].listen_address.clone()],
@@ -16549,7 +16556,9 @@ async fn remote_duplicate_attempts_have_independent_leases() {
     .await
     .unwrap();
     w.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&w, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&w, governance_id.clone(), None, true)
+        .await
+        .unwrap();
 
     let (subject_id, _) =
         create_subject(&alice, governance_id.clone(), "Example", "", true)
@@ -16617,7 +16626,9 @@ async fn remote_duplicate_attempts_have_independent_leases() {
     )
     .await
     .unwrap();
-    get_subject(&w, subject_id.clone(), Some(0), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
 
     // Both duplicates park after acquiring their leases: the
     // valid copy on the per-subject worker, the forged one on the
@@ -16635,8 +16646,7 @@ async fn remote_duplicate_attempts_have_independent_leases() {
                     ComunicateInfo {
                         request_id: String::new(),
                         version: 0,
-                        receiver: PublicKey::from_str(w.public_key())
-                            .unwrap(),
+                        receiver: PublicKey::from_str(w.public_key()).unwrap(),
                         receiver_actor,
                     },
                     ActorMessage::DistributionLedgerRes {
@@ -16652,11 +16662,7 @@ async fn remote_duplicate_attempts_have_independent_leases() {
             .unwrap();
         }
     };
-    inject(
-        vec![fact.clone(), transfer.clone()],
-        per_subject.clone(),
-    )
-    .await;
+    inject(vec![fact.clone(), transfer.clone()], per_subject.clone()).await;
     for _ in 0..100 {
         if w.test_after_acquire_hold_count().await.unwrap_or(0) >= 1 {
             break;
@@ -16699,16 +16705,24 @@ async fn remote_duplicate_attempts_have_independent_leases() {
         "duplicate attempts own independent leases: {requesters:?}"
     );
     assert!(
-        w.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        w.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         "live requesters while both duplicates are parked"
     );
 
     // Release both: the forged duplicate fails without a trace and
     // the valid copy applies the genuine history.
     w.test_pause_after_acquire(false).await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     for _ in 0..100 {
-        if !w.test_has_live_requesters(subject_id.clone()).await.unwrap() {
+        if !w
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -16755,7 +16769,9 @@ async fn remote_duplicate_attempts_have_independent_leases() {
         }
     }
     assert!(
-        !w.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        !w.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         "no lease may leak once both attempts finish"
     );
     node_running(&w).await.unwrap();
@@ -16896,7 +16912,9 @@ async fn remote_duplicate_pushes_have_independent_leases() {
     .await
     .unwrap();
     w.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&w, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&w, governance_id.clone(), None, true)
+        .await
+        .unwrap();
 
     let (subject_id, _) =
         create_subject(&alice, governance_id.clone(), "Example", "", true)
@@ -16937,7 +16955,9 @@ async fn remote_duplicate_pushes_have_independent_leases() {
     )
     .await
     .unwrap();
-    get_subject(&w, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 
     emit_fact(
         &alice,
@@ -17038,14 +17058,18 @@ async fn remote_duplicate_pushes_have_independent_leases() {
         "duplicate pushes own independent leases: {requesters:?}"
     );
     assert!(
-        w.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        w.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         "live requesters while both pushes are parked"
     );
 
     // Release both: the forged push fails without a trace and the
     // valid one completes the copy.
     w.test_pause_single_updated(false).await.unwrap();
-    get_subject(&w, subject_id.clone(), Some(2), true).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
     let copied = w
         .test_get_tracker_ledger(subject_id.clone(), 2)
         .await
@@ -17063,13 +17087,19 @@ async fn remote_duplicate_pushes_have_independent_leases() {
     // Both parked attempts close once released: poll, since their
     // finish is asynchronous to the release.
     for _ in 0..100 {
-        if !w.test_has_live_requesters(subject_id.clone()).await.unwrap() {
+        if !w
+            .test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        !w.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        !w.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         "no lease may leak once both pushes finish"
     );
     node_running(&w).await.unwrap();
@@ -17077,10 +17107,7 @@ async fn remote_duplicate_pushes_have_independent_leases() {
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(
-        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
-    )
-    .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }
@@ -17262,7 +17289,10 @@ async fn remote_update_restart_rejects_stale_offer() {
         .await
         .unwrap();
     b.test_clear_faults().await.unwrap();
-    a.authorize_governance(t.clone(), ave_core::auth::AuthWitness::One(b_key.clone()))
+    a.authorize_governance(
+        t.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
         .await
         .unwrap();
 
@@ -17387,9 +17417,9 @@ async fn remote_update_restart_refreshes_snapshot() {
             .unwrap_or_default()
             .iter()
             .filter_map(|m| match &m.message {
-                ActorMessage::DistributionGetLastSn {
-                    actual_sn, ..
-                } => Some((m.info.receiver.clone(), *actual_sn)),
+                ActorMessage::DistributionGetLastSn { actual_sn, .. } => {
+                    Some((m.info.receiver.clone(), *actual_sn))
+                }
                 _ => None,
             })
             .collect()
@@ -17619,8 +17649,11 @@ async fn remote_update_restart_refreshes_snapshot() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let fresh: Vec<_> =
-        last_sn_reqs(&a).await.into_iter().skip(sweep1.len()).collect();
+    let fresh: Vec<_> = last_sn_reqs(&a)
+        .await
+        .into_iter()
+        .skip(sweep1.len())
+        .collect();
     assert!(
         fresh.iter().any(|(p, s)| p == &b_key && *s == Some(2)),
         "the new sweep uses the new local sn, got {fresh:?}"
@@ -17948,24 +17981,32 @@ async fn remote_registered_refuted_inline_transfer_cannot_unmask_prefix() {
         _ => panic!("premise: the new fact is Full"),
     };
     let forged4 = forge_ok_evaluation(&transfer4, fact3_result, &alice_keys);
-    inject_ledger_batch(
-        &rita,
-        &alice_key,
-        vec![fact3.clone(), forged4],
-        None,
-    )
+    inject_ledger_batch(&rita, &alice_key, vec![fact3.clone(), forged4], None)
     .await;
     // Poll rejection: SN stays, no proof, deferred empty (no fixed sleep).
     {
         let start = tokio::time::Instant::now();
         loop {
-            let sn = get_subject(&rita, subject_id.clone(), None, true).await.unwrap().sn;
-            let proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None);
-            let deferred = rita.test_deferred_stats().await.unwrap_or((1,1,1));
+            let sn = get_subject(&rita, subject_id.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+            let proof = rita
+                .test_get_verified_transfer_sn(
+                    &governance_id,
+                    subject_id.clone(),
+                )
+                .await
+                .unwrap_or(None);
+            let deferred =
+                rita.test_deferred_stats().await.unwrap_or((1, 1, 1));
             if sn == 2 && proof.is_none() && deferred == (0,0,0) {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "refuted chunk rejects");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "refuted chunk rejects"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -18427,14 +18468,31 @@ async fn remote_first_copy_refuted_inline_transfer_emits_nothing() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let no_subject = rita.get_subject_state(subject_id.clone()).await.is_err();
-            let no_journal = rita.test_get_tracker_ledger(subject_id.clone(), 10).await.map(|e| e.is_empty()).unwrap_or(true);
-            let no_proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None).is_none();
-            let no_deferred = rita.test_deferred_stats().await.unwrap_or((1,1,1)) == (0,0,0);
+            let no_subject =
+                rita.get_subject_state(subject_id.clone()).await.is_err();
+            let no_journal = rita
+                .test_get_tracker_ledger(subject_id.clone(), 10)
+                .await
+                .map(|e| e.is_empty())
+                .unwrap_or(true);
+            let no_proof = rita
+                .test_get_verified_transfer_sn(
+                    &governance_id,
+                    subject_id.clone(),
+                )
+                .await
+                .unwrap_or(None)
+                .is_none();
+            let no_deferred =
+                rita.test_deferred_stats().await.unwrap_or((1, 1, 1))
+                    == (0, 0, 0);
             if no_subject && no_journal && no_proof && no_deferred {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "refuted first copy leaves nothing");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "refuted first copy leaves nothing"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -18683,7 +18741,12 @@ async fn byte_capped_batches_make_progress_once(
         .await
         .unwrap();
     }
-    emit_transfer(&b, subject_id.clone(), PublicKey::from_str(&a.public_key()).unwrap(), true)
+    emit_transfer(
+        &b,
+        subject_id.clone(),
+        PublicKey::from_str(&a.public_key()).unwrap(),
+        true,
+    )
         .await
         .unwrap();
     let tip = fact_count + 1;
@@ -18737,10 +18800,7 @@ async fn byte_capped_batches_make_progress_once(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let held = held_responses(&b).await;
-        assert!(
-            !held.is_empty(),
-            "the sender stalls instead of batching on"
-        );
+        assert!(!held.is_empty(), "the sender stalls instead of batching on");
         let mut closed = false;
         for m in &held {
             // Measure exactly what the transport measures: the whole
@@ -18776,8 +18836,10 @@ async fn byte_capped_batches_make_progress_once(
         "byte-capped batches split the history, got {}",
         responses.len()
     );
-    let mut covered: Vec<u64> =
-        responses.iter().flat_map(|(sns, _, _)| sns.clone()).collect();
+    let mut covered: Vec<u64> = responses
+        .iter()
+        .flat_map(|(sns, _, _)| sns.clone())
+        .collect();
     covered.sort_unstable();
     assert!(
         covered.windows(2).all(|w| w[1] == w[0] + 1),
@@ -18809,7 +18871,11 @@ async fn remote_byte_capped_batches_make_progress() {
     // Explicitly configured larger cap: sender and batch builder
     // honor the same effective limit, not the 1 MiB constant. A batch
     // above 1 MiB only flows because the configured 2 MiB applies.
-    byte_capped_batches_make_progress_once(Some(2 * 1024 * 1024), 200 * 1024, 12)
+    byte_capped_batches_make_progress_once(
+        Some(2 * 1024 * 1024),
+        200 * 1024,
+        12,
+    )
         .await;
 }
 
@@ -18961,9 +19027,7 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
         .into_iter()
         .find(|event| event.sn == 1)
         .expect("oversized fact committed");
-    let expected_hash = expected
-        .ledger_hash(HashAlgorithm::Blake3)
-        .unwrap();
+    let expected_hash = expected.ledger_hash(HashAlgorithm::Blake3).unwrap();
 
     // Hold every fragment: more than one must exist (otherwise the
     // event went out whole and over the cap), all under the cap,
@@ -19030,7 +19094,10 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
                 ..
             } => {
                 assert_eq!(*event_sn, 1, "fragments belong to the event");
-                assert_eq!(*event_hash, expected_hash, "fragments name the event");
+                assert_eq!(
+                    *event_hash, expected_hash,
+                    "fragments name the event"
+                );
                 total = Some((*total_bytes, *chunk_total));
                 is_all = Some(*frag_all);
                 indexes.push(*chunk_index);
@@ -19084,12 +19151,20 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let count = a.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default().len();
-            let (assemblies, ready_mains, ready_auxes, _, _) = a.test_fragment_stats().await.unwrap_or((1,1,1,0,0));
+            let count = a
+                .test_get_tracker_ledger(subject_id.clone(), 10)
+                .await
+                .unwrap_or_default()
+                .len();
+            let (assemblies, ready_mains, ready_auxes, _, _) =
+                a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
             if count == 2 && assemblies + ready_mains + ready_auxes == 0 {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "duplicates never apply twice");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "duplicates never apply twice"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19144,9 +19219,8 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
         .into_iter()
         .find(|event| event.sn == 1)
         .expect("oversized fact committed");
-    let expected_hash_c = expected_c
-        .ledger_hash(HashAlgorithm::Blake3)
-        .unwrap();
+    let expected_hash_c =
+        expected_c.ledger_hash(HashAlgorithm::Blake3).unwrap();
     a.authorize_governance(
         subject_c.clone(),
         ave_core::auth::AuthWitness::One(b_key.clone()),
@@ -19213,13 +19287,28 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let sn = get_subject(&a, subject_c.clone(), None, true).await.unwrap().sn;
-            let has_fact = a.test_get_tracker_ledger(subject_c.clone(), 10).await.unwrap_or_default().iter().any(|e| e.sn == 1);
-            let (assemblies, ready_mains, ready_auxes, _, _) = a.test_fragment_stats().await.unwrap_or((1,1,1,0,0));
-            if sn == 0 && !has_fact && assemblies + ready_mains + ready_auxes == 0 {
+            let sn = get_subject(&a, subject_c.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+            let has_fact = a
+                .test_get_tracker_ledger(subject_c.clone(), 10)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.sn == 1);
+            let (assemblies, ready_mains, ready_auxes, _, _) =
+                a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+            if sn == 0
+                && !has_fact
+                && assemblies + ready_mains + ready_auxes == 0
+            {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "corrupt chunk fails closed");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "corrupt chunk fails closed"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19303,9 +19392,8 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
         .into_iter()
         .find(|event| event.sn == 1)
         .expect("oversized fact committed");
-    let expected_hash_r = expected_r
-        .ledger_hash(HashAlgorithm::Blake3)
-        .unwrap();
+    let expected_hash_r =
+        expected_r.ledger_hash(HashAlgorithm::Blake3).unwrap();
     a.authorize_governance(
         subject_r.clone(),
         ave_core::auth::AuthWitness::One(b_key.clone()),
@@ -19357,13 +19445,24 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let sn = get_subject(&a, subject_r.clone(), None, true).await.unwrap().sn;
-            let has_fact = a.test_get_tracker_ledger(subject_r.clone(), 10).await.unwrap_or_default().iter().any(|e| e.sn == 1);
+            let sn = get_subject(&a, subject_r.clone(), None, true)
+                .await
+                .unwrap()
+                .sn;
+            let has_fact = a
+                .test_get_tracker_ledger(subject_r.clone(), 10)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.sn == 1);
             let len = a.test_fragment_assembly_len().await.unwrap_or(0);
             if sn == 0 && !has_fact && len == 1 {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "headless assembly never completes");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "headless assembly never completes"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19443,7 +19542,6 @@ async fn remote_oversized_single_event_syncs_by_bounded_fragments() {
     node_running(&a).await.unwrap();
     node_running(&b).await.unwrap();
 }
-
 
 // A full evidence rebuild deduplicates by (sn, hash), not by sn
 // alone: two different bytes for one sn are an explicit divergence
@@ -19652,25 +19750,26 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     // content, validly signed by Alice. It must never silently win
     // over (or merge into) its genuine twin.
     let altered_req = match fact1.protocols.clone() {
-        Protocols::TrackerFactFull { event_request, .. } => {
-            match event_request.content() {
+        Protocols::TrackerFactFull { event_request, .. } => match event_request
+            .content()
+        {
                 EventRequest::Fact(req) => {
                     let mut req = req.clone();
-                    req.payload = ave_common::ValueWrapper(
-                        json!({"ModOne": {"data": 999}}),
-                    );
+                req.payload =
+                    ave_common::ValueWrapper(json!({"ModOne": {"data": 999}}));
                     EventRequest::Fact(req)
                 }
                 other => panic!("premise: fact request, got {other:?}"),
-            }
-        }
+        },
         _ => panic!("premise: fact1 is a full fact"),
     };
     let altered_sig = Signature::new(&altered_req, &alice_keys).unwrap();
     let (altered_eval, altered_val) = match &fact1.protocols {
-        Protocols::TrackerFactFull { evaluation, validation, .. } => {
-            (evaluation.clone(), validation.clone())
-        }
+        Protocols::TrackerFactFull {
+            evaluation,
+            validation,
+            ..
+        } => (evaluation.clone(), validation.clone()),
         _ => unreachable!(),
     };
     let mut divergent = fact1.clone();
@@ -19715,14 +19814,35 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let no_subject = rita.get_subject_state(subject_id.clone()).await.is_err();
-            let no_proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None).is_none();
-            let deferred = rita.test_deferred_stats().await.unwrap_or((0,0,0));
-            let rebuilds = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
-            if no_subject && no_proof && deferred.0 == 1 && deferred.1 == 2 && deferred.2 > 0 && rebuilds == 1 {
+            let no_subject =
+                rita.get_subject_state(subject_id.clone()).await.is_err();
+            let no_proof = rita
+                .test_get_verified_transfer_sn(
+                    &governance_id,
+                    subject_id.clone(),
+                )
+                .await
+                .unwrap_or(None)
+                .is_none();
+            let deferred =
+                rita.test_deferred_stats().await.unwrap_or((0, 0, 0));
+            let rebuilds = rita
+                .test_full_rebuilds(subject_id.clone())
+                .await
+                .unwrap_or(0);
+            if no_subject
+                && no_proof
+                && deferred.0 == 1
+                && deferred.1 == 2
+                && deferred.2 > 0
+                && rebuilds == 1
+            {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "gapped prefix holds");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "gapped prefix holds"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19749,7 +19869,9 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     // Evict any cursor so the continuation rebuilds from scratch
     // instead of resuming an incremental round. The staged genuine
     // prefix stays held; only cursor and incremental auth go away.
-    rita.test_evict_verify_cursor(subject_id.clone()).await.unwrap();
+    rita.test_evict_verify_cursor(subject_id.clone())
+        .await
+        .unwrap();
 
     // Phase two: SN1 arrives with different bytes plus the genuine
     // rest of the chain. The full rebuild sees held genuine SN1
@@ -19767,14 +19889,29 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let no_subject = rita.get_subject_state(subject_id.clone()).await.is_err();
-            let no_proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None).is_none();
-            let (held_subs, _, _) = rita.test_deferred_stats().await.unwrap_or((0,0,0));
-            let rebuilds = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
+            let no_subject =
+                rita.get_subject_state(subject_id.clone()).await.is_err();
+            let no_proof = rita
+                .test_get_verified_transfer_sn(
+                    &governance_id,
+                    subject_id.clone(),
+                )
+                .await
+                .unwrap_or(None)
+                .is_none();
+            let (held_subs, _, _) =
+                rita.test_deferred_stats().await.unwrap_or((0, 0, 0));
+            let rebuilds = rita
+                .test_full_rebuilds(subject_id.clone())
+                .await
+                .unwrap_or(0);
             if no_subject && no_proof && held_subs >= 1 && rebuilds >= 2 {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "divergence holds");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "divergence holds"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19789,7 +19926,8 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
             .is_none(),
         "a divergent chain records no proof"
     );
-    let (held_subs, held_evts, held_bytes) = rita.test_deferred_stats().await.unwrap();
+    let (held_subs, held_evts, held_bytes) =
+        rita.test_deferred_stats().await.unwrap();
     assert!(
         held_subs >= 1,
         "a divergent batch is held, not dropped: got ({held_subs},{held_evts},{held_bytes})"
@@ -19812,20 +19950,32 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let deferred = rita.test_deferred_stats().await.unwrap_or((0,0,0));
-            let no_subject = rita.get_subject_state(subject_id.clone()).await.is_err();
+            let deferred =
+                rita.test_deferred_stats().await.unwrap_or((0, 0, 0));
+            let no_subject =
+                rita.get_subject_state(subject_id.clone()).await.is_err();
             if deferred == held_before && no_subject {
                 break;
             }
             // Allow one rebuild for the re-send, then stable (no duplication).
-            assert!(start.elapsed() < Duration::from_secs(20), "exact re-send deduplicated");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "exact re-send deduplicated"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         // Stability on next transition: another identical re-send changes nothing.
-        inject_ledger_batch(&rita, &alice_key, vec![divergent.clone(), fact2.clone(), transfer3.clone()], Some(transfer3.clone())).await;
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![divergent.clone(), fact2.clone(), transfer3.clone()],
+            Some(transfer3.clone()),
+        )
+        .await;
         let start2 = tokio::time::Instant::now();
         loop {
-            let deferred2 = rita.test_deferred_stats().await.unwrap_or((0,0,0));
+            let deferred2 =
+                rita.test_deferred_stats().await.unwrap_or((0, 0, 0));
             if deferred2 == held_before {
                 break;
             }
@@ -19860,13 +20010,25 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            let deferred = rita.test_deferred_stats().await.unwrap_or((0,0,0));
-            let no_subject = rita.get_subject_state(subject_id.clone()).await.is_err();
-            let no_proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None).is_none();
+            let deferred =
+                rita.test_deferred_stats().await.unwrap_or((0, 0, 0));
+            let no_subject =
+                rita.get_subject_state(subject_id.clone()).await.is_err();
+            let no_proof = rita
+                .test_get_verified_transfer_sn(
+                    &governance_id,
+                    subject_id.clone(),
+                )
+                .await
+                .unwrap_or(None)
+                .is_none();
             if deferred == held_before && no_subject && no_proof {
                 break;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "genuine re-send deduplicated");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "genuine re-send deduplicated"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -19911,7 +20073,8 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
 // verify. Pre-fix the aux was dropped and the copy stalled.
 #[test(tokio::test)]
 async fn remote_oversized_fact_keeps_external_transfer_aux() {
-    let (mut nodes, dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
         bootstrap: vec![vec![]],
         addressable: vec![vec![0], vec![0]],
         always_accept: true,
@@ -19923,7 +20086,8 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
     let carol = nodes[2].api.clone();
     let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
     let _ = dirs;
-    let governance_id = create_and_authorize_governance(&owner, vec![&alice]).await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -19959,17 +20123,30 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
     .await
     .unwrap();
     for api in [&carol] {
-        api.authorize_governance(governance_id.clone(), ave_core::auth::AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap())).await.unwrap();
+        api.authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     }
     for api in [&alice, &carol] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), None, true).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
     }
     // Silence automatic pushes so only manual + follow-up pull deliver.
     for target in [&carol] {
         let peer = PublicKey::from_str(target.public_key()).unwrap();
-        for message in [FaultMessage::DistributionLedgerRes, FaultMessage::DistributionLastEventReq] {
-            alice.test_install_fault(FaultRule {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
                 direction: FaultDirection::Outbound,
                 message,
                 peer: Some(peer.clone()),
@@ -19980,43 +20157,86 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
             .unwrap();
         }
     }
-    let (subject_id, _) = create_subject(&alice, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "y".repeat(1200 * 1024);
-    emit_fact(&alice, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true).await.unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
-    assert!(carol.get_subject_state(subject_id.clone()).await.is_err(), "silenced pushes deliver nothing yet");
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        carol.get_subject_state(subject_id.clone()).await.is_err(),
+        "silenced pushes deliver nothing yet"
+    );
     alice.test_clear_faults().await.unwrap();
     alice.manual_distribution(subject_id.clone()).await.unwrap();
     // Poll: grouped copy completes with pending ownership, no leak.
     let start = tokio::time::Instant::now();
     loop {
         if let Ok(state) = carol.get_subject_state(subject_id.clone()).await {
-            if state.sn == 2 { break; }
+            if state.sn == 2 {
+                break;
+            }
         }
-        assert!(start.elapsed() < Duration::from_secs(60), "grouped copy completes");
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "grouped copy completes"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let landed = carol.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default();
+    let landed = carol
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap_or_default();
     assert!(landed.iter().any(|e| e.sn == 1), "fact applied");
     assert!(landed.iter().any(|e| e.sn == 2), "transfer applied");
-    let (_, pending, _, _) = carol.test_witnesses_ownership(&governance_id, subject_id.clone()).await.unwrap();
+    let (_, pending, _, _) = carol
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(pending, Some(carol_key), "pending opens with grouped aux");
     // No re-request loop: poll held outbound empty (no fixed sleep on outcome).
     let start = tokio::time::Instant::now();
     loop {
-        let held: Vec<NetworkMessage> = carol.test_held_outbound().await.unwrap_or_default();
+        let held: Vec<NetworkMessage> =
+            carol.test_held_outbound().await.unwrap_or_default();
         // Filter copy requests (LedgerReq) – no new asks after completion.
-        let reqs: Vec<_> = held.into_iter().filter(|m| matches!(m.message, ActorMessage::DistributionLedgerReq { .. })).collect();
-        if reqs.is_empty() { break; }
+        let reqs: Vec<_> = held
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerReq { .. })
+            })
+            .collect();
+        if reqs.is_empty() {
+            break;
+        }
         // Allow one in-flight ask to settle, but no endless re-asks.
-        assert!(start.elapsed() < Duration::from_secs(10), "no re-request loop");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "no re-request loop"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
         // Break after one settle window: the exact count is asserted
         // stable below, not after a fixed sleep.
-        if start.elapsed() > Duration::from_secs(3) { break; }
+        if start.elapsed() > Duration::from_secs(3) {
+            break;
+        }
     }
-    for node in nodes.iter_mut() { node.token.cancel(); }
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
     join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut())).await;
 }
 
@@ -20027,7 +20247,8 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
 // before apply (decode attempts prove both sides decoded).
 #[test(tokio::test)]
 async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
-    let (mut nodes, dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
         bootstrap: vec![vec![]],
         addressable: vec![vec![0], vec![0]],
         always_accept: true,
@@ -20039,7 +20260,8 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
     let carol = nodes[2].api.clone();
     let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
     let _ = dirs;
-    let governance_id = create_and_authorize_governance(&owner, vec![&alice]).await;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -20075,16 +20297,29 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
     .await
     .unwrap();
     for api in [&carol] {
-        api.authorize_governance(governance_id.clone(), ave_core::auth::AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap())).await.unwrap();
+        api.authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
     }
     for api in [&alice, &carol] {
         api.update_subject(governance_id.clone()).await.unwrap();
-        get_subject(api, governance_id.clone(), None, true).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
     }
     for target in [&carol] {
         let peer = PublicKey::from_str(target.public_key()).unwrap();
-        for message in [FaultMessage::DistributionLedgerRes, FaultMessage::DistributionLastEventReq] {
-            alice.test_install_fault(FaultRule {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
                 direction: FaultDirection::Outbound,
                 message,
                 peer: Some(peer.clone()),
@@ -20095,28 +20330,58 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
             .unwrap();
         }
     }
-    let (subject_id, _) = create_subject(&alice, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "z".repeat(1200 * 1024);
-    emit_fact(&alice, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true).await.unwrap();
-    get_subject(&alice, subject_id.clone(), Some(2), true).await.unwrap();
-    assert!(carol.get_subject_state(subject_id.clone()).await.is_err(), "silenced");
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        carol.get_subject_state(subject_id.clone()).await.is_err(),
+        "silenced"
+    );
     alice.test_clear_faults().await.unwrap();
-    let (_, _, _, decode_before, _) = carol.test_fragment_stats().await.unwrap_or((0,0,0,0,0));
+    let (_, _, _, decode_before, _) =
+        carol.test_fragment_stats().await.unwrap_or((0, 0, 0, 0, 0));
     alice.manual_distribution(subject_id.clone()).await.unwrap();
     let start = tokio::time::Instant::now();
     loop {
         if let Ok(state) = carol.get_subject_state(subject_id.clone()).await {
-            if state.sn == 2 { break; }
+            if state.sn == 2 {
+                break;
         }
-        assert!(start.elapsed() < Duration::from_secs(60), "grouped copy completes");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "grouped copy completes"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let (_, _, _, decode_after, _) = carol.test_fragment_stats().await.unwrap_or((0,0,0,0,0));
-    assert!(decode_after > decode_before, "both sides decoded after payload verify");
-    let (assemblies, ready_mains, ready_auxes, _, _) = carol.test_fragment_stats().await.unwrap_or((1,1,1,0,0));
+    let (_, _, _, decode_after, _) =
+        carol.test_fragment_stats().await.unwrap_or((0, 0, 0, 0, 0));
+    assert!(
+        decode_after > decode_before,
+        "both sides decoded after payload verify"
+    );
+    let (assemblies, ready_mains, ready_auxes, _, _) =
+        carol.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
     assert_eq!(assemblies + ready_mains + ready_auxes, 0, "no leak");
-    for node in nodes.iter_mut() { node.token.cancel(); }
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
     join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut())).await;
 }
 // preflight by exact identity. An inline transfer with the same
@@ -20127,11 +20392,32 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
 #[test(tokio::test)]
 async fn remote_preflight_same_sn_different_aux_hash_rejected() {
     use ave_common::bridge::request::SinkEventsQuery;
-    async fn sink_empty_from(api: &ave_core::Api, subject: &DigestIdentifier, from_sn: u64) {
-        let page = api.get_sink_events(subject.clone(), SinkEventsQuery { from_sn: Some(from_sn), to_sn: None, limit: Some(100) }).await.unwrap();
-        assert!(page.events.is_empty(), "a rejected chunk emits nothing to sinks");
+    async fn sink_empty_from(
+        api: &ave_core::Api,
+        subject: &DigestIdentifier,
+        from_sn: u64,
+    ) {
+        let page = api
+            .get_sink_events(
+                subject.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(from_sn),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "a rejected chunk emits nothing to sinks"
+        );
     }
-    async fn poll_sn(api: &ave_core::Api, subject: &DigestIdentifier, want: u64) {
+    async fn poll_sn(
+        api: &ave_core::Api,
+        subject: &DigestIdentifier,
+        want: u64,
+    ) {
         let start = tokio::time::Instant::now();
         loop {
             if let Ok(state) = api.get_subject_state(subject.clone()).await {
@@ -20139,11 +20425,16 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
                     return;
                 }
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "timeout waiting for sn {}", want);
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "timeout waiting for sn {}",
+                want
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    let (mut nodes, dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
         bootstrap: vec![vec![]],
         addressable: vec![vec![0], vec![0]],
         always_accept: true,
@@ -20155,8 +20446,13 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
     let boot_addr = nodes[0].listen_address.clone();
     let boot_peer = nodes[0].api.peer_id().to_string();
     let rita_signer = Ed25519Signer::generate().unwrap();
-    let rita_key = PublicKey::new(ave_common::identity::keys::DSAlgorithm::Ed25519, rita_signer.public_key_bytes()).unwrap();
-    let governance_id = create_and_authorize_governance(&owner, vec![&alice]).await;
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -20192,12 +20488,17 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
     .await
     .unwrap();
     alice.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&alice, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
     let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
         listen_address: format!("/memory/{rita_port}"),
-        peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
         always_accept: true,
         keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
         ..Default::default()
@@ -20205,34 +20506,86 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita.authorize_governance(governance_id.clone(), ave_core::auth::AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap())).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&rita, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
     let rita_public = PublicKey::from_str(rita.public_key()).expect("node key");
     let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
-    for message in [FaultMessage::DistributionLedgerRes, FaultMessage::DistributionLastEventReq] {
-        alice.test_install_fault(FaultRule { direction: FaultDirection::Outbound, message, peer: Some(rita_public.clone()), remaining: None, action: FaultAction::Drop }).await.unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
     }
-    let (subject_id, _) = create_subject(&alice, governance_id.clone(), "Example", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     for data in [1, 2, 3] {
-        emit_fact(&alice, subject_id.clone(), json!({"ModOne": {"data": data}}), true).await.unwrap();
+        emit_fact(
+            &alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
     }
-    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true).await.unwrap();
-    get_subject(&alice, subject_id.clone(), Some(4), true).await.unwrap();
-    let history = alice.test_get_tracker_ledger(subject_id.clone(), 4).await.unwrap();
-    let hfind = |sn: u64| history.iter().find(|e| e.sn == sn).expect("history").clone();
+    emit_transfer(&alice, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 4)
+        .await
+        .unwrap();
+    let hfind = |sn: u64| {
+        history
+            .iter()
+            .find(|e| e.sn == sn)
+            .expect("history")
+            .clone()
+    };
     let create = hfind(0);
     let fact1 = hfind(1);
     let fact2 = hfind(2);
     let fact3 = hfind(3);
     let transfer4 = hfind(4);
-    inject_ledger_batch(&rita, &alice_key, vec![create.clone(), fact1.clone(), fact2.clone()], None).await;
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![create.clone(), fact1.clone(), fact2.clone()],
+        None,
+    )
+    .await;
     poll_sn(&rita, &subject_id, 2).await;
     // Same SN, different hash: genuine aux (Witness) plus forged
     // inline with Ok evaluation that does not reproduce. Must reject
     // before any write, even though the aux alone would pass.
     let fact3_result = match &fact3.protocols {
-        Protocols::TrackerFactFull { evaluation, .. } => evaluation.evaluator_response_ok().expect("fact ok"),
+        Protocols::TrackerFactFull { evaluation, .. } => {
+            evaluation.evaluator_response_ok().expect("fact ok")
+        }
         _ => panic!("fact full"),
     };
     let forged4 = forge_ok_evaluation(&transfer4, fact3_result, &nodes[1].keys);
@@ -20241,37 +20594,90 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
         transfer4.ledger_hash(HashAlgorithm::Blake3).unwrap(),
         "same SN, different bytes"
     );
-    let rebuilds_before = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
-    inject_ledger_batch(&rita, &alice_key, vec![fact3.clone(), forged4.clone()], Some(transfer4.clone())).await;
+    let rebuilds_before = rita
+        .test_full_rebuilds(subject_id.clone())
+        .await
+        .unwrap_or(0);
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![fact3.clone(), forged4.clone()],
+        Some(transfer4.clone()),
+    )
+    .await;
     // Poll rejection: SN stays, no proof, deferred empty.
     poll_sn(&rita, &subject_id, 2).await;
     let start = tokio::time::Instant::now();
     loop {
-        let proof = rita.test_get_verified_transfer_sn(&governance_id, subject_id.clone()).await.unwrap_or(None);
+        let proof = rita
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap_or(None);
         let deferred = rita.test_deferred_stats().await.unwrap_or((1,1,1));
         if proof.is_none() && deferred == (0,0,0) {
             break;
         }
-        assert!(start.elapsed() < Duration::from_secs(10), "timeout waiting for clean rejection");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timeout waiting for clean rejection"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let stored: Vec<u64> = rita.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default().iter().map(|e| e.sn).collect();
+    let stored: Vec<u64> = rita
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e.sn)
+        .collect();
     assert_eq!(stored, vec![0,1,2], "no prefix rewritten");
     sink_empty_from(&rita, &subject_id, 3).await;
     // Identical aux reuses correctly: genuine fact+transfer with the
     // same aux bytes succeeds and leaves the cursor intact.
-    let rebuilds_after_refuted = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
-    inject_ledger_batch(&rita, &alice_key, vec![fact3.clone(), transfer4.clone()], Some(transfer4.clone())).await;
+    let rebuilds_after_refuted = rita
+        .test_full_rebuilds(subject_id.clone())
+        .await
+        .unwrap_or(0);
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![fact3.clone(), transfer4.clone()],
+        Some(transfer4.clone()),
+    )
+    .await;
     poll_sn(&rita, &subject_id, 4).await;
-    let rebuilds_after_identical = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
-    assert!(rebuilds_after_identical <= rebuilds_after_refuted + 1, "identical aux must not rebuild per transfer");
-    let stored2: Vec<u64> = rita.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default().iter().map(|e| e.sn).collect();
+    let rebuilds_after_identical = rita
+        .test_full_rebuilds(subject_id.clone())
+        .await
+        .unwrap_or(0);
+    assert!(
+        rebuilds_after_identical <= rebuilds_after_refuted + 1,
+        "identical aux must not rebuild per transfer"
+    );
+    let stored2: Vec<u64> = rita
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e.sn)
+        .collect();
     assert_eq!(stored2, vec![0,1,2,3,4], "identical aux delivers");
     let _ = rebuilds_before;
-    for node in nodes.iter_mut() { node.token.cancel(); }
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
     rita_node.token.cancel();
-    join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut()).chain(rita_node.handler.iter_mut())).await;
-    drop(nodes); drop(dirs); drop(rita_node); drop(rita_dirs);
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|n| n.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
 }
 
 // preflight stays linear with several transfers. A chain with
@@ -20280,7 +20686,8 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
 // cursor is restored on every exit.
 #[test(tokio::test)]
 async fn remote_preflight_multiple_transfers_stays_linear() {
-    let (mut nodes, dirs) = create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
         bootstrap: vec![vec![]],
         addressable: vec![vec![0], vec![0]],
         always_accept: true,
@@ -20294,11 +20701,22 @@ async fn remote_preflight_multiple_transfers_stays_linear() {
     let mut owner_keys = vec![];
     for _ in 0..3 {
         let s = Ed25519Signer::generate().unwrap();
-        owner_keys.push(PublicKey::new(ave_common::identity::keys::DSAlgorithm::Ed25519, s.public_key_bytes()).unwrap());
+        owner_keys.push(
+            PublicKey::new(
+                ave_common::identity::keys::DSAlgorithm::Ed25519,
+                s.public_key_bytes(),
+            )
+            .unwrap(),
+        );
     }
     let rita_signer = Ed25519Signer::generate().unwrap();
-    let rita_key = PublicKey::new(ave_common::identity::keys::DSAlgorithm::Ed25519, rita_signer.public_key_bytes()).unwrap();
-    let governance_id = create_and_authorize_governance(&owner, vec![&alice]).await;
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -20334,12 +20752,17 @@ async fn remote_preflight_multiple_transfers_stays_linear() {
     .await
     .unwrap();
     alice.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&alice, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
     let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Addressable,
         listen_address: format!("/memory/{rita_port}"),
-        peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
         always_accept: true,
         keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
         ..Default::default()
@@ -20347,37 +20770,101 @@ async fn remote_preflight_multiple_transfers_stays_linear() {
     .await;
     let rita = rita_node.api.clone();
     node_running(&rita).await.unwrap();
-    rita.authorize_governance(governance_id.clone(), ave_core::auth::AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap())).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&rita, governance_id.clone(), None, true).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
     let rita_public = PublicKey::from_str(rita.public_key()).unwrap();
     let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
     // Silence pushes so every batch below is injected.
-    for message in [FaultMessage::DistributionLedgerRes, FaultMessage::DistributionLastEventReq] {
-        alice.test_install_fault(FaultRule { direction: FaultDirection::Outbound, message, peer: Some(rita_public.clone()), remaining: None, action: FaultAction::Drop }).await.unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
     }
-    let (subject_id, _) = create_subject(&alice, governance_id.clone(), "Example", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
     for data in [1, 2] {
-        emit_fact(&alice, subject_id.clone(), json!({"ModOne": {"data": data}}), true).await.unwrap();
+        emit_fact(
+            &alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
     }
     // Three transfers to distinct owners: different hashes, owners
     // and evidence chains in one chunk.
-    emit_transfer(&alice, subject_id.clone(), owner_keys[0].clone(), true).await.unwrap();
-    emit_fact(&alice, subject_id.clone(), json!({"ModOne": {"data": 10}}), true).await.unwrap();
-    emit_transfer(&alice, subject_id.clone(), owner_keys[1].clone(), true).await.unwrap();
-    emit_fact(&alice, subject_id.clone(), json!({"ModOne": {"data": 11}}), true).await.unwrap();
-    emit_transfer(&alice, subject_id.clone(), owner_keys[2].clone(), true).await.unwrap();
-    get_subject(&alice, subject_id.clone(), Some(7), true).await.unwrap();
-    let history = alice.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap();
+    emit_transfer(&alice, subject_id.clone(), owner_keys[0].clone(), true)
+        .await
+        .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 10}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), owner_keys[1].clone(), true)
+        .await
+        .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 11}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), owner_keys[2].clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap();
     let hfind = |sn: u64| history.iter().find(|e| e.sn == sn).unwrap().clone();
     let create = hfind(0);
     let f1 = hfind(1);
     let f2 = hfind(2);
-    inject_ledger_batch(&rita, &alice_key, vec![create.clone(), f1.clone(), f2.clone()], None).await;
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![create.clone(), f1.clone(), f2.clone()],
+        None,
+    )
+    .await;
     let start = tokio::time::Instant::now();
     loop {
         if let Ok(state) = rita.get_subject_state(subject_id.clone()).await {
-            if state.sn == 2 { break; }
+            if state.sn == 2 {
+                break;
+            }
         }
         assert!(start.elapsed() < Duration::from_secs(20), "prefix");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -20388,32 +20875,66 @@ async fn remote_preflight_multiple_transfers_stays_linear() {
     let f6 = hfind(6);
     let t7 = hfind(7);
     // Baseline work before the multi-transfer chunk.
-    let (buf_c0, buf_v0, _) = rita.test_buffer_stats(subject_id.clone()).await.unwrap_or((0,0,0));
-    let rebuilds0 = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
+    let (buf_c0, buf_v0, _) = rita
+        .test_buffer_stats(subject_id.clone())
+        .await
+        .unwrap_or((0, 0, 0));
+    let rebuilds0 = rita
+        .test_full_rebuilds(subject_id.clone())
+        .await
+        .unwrap_or(0);
     // Genuine chain with three transfers: must deliver with one
     // incremental pass, not one rebuild per transfer.
-    inject_ledger_batch(&rita, &alice_key, vec![t3.clone(), t4.clone(), f5.clone(), f6.clone(), t7.clone()], Some(t7.clone())).await;
+    inject_ledger_batch(
+        &rita,
+        &alice_key,
+        vec![t3.clone(), t4.clone(), f5.clone(), f6.clone(), t7.clone()],
+        Some(t7.clone()),
+    )
+    .await;
     let start = tokio::time::Instant::now();
     loop {
         if let Ok(state) = rita.get_subject_state(subject_id.clone()).await {
-            if state.sn == 7 { break; }
+            if state.sn == 7 {
+                break;
+            }
         }
         assert!(start.elapsed() < Duration::from_secs(20), "multi-transfer");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let (buf_c1, buf_v1, _) = rita.test_buffer_stats(subject_id.clone()).await.unwrap_or((0,0,0));
-    let rebuilds1 = rita.test_full_rebuilds(subject_id.clone()).await.unwrap_or(0);
+    let (buf_c1, buf_v1, _) = rita
+        .test_buffer_stats(subject_id.clone())
+        .await
+        .unwrap_or((0, 0, 0));
+    let rebuilds1 = rita
+        .test_full_rebuilds(subject_id.clone())
+        .await
+        .unwrap_or(0);
     let cloned = buf_c1.saturating_sub(buf_c0);
     let visited = buf_v1.saturating_sub(buf_v0);
     let rebuilds = rebuilds1.saturating_sub(rebuilds0);
     // Linear bounds: no rebuild per transfer.
-    assert!(rebuilds <= 1, "one scratch advances, no rebuild per transfer, got {rebuilds}");
+    assert!(
+        rebuilds <= 1,
+        "one scratch advances, no rebuild per transfer, got {rebuilds}"
+    );
     assert!(cloned <= 4 * 7, "buffer clones linear, got {cloned}");
     assert!(visited <= 12 * 7, "buffer visits linear, got {visited}");
-    for node in nodes.iter_mut() { node.token.cancel(); }
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
     rita_node.token.cancel();
-    join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut()).chain(rita_node.handler.iter_mut())).await;
-    drop(nodes); drop(dirs); drop(rita_node); drop(rita_dirs);
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|n| n.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
 }
 
 // payload hash verified before decode. A join with mismatched
@@ -20445,7 +20966,10 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
         let (node, mut d) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{port}"),
-            peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
             always_accept: true,
             is_service: true,
             network_max_message_bytes: Some(cap),
@@ -20489,9 +21013,13 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLedgerReq,
@@ -20510,11 +21038,28 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
         .await
         .unwrap();
     }
-    let (subject_id, _) = create_subject(&b, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "q".repeat(1200 * 1024);
-    emit_fact(&b, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
-    a.authorize_governance(subject_id.clone(), ave_core::auth::AuthWitness::One(b_key.clone())).await.unwrap();
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
     b.test_clear_faults().await.unwrap();
     b.test_install_fault(FaultRule {
         direction: FaultDirection::Outbound,
@@ -20528,8 +21073,18 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
     a.update_subject(subject_id.clone()).await.unwrap();
     let mut frags = vec![];
     for _ in 0..300 {
-        let held: Vec<NetworkMessage> = b.test_held_outbound().await.unwrap_or_default().into_iter().filter(|m| matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })).collect();
-        if !held.is_empty() && held.len() == frags.len() { break; }
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        if !held.is_empty() && held.len() == frags.len() {
+            break;
+        }
         frags = held;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -20539,7 +21094,9 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
     // the join must fail before any decode.
     let mut bad = frags.clone();
     for m in &mut bad {
-        if let ActorMessage::DistributionLedgerFrag { payload_hash, .. } = &mut m.message {
+        if let ActorMessage::DistributionLedgerFrag { payload_hash, .. } =
+            &mut m.message
+        {
             *payload_hash = DigestIdentifier::default();
         }
     }
@@ -20550,10 +21107,21 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
     let start = tokio::time::Instant::now();
     loop {
         let (_, _, _, decode_after, _) = a.test_fragment_stats().await.unwrap();
-        assert_eq!(decode_after, decode_before, "bad payload hash never decodes");
-        let ledger = a.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default();
-        assert!(!ledger.iter().any(|e| e.sn == 1), "bad join applies nothing");
-        if start.elapsed() > Duration::from_secs(2) { break; }
+        assert_eq!(
+            decode_after, decode_before,
+            "bad payload hash never decodes"
+        );
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 1),
+            "bad join applies nothing"
+        );
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Genuine set still completes afterwards.
@@ -20561,7 +21129,9 @@ async fn remote_fragment_rejects_bad_payload_hash_before_decode() {
     for m in frags {
         a.test_inject_inbound(m, &b_key).await.unwrap();
     }
-    get_subject(&a, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }
 
 // mixing senders, scopes or completeness never merges. Fragments
@@ -20593,7 +21163,10 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
         let (node, mut d) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{port}"),
-            peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
             always_accept: true,
             is_service: true,
             network_max_message_bytes: Some(cap),
@@ -20605,7 +21178,11 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
         node_running(&node.api).await.unwrap();
         nodes.push(node);
     }
-    let (a, b, c) = (nodes[1].api.clone(), nodes[2].api.clone(), nodes[3].api.clone());
+    let (a, b, c) = (
+        nodes[1].api.clone(),
+        nodes[2].api.clone(),
+        nodes[3].api.clone(),
+    );
     let b_key = PublicKey::from_str(&b.public_key()).unwrap();
     let c_key = PublicKey::from_str(&c.public_key()).unwrap();
     let _ = nodes;
@@ -20638,9 +21215,13 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLedgerReq,
@@ -20659,11 +21240,28 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
         .await
         .unwrap();
     }
-    let (subject_id, _) = create_subject(&b, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "m".repeat(1200 * 1024);
-    emit_fact(&b, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
-    a.authorize_governance(subject_id.clone(), ave_core::auth::AuthWitness::One(b_key.clone())).await.unwrap();
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
     b.test_clear_faults().await.unwrap();
     b.test_install_fault(FaultRule {
         direction: FaultDirection::Outbound,
@@ -20677,8 +21275,18 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
     a.update_subject(subject_id.clone()).await.unwrap();
     let mut frags = vec![];
     for _ in 0..300 {
-        let held: Vec<NetworkMessage> = b.test_held_outbound().await.unwrap_or_default().into_iter().filter(|m| matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })).collect();
-        if !held.is_empty() && held.len() == frags.len() { break; }
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        if !held.is_empty() && held.len() == frags.len() {
+            break;
+        }
         frags = held;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -20689,7 +21297,11 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
     for (i, m) in frags.iter().enumerate() {
         let mut forged = m.clone();
         match &mut forged.message {
-            ActorMessage::DistributionLedgerFrag { is_all, expected_governance_id, .. } => {
+            ActorMessage::DistributionLedgerFrag {
+                is_all,
+                expected_governance_id,
+                ..
+            } => {
                 if i % 3 == 0 {
                     *is_all = !*is_all;
                 } else if i % 3 == 1 {
@@ -20698,7 +21310,14 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
             }
             _ => unreachable!(),
         }
-        mixed.push((forged, if i % 3 == 2 { c_key.clone() } else { b_key.clone() }));
+        mixed.push((
+            forged,
+            if i % 3 == 2 {
+                c_key.clone()
+            } else {
+                b_key.clone()
+            },
+        ));
     }
     for (m, sender) in mixed {
         a.test_inject_inbound(m, &sender).await.unwrap();
@@ -20706,9 +21325,17 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
     // Poll: mixing delivers no fact (create may already be present).
     let start = tokio::time::Instant::now();
     loop {
-        let ledger = a.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default();
-        assert!(!ledger.iter().any(|e| e.sn == 1), "mixed fragments never apply");
-        if start.elapsed() > Duration::from_secs(2) { break; }
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 1),
+            "mixed fragments never apply"
+        );
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Genuine group still completes afterwards.
@@ -20716,7 +21343,9 @@ async fn remote_fragment_does_not_mix_senders_or_scope() {
     for m in frags {
         a.test_inject_inbound(m, &b_key).await.unwrap();
     }
-    get_subject(&a, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }
 
 // incomplete assembly expires without further messages and frees
@@ -20747,7 +21376,10 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
         let (node, mut d) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{port}"),
-            peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
             always_accept: true,
             is_service: true,
             network_max_message_bytes: Some(cap),
@@ -20791,9 +21423,13 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLedgerReq,
@@ -20812,11 +21448,28 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
         .await
         .unwrap();
     }
-    let (subject_id, _) = create_subject(&b, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "e".repeat(1200 * 1024);
-    emit_fact(&b, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
-    a.authorize_governance(subject_id.clone(), ave_core::auth::AuthWitness::One(b_key.clone())).await.unwrap();
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
     b.test_clear_faults().await.unwrap();
     b.test_install_fault(FaultRule {
         direction: FaultDirection::Outbound,
@@ -20830,8 +21483,18 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
     a.update_subject(subject_id.clone()).await.unwrap();
     let mut frags = vec![];
     for _ in 0..300 {
-        let held: Vec<NetworkMessage> = b.test_held_outbound().await.unwrap_or_default().into_iter().filter(|m| matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })).collect();
-        if !held.is_empty() && held.len() == frags.len() { break; }
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        if !held.is_empty() && held.len() == frags.len() {
+            break;
+        }
         frags = held;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -20844,16 +21507,24 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
     let start = tokio::time::Instant::now();
     loop {
         let len = a.test_fragment_assembly_len().await.unwrap_or(0);
-        if len == 1 { break; }
+        if len == 1 {
+            break;
+        }
         assert!(start.elapsed() < Duration::from_secs(5), "assembly appears");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let start = tokio::time::Instant::now();
     loop {
         let len = a.test_fragment_assembly_len().await.unwrap_or(1);
-        let (_, _, _, _, expired) = a.test_fragment_stats().await.unwrap_or((0,0,0,0,0));
-        if len == 0 && expired >= 1 { break; }
-        assert!(start.elapsed() < Duration::from_secs(10), "assembly expires without more messages");
+        let (_, _, _, _, expired) =
+            a.test_fragment_stats().await.unwrap_or((0, 0, 0, 0, 0));
+        if len == 0 && expired >= 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "assembly expires without more messages"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     // Fresh genuine copy completes afterwards.
@@ -20861,7 +21532,9 @@ async fn remote_fragment_assembly_expires_without_more_messages() {
     for m in frags {
         a.test_inject_inbound(m, &b_key).await.unwrap();
     }
-    get_subject(&a, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }
 
 // push over the total bound is rejected before emit and never
@@ -20873,7 +21546,10 @@ async fn remote_fragment_over_total_bound_rejected_before_send() {
     // reassembly bound and propagates the encode/size error instead
     // of returning an empty size. Exercised through the public bound
     // constant so the coordinator and worker can never diverge.
-    assert!(ave_core::distribution::worker::DistriWorker::MAX_FRAGMENT_EVENT_BYTES > ave_network::MAX_APP_MESSAGE_BYTES as usize);
+    assert!(
+        ave_core::distribution::worker::DistriWorker::MAX_FRAGMENT_EVENT_BYTES
+            > ave_network::MAX_APP_MESSAGE_BYTES as usize
+    );
 }
 
 // wire versions are explicit. v1 fragments and acks requiring v2
@@ -20881,7 +21557,9 @@ async fn remote_fragment_over_total_bound_rejected_before_send() {
 // messages requiring v1 still work.
 #[test(tokio::test)]
 async fn remote_wire_version_incompatibility_is_explicit() {
-    // Matrix: frag/ack/scoped pull require v2, others stay v1.
+    // Matrix: frag/ACK with hash and scoped pull require v2; the same
+    // pull messages without scope stay v1, and unmodified messages keep
+    // working with byte-identical encodings.
     let frag = ActorMessage::DistributionLedgerFrag {
         subject_id: DigestIdentifier::default(),
         event_hash: DigestIdentifier::default(),
@@ -20899,15 +21577,30 @@ async fn remote_wire_version_incompatibility_is_explicit() {
         is_push: false,
         expected_governance_id: None,
     };
-    let ack = ActorMessage::DistributionLastEventRes { event_hash: DigestIdentifier::default() };
-    let req = ActorMessage::DistributionLedgerReq {
+    let ack = ActorMessage::DistributionLastEventRes {
+        event_hash: DigestIdentifier::default(),
+    };
+    let scoped_req = ActorMessage::DistributionLedgerReq {
+        actual_sn: None,
+        target_sn: None,
+        subject_id: DigestIdentifier::default(),
+        already_verified_transfer_sn: None,
+        expected_governance_id: Some(DigestIdentifier::default()),
+    };
+    let scoped_res = ActorMessage::DistributionLedgerRes {
+        ledger: vec![],
+        is_all: false,
+        transfer_event: None,
+        expected_governance_id: Some(DigestIdentifier::default()),
+    };
+    let plain_req = ActorMessage::DistributionLedgerReq {
         actual_sn: None,
         target_sn: None,
         subject_id: DigestIdentifier::default(),
         already_verified_transfer_sn: None,
         expected_governance_id: None,
     };
-    let res = ActorMessage::DistributionLedgerRes {
+    let plain_res = ActorMessage::DistributionLedgerRes {
         ledger: vec![],
         is_all: false,
         transfer_event: None,
@@ -20918,12 +21611,74 @@ async fn remote_wire_version_incompatibility_is_explicit() {
         actual_sn: None,
         receiver_actor: String::new(),
     };
-    assert_eq!(ave_core::helpers::network::NetworkMessage::required_wire_version(&frag), 2);
-    assert_eq!(ave_core::helpers::network::NetworkMessage::required_wire_version(&ack), 2);
-    assert_eq!(ave_core::helpers::network::NetworkMessage::required_wire_version(&req), 2);
-    assert_eq!(ave_core::helpers::network::NetworkMessage::required_wire_version(&res), 2);
-    assert_eq!(ave_core::helpers::network::NetworkMessage::required_wire_version(&old), 1);
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(
+            &frag
+        ),
+        2
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(&ack),
+        2
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(
+            &scoped_req
+        ),
+        2
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(
+            &scoped_res
+        ),
+        2
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(
+            &plain_req
+        ),
+        1
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(
+            &plain_res
+        ),
+        1
+    );
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(&old),
+        1
+    );
     assert_eq!(ave_core::helpers::network::WIRE_VERSION, 2);
+    // Unmodified messages keep byte-identical encodings: the test-only
+    // encoded buffer never reaches the wire.
+    let info = ave_network::ComunicateInfo {
+        request_id: String::from("req"),
+        version: 0,
+        receiver: PublicKey::new(
+            ave_common::identity::DSAlgorithm::Ed25519,
+            vec![1u8; 32],
+        )
+        .expect("sample key"),
+        receiver_actor: String::from("actor"),
+    };
+    let without_encoded = ave_core::helpers::network::NetworkMessage {
+        info: info.clone(),
+        message: plain_res.clone(),
+        wire_version: 1,
+        encoded: None,
+    };
+    let mut with_encoded = without_encoded.clone();
+    with_encoded.encoded = Some(vec![9, 9, 9]);
+    assert_eq!(
+        rmp_serde::to_vec(&without_encoded).unwrap(),
+        rmp_serde::to_vec(&with_encoded).unwrap(),
+        "encoded stays out of the wire"
+    );
+    let decoded: ave_core::helpers::network::NetworkMessage =
+        rmp_serde::from_slice(&rmp_serde::to_vec(&without_encoded).unwrap())
+            .unwrap();
+    assert_eq!(decoded.wire_version, 1);
 }
 
 // a v1 fragment never reassembles. Same bytes with v1 are
@@ -20954,7 +21709,10 @@ async fn remote_old_peer_fragment_does_not_apply() {
         let (node, mut d) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{port}"),
-            peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
             always_accept: true,
             is_service: true,
             network_max_message_bytes: Some(cap),
@@ -20998,9 +21756,13 @@ async fn remote_old_peer_fragment_does_not_apply() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLedgerReq,
@@ -21015,7 +21777,11 @@ async fn remote_old_peer_fragment_does_not_apply() {
     // Silence pushes so the manual injection below is the only path.
     for target in [&a] {
         let peer = PublicKey::from_str(target.public_key()).unwrap();
-        for message in [FaultMessage::DistributionLedgerRes, FaultMessage::DistributionLastEventReq, FaultMessage::DistributionLedgerFrag] {
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+            FaultMessage::DistributionLedgerFrag,
+        ] {
             b.test_install_fault(FaultRule {
                 direction: FaultDirection::Outbound,
                 message,
@@ -21027,11 +21793,26 @@ async fn remote_old_peer_fragment_does_not_apply() {
             .unwrap();
         }
     }
-    let (subject_id, _) = create_subject(&b, governance_id.clone(), "Big", "", true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
     let bulk = "v".repeat(1200 * 1024);
-    emit_fact(&b, subject_id.clone(), json!({"ChangeData": {"data": bulk}}), true).await.unwrap();
-    get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
-    let b_ledger = b.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap();
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let b_ledger = b
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap();
     let create_ev = b_ledger.iter().find(|e| e.sn == 0).unwrap().clone();
     let main_ev = b_ledger.iter().find(|e| e.sn == 1).unwrap().clone();
     let main_hash = main_ev.ledger_hash(HashAlgorithm::Blake3).unwrap();
@@ -21055,7 +21836,9 @@ async fn remote_old_peer_fragment_does_not_apply() {
     let mut create_v2 = create_msg;
     create_v2.wire_version = 2;
     a.test_inject_inbound(create_v2, &b_key).await.unwrap();
-    get_subject(&a, subject_id.clone(), Some(0), true).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
     fn chunk_size_for(cap: usize) -> usize {
         (cap.saturating_sub(8192) / 2).clamp(1024, 256 * 1024)
     }
@@ -21090,7 +21873,10 @@ async fn remote_old_peer_fragment_does_not_apply() {
                 request_id: "test-v1".to_string(),
                 version: 0,
                 receiver: PublicKey::from_str(&a.public_key()).unwrap(),
-                receiver_actor: format!("/user/node/distributor_{}", subject_id),
+                receiver_actor: format!(
+                    "/user/node/distributor_{}",
+                    subject_id
+                ),
             },
             base.clone(),
         );
@@ -21100,7 +21886,10 @@ async fn remote_old_peer_fragment_does_not_apply() {
                 request_id: "test-v2".to_string(),
                 version: 0,
                 receiver: PublicKey::from_str(&a.public_key()).unwrap(),
-                receiver_actor: format!("/user/node/distributor_{}", subject_id),
+                receiver_actor: format!(
+                    "/user/node/distributor_{}",
+                    subject_id
+                ),
             },
             base,
         );
@@ -21114,17 +21903,24 @@ async fn remote_old_peer_fragment_does_not_apply() {
     // Poll: v1 fragments never assemble or apply.
     let start = tokio::time::Instant::now();
     loop {
-        let ledger = a.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default();
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
         assert!(!ledger.iter().any(|e| e.sn == 1), "v1 frag must not apply");
         let len = a.test_fragment_assembly_len().await.unwrap_or(1);
         assert_eq!(len, 0, "v1 frag must not even assemble");
-        if start.elapsed() > Duration::from_secs(2) { break; }
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     for m in v2_frags {
         a.test_inject_inbound(m, &b_key).await.unwrap();
     }
-    get_subject(&a, subject_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
 }
 // scope fallback is explicit. A mismatched governance scope
 // rejects before any write; the matching scope applies. Legacy
@@ -21153,7 +21949,10 @@ async fn remote_scope_mismatch_rejects_before_write() {
         let (node, mut d) = create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{port}"),
-            peers: vec![RoutingNode { peer_id: boot_peer.clone(), address: vec![boot_addr.clone()] }],
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
             always_accept: true,
             is_service: true,
             ..Default::default()
@@ -21196,9 +21995,13 @@ async fn remote_scope_mismatch_rejects_before_write() {
     )
     .await
     .unwrap();
-    get_subject(&b, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     a.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&a, governance_id.clone(), Some(1), true).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLedgerReq,
@@ -21217,11 +22020,21 @@ async fn remote_scope_mismatch_rejects_before_write() {
         .await
         .unwrap();
     }
-    let (subject_id, _) = create_subject(&b, governance_id.clone(), "Example", "", true).await.unwrap();
-    emit_fact(&b, subject_id.clone(), json!({"ModOne": {"data": 5}}), true).await.unwrap();
-    get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&b, subject_id.clone(), json!({"ModOne": {"data": 5}}), true)
+        .await
+        .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     b.test_clear_faults().await.unwrap();
-    let b_ledger = b.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap();
+    let b_ledger = b
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap();
     let create_ev = b_ledger.iter().find(|e| e.sn == 0).unwrap().clone();
     let fact_ev = b_ledger.iter().find(|e| e.sn == 1).unwrap().clone();
     a.test_ensure_distributor(subject_id.clone()).await.unwrap();
@@ -21231,7 +22044,10 @@ async fn remote_scope_mismatch_rejects_before_write() {
                 request_id: "test-scope".to_string(),
                 version: 0,
                 receiver: a_key.clone(),
-                receiver_actor: format!("/user/node/distributor_{}", subject_id),
+                receiver_actor: format!(
+                    "/user/node/distributor_{}",
+                    subject_id
+                ),
             },
             ActorMessage::DistributionLedgerRes {
                 ledger,
@@ -21244,15 +22060,1938 @@ async fn remote_scope_mismatch_rejects_before_write() {
     // Mismatched scope rejects before any write.
     let wrong = DigestIdentifier::default();
     assert_ne!(wrong, governance_id, "wrong scope differs");
-    a.test_inject_inbound(mk_res(vec![create_ev.clone(), fact_ev.clone()], Some(wrong)), &b_key).await.unwrap();
+    a.test_inject_inbound(
+        mk_res(vec![create_ev.clone(), fact_ev.clone()], Some(wrong)),
+        &b_key,
+    )
+    .await
+    .unwrap();
     let start = tokio::time::Instant::now();
     loop {
-        let ledger = a.test_get_tracker_ledger(subject_id.clone(), 10).await.unwrap_or_default();
-        assert!(!ledger.iter().any(|e| e.sn == 0), "wrong scope never writes");
-        if start.elapsed() > Duration::from_secs(2) { break; }
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 0),
+            "wrong scope never writes"
+        );
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Matching scope applies.
-    a.test_inject_inbound(mk_res(vec![create_ev, fact_ev], Some(governance_id.clone())), &b_key).await.unwrap();
-    get_subject(&a, subject_id.clone(), Some(1), true).await.unwrap();
+    a.test_inject_inbound(
+        mk_res(vec![create_ev, fact_ev], Some(governance_id.clone())),
+        &b_key,
+    )
+    .await
+    .unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+// Grouped main+aux delivery only completes when both sides share the
+// full identity: sender, scope, completeness, request, version, route
+// and aux hash. A mixed counterpart discards both sides with no apply,
+// proof or ready entries; the genuine pair still completes afterwards.
+#[test(tokio::test)]
+async fn remote_fragment_ready_mixed_identity_discarded_before_delivery() {
+    async fn poll_no_fact(
+        api: &ave_core::Api,
+        gov: &DigestIdentifier,
+        subject: &DigestIdentifier,
+    ) {
+        let start = tokio::time::Instant::now();
+        loop {
+            let ledger = api
+                .test_get_tracker_ledger(subject.clone(), 10)
+                .await
+                .unwrap_or_default();
+            assert!(
+                !ledger.iter().any(|e| e.sn == 1),
+                "mixed group never applies"
+            );
+            let proof = api
+                .test_get_verified_transfer_sn(gov, subject.clone())
+                .await
+                .unwrap_or(None);
+            assert!(proof.is_none(), "mixed group records no proof");
+            let (assemblies, mains, auxes, _, _) =
+                api.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+            if assemblies == 0 && mains == 0 && auxes == 0 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "mixed group discarded"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let carol = nodes[2].api.clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
+    let owner_key = PublicKey::from_str(nodes[0].api.public_key()).unwrap();
+    assert_ne!(alice_key, owner_key, "mixed sender differs");
+    let _ = dirs;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Carol", "key": carol.public_key()},
+            ]},
+            "schemas": { "add": [{
+                "id": "Big",
+                "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                "initial_value": {"data": ""},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Big",
+                    "add": {
+                        "evaluator": [{"name": "Alice", "namespace": []}],
+                        "validator": [{"name": "Alice", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Alice", "namespace": [], "quantity": "infinity"},
+                            {"name": "Carol", "namespace": [], "quantity": "infinity"}
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for api in [&carol] {
+        api.authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    for api in [&alice, &carol] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+    // Silence automatic pushes so only manual + follow-up pull deliver.
+    for target in [&carol] {
+        let peer = PublicKey::from_str(target.public_key()).unwrap();
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    let bulk = "y".repeat(1200 * 1024);
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        carol.get_subject_state(subject_id.clone()).await.is_err(),
+        "silenced pushes deliver nothing yet"
+    );
+    // Hold fragments: the manual push gaps on the missing fact and the
+    // pull for the oversized fact stays held as main+aux fragments.
+    // Only carol's copy is held; the owner node may complete freely.
+    alice.test_clear_faults().await.unwrap();
+    alice
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerFrag,
+            peer: Some(carol_key.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    alice.manual_distribution(subject_id.clone()).await.unwrap();
+    // The transfer push gaps; the create arrives deferred (its aux needs
+    // the missing fact) and the oversized fact+transfer group stays held
+    // as fragments until both sides are injected by the test.
+    let mut frags = vec![];
+    let mut stable = 0;
+    for _ in 0..300 {
+        let held: Vec<NetworkMessage> = alice
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        let has_aux = held.iter().any(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        });
+        if !held.is_empty() && has_aux && held.len() == frags.len() {
+            stable += 1;
+            if stable >= 2 {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
+        frags = held;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!frags.is_empty(), "grouped copy travels fragmented");
+    let mains: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: false, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    let auxes: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !mains.is_empty() && !auxes.is_empty(),
+        "group holds both sides"
+    );
+    let (a, b_key, c_key) =
+        (carol.clone(), alice_key.clone(), owner_key.clone());
+    // Mixed sender: aux from another peer shares the group but never
+    // delivers; both sides are dropped with no apply, proof or ready.
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    for m in &auxes {
+        a.test_inject_inbound(m.clone(), &c_key).await.unwrap();
+    }
+    poll_no_fact(&a, &governance_id, &subject_id).await;
+    // Same sender, different scope.
+    let mut scoped = auxes.clone();
+    for m in &mut scoped {
+        if let ActorMessage::DistributionLedgerFrag {
+            expected_governance_id,
+            ..
+        } = &mut m.message
+        {
+            *expected_governance_id = Some(DigestIdentifier::default());
+        }
+    }
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    for m in scoped {
+        a.test_inject_inbound(m, &b_key).await.unwrap();
+    }
+    poll_no_fact(&a, &governance_id, &subject_id).await;
+    // Same sender and scope, different completeness.
+    let mut flipped = auxes.clone();
+    for m in &mut flipped {
+        if let ActorMessage::DistributionLedgerFrag { is_all, .. } =
+            &mut m.message
+        {
+            *is_all = !*is_all;
+        }
+    }
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    for m in flipped {
+        a.test_inject_inbound(m, &b_key).await.unwrap();
+    }
+    poll_no_fact(&a, &governance_id, &subject_id).await;
+    // Same sender, scope and completeness, different request identity.
+    let mut requid = auxes.clone();
+    for m in &mut requid {
+        m.info.request_id = String::from("test-foreign-request");
+        m.info.version = m.info.version.wrapping_add(1);
+        m.info.receiver_actor = String::from("foreign-actor");
+    }
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    for m in requid {
+        a.test_inject_inbound(m, &b_key).await.unwrap();
+    }
+    poll_no_fact(&a, &governance_id, &subject_id).await;
+    // The genuine pair still completes afterwards with no re-request loop.
+    alice.test_clear_faults().await.unwrap();
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    for m in &auxes {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let (_, pending, _, _) = a
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        Some(carol_key),
+        "grouped aux opens pending ownership"
+    );
+    let (assemblies, mains_n, auxes_n, _, _) =
+        a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+    assert_eq!(
+        assemblies + mains_n + auxes_n,
+        0,
+        "ready counters return to zero after delivery"
+    );
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut())).await;
+}
+
+// A main whose group differs from its own event is rejected at ingress
+// before any assembly forms; an auxiliary whose event differs from the
+// group is valid and waits for its main side.
+#[test(tokio::test)]
+async fn remote_fragment_group_sn_identity() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let carol = nodes[2].api.clone();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
+    let _ = dirs;
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Carol", "key": carol.public_key()},
+            ]},
+            "schemas": { "add": [{
+                "id": "Big",
+                "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                "initial_value": {"data": ""},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Big",
+                    "add": {
+                        "evaluator": [{"name": "Alice", "namespace": []}],
+                        "validator": [{"name": "Alice", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Alice", "namespace": [], "quantity": "infinity"},
+                            {"name": "Carol", "namespace": [], "quantity": "infinity"}
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for api in [&carol] {
+        api.authorize_governance(
+            governance_id.clone(),
+            ave_core::auth::AuthWitness::One(
+                PublicKey::from_str(owner.public_key()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    for api in [&alice, &carol] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+        get_subject(api, governance_id.clone(), None, true)
+            .await
+            .unwrap();
+    }
+    for target in [&carol] {
+        let peer = PublicKey::from_str(target.public_key()).unwrap();
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            alice
+                .test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    let bulk = "y".repeat(1200 * 1024);
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&alice, subject_id.clone(), carol_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        carol.get_subject_state(subject_id.clone()).await.is_err(),
+        "silenced pushes deliver nothing yet"
+    );
+    alice.test_clear_faults().await.unwrap();
+    alice
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerFrag,
+            peer: Some(carol_key.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    alice.manual_distribution(subject_id.clone()).await.unwrap();
+    let mut frags = vec![];
+    let mut stable = 0;
+    for _ in 0..300 {
+        let held: Vec<NetworkMessage> = alice
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        let has_aux = held.iter().any(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        });
+        if !held.is_empty() && has_aux && held.len() == frags.len() {
+            stable += 1;
+            if stable >= 2 {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
+        frags = held;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!frags.is_empty(), "grouped copy travels fragmented");
+    let mains: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: false, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    let auxes: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !mains.is_empty() && !auxes.is_empty(),
+        "group holds both sides"
+    );
+    let (a, b_key) = (carol.clone(), alice_key.clone());
+    // A main whose group does not name its own event is dropped at
+    // ingress: no assembly forms, nothing applies, counters stay zero.
+    let mut forged_mains = mains.clone();
+    for m in &mut forged_mains {
+        if let ActorMessage::DistributionLedgerFrag { group_sn, .. } =
+            &mut m.message
+        {
+            *group_sn = group_sn.wrapping_add(1000);
+        }
+    }
+    for m in forged_mains {
+        a.test_inject_inbound(m, &b_key).await.unwrap();
+    }
+    let start = tokio::time::Instant::now();
+    loop {
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 1),
+            "misgrouped main never applies"
+        );
+        let len = a.test_fragment_assembly_len().await.unwrap_or(1);
+        if len == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "misgrouped main forms no assembly"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The genuine aux carries another event sn than the group by design
+    // (it authorizes the main): it completes and waits for its main side.
+    for m in &auxes {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, _, ready_auxes, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 1),
+            "aux alone never applies the main"
+        );
+        if ready_auxes == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "aux waits for its main"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The genuine main still completes the group afterwards.
+    alice.test_clear_faults().await.unwrap();
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let (_, pending, _, _) = a
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        Some(carol_key),
+        "grouped aux opens pending ownership"
+    );
+    let (assemblies, mains_n, auxes_n, _, _) =
+        a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+    assert_eq!(
+        assemblies + mains_n + auxes_n,
+        0,
+        "ready counters return to zero after delivery"
+    );
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|n| n.handler.iter_mut())).await;
+}
+
+// A complete pair delivers before any eviction, even when it is the
+// oldest group: filling the ready map still lets the oldest pair
+// complete, while an evicted side only waits for its counterpart.
+#[test(tokio::test)]
+async fn remote_fragment_capacity_oldest_pair_delivers_first() {
+    let cap = ave_network::MAX_APP_MESSAGE_BYTES as usize;
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        network_max_message_bytes: Some(cap),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            network_max_message_bytes: Some(cap),
+            ledger_batch_size: Some(100),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let b_key = PublicKey::from_str(&b.public_key()).unwrap();
+    let a_key = PublicKey::from_str(&a.public_key()).unwrap();
+    let _ = nodes;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [{ "name": "A", "key": a.public_key() }]},
+            "schemas": { "add": [{
+                "id": "Big",
+                "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                "initial_value": {"data": ""},
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Big",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "A", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for target in [&a] {
+        let peer = PublicKey::from_str(target.public_key()).unwrap();
+        for message in [
+            FaultMessage::DistributionLedgerRes,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            b.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(peer.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    // One real grouped copy plus fabricated filler mains: the fillers
+    // complete without any auxiliary and sit in the ready map, so the
+    // genuine pair must still deliver first even when the map is full.
+    let bulk = "y".repeat(1200 * 1024);
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&b, subject_id.clone(), a_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&b, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    // Barrier: the register trails the ledger, and the pull only carries
+    // the auxiliary once the pending transfer is recorded there.
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, pending, _, _) = b
+            .test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+            .unwrap();
+        if pending == Some(a_key.clone()) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "pending transfer recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
+    b.test_clear_faults().await.unwrap();
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerFrag,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    // The manual push gaps on the missing fact; the create arrives
+    // deferred and the oversized fact+transfer group stays held.
+    b.manual_distribution(subject_id.clone()).await.unwrap();
+    let mut frags = vec![];
+    let mut stable = 0;
+    for _ in 0..300 {
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        let has_aux = held.iter().any(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        });
+        if !held.is_empty() && has_aux && held.len() == frags.len() {
+            stable += 1;
+            if stable >= 2 {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
+        frags = held;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!frags.is_empty(), "grouped copy travels fragmented");
+    let mains: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: false, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    let auxes: Vec<NetworkMessage> = frags
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerFrag { is_aux: true, .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !mains.is_empty() && !auxes.is_empty(),
+        "group holds both sides"
+    );
+    // Fabricated filler mains: small self-consistent fragments for events
+    // that never existed, sharing the tracked subject but with distinct
+    // identities. They complete and wait in the ready map like any main
+    // whose auxiliary never arrives.
+    let create_ev = b
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.sn == 0)
+        .expect("create committed");
+    let template_info = match &mains[0].message {
+        ActorMessage::DistributionLedgerFrag { .. } => mains[0].info.clone(),
+        _ => unreachable!(),
+    };
+    let mut fillers: Vec<Vec<NetworkMessage>> = vec![];
+    for k in 0..8u64 {
+        let mut ledger = create_ev.clone();
+        ledger.sn = 100 + k;
+        let bytes = borsh::to_vec(&ledger).unwrap();
+        let event_hash = ledger.ledger_hash(HashAlgorithm::Blake3).unwrap();
+        let total = bytes.len() as u64;
+        let chunk_size = (cap.saturating_sub(8192) / 2).clamp(1024, 256 * 1024);
+        let total_chunks = bytes.len().div_ceil(chunk_size) as u32;
+        assert!(total_chunks >= 1, "filler fragments");
+        let mut set = vec![];
+        for (i, piece) in bytes.chunks(chunk_size).enumerate() {
+            let mut info = template_info.clone();
+            info.request_id = format!("test-filler-{k}");
+            set.push(NetworkMessage {
+                info,
+                wire_version: 2,
+                encoded: None,
+                message: ActorMessage::DistributionLedgerFrag {
+                    subject_id: subject_id.clone(),
+                    event_hash: event_hash.clone(),
+                    event_sn: 100 + k,
+                    total_bytes: total,
+                    chunk_index: i as u32,
+                    chunk_total: total_chunks,
+                    chunk: piece.to_vec(),
+                    payload_hash: HashAlgorithm::Blake3.hasher().hash(&bytes),
+                    is_aux: false,
+                    group_hash: event_hash.clone(),
+                    group_sn: 100 + k,
+                    aux_hash: Some(DigestIdentifier::default()),
+                    is_all: false,
+                    is_push: false,
+                    expected_governance_id: None,
+                },
+            });
+        }
+        fillers.push(set);
+    }
+    // Fill the ready map with the eight fabricated mains.
+    for set in &fillers {
+        for m in set {
+            a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+        }
+    }
+    let start = tokio::time::Instant::now();
+    loop {
+        let (assemblies, ready_mains, ready_auxes, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 0, 0, 0, 0));
+        if ready_mains == 8 && ready_auxes == 0 && assemblies == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "eight filler mains wait for their aux"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The genuine main evicts the oldest filler instead of growing the store.
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    // Its auxiliary still completes the pair at once: no eviction of a
+    // complete group, even though the map was full.
+    for m in &auxes {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    // The evicted oldest side only waits: a fabricated auxiliary for its
+    // group arrives but nothing applies until the main side is served
+    // again. The map was just proven full, so the missing main was
+    // evicted to make room for the genuine pair delivered above.
+    let mut filler_aux = fillers[0][0].clone();
+    if let ActorMessage::DistributionLedgerFrag {
+        is_aux, aux_hash, ..
+    } = &mut filler_aux.message
+    {
+        *is_aux = true;
+        *aux_hash = None;
+    }
+    a.test_inject_inbound(filler_aux, &b_key).await.unwrap();
+    let start = tokio::time::Instant::now();
+    loop {
+        let ledger = a
+            .test_get_tracker_ledger(subject_id.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            !ledger.iter().any(|e| e.sn == 100),
+            "evicted filler never applies from aux alone"
+        );
+        let (_, _, ready_auxes, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        if ready_auxes == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "evicted side waits for its main"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The genuine pair still opens pending ownership once the register
+    // catches up with the applied ledger.
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, pending, _, _) = a
+            .test_witnesses_ownership(&governance_id, subject_id.clone())
+            .await
+            .unwrap();
+        if pending == Some(a_key.clone()) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "genuine pair opens pending ownership"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Repeat at capacity with only auxiliary sides. A new main without
+    // its counterpart must evict the oldest auxiliary instead of growing
+    // the combined store past its eight-entry bound.
+    for set in &fillers {
+        for message in set {
+            let mut aux = message.clone();
+            if let ActorMessage::DistributionLedgerFrag {
+                is_aux, aux_hash, ..
+            } = &mut aux.message
+            {
+                *is_aux = true;
+                *aux_hash = None;
+            }
+            a.test_inject_inbound(aux, &b_key).await.unwrap();
+        }
+    }
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, ready_mains, ready_auxes, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        if ready_mains == 0 && ready_auxes == 8 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "auxiliary fillers fill the ready map"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for m in &mains {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, ready_mains, ready_auxes, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        assert!(
+            ready_mains + ready_auxes <= 8,
+            "ready sides never exceed their combined bound"
+        );
+        if ready_mains == 1 {
+            assert_eq!(
+                ready_auxes, 7,
+                "the new main evicts one auxiliary at capacity"
+            );
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "main joins a full auxiliary-only ready map"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // All timers cancelled on delivery plus natural expiry of the
+    // remaining fillers free the whole map: counters return to zero.
+    let start = tokio::time::Instant::now();
+    loop {
+        let (assemblies, mains_n, auxes_n, _, _) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        if assemblies == 0 && mains_n == 0 && auxes_n == 0 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "fillers expire and free the map"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// A v1 copy without scope completes: the same pull messages without
+// expected_governance_id require only v1 and apply through the legacy
+// path when the create declares the tracked governance.
+#[test(tokio::test)]
+async fn remote_v1_copy_without_scope_completes() {
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let b_key = PublicKey::from_str(&b.public_key()).unwrap();
+    let a_key = PublicKey::from_str(&a.public_key()).unwrap();
+    let _ = nodes;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [{ "name": "A", "key": a.public_key() }]},
+            "schemas": { "add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0}
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}, {"name": "A", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "A", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&b, subject_id.clone(), json!({"ModOne": {"data": 5}}), true)
+        .await
+        .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let b_ledger = b
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap();
+    let create_ev = b_ledger.iter().find(|e| e.sn == 0).unwrap().clone();
+    let fact_ev = b_ledger.iter().find(|e| e.sn == 1).unwrap().clone();
+    a.test_ensure_distributor(subject_id.clone()).await.unwrap();
+    // v1 framing (wire 1) with no scope: required stays 1 and the legacy
+    // path applies the matching create without any scope gate.
+    let msg = ActorMessage::DistributionLedgerRes {
+        ledger: vec![create_ev, fact_ev],
+        is_all: true,
+        transfer_event: None,
+        expected_governance_id: None,
+    };
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(&msg),
+        1
+    );
+    let mut v1 = NetworkMessage::new(
+        ave_network::ComunicateInfo {
+            request_id: String::from("test-v1-copy"),
+            version: 0,
+            receiver: a_key,
+            receiver_actor: format!("/user/node/distributor_{}", subject_id),
+        },
+        msg,
+    );
+    v1.wire_version = 1;
+    a.test_inject_inbound(v1, &b_key).await.unwrap();
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+// A response without scope never validates another governance: a create
+// declaring a foreign id is rejected before any write, so omitting the
+// scope is not a bypass for the v2 scope check.
+#[test(tokio::test)]
+async fn remote_scope_none_with_foreign_create_never_writes() {
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let b_key = PublicKey::from_str(&b.public_key()).unwrap();
+    let a_key = PublicKey::from_str(&a.public_key()).unwrap();
+    let _ = nodes;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [{ "name": "A", "key": a.public_key() }]},
+            "schemas": { "add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0}
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}, {"name": "A", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "A", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    // A second governance the receiver never tracks: its subjects must
+    // never land through a scopeless legacy response.
+    let foreign_gov = create_and_authorize_governance(&b, vec![]).await;
+    assert_ne!(foreign_gov, governance_id, "governances differ");
+    emit_fact(
+        &b,
+        foreign_gov.clone(),
+        json!({
+            "schemas": { "add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0}
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}],
+                    "creator": [{"name": "Owner", "namespace": [], "quantity": "infinity"}],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let (foreign_subject, _) =
+        create_subject(&b, foreign_gov.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &b,
+        foreign_subject.clone(),
+        json!({"ModOne": {"data": 7}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, foreign_subject.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let b_ledger = b
+        .test_get_tracker_ledger(foreign_subject.clone(), 10)
+        .await
+        .unwrap();
+    let create_ev = b_ledger.iter().find(|e| e.sn == 0).unwrap().clone();
+    let fact_ev = b_ledger.iter().find(|e| e.sn == 1).unwrap().clone();
+    a.test_ensure_distributor(foreign_subject.clone())
+        .await
+        .unwrap();
+    let msg = ActorMessage::DistributionLedgerRes {
+        ledger: vec![create_ev, fact_ev],
+        is_all: true,
+        transfer_event: None,
+        expected_governance_id: None,
+    };
+    assert_eq!(
+        ave_core::helpers::network::NetworkMessage::required_wire_version(&msg),
+        1
+    );
+    let mut v1 = NetworkMessage::new(
+        ave_network::ComunicateInfo {
+            request_id: String::from("test-foreign-scope"),
+            version: 0,
+            receiver: a_key,
+            receiver_actor: format!(
+                "/user/node/distributor_{}",
+                foreign_subject
+            ),
+        },
+        msg,
+    );
+    v1.wire_version = 1;
+    a.test_inject_inbound(v1, &b_key).await.unwrap();
+    let start = tokio::time::Instant::now();
+    loop {
+        let ledger = a
+            .test_get_tracker_ledger(foreign_subject.clone(), 10)
+            .await
+            .unwrap_or_default();
+        assert!(
+            ledger.is_empty(),
+            "foreign create never writes without its scope"
+        );
+        assert!(
+            a.get_subject_state(foreign_subject.clone()).await.is_err(),
+            "no subject without its scope"
+        );
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// Activity renews the fragment expiry: delivering chunks past one TTL
+// keeps the assembly alive, and only real inactivity expires it and
+// frees the memory. A fresh copy completes afterwards.
+#[test(tokio::test)]
+async fn remote_fragment_expiry_is_renewed_by_activity() {
+    let cap = ave_network::MAX_APP_MESSAGE_BYTES as usize;
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        network_max_message_bytes: Some(cap),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            network_max_message_bytes: Some(cap),
+            ledger_batch_size: Some(100),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let b_key = PublicKey::from_str(&b.public_key()).unwrap();
+    let _ = nodes;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [{ "name": "A", "key": a.public_key() }]},
+            "schemas": { "add": [{
+                "id": "Big",
+                "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                "initial_value": {"data": ""},
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Big",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}, {"name": "A", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "A", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLedgerReq,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::DistributionLedgerFrag,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(PublicKey::from_str(&a.public_key()).unwrap()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    let bulk = "q".repeat(1200 * 1024);
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
+    b.test_clear_faults().await.unwrap();
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerFrag,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.update_subject(subject_id.clone()).await.unwrap();
+    let mut frags = vec![];
+    for _ in 0..300 {
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        if !held.is_empty() && held.len() == frags.len() {
+            break;
+        }
+        frags = held;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(frags.len() >= 2, "oversized travels fragmented");
+    // Only the first chunk: the assembly exists but cannot complete.
+    a.test_inject_inbound(frags[0].clone(), &b_key)
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    loop {
+        let len = a.test_fragment_assembly_len().await.unwrap_or(0);
+        if len == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "partial assembly appears"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Sustained activity past one TTL: duplicates renew the assembly, so
+    // it never expires and the expiry counter stays flat.
+    let active_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        a.test_inject_inbound(frags[0].clone(), &b_key)
+            .await
+            .unwrap();
+        let len = a.test_fragment_assembly_len().await.unwrap_or(0);
+        let (_, _, _, _, expired) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        assert_eq!(
+            len, 1,
+            "activity keeps the assembly alive past its first TTL"
+        );
+        assert_eq!(expired, 0, "no expiry while the assembly advances");
+        if tokio::time::Instant::now() >= active_until {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    // Real inactivity expires it and frees the memory.
+    let start = tokio::time::Instant::now();
+    loop {
+        let len = a.test_fragment_assembly_len().await.unwrap_or(1);
+        let (_, _, _, _, expired) =
+            a.test_fragment_stats().await.unwrap_or((0, 0, 0, 0, 0));
+        if len == 0 && expired >= 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "idle assembly expires without more messages"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // A fresh genuine copy still completes afterwards.
+    b.test_clear_faults().await.unwrap();
+    for m in frags {
+        a.test_inject_inbound(m, &b_key).await.unwrap();
+    }
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+}
+
+// A stale timeout can never remove a renewed assembly: after activity
+// moves the generation forward, only the newest timer may expire the
+// entry, and completing the join cancels every pending timer without
+// counting a spurious expiry.
+#[test(tokio::test)]
+async fn remote_fragment_stale_timer_cannot_remove_renewed_assembly() {
+    let cap = ave_network::MAX_APP_MESSAGE_BYTES as usize;
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        network_max_message_bytes: Some(cap),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            network_max_message_bytes: Some(cap),
+            ledger_batch_size: Some(100),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let b_key = PublicKey::from_str(&b.public_key()).unwrap();
+    let _ = nodes;
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [{ "name": "A", "key": a.public_key() }]},
+            "schemas": { "add": [{
+                "id": "Big",
+                "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                "initial_value": {"data": ""},
+            }]},
+            "roles": {"schema": [{
+                "schema_id": "Big",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "witness": [{"name": "Owner", "namespace": []}, {"name": "A", "namespace": []}],
+                    "creator": [
+                        {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                        {"name": "A", "namespace": [], "quantity": "infinity"},
+                    ],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLedgerReq,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::DistributionLedgerFrag,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(PublicKey::from_str(&a.public_key()).unwrap()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    let bulk = "e".repeat(1200 * 1024);
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.authorize_governance(
+        subject_id.clone(),
+        ave_core::auth::AuthWitness::One(b_key.clone()),
+    )
+    .await
+    .unwrap();
+    b.test_clear_faults().await.unwrap();
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerFrag,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.update_subject(subject_id.clone()).await.unwrap();
+    let mut frags = vec![];
+    for _ in 0..300 {
+        let held: Vec<NetworkMessage> = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerFrag { .. })
+            })
+            .collect();
+        if !held.is_empty() && held.len() == frags.len() {
+            break;
+        }
+        frags = held;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        frags.len() >= 3,
+        "oversized travels in at least three fragments"
+    );
+    // First chunk arms the first timer; spaced duplicate renewals move
+    // the generation forward and cancel every previous timer. Only the
+    // newest timer may ever expire the entry.
+    a.test_inject_inbound(frags[0].clone(), &b_key)
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    loop {
+        let len = a.test_fragment_assembly_len().await.unwrap_or(99);
+        if len == 1 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "first frag creates the assembly"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let renewed_until =
+        tokio::time::Instant::now() + Duration::from_millis(1600);
+    loop {
+        a.test_inject_inbound(frags[0].clone(), &b_key)
+            .await
+            .unwrap();
+        let len = a.test_fragment_assembly_len().await.unwrap_or(0);
+        let (_, _, _, _, expired) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+        assert_eq!(len, 1, "renewed assembly never disappears");
+        assert_eq!(expired, 0, "obsolete timers never count an expiry");
+        if tokio::time::Instant::now() >= renewed_until {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    // Completing the join cancels every pending timer: no spurious expiry
+    // fires afterwards and the copy applies exactly once.
+    for m in &frags[1..] {
+        a.test_inject_inbound(m.clone(), &b_key).await.unwrap();
+    }
+    get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, _, _, _, expired) =
+            a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 1));
+        assert_eq!(expired, 0, "completed join cancels every pending timer");
+        if start.elapsed() > Duration::from_secs(2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (assemblies, mains_n, auxes_n, _, _) =
+        a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
+    assert_eq!(
+        assemblies + mains_n + auxes_n,
+        0,
+        "no fragment state leaks after delivery"
+    );
+}
+
+// A v1 ack never closes a generation: the same bytes framed as v1 are
+// dropped as incompatible while the genuine v2 ack completes exactly
+// once and the next generation still makes progress.
+#[test(tokio::test)]
+async fn remote_v1_ack_never_closes_generation() {
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let w = nodes[2].api.clone();
+    let w_key = PublicKey::from_str(w.public_key()).unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {
+                "add": [
+                    {"name": "Alice", "key": alice.public_key()},
+                    {"name": "W", "key": w.public_key()},
+                ]
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {"one": 0, "two": 0, "three": 0}
+                    }
+                ]
+            },
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [
+                    {
+                        "schema_id": "Example",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [{"name": "Owner", "namespace": []}],
+                            "creator": [
+                                {
+                                    "name": "Alice",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                    "witnesses": [
+                                        {
+                                            "name": "W",
+                                            "viewpoints": ["AllViewpoints"]
+                                        }
+                                    ]
+                                }
+                            ],
+                            "issuer": [{"name": "Alice", "namespace": []}]
+                        }
+                    }
+                ]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    w.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    w.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&w, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    async fn hold_res(api: &ave_core::Api) {
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLastEventRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    async fn held_res_count(api: &ave_core::Api) -> usize {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| {
+                matches!(
+                    &m.message,
+                    ActorMessage::DistributionLastEventRes { .. }
+                )
+            })
+            .count()
+    }
+    hold_res(&w).await;
+    alice.manual_distribution(subject_id.clone()).await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if held_res_count(&w).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let genuine = w
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| {
+            matches!(&m.message, ActorMessage::DistributionLastEventRes { .. })
+        })
+        .expect("first generation ack held");
+    // Same ack bytes framed as v1: the intermediary drops them as
+    // incompatible, so the live generation keeps retrying.
+    let held_before = held_res_count(&w).await;
+    assert!(held_before >= 1, "genuine ack retained");
+    let mut legacy = genuine;
+    legacy.wire_version = 1;
+    alice.test_inject_inbound(legacy, &w_key).await.unwrap();
+    for _ in 0..100 {
+        if held_res_count(&w).await > held_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        held_res_count(&w).await > held_before,
+        "v1 ack ignored: the live generation keeps retrying"
+    );
+    // The genuine v2 ack still completes the generation exactly once,
+    // and both nodes stay healthy afterwards.
+    w.test_release_held().await.unwrap();
+    get_subject(&w, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    node_running(&alice).await.unwrap();
+    node_running(&w).await.unwrap();
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+    drop(nodes);
+    drop(dirs);
 }

@@ -19,8 +19,8 @@ use crate::model::common::{
 };
 use crate::{
     distribution::error::DistributorError,
-    distribution::transfer_verifier::TransferSimulationResult,
     distribution::transfer_verifier::AuxEvidence,
+    distribution::transfer_verifier::TransferSimulationResult,
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
@@ -291,13 +291,11 @@ impl DistriWorker {
                     if let Some(expected) = &dist_ctx.expected_governance_id
                         && *expected != subject_id
                     {
-                        return Err(
-                            DistributorError::UnexpectedGovernance {
+                        return Err(DistributorError::UnexpectedGovernance {
                                 expected: expected.clone(),
                                 found: subject_id.clone(),
                             }
-                            .into(),
-                        );
+                        .into());
                     }
                     let result =
                         create_subject(ctx, create_ledger.clone()).await;
@@ -330,13 +328,11 @@ impl DistriWorker {
                     if let Some(expected) = &dist_ctx.expected_governance_id
                         && *expected != request.governance_id
                     {
-                        return Err(
-                            DistributorError::UnexpectedGovernance {
+                        return Err(DistributorError::UnexpectedGovernance {
                                 expected: expected.clone(),
                                 found: request.governance_id.clone(),
                             }
-                            .into(),
-                        );
+                        .into());
                     }
 
                     let result = check_subject_creation(
@@ -1046,9 +1042,10 @@ impl DistriWorker {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.after_acquire_paused()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.after_acquire_paused())
             })
             .unwrap_or(false)
     }
@@ -1707,21 +1704,19 @@ impl DistriWorker {
             // them, so they need no replay. At the exact tip, same sn
             // with different bytes is a divergence that must verify
             // instead of reusing the tip verdict.
-            if let Some((tip_sn, tip_hash)) = self
-                .verify_cursors
-                .covered_tip(&common.subject_id)
+            if let Some((tip_sn, tip_hash)) =
+                self.verify_cursors.covered_tip(&common.subject_id)
             {
                 if event.sn < tip_sn {
                     continue;
                 }
-                if event.sn == tip_sn {
-                    if let (Ok(event_hash),) = (event.ledger_hash(self.hash),) {
-                        if event_hash == tip_hash {
+                if event.sn == tip_sn
+                    && let Ok(event_hash) = event.ledger_hash(self.hash)
+                    && event_hash == tip_hash
+                {
                             continue;
                         }
                     }
-                }
-            }
             pending.push(event);
         }
         if pending.is_empty() {
@@ -1754,8 +1749,7 @@ impl DistriWorker {
                 )
                 .await;
             match verdict {
-                AuxEvidence::Proven | AuxEvidence::Unverifiable => {
-                }
+                AuxEvidence::Proven | AuxEvidence::Unverifiable => {}
                 AuxEvidence::Missing => {
                     missing = true;
                     break;
@@ -1988,7 +1982,9 @@ impl DistriWorker {
         let Ok(actor) = ctx.system().get_actor::<Update>(&path).await else {
             return;
         };
-        let _ = actor.tell(UpdateMessage::DistributionDone { sn, round }).await;
+        let _ = actor
+            .tell(UpdateMessage::DistributionDone { sn, round })
+            .await;
     }
 
     pub(crate) async fn process_last_event_distribution(

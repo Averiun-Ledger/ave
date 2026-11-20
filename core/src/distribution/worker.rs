@@ -2981,9 +2981,7 @@ impl DistriWorker {
         for event in &ledger {
             let bytes = rmp_serde::to_vec(event).map_err(|e| {
                 ActorError::Functional {
-                    description: format!(
-                        "Can not measure event size: {e}"
-                    ),
+                    description: format!("Can not measure event size: {e}"),
                 }
             })?;
             sizes.push(bytes.len());
@@ -3015,10 +3013,7 @@ impl DistriWorker {
         }
         let mut ledger = ledger;
         ledger.truncate(take);
-        let hi_sn = ledger
-            .last()
-            .map(|event| event.sn)
-            .unwrap_or(hi_sn);
+        let hi_sn = ledger.last().map(|event| event.sn).unwrap_or(hi_sn);
         Ok(BatchPayload::Batch {
             ledger,
             // Completeness is only claimed when the trimmed batch
@@ -3520,15 +3515,15 @@ impl DistriWorker {
         chunk_size: usize,
         spec: FragmentSpec,
     ) -> Result<Vec<ActorMessage>, ActorError> {
-        let event_hash = event.ledger_hash(hash).map_err(|e| {
-            ActorError::Functional {
+        let event_hash =
+            event
+                .ledger_hash(hash)
+                .map_err(|e| ActorError::Functional {
                 description: format!("Can not hash fragmented event: {e}"),
-            }
         })?;
-        let bytes = borsh::to_vec(event).map_err(|e| {
-            ActorError::Functional {
+        let bytes =
+            borsh::to_vec(event).map_err(|e| ActorError::Functional {
                 description: format!("Can not encode fragmented event: {e}"),
-            }
         })?;
         let total_bytes = bytes.len() as u64;
         if total_bytes == 0
@@ -3619,7 +3614,8 @@ impl DistriWorker {
             })?),
             None => None,
         };
-        let chunk_size = Self::fragment_chunk_size(self.network.max_message_bytes());
+        let chunk_size =
+            Self::fragment_chunk_size(self.network.max_message_bytes());
         let mut frags = Self::build_event_fragments(
             &event,
             self.hash,
@@ -3655,7 +3651,8 @@ impl DistriWorker {
                 <= self.network.max_message_bytes();
             if !fits {
                 return Err(ActorError::Functional {
-                    description: "Fragment frame exceeds the wire cap".to_owned(),
+                    description: "Fragment frame exceeds the wire cap"
+                        .to_owned(),
                 });
             }
         }
@@ -3685,11 +3682,10 @@ impl DistriWorker {
     fn note_frag_stats(&self, ctx: &mut ActorContext<Self>) {
         #[cfg(feature = "test")]
         {
-            if let Some(stats) = ctx
-                .system()
-                .get_helper::<SharedFragStats>("frag_stats")
+            if let Some(stats) =
+                ctx.system().get_helper::<SharedFragStats>("frag_stats")
+                && let Ok(mut guard) = stats.lock()
             {
-                if let Ok(mut guard) = stats.lock() {
                     guard.assemblies = self.frag_assemblies.len() as u64;
                     guard.ready_mains = self.frag_ready_mains.len() as u64;
                     guard.ready_auxes = self.frag_ready_auxes.len() as u64;
@@ -3701,7 +3697,6 @@ impl DistriWorker {
                         .load(std::sync::atomic::Ordering::SeqCst);
                 }
             }
-        }
         #[cfg(not(feature = "test"))]
         {
             let _ = ctx;
@@ -3725,11 +3720,11 @@ impl DistriWorker {
             },
         )?;
         let key = (subject_id.clone(), event_hash.clone());
-        if let Some(assembly) = self.frag_assemblies.get_mut(&key) {
-            if let Some(previous) = assembly.expire_timer.replace(timer) {
+        if let Some(assembly) = self.frag_assemblies.get_mut(&key)
+            && let Some(previous) = assembly.expire_timer.replace(timer)
+        {
                 ctx.cancel_timer(previous);
             }
-        }
         Ok(())
     }
 
@@ -3750,7 +3745,7 @@ impl DistriWorker {
         )?;
         let key = (subject_id.clone(), group_hash.clone());
         if let Some(ready) = self.frag_ready_mains.get_mut(&key)
-            && let Some(previous) = ready.expire_timer.replace(timer.clone())
+            && let Some(previous) = ready.expire_timer.replace(timer)
         {
             ctx.cancel_timer(previous);
         }
@@ -3760,6 +3755,33 @@ impl DistriWorker {
             ctx.cancel_timer(previous);
         }
         Ok(())
+    }
+
+    fn evict_oldest_ready_side(&mut self, ctx: &ActorContext<Self>) {
+        let oldest_main = self
+            .frag_ready_mains
+            .iter()
+            .min_by_key(|(_, ready)| ready.last_active)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest_main {
+            if let Some(ready) = self.frag_ready_mains.remove(&key)
+                && let Some(timer) = ready.expire_timer
+            {
+                ctx.cancel_timer(timer);
+            }
+            return;
+        }
+        let oldest_aux = self
+            .frag_ready_auxes
+            .iter()
+            .min_by_key(|(_, ready)| ready.last_active)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest_aux
+            && let Some(ready) = self.frag_ready_auxes.remove(&key)
+            && let Some(timer) = ready.expire_timer
+        {
+            ctx.cancel_timer(timer);
+        }
     }
 
     fn expire_frag_assembly(
@@ -3834,7 +3856,10 @@ impl DistriWorker {
         group_hash: DigestIdentifier,
     ) -> Result<(), ActorError> {
         let key = (subject_id.clone(), group_hash.clone());
-        let (main, aux) = match (self.frag_ready_mains.get(&key), self.frag_ready_auxes.get(&key)) {
+        let (main, aux) = match (
+            self.frag_ready_mains.get(&key),
+            self.frag_ready_auxes.get(&key),
+        ) {
             (Some(main), Some(aux)) => (main, aux),
             _ => return Ok(()),
         };
@@ -3954,8 +3979,8 @@ impl DistriWorker {
         // A clashing fragment (same identity, different framing or
         // origin) is corrupt or mixed: keep the first assembly and
         // drop the newcomer without delivery.
-        if let Some(assembly) = self.frag_assemblies.get(&key) {
-            if assembly.total_bytes != total_bytes
+        if let Some(assembly) = self.frag_assemblies.get(&key)
+            && (assembly.total_bytes != total_bytes
                 || assembly.chunk_total != chunk_total
                 || assembly.event_sn != event_sn
                 || assembly.payload_hash != payload_hash
@@ -3970,7 +3995,7 @@ impl DistriWorker {
                 || assembly.info.receiver != info.receiver
                 || assembly.info.request_id != info.request_id
                 || assembly.info.version != info.version
-                || assembly.info.receiver_actor != info.receiver_actor
+                || assembly.info.receiver_actor != info.receiver_actor)
             {
                 warn!(
                     msg_type = "LedgerFrag",
@@ -3980,8 +4005,8 @@ impl DistriWorker {
                 );
                 return Ok(());
             }
-        }
-        if self.frag_assemblies.len() >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
+        if self.frag_assemblies.len()
+            >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
             && !self.frag_assemblies.contains_key(&key)
         {
             // Full of other events: evict the stalest instead of
@@ -3991,14 +4016,12 @@ impl DistriWorker {
                 .iter()
                 .min_by_key(|(_, assembly)| assembly.last_active)
                 .map(|(key, _)| key.clone())
-            {
-                if let Some(assembly) = self.frag_assemblies.remove(&oldest)
+                && let Some(assembly) = self.frag_assemblies.remove(&oldest)
                     && let Some(timer) = assembly.expire_timer
                 {
                     ctx.cancel_timer(timer);
                 }
             }
-        }
         if !self.frag_assemblies.contains_key(&key) {
             self.frag_assemblies.insert(
                 key.clone(),
@@ -4140,12 +4163,34 @@ impl DistriWorker {
         } else if assembly.is_aux {
             let group_key =
                 (assembly.subject_id.clone(), assembly.group_hash.clone());
-            // Aux side completes first: hold it until the main side
-            // arrives under the same group.
+            // Aux side completes: hold it until the main side
+            // arrives under the same group. When the counterpart
+            // already waits, store this side first and deliver the
+            // pair at once: dropping the newcomer would stall the
+            // copy forever.
             if self.frag_ready_auxes.contains_key(&group_key) {
                 return Ok(());
             }
             if self.frag_ready_mains.contains_key(&group_key) {
+                self.frag_generation = self.frag_generation.wrapping_add(1);
+                let generation = self.frag_generation;
+                self.frag_ready_auxes.insert(
+                    group_key.clone(),
+                    ReadyFragAux {
+                        ledger,
+                        is_all: assembly.is_all,
+                        is_push: assembly.is_push,
+                        info: assembly.info.clone(),
+                        sender: assembly.sender.clone(),
+                        expected_governance_id: assembly
+                            .expected_governance_id
+                            .clone(),
+                        last_active: Instant::now(),
+                        generation,
+                        expire_timer: None,
+                    },
+                );
+                self.note_frag_stats(ctx);
                 return self
                     .try_deliver_frag_group(
                         ctx,
@@ -4157,29 +4202,7 @@ impl DistriWorker {
             if self.frag_ready_mains.len() + self.frag_ready_auxes.len()
                 >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
             {
-                if let Some(oldest) = self
-                    .frag_ready_mains
-                    .iter()
-                    .min_by_key(|(_, r)| r.last_active)
-                    .map(|(k, _)| k.clone())
-                {
-                    if let Some(ready) = self.frag_ready_mains.remove(&oldest)
-                        && let Some(timer) = ready.expire_timer
-                    {
-                        ctx.cancel_timer(timer);
-                    }
-                } else if let Some(oldest) = self
-                    .frag_ready_auxes
-                    .iter()
-                    .min_by_key(|(_, r)| r.last_active)
-                    .map(|(k, _)| k.clone())
-                {
-                    if let Some(ready) = self.frag_ready_auxes.remove(&oldest)
-                        && let Some(timer) = ready.expire_timer
-                    {
-                        ctx.cancel_timer(timer);
-                    }
-                }
+                self.evict_oldest_ready_side(ctx);
             }
             self.frag_generation = self.frag_generation.wrapping_add(1);
             let generation = self.frag_generation;
@@ -4247,7 +4270,32 @@ impl DistriWorker {
                     if self.frag_ready_mains.contains_key(&group_key) {
                         return Ok(());
                     }
+                    // Main side completes while its aux already waits:
+                    // store this side first, then deliver the pair.
+                    // Dropping the newcomer here would stall the copy:
+                    // the counterpart alone can never deliver.
                     if self.frag_ready_auxes.contains_key(&group_key) {
+                        self.frag_generation =
+                            self.frag_generation.wrapping_add(1);
+                        let generation = self.frag_generation;
+                        self.frag_ready_mains.insert(
+                            group_key.clone(),
+                            ReadyFragMain {
+                                ledger,
+                                is_all: assembly.is_all,
+                                is_push: assembly.is_push,
+                                info: assembly.info.clone(),
+                                sender: assembly.sender.clone(),
+                                expected_governance_id: assembly
+                                    .expected_governance_id
+                                    .clone(),
+                                aux_hash,
+                                last_active: Instant::now(),
+                                generation,
+                                expire_timer: None,
+                            },
+                        );
+                        self.note_frag_stats(ctx);
                         return self
                             .try_deliver_frag_group(
                                 ctx,
@@ -4256,25 +4304,12 @@ impl DistriWorker {
                             )
                             .await;
                     }
-                    if self.frag_ready_mains.len()
-                        + self.frag_ready_auxes.len()
+                    if self.frag_ready_mains.len() + self.frag_ready_auxes.len()
                         >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
                     {
-                        if let Some(oldest) = self
-                            .frag_ready_mains
-                            .iter()
-                            .min_by_key(|(_, r)| r.last_active)
-                            .map(|(k, _)| k.clone())
-                        {
-                            if let Some(ready) = self.frag_ready_mains.remove(&oldest)
-                                && let Some(timer) = ready.expire_timer
-                            {
-                                ctx.cancel_timer(timer);
-                            }
+                        self.evict_oldest_ready_side(ctx);
                         }
-                    }
-                    self.frag_generation =
-                        self.frag_generation.wrapping_add(1);
+                    self.frag_generation = self.frag_generation.wrapping_add(1);
                     let generation = self.frag_generation;
                     let subject_id = assembly.subject_id.clone();
                     let group_hash = assembly.group_hash.clone();
@@ -5109,7 +5144,12 @@ impl Handler<Self> for DistriWorker {
                 group_hash,
                 generation,
             } => {
-                self.expire_frag_group(ctx, &subject_id, &group_hash, generation);
+                self.expire_frag_group(
+                    ctx,
+                    &subject_id,
+                    &group_hash,
+                    generation,
+                );
                 self.note_frag_stats(ctx);
             }
             #[cfg(feature = "test")]
