@@ -1682,47 +1682,69 @@ impl DistriWorker {
                 // rights and they can not unmask the prefix.
                 continue;
             }
-            if batch.event.is_some_and(|aux| aux.sn == event.sn)
-                && matches!(
-                    batch.simulation,
-                    Some(
-                        TransferSimulationResult::Witness
-                            | TransferSimulationResult::WitnessUnverified
-                    )
+            if batch.event.is_some_and(|aux| {
+                aux.sn == event.sn
+                    && aux
+                        .ledger_hash(self.hash)
+                        .ok()
+                        .zip(event.ledger_hash(self.hash).ok())
+                        .is_some_and(|(left, right)| left == right)
+            }) && matches!(
+                batch.simulation,
+                Some(
+                    TransferSimulationResult::Witness
+                        | TransferSimulationResult::WitnessUnverified
                 )
-            {
+            ) {
                 continue;
             }
-            if batch.verified_sn.is_some_and(|floor| event.sn <= floor) {
-                continue;
-            }
-            // Already covered by the validated prefix: the evidence
-            // chain through this transfer was replayed and judged
-            // when the cursor advanced past it, so rechecking could
-            // only replay work or invalidate the cursor, never learn
-            // anything new.
-            if self
+            // Verified-sn floor removed: it skipped by sn alone and
+            // let a forged inline with the same sn reuse the genuine
+            // aux verdict. The aux-identity check above already covers
+            // the same-event case by hash.
+            // Already covered by the validated prefix: transfers at or
+            // below the tip were judged when the cursor advanced past
+            // them, so they need no replay. At the exact tip, same sn
+            // with different bytes is a divergence that must verify
+            // instead of reusing the tip verdict.
+            if let Some((tip_sn, tip_hash)) = self
                 .verify_cursors
-                .covered_tip_sn(&common.subject_id)
-                .is_some_and(|tip| event.sn <= tip)
+                .covered_tip(&common.subject_id)
             {
-                continue;
+                if event.sn < tip_sn {
+                    continue;
+                }
+                if event.sn == tip_sn {
+                    if let (Ok(event_hash),) = (event.ledger_hash(self.hash),) {
+                        if event_hash == tip_hash {
+                            continue;
+                        }
+                    }
+                }
             }
             pending.push(event);
         }
         if pending.is_empty() {
             return Ok(());
         }
-        for transfer_event in pending {
+        // Single scratch cursor for the whole preflight: it advances
+        // between transfers so a chain of transfers reuses one
+        // incremental rebuild instead of paying one full rebuild per
+        // transfer. The production cursor stays untouched and is
+        // restored on every exit below.
+        let saved_cursors = self.verify_cursors.clone();
+        let mut scratch = saved_cursors.clone();
+        let mut refuted_sn: Option<u64> = None;
+        let mut missing = false;
+        for transfer_event in &pending {
             // Read-only check: the verdict must not advance,
             // invalidate or otherwise disturb the cursor the apply
-            // path resumes from. Any state the replay builds is
-            // discarded with the clone.
-            let saved_cursors = self.verify_cursors.clone();
+            // path resumes from. All replay state stays in the
+            // scratch above.
             let verdict = self
                 .transfer_verifier
                 .verify_aux_evidence(
-                    &mut self.verify_cursors,
+                    &mut scratch,
                     ctx,
                     &common.governance_id,
                     &common.subject_id,
@@ -1731,25 +1753,36 @@ impl DistriWorker {
                     &[],
                 )
                 .await;
-            self.verify_cursors = saved_cursors;
             match verdict {
-                AuxEvidence::Proven | AuxEvidence::Unverifiable => {}
+                AuxEvidence::Proven | AuxEvidence::Unverifiable => {
+                }
                 AuxEvidence::Missing => {
-                    return Err(DistributorError::ReceiverNoAccess.into());
+                    missing = true;
+                    break;
                 }
                 AuxEvidence::Refuted => {
-                    self.drop_deferred(ctx, &common.subject_id);
-                    self.rollback_refuted_aux(
-                        ctx,
-                        &common.governance_id,
-                        &common.subject_id,
-                        transfer_event.sn,
-                        attempt,
-                    )
-                    .await;
-                    return Err(DistributorError::ReceiverNoAccess.into());
+                    refuted_sn = Some(transfer_event.sn);
+                    break;
                 }
             }
+        }
+        // Production cursor never advances here: the scratch above
+        // is discarded in favour of the entry state.
+        self.verify_cursors = saved_cursors;
+        if let Some(sn) = refuted_sn {
+            self.drop_deferred(ctx, &common.subject_id);
+            self.rollback_refuted_aux(
+                ctx,
+                &common.governance_id,
+                &common.subject_id,
+                sn,
+                attempt,
+            )
+            .await;
+            return Err(DistributorError::ReceiverNoAccess.into());
+        }
+        if missing {
+            return Err(DistributorError::ReceiverNoAccess.into());
         }
         Ok(())
     }

@@ -233,15 +233,17 @@ impl VerifyCursorStore {
         self.cursors.remove(subject_id);
     }
 
-    /// Tip sn of the validated prefix, if any: a pure read that
-    /// neither disturbs the LRU order nor counts work. Lets
-    /// read-only checks skip transfers the cursor already covers
-    /// instead of replaying (or worse, invalidating) them.
-    pub(crate) fn covered_tip_sn(
+    /// Tip identity of the validated prefix, if any: sn plus hash.
+    /// Preflight only skips an inline when it is exactly the same
+    /// event (same sn and same bytes) as the covered tip; same sn
+    /// with different bytes is a divergence that must verify.
+    pub(crate) fn covered_tip(
         &self,
         subject_id: &DigestIdentifier,
-    ) -> Option<u64> {
-        self.cursors.get(subject_id).map(|cursor| cursor.metadata.sn)
+    ) -> Option<(u64, DigestIdentifier)> {
+        self.cursors
+            .get(subject_id)
+            .map(|cursor| (cursor.metadata.sn, cursor.tip_hash.clone()))
     }
 }
 

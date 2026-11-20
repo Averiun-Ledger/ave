@@ -758,9 +758,11 @@ async fn sync_unanswered_peers_never_prove_idle() {
     // nobody: an empty selection with known peers is still not a
     // tip proof.
     a.test_version_sync_tick(governance_id.clone()).await.unwrap();
-    // Let the round settle (no answers can arrive: B is held and
-    // backed off, and no other peer exists).
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Barrier ensures the tick was processed (ticks are tells): empty
+    // selection with known peers closes immediately with no timer, no
+    // fixed wait needed (no answers can arrive: B is held and backed
+    // off, and no other peer exists).
+    let _ = a.test_version_sync_state(governance_id.clone()).await.unwrap();
     assert_eq!(
         idle_count(&a, &governance_id).await,
         0,
@@ -927,7 +929,11 @@ async fn sync_higher_page_version_does_not_spin() {
         None,
     )
     .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Barrier ensures the forged page was processed (tells are ordered
+    // before asks): no fixed wait needed. Poll the final state plus
+    // absence of growth on the next transition (Round 2 below) instead
+    // of assuming termination after an arbitrary sleep.
+    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         1,
@@ -950,7 +956,8 @@ async fn sync_higher_page_version_does_not_spin() {
     let f2 = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
     inject_sync_page_versioned(&a, &a_key, &b_key, &sync_actor, f2, 1, vec![], None)
         .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Barrier ensures the accepted page completed (no follow-up fetch).
+    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         2,
@@ -963,7 +970,8 @@ async fn sync_higher_page_version_does_not_spin() {
     let f3 = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
     inject_sync_page_versioned(&a, &a_key, &b_key, &sync_actor, f3, 0, vec![], None)
         .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Barrier ensures the stale page was dropped (no new fetch).
+    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         3,
@@ -1164,13 +1172,9 @@ async fn sync_page_items_are_deduplicated_and_scoped() {
         None,
     )
     .await;
-    for _ in 0..100 {
-        if held_count(&a, FaultMessage::DistributionLedgerReq).await == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Barrier ensures the page was fully processed (tells ordered before asks):
+    // deduplication happens once during planning, never via retry.
+    let _ = a.test_tracker_sync_state(g1.clone()).await.unwrap();
     assert_eq!(
         held_count(&a, FaultMessage::DistributionLedgerReq).await,
         1,
@@ -1222,7 +1226,9 @@ async fn sync_page_items_are_deduplicated_and_scoped() {
     )
     .await;
     get_subject(&a, x1.clone(), Some(0), true).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Barrier ensures the mixed page was fully processed (x1 applied,
+    // x2 rejected) with no follow-up fetch.
+    let _ = a.test_tracker_sync_state(g1.clone()).await.unwrap();
     assert!(
         a.get_subject_state(x2.clone()).await.is_err(),
         "a Create under another governance is rejected before any write"
@@ -1433,7 +1439,8 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
         vec![item(stale_subject, 5)], None,
     )
     .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Barrier ensures the stale page was processed (discarded, no copies, no new fetch).
+    let _ = a.test_tracker_sync_state(g1.clone()).await.unwrap();
     assert_eq!(
         held_count(&a, FaultMessage::DistributionLedgerReq).await,
         0,
@@ -1475,7 +1482,8 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
         vec![t.clone()],
         "only the live page item produces a copy request"
     );
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Barrier ensures the live page was fully processed with no follow-up fetch.
+    let _ = a.test_tracker_sync_state(g1.clone()).await.unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         1,

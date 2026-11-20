@@ -144,6 +144,16 @@ impl Intermediary {
                 crate::tracker::reconcile::ReconcileStatsRegistry::default(),
             )),
         );
+        // Test-only fragment reassembly counters, read by the suites
+        // through the `frag_stats` helper. Tracks assemblies, ready
+        // sides, decode attempts and expiries without sleeps.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "frag_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::distribution::worker::FragStatsRegistry::default(),
+            )),
+        );
 
         #[cfg(feature = "test")]
         let service_sender =
@@ -384,6 +394,25 @@ impl Intermediary {
                         current = WIRE_VERSION,
                         "Peer speaks a different wire version"
                     );
+                }
+                {
+                    let required =
+                        crate::helpers::network::NetworkMessage::required_wire_version(
+                            &message.message,
+                        );
+                    if required > message.wire_version {
+                        if let Some(metrics) = try_core_metrics() {
+                            metrics.observe_network_wire_version("incompatible");
+                        }
+                        warn!(
+                            sender = %sender,
+                            wire_version = message.wire_version,
+                            required = required,
+                            current = WIRE_VERSION,
+                            "Dropping message from incompatible peer version"
+                        );
+                        return Ok(());
+                    }
                 }
 
                 // Test-only fault injection: drop/hold/corrupt inbound
@@ -1258,6 +1287,11 @@ impl Intermediary {
                         chunk_index,
                         chunk_total,
                         chunk,
+                        payload_hash,
+                        is_aux,
+                        group_hash,
+                        group_sn,
+                        aux_hash,
                         is_all,
                         is_push,
                         expected_governance_id,
@@ -1295,6 +1329,11 @@ impl Intermediary {
                                 chunk_index,
                                 chunk_total,
                                 chunk,
+                                payload_hash,
+                                is_aux,
+                                group_hash,
+                                group_sn,
+                                aux_hash,
                                 is_all,
                                 is_push,
                                 expected_governance_id,

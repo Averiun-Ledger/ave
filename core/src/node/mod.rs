@@ -471,9 +471,20 @@ impl Node {
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
+                            frag_ready_mains:
+                                std::collections::HashMap::new(),
+                            frag_ready_auxes:
+                                std::collections::HashMap::new(),
+                            frag_generation: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
+                        #[cfg(feature = "test")]
+                        frag_decode_attempts:
+                            std::sync::atomic::AtomicU64::new(0),
+                        #[cfg(feature = "test")]
+                        frag_expired:
+                            std::sync::atomic::AtomicU64::new(0),
                     },
                 )
                 .await?;
@@ -501,9 +512,20 @@ impl Node {
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
+                            frag_ready_mains:
+                                std::collections::HashMap::new(),
+                            frag_ready_auxes:
+                                std::collections::HashMap::new(),
+                            frag_generation: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
+                        #[cfg(feature = "test")]
+                        frag_decode_attempts:
+                            std::sync::atomic::AtomicU64::new(0),
+                        #[cfg(feature = "test")]
+                        frag_expired:
+                            std::sync::atomic::AtomicU64::new(0),
                     },
                 )
                 .await?;
@@ -1230,9 +1252,20 @@ impl Actor for Node {
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
+                            frag_ready_mains:
+                                std::collections::HashMap::new(),
+                            frag_ready_auxes:
+                                std::collections::HashMap::new(),
+                            frag_generation: 0,
                         #[cfg(feature = "test")]
                         test_modes_fault:
                             std::sync::atomic::AtomicU8::new(0),
+                        #[cfg(feature = "test")]
+                        frag_decode_attempts:
+                            std::sync::atomic::AtomicU64::new(0),
+                        #[cfg(feature = "test")]
+                        frag_expired:
+                            std::sync::atomic::AtomicU64::new(0),
                     },
                 )
                 .await
@@ -1345,9 +1378,20 @@ impl Handler<Self> for Node {
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
+                            frag_ready_mains:
+                                std::collections::HashMap::new(),
+                            frag_ready_auxes:
+                                std::collections::HashMap::new(),
+                            frag_generation: 0,
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),
+                            #[cfg(feature = "test")]
+                            frag_decode_attempts:
+                                std::sync::atomic::AtomicU64::new(0),
+                            #[cfg(feature = "test")]
+                            frag_expired:
+                                std::sync::atomic::AtomicU64::new(0),
                         },
                     )
                     .await?;
@@ -1386,9 +1430,20 @@ impl Handler<Self> for Node {
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
+                            frag_ready_mains:
+                                std::collections::HashMap::new(),
+                            frag_ready_auxes:
+                                std::collections::HashMap::new(),
+                            frag_generation: 0,
                             #[cfg(feature = "test")]
                             test_modes_fault:
                                 std::sync::atomic::AtomicU8::new(0),
+                            #[cfg(feature = "test")]
+                            frag_decode_attempts:
+                                std::sync::atomic::AtomicU64::new(0),
+                            #[cfg(feature = "test")]
+                            frag_expired:
+                                std::sync::atomic::AtomicU64::new(0),
                         },
                     )
                     .await?;

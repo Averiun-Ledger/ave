@@ -3794,6 +3794,42 @@ impl Api {
         Ok(())
     }
 
+    /// Test-only version sync round state: round, whether a round is
+    /// open and pending peers. Read-only, no state change: also serves
+    /// as an ask barrier ensuring prior tells were processed before
+    /// asserting idle never fires.
+    pub async fn test_version_sync_state(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<(u64, bool, usize), Error> {
+        use crate::governance::version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage, GovernanceVersionSyncResponse};
+        let actor = self
+            .system
+            .get_actor::<GovernanceVersionSync>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/version_sync",
+                governance_id
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync not found".to_owned(),
+            })?;
+        match actor
+            .ask(GovernanceVersionSyncMessage::GetState)
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "version_sync".to_owned(),
+                reason: "Version sync state failed".to_owned(),
+            })? {
+            GovernanceVersionSyncResponse::State { round, round_open, pending_peers } => Ok((round, round_open, pending_peers)),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "version_sync".to_owned(),
+                expected: "State".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Test-only: delivers a stale round timeout to the governance
     /// version sync of one governance. Lets a test prove an old
     /// timeout can not close the active round, drain its peers or
@@ -3966,6 +4002,48 @@ impl Api {
         Ok(())
     }
 
+    /// Test-only tracker sync round state: round, next nonce, pages
+    /// this cycle and whether fetch/update timeouts are armed. Read-only,
+    /// no state change: also serves as an ask barrier ensuring prior
+    /// tells (injected pages) were processed before asserting no minting.
+    pub async fn test_tracker_sync_state(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<(u64, u64, u32, bool, bool), Error> {
+        use crate::governance::tracker_sync::{TrackerSync, TrackerSyncMessage, TrackerSyncResponse};
+        let actor = self
+            .system
+            .get_actor::<TrackerSync>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{}/tracker_sync",
+                governance_id
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "tracker_sync".to_owned(),
+                reason: "Tracker sync not found".to_owned(),
+            })?;
+        match actor
+            .ask(TrackerSyncMessage::GetState)
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "tracker_sync".to_owned(),
+                reason: "Tracker sync state failed".to_owned(),
+            })? {
+            TrackerSyncResponse::State {
+                round,
+                next_nonce,
+                pages_this_cycle,
+                has_fetch_timeout,
+                has_update_timeout,
+            } => Ok((round, next_nonce, pages_this_cycle, has_fetch_timeout, has_update_timeout)),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "tracker_sync".to_owned(),
+                expected: "State".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Retained staged prefix per node: subjects holding events,
     /// staged events and staged bytes, in that order. Lets tests
     /// pin the deferred-store budget exactly instead of inferring
@@ -4009,6 +4087,43 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .snapshot_retained())
+    }
+
+    /// Fragment reassembly counters: assemblies, ready mains, ready
+    /// auxes, decode attempts and expiries, in that order. Lets tests
+    /// prove payload-hash rejection without decode, mixing rejection
+    /// without apply and timer expiry without further messages.
+    pub async fn test_fragment_stats(
+        &self,
+    ) -> Result<(u64, u64, u64, u64, u64), Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::worker::SharedFragStats>(
+                "frag_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "frag_stats".to_owned(),
+                reason: "Frag stats helper not found".to_owned(),
+            })?;
+        let guard = stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok((
+            guard.assemblies,
+            guard.ready_mains,
+            guard.ready_auxes,
+            guard.decode_attempts,
+            guard.expired,
+        ))
+    }
+
+    /// Total fragment assemblies held across workers: in-flight plus
+    /// ready sides. Lets expiry tests prove memory returns to zero
+    /// without further messages.
+    pub async fn test_fragment_assembly_len(&self) -> Result<usize, Error> {
+        let (assemblies, ready_mains, ready_auxes, _, _) =
+            self.test_fragment_stats().await?;
+        Ok((assemblies + ready_mains + ready_auxes) as usize)
     }
 
     /// Replaces the node-level distributor's deferred-store bounds

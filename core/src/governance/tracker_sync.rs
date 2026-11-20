@@ -42,6 +42,12 @@ pub enum TrackerSyncMessage {
     UpdateTimeout {
         batch_nonce: u64,
     },
+    /// Test-only state read: round, next nonce, pages this cycle and
+    /// whether a fetch or update timeout is armed. Read-only, no state
+    /// change: also serves as an ask barrier ensuring prior tells
+    /// (injected pages) were processed before asserting no minting.
+    #[cfg(feature = "test")]
+    GetState,
     NetworkRequest(TrackerSyncNetworkRequest),
     NetworkResponse(TrackerSyncNetworkResponse),
     /// Pushed by the parent governance every time it updates (same
@@ -59,6 +65,16 @@ impl Message for TrackerSyncMessage {}
 #[derive(Debug, Clone)]
 pub enum TrackerSyncResponse {
     None,
+    /// Test-only state: round, next nonce, pages this cycle, fetch
+    /// timeout armed, update timeout armed.
+    #[cfg(feature = "test")]
+    State {
+        round: u64,
+        next_nonce: u64,
+        pages_this_cycle: u32,
+        has_fetch_timeout: bool,
+        has_update_timeout: bool,
+    },
 }
 
 impl Response for TrackerSyncResponse {}
@@ -1098,6 +1114,16 @@ impl Handler<Self> for TrackerSync {
                 if let Err(e) = page_result {
                     return self.fail_cycle(ctx, "network response", e).await;
                 }
+            }
+            #[cfg(feature = "test")]
+            TrackerSyncMessage::GetState => {
+                return Ok(TrackerSyncResponse::State {
+                    round: self.round,
+                    next_nonce: self.next_nonce,
+                    pages_this_cycle: self.pages_this_cycle,
+                    has_fetch_timeout: self.pending_fetch_timeout.is_some(),
+                    has_update_timeout: self.pending_update_timeout.is_some(),
+                });
             }
         }
 

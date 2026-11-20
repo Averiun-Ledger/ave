@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, Message,
-    NotPersistentActor,
+    NotPersistentActor, TimerKey,
 };
 use ave_common::{
     SchemaType,
@@ -84,15 +84,39 @@ pub struct DistriWorker {
     pub(crate) attempt_clock: Arc<AtomicU64>,
     /// In-flight fragment reassemblies keyed by (subject, event
     /// hash): bounded, memory-only, dropped on restart. A completed
-    /// event is verified by hash before any deserialization or
-    /// apply, then delivered exactly like a whole batch.
+    /// event is verified by payload hash before deserialization and
+    /// by ledger hash after, then delivered exactly like a whole
+    /// batch. Main and aux sides reassemble independently and only
+    /// deliver together under the same group identity.
     pub(crate) frag_assemblies:
         HashMap<(DigestIdentifier, DigestIdentifier), FragAssembly>,
+    /// Completed main events waiting for their auxiliary side, keyed
+    /// by (subject, group hash). Bounded like the assemblies above
+    /// and expired by timer, never delivered alone when an aux is
+    /// required.
+    pub(crate) frag_ready_mains:
+        HashMap<(DigestIdentifier, DigestIdentifier), ReadyFragMain>,
+    /// Completed auxiliary events waiting for their main side, keyed
+    /// by (subject, group hash). Same bounds and expiry as above.
+    pub(crate) frag_ready_auxes:
+        HashMap<(DigestIdentifier, DigestIdentifier), ReadyFragAux>,
+    /// Monotonic generation for fragment expiry timers: a timer only
+    /// clears the entry it was armed for, never a renewed assembly.
+    pub(crate) frag_generation: u64,
     /// Test-only one-shot visibility fault: 0 none, 1 fail, 2 empty.
     /// Atomic so the shared `&self` receipt helpers can consume it;
     /// production never arms it.
     #[cfg(feature = "test")]
     pub(crate) test_modes_fault: std::sync::atomic::AtomicU8,
+    /// Test-only decode attempts for fragment joins: incremented
+    /// before every Borsh decode so a test can prove a bad payload
+    /// hash never reached the decoder.
+    #[cfg(feature = "test")]
+    pub(crate) frag_decode_attempts: std::sync::atomic::AtomicU64,
+    /// Test-only expired assemblies counter: incremented on every
+    /// timer-driven expiry.
+    #[cfg(feature = "test")]
+    pub(crate) frag_expired: std::sync::atomic::AtomicU64,
 }
 
 use super::transfer_verifier::TransferSimulationResult;
@@ -211,11 +235,48 @@ pub(crate) struct DistributionRange {
 /// only when complete. The joined bytes are hash-verified before any
 /// deserialization or apply; any failure drops the assembly with no
 /// writes.
+#[derive(Clone)]
+pub(crate) struct FragmentSpec {
+    pub(crate) subject_id: DigestIdentifier,
+    pub(crate) group_hash: DigestIdentifier,
+    pub(crate) group_sn: u64,
+    pub(crate) is_aux: bool,
+    pub(crate) aux_hash: Option<DigestIdentifier>,
+    pub(crate) is_all: bool,
+    pub(crate) is_push: bool,
+    pub(crate) expected_governance_id: Option<DigestIdentifier>,
+}
+
+pub(crate) struct FragmentSend {
+    info: ComunicateInfo,
+    event: Ledger,
+    transfer_event: Option<Ledger>,
+    spec: FragmentSpec,
+}
+
+pub(crate) struct FragmentFrame {
+    event_hash: DigestIdentifier,
+    event_sn: u64,
+    total_bytes: u64,
+    chunk_index: u32,
+    chunk_total: u32,
+    chunk: Vec<u8>,
+    payload_hash: DigestIdentifier,
+    spec: FragmentSpec,
+    info: ComunicateInfo,
+    sender: PublicKey,
+}
+
 pub(crate) struct FragAssembly {
     subject_id: DigestIdentifier,
     event_sn: u64,
     total_bytes: u64,
     chunk_total: u32,
+    payload_hash: DigestIdentifier,
+    is_aux: bool,
+    group_hash: DigestIdentifier,
+    group_sn: u64,
+    aux_hash: Option<DigestIdentifier>,
     is_all: bool,
     is_push: bool,
     expected_governance_id: Option<DigestIdentifier>,
@@ -225,11 +286,61 @@ pub(crate) struct FragAssembly {
     received_bytes: u64,
     received: u32,
     last_active: Instant,
+    generation: u64,
+    expire_timer: Option<TimerKey>,
 }
+
+/// A completed main event held until its auxiliary side completes.
+/// Never delivered alone when an aux is required.
+pub(crate) struct ReadyFragMain {
+    ledger: Ledger,
+    is_all: bool,
+    is_push: bool,
+    info: ComunicateInfo,
+    sender: PublicKey,
+    expected_governance_id: Option<DigestIdentifier>,
+    aux_hash: DigestIdentifier,
+    last_active: Instant,
+    generation: u64,
+    expire_timer: Option<TimerKey>,
+}
+
+/// A completed auxiliary event held until its main side completes.
+pub(crate) struct ReadyFragAux {
+    ledger: Ledger,
+    is_all: bool,
+    is_push: bool,
+    info: ComunicateInfo,
+    sender: PublicKey,
+    expected_governance_id: Option<DigestIdentifier>,
+    last_active: Instant,
+    generation: u64,
+    expire_timer: Option<TimerKey>,
+}
+
+/// Test-only fragment reassembly counters, shared across workers via
+/// the `frag_stats` helper. Updated after every assembly mutation so
+/// tests can poll for expiry, delivery and decode behaviour without
+/// sleeps.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub(crate) struct FragStatsRegistry {
+    pub(crate) assemblies: u64,
+    pub(crate) ready_mains: u64,
+    pub(crate) ready_auxes: u64,
+    pub(crate) decode_attempts: u64,
+    pub(crate) expired: u64,
+}
+
+#[cfg(feature = "test")]
+pub(crate) type SharedFragStats =
+    std::sync::Arc<std::sync::Mutex<FragStatsRegistry>>;
 
 /// Sender-side batch outcome: either a batch that fits the
 /// effective wire cap, or a single event that needs fragmentation.
 /// Both carry the tip-completeness of the response they belong to.
+/// The oversized variant keeps the transfer hint so the receiver
+/// still gets its authorization evidence, fragmented as needed.
 pub(crate) enum BatchPayload {
     Batch {
         ledger: Vec<Ledger>,
@@ -239,6 +350,7 @@ pub(crate) enum BatchPayload {
     },
     OversizedSingle {
         event: Ledger,
+        transfer_event: Option<Ledger>,
         is_all: bool,
     },
 }
@@ -304,7 +416,7 @@ impl DistriWorker {
     /// below, and the bound caps a lying peer's memory claim. Also
     /// bounds locally committed events: anything above it could
     /// never replicate, not even fragmented.
-    pub(crate) const MAX_FRAGMENT_EVENT_BYTES: usize = 16 * 1024 * 1024;
+    pub const MAX_FRAGMENT_EVENT_BYTES: usize = 16 * 1024 * 1024;
     /// Largest fragment count accepted for one event.
     pub(crate) const MAX_FRAGMENTS_PER_EVENT: u32 = 1024;
     /// Idle assemblies older than this are dropped on the next
@@ -2852,29 +2964,19 @@ impl DistriWorker {
             });
         }
         let max_bytes = self.network.max_message_bytes();
-        let aux_bytes = match &transfer_event {
-            Some(aux) => rmp_serde::to_vec(aux).map_err(|e| {
-                ActorError::Functional {
+        let aux_bytes_len = match &transfer_event {
+            Some(aux) => rmp_serde::to_vec(aux)
+                .map_err(|e| ActorError::Functional {
                     description: format!(
                         "Can not measure transfer hint size: {e}"
                     ),
-                }
-            })?,
-            None => Vec::new(),
+                })?
+                .len(),
+            None => 0,
         };
-        if aux_bytes.len().saturating_add(Self::DISTRIBUTION_ENVELOPE_RESERVE_BYTES)
-            > max_bytes
-        {
-            // Protocol-bounded hint that still overflows the cap:
-            // loud instead of a batch the transport must drop.
-            return Err(ActorError::Functional {
-                description: format!(
-                    "Transfer hint ({} bytes) exceeds the wire cap ({} bytes)",
-                    aux_bytes.len(),
-                    max_bytes
-                ),
-            });
-        }
+        // An oversized hint no longer fails the batch: the single
+        // event path below fragments both sides under the same
+        // bound instead of dropping a replicable ledger.
         let mut sizes: Vec<usize> = Vec::with_capacity(ledger.len());
         for event in &ledger {
             let bytes = rmp_serde::to_vec(event).map_err(|e| {
@@ -2886,8 +2988,7 @@ impl DistriWorker {
             })?;
             sizes.push(bytes.len());
         }
-        let mut budget = aux_bytes
-            .len()
+        let mut budget = aux_bytes_len
             .saturating_add(Self::DISTRIBUTION_ENVELOPE_RESERVE_BYTES);
         let mut take = 0usize;
         for size in &sizes {
@@ -2909,6 +3010,7 @@ impl DistriWorker {
             return Ok(BatchPayload::OversizedSingle {
                 is_all: raw_is_all && event.sn == tip_sn,
                 event,
+                transfer_event,
             });
         }
         let mut ledger = ledger;
@@ -3370,15 +3472,28 @@ impl DistriWorker {
                     "Ledger distribution sent successfully"
                 );
             }
-            BatchPayload::OversizedSingle { event, is_all } => {
-                self.send_fragmented_event(
-                    new_info,
-                    subject_id.clone(),
+            BatchPayload::OversizedSingle {
+                event,
+                transfer_event,
+                is_all,
+            } => {
+                let main_hash = event.ledger_hash(self.hash)?;
+                let main_sn = event.sn;
+                self.send_fragmented_event(FragmentSend {
+                    info: new_info,
                     event,
-                    is_all,
-                    false,
-                    range.expected_governance_id,
-                )
+                    transfer_event,
+                    spec: FragmentSpec {
+                        subject_id: subject_id.clone(),
+                        group_hash: main_hash,
+                        group_sn: main_sn,
+                        is_aux: false,
+                        aux_hash: None,
+                        is_all,
+                        is_push: false,
+                        expected_governance_id: range.expected_governance_id,
+                    },
+                })
                 .await?;
 
                 debug!(
@@ -3394,33 +3509,31 @@ impl DistriWorker {
         Ok(())
     }
 
-    /// Sends one oversized event as bounded fragments: each chunk
-    /// fits the effective cap by construction and is validated by
-    /// the sender frame check, so no retry loop can rebuild an
-    /// oversize batch. The receiver reassembles by event identity,
-    /// verifies the hash before any deserialization or apply, and
-    /// delivers exactly like a whole response.
-    async fn send_fragmented_event(
-        &self,
-        info: ComunicateInfo,
-        subject_id: DigestIdentifier,
-        event: Ledger,
-        is_all: bool,
-        is_push: bool,
-        expected_governance_id: Option<DigestIdentifier>,
-    ) -> Result<(), ActorError> {
-        let event_hash = event.ledger_hash(self.hash).map_err(|e| {
+    /// Shared fragment builder: splits one Borsh-encoded event into
+    /// bounded frames with payload and ledger identity. Used by the
+    /// pull path and the push coordinator so chunking, limits and
+    /// identity never diverge. Serialization failures propagate as
+    /// real errors, never as empty sizes.
+    pub(crate) fn build_event_fragments(
+        event: &Ledger,
+        hash: HashAlgorithm,
+        chunk_size: usize,
+        spec: FragmentSpec,
+    ) -> Result<Vec<ActorMessage>, ActorError> {
+        let event_hash = event.ledger_hash(hash).map_err(|e| {
             ActorError::Functional {
                 description: format!("Can not hash fragmented event: {e}"),
             }
         })?;
-        let bytes = borsh::to_vec(&event).map_err(|e| {
+        let bytes = borsh::to_vec(event).map_err(|e| {
             ActorError::Functional {
                 description: format!("Can not encode fragmented event: {e}"),
             }
         })?;
         let total_bytes = bytes.len() as u64;
-        if total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64 {
+        if total_bytes == 0
+            || total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64
+        {
             return Err(ActorError::Functional {
                 description: format!(
                     "Fragmented event ({} bytes) exceeds the reassembly bound ({} bytes)",
@@ -3429,7 +3542,11 @@ impl DistriWorker {
                 ),
             });
         }
-        let chunk_size = Self::fragment_chunk_size(self.network.max_message_bytes());
+        if chunk_size == 0 {
+            return Err(ActorError::Functional {
+                description: "Fragment chunk size is zero".to_owned(),
+            });
+        }
         let chunk_total = bytes.len().div_ceil(chunk_size) as u32;
         if chunk_total == 0 || chunk_total > Self::MAX_FRAGMENTS_PER_EVENT {
             return Err(ActorError::Functional {
@@ -3438,24 +3555,112 @@ impl DistriWorker {
                 ),
             });
         }
+        let payload_hash = hash.hasher().hash(&bytes);
         let event_sn = event.sn;
+        let mut out = Vec::with_capacity(chunk_total as usize);
         for (index, piece) in bytes.chunks(chunk_size).enumerate() {
-            self.send_network_message(
-                info.clone(),
-                ActorMessage::DistributionLedgerFrag {
-                    subject_id: subject_id.clone(),
-                    event_hash: event_hash.clone(),
-                    event_sn,
-                    total_bytes,
-                    chunk_index: index as u32,
-                    chunk_total,
-                    chunk: piece.to_vec(),
-                    is_all,
-                    is_push,
-                    expected_governance_id: expected_governance_id.clone(),
+            out.push(ActorMessage::DistributionLedgerFrag {
+                subject_id: spec.subject_id.clone(),
+                event_hash: event_hash.clone(),
+                event_sn,
+                total_bytes,
+                chunk_index: index as u32,
+                chunk_total,
+                chunk: piece.to_vec(),
+                payload_hash: payload_hash.clone(),
+                is_aux: spec.is_aux,
+                group_hash: spec.group_hash.clone(),
+                group_sn: spec.group_sn,
+                aux_hash: spec.aux_hash.clone(),
+                is_all: spec.is_all,
+                is_push: spec.is_push,
+                expected_governance_id: spec.expected_governance_id.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Sends one oversized event as bounded fragments, preserving its
+    /// transfer hint: the main event and its auxiliary are each
+    /// fragmented as needed under the same group identity and the
+    /// receiver only delivers when both verify. Each chunk fits the
+    /// effective cap by construction, so no retry loop can rebuild an
+    /// oversize batch. A transfer event itself carries no external
+    /// aux: its bytes already are the evidence.
+    async fn send_fragmented_event(
+        &self,
+        request: FragmentSend,
+    ) -> Result<(), ActorError> {
+        let FragmentSend {
+            info,
+            event,
+            transfer_event,
+            spec,
+        } = request;
+        // An aux identical to the main event needs no second copy:
+        // the receiver synthesizes it from the reassembled transfer
+        // itself, as in the whole-batch path. Any distinct hint is
+        // preserved and fragmented under the same group.
+        let aux_to_send: Option<Ledger> = match &transfer_event {
+            Some(aux) => {
+                let same = matches!(
+                    (aux.ledger_hash(self.hash), event.ledger_hash(self.hash)),
+                    (Ok(a), Ok(m)) if a == m
+                );
+                if same { None } else { Some(aux.clone()) }
+            }
+            None => None,
+        };
+        let aux_hash = match &aux_to_send {
+            Some(aux) => Some(aux.ledger_hash(self.hash).map_err(|e| {
+                ActorError::Functional {
+                    description: format!("Can not hash fragmented aux: {e}"),
+                }
+            })?),
+            None => None,
+        };
+        let chunk_size = Self::fragment_chunk_size(self.network.max_message_bytes());
+        let mut frags = Self::build_event_fragments(
+            &event,
+            self.hash,
+            chunk_size,
+            FragmentSpec {
+                aux_hash: aux_hash.clone(),
+                is_aux: false,
+                ..spec.clone()
+            },
+        )?;
+        if let Some(aux) = &aux_to_send {
+            let mut aux_frags = Self::build_event_fragments(
+                aux,
+                self.hash,
+                chunk_size,
+                FragmentSpec {
+                    aux_hash: None,
+                    is_aux: true,
+                    ..spec.clone()
                 },
-            )
-            .await?;
+            )?;
+            frags.append(&mut aux_frags);
+        }
+        for frag in &frags {
+            // Sender-side frame check: every fragment must fit the
+            // effective cap, otherwise fail loud instead of looping.
+            let probe = NetworkMessage::new(info.clone(), frag.clone());
+            let fits = rmp_serde::to_vec(&probe)
+                .map_err(|e| ActorError::Functional {
+                    description: format!("Can not measure fragment frame: {e}"),
+                })?
+                .len()
+                <= self.network.max_message_bytes();
+            if !fits {
+                return Err(ActorError::Functional {
+                    description: "Fragment frame exceeds the wire cap".to_owned(),
+                });
+            }
+        }
+        for frag in frags {
+            self.send_network_message(info.clone(), frag).await?;
         }
         Ok(())
     }
@@ -3466,22 +3671,258 @@ impl DistriWorker {
     /// reorders are idempotent. The store is bounded and
     /// memory-only: completed, failed and expired assemblies never
     /// accumulate, and a restart clears them outright.
-    async fn handle_ledger_frag(
+    fn frag_ttl() -> std::time::Duration {
+        #[cfg(feature = "test")]
+        {
+            std::time::Duration::from_secs(1)
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            Self::FRAGMENT_ASSEMBLY_TTL
+        }
+    }
+
+    fn note_frag_stats(&self, ctx: &mut ActorContext<Self>) {
+        #[cfg(feature = "test")]
+        {
+            if let Some(stats) = ctx
+                .system()
+                .get_helper::<SharedFragStats>("frag_stats")
+            {
+                if let Ok(mut guard) = stats.lock() {
+                    guard.assemblies = self.frag_assemblies.len() as u64;
+                    guard.ready_mains = self.frag_ready_mains.len() as u64;
+                    guard.ready_auxes = self.frag_ready_auxes.len() as u64;
+                    guard.decode_attempts = self
+                        .frag_decode_attempts
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    guard.expired = self
+                        .frag_expired
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = ctx;
+            let _ = self;
+        }
+    }
+
+    fn arm_frag_expire(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        event_hash: &DigestIdentifier,
+        generation: u64,
+    ) -> Result<(), ActorError> {
+        let timer = ctx.schedule_once(
+            Self::frag_ttl(),
+            DistriWorkerMessage::FragExpire {
+                subject_id: subject_id.clone(),
+                event_hash: event_hash.clone(),
+                generation,
+            },
+        )?;
+        let key = (subject_id.clone(), event_hash.clone());
+        if let Some(assembly) = self.frag_assemblies.get_mut(&key) {
+            if let Some(previous) = assembly.expire_timer.replace(timer) {
+                ctx.cancel_timer(previous);
+            }
+        }
+        Ok(())
+    }
+
+    fn arm_frag_group_expire(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        group_hash: &DigestIdentifier,
+        generation: u64,
+    ) -> Result<(), ActorError> {
+        let timer = ctx.schedule_once(
+            Self::frag_ttl(),
+            DistriWorkerMessage::FragGroupExpire {
+                subject_id: subject_id.clone(),
+                group_hash: group_hash.clone(),
+                generation,
+            },
+        )?;
+        let key = (subject_id.clone(), group_hash.clone());
+        if let Some(ready) = self.frag_ready_mains.get_mut(&key)
+            && let Some(previous) = ready.expire_timer.replace(timer.clone())
+        {
+            ctx.cancel_timer(previous);
+        }
+        if let Some(ready) = self.frag_ready_auxes.get_mut(&key)
+            && let Some(previous) = ready.expire_timer.replace(timer)
+        {
+            ctx.cancel_timer(previous);
+        }
+        Ok(())
+    }
+
+    fn expire_frag_assembly(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        event_hash: &DigestIdentifier,
+        generation: u64,
+    ) {
+        let key = (subject_id.clone(), event_hash.clone());
+        if self
+            .frag_assemblies
+            .get(&key)
+            .is_some_and(|a| a.generation == generation)
+        {
+            self.frag_assemblies.remove(&key);
+            #[cfg(feature = "test")]
+            {
+                self.frag_expired
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn expire_frag_group(
+        &mut self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        group_hash: &DigestIdentifier,
+        generation: u64,
+    ) {
+        let key = (subject_id.clone(), group_hash.clone());
+        let should_expire = self
+            .frag_ready_mains
+            .get(&key)
+            .is_some_and(|r| r.generation == generation)
+            || self
+                .frag_ready_auxes
+                .get(&key)
+                .is_some_and(|r| r.generation == generation);
+        let mut removed = false;
+        if should_expire {
+            if let Some(main) = self.frag_ready_mains.remove(&key) {
+                if let Some(timer) = main.expire_timer {
+                    ctx.cancel_timer(timer);
+                }
+                removed = true;
+            }
+            if let Some(aux) = self.frag_ready_auxes.remove(&key) {
+                if let Some(timer) = aux.expire_timer {
+                    ctx.cancel_timer(timer);
+                }
+                removed = true;
+            }
+        }
+        #[cfg(feature = "test")]
+        {
+            if removed {
+                self.frag_expired
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            let _ = removed;
+        }
+    }
+
+    async fn try_deliver_frag_group(
         &mut self,
         ctx: &mut ActorContext<Self>,
         subject_id: DigestIdentifier,
-        event_hash: DigestIdentifier,
-        event_sn: u64,
-        total_bytes: u64,
-        chunk_index: u32,
-        chunk_total: u32,
-        chunk: Vec<u8>,
-        is_all: bool,
-        is_push: bool,
-        expected_governance_id: Option<DigestIdentifier>,
-        info: ComunicateInfo,
-        sender: PublicKey,
+        group_hash: DigestIdentifier,
     ) -> Result<(), ActorError> {
+        let key = (subject_id.clone(), group_hash.clone());
+        let (main, aux) = match (self.frag_ready_mains.get(&key), self.frag_ready_auxes.get(&key)) {
+            (Some(main), Some(aux)) => (main, aux),
+            _ => return Ok(()),
+        };
+        let compatible = main.is_all == aux.is_all
+            && main.is_push == aux.is_push
+            && main.expected_governance_id == aux.expected_governance_id
+            && main.sender == aux.sender
+            && main.info.request_id == aux.info.request_id
+            && main.info.version == aux.info.version
+            && main.info.receiver == aux.info.receiver
+            && main.info.receiver_actor == aux.info.receiver_actor
+            && aux
+                .ledger
+                .ledger_hash(self.hash)
+                .is_ok_and(|hash| hash == main.aux_hash);
+        if !compatible {
+            if let Some(main) = self.frag_ready_mains.remove(&key)
+                && let Some(timer) = main.expire_timer
+            {
+                ctx.cancel_timer(timer);
+            }
+            if let Some(aux) = self.frag_ready_auxes.remove(&key)
+                && let Some(timer) = aux.expire_timer
+            {
+                ctx.cancel_timer(timer);
+            }
+            self.note_frag_stats(ctx);
+            return Ok(());
+        }
+        let Some(main_entry) = self.frag_ready_mains.remove(&key) else {
+            return Ok(());
+        };
+        if let Some(timer) = main_entry.expire_timer {
+            ctx.cancel_timer(timer);
+        }
+        let Some(aux_entry) = self.frag_ready_auxes.remove(&key) else {
+            return Ok(());
+        };
+        if let Some(timer) = aux_entry.expire_timer {
+            ctx.cancel_timer(timer);
+        }
+        self.note_frag_stats(ctx);
+        self.handle_ledger_distribution(
+            ctx,
+            vec![main_entry.ledger],
+            main_entry.is_all,
+            Some(Box::new(aux_entry.ledger)),
+            main_entry.info,
+            main_entry.sender,
+            main_entry.expected_governance_id,
+        )
+        .await
+    }
+
+    /// Receives one fragment: bounds it, stores it by index and, on
+    /// completion, joins, hash-verifies and delivers the event. Any
+    /// failure drops the assembly with no writes; duplicates and
+    /// reorders are idempotent. The store is bounded and
+    /// memory-only: completed, failed and expired assemblies never
+    /// accumulate, and a restart clears them outright. Main and aux
+    /// sides share the group identity and only deliver together.
+    async fn handle_ledger_frag(
+        &mut self,
+        ctx: &mut ActorContext<Self>,
+        frame: FragmentFrame,
+    ) -> Result<(), ActorError> {
+        let FragmentFrame {
+            event_hash,
+            event_sn,
+            total_bytes,
+            chunk_index,
+            chunk_total,
+            chunk,
+            payload_hash,
+            spec,
+            info,
+            sender,
+        } = frame;
+        let FragmentSpec {
+            subject_id,
+            group_hash,
+            group_sn,
+            is_aux,
+            aux_hash,
+            is_all,
+            is_push,
+            expected_governance_id,
+        } = spec;
         let max_bytes = self.network.max_message_bytes() as u64;
         if chunk_total == 0
             || chunk_total > Self::MAX_FRAGMENTS_PER_EVENT
@@ -3489,6 +3930,7 @@ impl DistriWorker {
             || total_bytes == 0
             || total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64
             || chunk.len() as u64 > max_bytes
+            || (!is_aux && group_sn != event_sn)
         {
             warn!(
                 msg_type = "LedgerFrag",
@@ -3501,21 +3943,43 @@ impl DistriWorker {
             );
             return Ok(());
         }
-        // Expire idle assemblies first: the store stays bounded even
-        // when a sender never completes.
+        // Backstop expiry for idle assemblies and ready sides: the
+        // store stays bounded even when a sender never completes.
+        // The timer below is the real expiry; this retain only covers
+        // entries armed before a restart or a clock jump.
         self.frag_assemblies.retain(|_, assembly| {
             assembly.last_active.elapsed() < Self::FRAGMENT_ASSEMBLY_TTL
         });
         let key = (subject_id.clone(), event_hash.clone());
-        // A clashing assembly (same identity, different framing) is
-        // corrupt or mixed: drop it instead of joining garbage.
-        if self.frag_assemblies.get(&key).is_some_and(|assembly| {
-            assembly.total_bytes != total_bytes
+        // A clashing fragment (same identity, different framing or
+        // origin) is corrupt or mixed: keep the first assembly and
+        // drop the newcomer without delivery.
+        if let Some(assembly) = self.frag_assemblies.get(&key) {
+            if assembly.total_bytes != total_bytes
                 || assembly.chunk_total != chunk_total
                 || assembly.event_sn != event_sn
+                || assembly.payload_hash != payload_hash
+                || assembly.is_aux != is_aux
+                || assembly.group_hash != group_hash
+                || assembly.group_sn != group_sn
+                || assembly.aux_hash != aux_hash
                 || assembly.is_push != is_push
-        }) {
-            self.frag_assemblies.remove(&key);
+                || assembly.is_all != is_all
+                || assembly.expected_governance_id != expected_governance_id
+                || assembly.sender != sender
+                || assembly.info.receiver != info.receiver
+                || assembly.info.request_id != info.request_id
+                || assembly.info.version != info.version
+                || assembly.info.receiver_actor != info.receiver_actor
+            {
+                warn!(
+                    msg_type = "LedgerFrag",
+                    subject_id = %subject_id,
+                    sender = %sender,
+                    "Dropping mixed fragment without delivery"
+                );
+                return Ok(());
+            }
         }
         if self.frag_assemblies.len() >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
             && !self.frag_assemblies.contains_key(&key)
@@ -3528,41 +3992,88 @@ impl DistriWorker {
                 .min_by_key(|(_, assembly)| assembly.last_active)
                 .map(|(key, _)| key.clone())
             {
-                self.frag_assemblies.remove(&oldest);
+                if let Some(assembly) = self.frag_assemblies.remove(&oldest)
+                    && let Some(timer) = assembly.expire_timer
+                {
+                    ctx.cancel_timer(timer);
+                }
             }
         }
-        self.frag_assemblies.entry(key.clone()).or_insert_with(
-            || FragAssembly {
-                subject_id: subject_id.clone(),
-                event_sn,
-                total_bytes,
-                chunk_total,
-                is_all,
-                is_push,
-                expected_governance_id: expected_governance_id.clone(),
-                sender: sender.clone(),
-                info: info.clone(),
-                chunks: (0..chunk_total).map(|_| None).collect(),
-                received_bytes: 0,
-                received: 0,
-                last_active: Instant::now(),
-            },
-        );
+        if !self.frag_assemblies.contains_key(&key) {
+            self.frag_assemblies.insert(
+                key.clone(),
+                FragAssembly {
+                    subject_id: subject_id.clone(),
+                    event_sn,
+                    total_bytes,
+                    chunk_total,
+                    payload_hash: payload_hash.clone(),
+                    is_aux,
+                    group_hash: group_hash.clone(),
+                    group_sn,
+                    aux_hash: aux_hash.clone(),
+                    is_all,
+                    is_push,
+                    expected_governance_id: expected_governance_id.clone(),
+                    sender: sender.clone(),
+                    info: info.clone(),
+                    chunks: (0..chunk_total).map(|_| None).collect(),
+                    received_bytes: 0,
+                    received: 0,
+                    last_active: Instant::now(),
+                    generation: 0,
+                    expire_timer: None,
+                },
+            );
+        }
+        self.frag_generation = self.frag_generation.wrapping_add(1);
+        let generation = self.frag_generation;
+        {
+            let Some(assembly) = self.frag_assemblies.get_mut(&key) else {
+                return Ok(());
+            };
+            assembly.generation = generation;
+            assembly.last_active = Instant::now();
+        }
+        self.arm_frag_expire(ctx, &subject_id, &event_hash, generation)?;
+        self.note_frag_stats(ctx);
         let Some(assembly) = self.frag_assemblies.get_mut(&key) else {
             return Ok(());
         };
-        assembly.last_active = Instant::now();
         if assembly.chunks[chunk_index as usize].is_none() {
+            // Reject over-claimed joins during accumulation, not only
+            // at the end: a lying total can never absorb more bytes.
+            if assembly.received_bytes.saturating_add(chunk.len() as u64)
+                > assembly.total_bytes
+            {
+                warn!(
+                    msg_type = "LedgerFrag",
+                    subject_id = %assembly.subject_id,
+                    "Dropping fragment join exceeding its total"
+                );
+                if let Some(assembly) = self.frag_assemblies.remove(&key)
+                    && let Some(timer) = assembly.expire_timer
+                {
+                    ctx.cancel_timer(timer);
+                }
+                self.note_frag_stats(ctx);
+                return Ok(());
+            }
             assembly.received_bytes += chunk.len() as u64;
             assembly.received += 1;
             assembly.chunks[chunk_index as usize] = Some(chunk);
         }
         if assembly.received < assembly.chunk_total {
+            self.note_frag_stats(ctx);
             return Ok(());
         }
         let Some(assembly) = self.frag_assemblies.remove(&key) else {
             return Ok(());
         };
+        if let Some(timer) = assembly.expire_timer {
+            ctx.cancel_timer(timer);
+        }
+        self.note_frag_stats(ctx);
         if assembly.received_bytes != assembly.total_bytes {
             warn!(
                 msg_type = "LedgerFrag",
@@ -3575,19 +4086,36 @@ impl DistriWorker {
         for piece in assembly.chunks.into_iter().flatten() {
             joined.extend_from_slice(&piece);
         }
-        let ledger: Ledger = borsh::from_slice(&joined).map_err(|e| {
+        // Payload hash first: a corrupt or mixed join never reaches
+        // the decoder.
+        if self.hash.hasher().hash(&joined) != assembly.payload_hash {
             warn!(
                 msg_type = "LedgerFrag",
                 subject_id = %assembly.subject_id,
-                error = %e,
-                "Dropping fragment join that does not decode"
+                "Dropping fragment join with mismatched payload hash"
             );
-            ActorError::Functional {
-                description: format!("Fragment join does not decode: {e}"),
+            return Ok(());
+        }
+        #[cfg(feature = "test")]
+        {
+            self.frag_decode_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.note_frag_stats(ctx);
+        }
+        let ledger: Ledger = match borsh::from_slice(&joined) {
+            Ok(ledger) => ledger,
+            Err(e) => {
+                warn!(
+                    msg_type = "LedgerFrag",
+                    subject_id = %assembly.subject_id,
+                    error = %e,
+                    "Dropping fragment join that does not decode"
+                );
+                return Ok(());
             }
-        })?;
-        // Identity before anything else: a corrupt or mixed join can
-        // never deserialise into an apply.
+        };
+        // Identity after decoding: a corrupt or mixed join can never
+        // reach the apply.
         let verified = ledger
             .ledger_hash(self.hash)
             .is_ok_and(|hash| hash == event_hash)
@@ -3609,25 +4137,177 @@ impl DistriWorker {
                 assembly.sender,
             )
             .await
-        } else {
-            // A reassembled transfer carries its own aux: the sender
-            // could not fit both, and the bytes are identical.
-            let aux = match &ledger.protocols {
-                Protocols::Transfer { evaluation, .. } if evaluation.is_ok() => {
-                    Some(Box::new(ledger.clone()))
+        } else if assembly.is_aux {
+            let group_key =
+                (assembly.subject_id.clone(), assembly.group_hash.clone());
+            // Aux side completes first: hold it until the main side
+            // arrives under the same group.
+            if self.frag_ready_auxes.contains_key(&group_key) {
+                return Ok(());
+            }
+            if self.frag_ready_mains.contains_key(&group_key) {
+                return self
+                    .try_deliver_frag_group(
+                        ctx,
+                        assembly.subject_id,
+                        assembly.group_hash,
+                    )
+                    .await;
+            }
+            if self.frag_ready_mains.len() + self.frag_ready_auxes.len()
+                >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
+            {
+                if let Some(oldest) = self
+                    .frag_ready_mains
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_active)
+                    .map(|(k, _)| k.clone())
+                {
+                    if let Some(ready) = self.frag_ready_mains.remove(&oldest)
+                        && let Some(timer) = ready.expire_timer
+                    {
+                        ctx.cancel_timer(timer);
+                    }
+                } else if let Some(oldest) = self
+                    .frag_ready_auxes
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_active)
+                    .map(|(k, _)| k.clone())
+                {
+                    if let Some(ready) = self.frag_ready_auxes.remove(&oldest)
+                        && let Some(timer) = ready.expire_timer
+                    {
+                        ctx.cancel_timer(timer);
+                    }
                 }
-                _ => None,
-            };
-            self.handle_ledger_distribution(
+            }
+            self.frag_generation = self.frag_generation.wrapping_add(1);
+            let generation = self.frag_generation;
+            self.frag_ready_auxes.insert(
+                group_key.clone(),
+                ReadyFragAux {
+                    ledger,
+                    is_all: assembly.is_all,
+                    is_push: assembly.is_push,
+                    info: assembly.info.clone(),
+                    sender: assembly.sender.clone(),
+                    expected_governance_id: assembly
+                        .expected_governance_id
+                        .clone(),
+                    last_active: Instant::now(),
+                    generation,
+                    expire_timer: None,
+                },
+            );
+            self.arm_frag_group_expire(
                 ctx,
-                vec![ledger],
-                assembly.is_all,
-                aux,
-                assembly.info,
-                assembly.sender,
-                assembly.expected_governance_id,
+                &assembly.subject_id,
+                &assembly.group_hash,
+                generation,
+            )?;
+            self.note_frag_stats(ctx);
+            self.try_deliver_frag_group(
+                ctx,
+                assembly.subject_id,
+                assembly.group_hash,
             )
             .await
+        } else {
+            // Main side completes: without an aux requirement it
+            // delivers exactly like a whole batch. With one, it waits
+            // for the aux side under the same group instead of
+            // applying without evidence.
+            let needed_aux = assembly.aux_hash.clone();
+            match needed_aux {
+                None => {
+                    let aux = match &ledger.protocols {
+                        Protocols::Transfer { evaluation, .. }
+                            if evaluation.is_ok() =>
+                        {
+                            Some(Box::new(ledger.clone()))
+                        }
+                        _ => None,
+                    };
+                    self.handle_ledger_distribution(
+                        ctx,
+                        vec![ledger],
+                        assembly.is_all,
+                        aux,
+                        assembly.info,
+                        assembly.sender,
+                        assembly.expected_governance_id,
+                    )
+                    .await
+                }
+                Some(aux_hash) => {
+                    let group_key = (
+                        assembly.subject_id.clone(),
+                        assembly.group_hash.clone(),
+                    );
+                    if self.frag_ready_mains.contains_key(&group_key) {
+                        return Ok(());
+                    }
+                    if self.frag_ready_auxes.contains_key(&group_key) {
+                        return self
+                            .try_deliver_frag_group(
+                                ctx,
+                                assembly.subject_id,
+                                assembly.group_hash,
+                            )
+                            .await;
+                    }
+                    if self.frag_ready_mains.len()
+                        + self.frag_ready_auxes.len()
+                        >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
+                    {
+                        if let Some(oldest) = self
+                            .frag_ready_mains
+                            .iter()
+                            .min_by_key(|(_, r)| r.last_active)
+                            .map(|(k, _)| k.clone())
+                        {
+                            if let Some(ready) = self.frag_ready_mains.remove(&oldest)
+                                && let Some(timer) = ready.expire_timer
+                            {
+                                ctx.cancel_timer(timer);
+                            }
+                        }
+                    }
+                    self.frag_generation =
+                        self.frag_generation.wrapping_add(1);
+                    let generation = self.frag_generation;
+                    let subject_id = assembly.subject_id.clone();
+                    let group_hash = assembly.group_hash.clone();
+                    let info = assembly.info.clone();
+                    let sender = assembly.sender.clone();
+                    let expected = assembly.expected_governance_id.clone();
+                    let is_all = assembly.is_all;
+                    self.frag_ready_mains.insert(
+                        group_key,
+                        ReadyFragMain {
+                            ledger,
+                            is_all,
+                            is_push: assembly.is_push,
+                            info,
+                            sender,
+                            expected_governance_id: expected,
+                            aux_hash,
+                            last_active: Instant::now(),
+                            generation,
+                            expire_timer: None,
+                        },
+                    );
+                    self.arm_frag_group_expire(
+                        ctx,
+                        &subject_id,
+                        &group_hash,
+                        generation,
+                    )?;
+                    self.note_frag_stats(ctx);
+                    self.try_deliver_frag_group(ctx, subject_id, group_hash)
+                        .await
+                }
+            }
         }
     }
 
@@ -4136,6 +4816,8 @@ pub enum DistriWorkerMessage {
     /// One bounded chunk of an oversized event. Reassembled by
     /// (subject, event hash); duplicates are idempotent and order
     /// is irrelevant. Only a hash-verified join is ever delivered.
+    /// Main and aux sides share the group identity and deliver
+    /// together.
     LedgerFrag {
         subject_id: DigestIdentifier,
         event_hash: DigestIdentifier,
@@ -4144,11 +4826,31 @@ pub enum DistriWorkerMessage {
         chunk_index: u32,
         chunk_total: u32,
         chunk: Vec<u8>,
+        payload_hash: DigestIdentifier,
+        is_aux: bool,
+        group_hash: DigestIdentifier,
+        group_sn: u64,
+        aux_hash: Option<DigestIdentifier>,
         is_all: bool,
         is_push: bool,
         expected_governance_id: Option<DigestIdentifier>,
         info: ComunicateInfo,
         sender: PublicKey,
+    },
+    /// Timer-driven expiry for one fragment assembly: only clears
+    /// the entry armed with the same generation, so a renewed
+    /// assembly is never wiped by a stale timeout.
+    FragExpire {
+        subject_id: DigestIdentifier,
+        event_hash: DigestIdentifier,
+        generation: u64,
+    },
+    /// Timer-driven expiry for one completed group side waiting for
+    /// its counterpart.
+    FragGroupExpire {
+        subject_id: DigestIdentifier,
+        group_hash: DigestIdentifier,
+        generation: u64,
     },
     /// Test-only fault injection: the next visibility lookup for
     /// this worker fails (`empty == false`) or returns no modes
@@ -4348,6 +5050,11 @@ impl Handler<Self> for DistriWorker {
                 chunk_index,
                 chunk_total,
                 chunk,
+                payload_hash,
+                is_aux,
+                group_hash,
+                group_sn,
+                aux_hash,
                 is_all,
                 is_push,
                 expected_governance_id,
@@ -4357,18 +5064,27 @@ impl Handler<Self> for DistriWorker {
                 let result = self
                     .handle_ledger_frag(
                         ctx,
-                        subject_id.clone(),
-                        event_hash,
-                        event_sn,
-                        total_bytes,
-                        chunk_index,
-                        chunk_total,
-                        chunk,
-                        is_all,
-                        is_push,
-                        expected_governance_id,
-                        info,
-                        sender.clone(),
+                        FragmentFrame {
+                            event_hash,
+                            event_sn,
+                            total_bytes,
+                            chunk_index,
+                            chunk_total,
+                            chunk,
+                            payload_hash,
+                            spec: FragmentSpec {
+                                subject_id: subject_id.clone(),
+                                group_hash,
+                                group_sn,
+                                is_aux,
+                                aux_hash,
+                                is_all,
+                                is_push,
+                                expected_governance_id,
+                            },
+                            info,
+                            sender: sender.clone(),
+                        },
                     )
                     .await;
                 handle_distri_error!(
@@ -4379,6 +5095,22 @@ impl Handler<Self> for DistriWorker {
                     "Ledger fragment processing failed",
                     sender = &sender
                 )?;
+            }
+            DistriWorkerMessage::FragExpire {
+                subject_id,
+                event_hash,
+                generation,
+            } => {
+                self.expire_frag_assembly(&subject_id, &event_hash, generation);
+                self.note_frag_stats(ctx);
+            }
+            DistriWorkerMessage::FragGroupExpire {
+                subject_id,
+                group_hash,
+                generation,
+            } => {
+                self.expire_frag_group(ctx, &subject_id, &group_hash, generation);
+                self.note_frag_stats(ctx);
             }
             #[cfg(feature = "test")]
             DistriWorkerMessage::TestFailNextModes { empty } => {

@@ -220,44 +220,45 @@ impl DistriCoordinator {
                     .to_owned(),
             });
         };
-        let bytes = borsh::to_vec(&*ledger).map_err(|e| {
+        // Same total bound as the pull path: an event that can
+        // never be accepted must fail before the first send instead
+        // of retrying forever.
+        let probe_bytes = borsh::to_vec(&*ledger).map_err(|e| {
             ActorError::Functional {
                 description: format!(
                     "Can not encode fragmented event: {e}"
                 ),
             }
         })?;
-        let total_bytes = bytes.len() as u64;
-        let chunk_size =
-            DistriWorker::fragment_chunk_size(config.max_message_bytes);
-        let chunk_total = bytes.len().div_ceil(chunk_size) as u32;
-        if chunk_total == 0
-            || chunk_total > DistriWorker::MAX_FRAGMENTS_PER_EVENT
+        if probe_bytes.len() as u64
+            > DistriWorker::MAX_FRAGMENT_EVENT_BYTES as u64
         {
             return Err(ActorError::Functional {
                 description: format!(
-                    "Fragmented event needs {chunk_total} chunks, out of bounds"
+                    "Fragmented event ({} bytes) exceeds the reassembly bound ({} bytes)",
+                    probe_bytes.len(),
+                    DistriWorker::MAX_FRAGMENT_EVENT_BYTES
                 ),
             });
         }
-        let mut frags = Vec::with_capacity(chunk_total as usize);
-        for (index, piece) in bytes.chunks(chunk_size).enumerate() {
-            frags.push(ActorMessage::DistributionLedgerFrag {
+        let chunk_size =
+            DistriWorker::fragment_chunk_size(config.max_message_bytes);
+        let frags = DistriWorker::build_event_fragments(
+            &ledger,
+            config.hash_algorithm,
+            chunk_size,
+            super::worker::FragmentSpec {
                 subject_id: subject_id.clone(),
-                event_hash: expected.clone(),
-                event_sn: sn,
-                total_bytes,
-                chunk_index: index as u32,
-                chunk_total,
-                chunk: piece.to_vec(),
-                // A push carries the sender tip: it completes the
-                // response it belongs to.
+                group_hash: expected.clone(),
+                group_sn: sn,
+                is_aux: false,
+                aux_hash: None,
                 is_all: true,
                 is_push: true,
-                // Pushes carry no pull scope.
                 expected_governance_id: None,
-            });
-        }
+            },
+        )?;
+        let frag_count = frags.len();
         self.send_frags(&frags, &request_id, &receiver_actor).await?;
 
         #[cfg(any(test, feature = "test"))]
@@ -286,7 +287,7 @@ impl DistriCoordinator {
             subject_id = %subject_id,
             sn = sn,
             node_key = %self.node_key,
-            chunks = chunk_total,
+            chunks = frag_count,
             "Oversized event fragmented for distribution"
         );
         Ok(())

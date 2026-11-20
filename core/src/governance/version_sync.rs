@@ -64,6 +64,12 @@ pub enum GovernanceVersionSyncMessage {
     /// real network topology (which still needs boot nodes to run).
     #[cfg(feature = "test")]
     SetHasBootNodes(bool),
+    /// Test-only state read: round, whether a round is open and how
+    /// many sync peers are pending. Read-only, no state change: also
+    /// serves as an ask barrier ensuring prior tells were processed
+    /// before asserting idle never fires.
+    #[cfg(feature = "test")]
+    GetState,
 }
 
 impl Message for GovernanceVersionSyncMessage {}
@@ -73,6 +79,13 @@ pub enum GovernanceVersionSyncResponse {
     None,
     #[cfg(feature = "test")]
     IdleRounds(u64),
+    /// Test-only state: round, round open, pending peers.
+    #[cfg(feature = "test")]
+    State {
+        round: u64,
+        round_open: bool,
+        pending_peers: usize,
+    },
 }
 
 impl Response for GovernanceVersionSyncResponse {}
@@ -689,6 +702,14 @@ impl Handler<Self> for GovernanceVersionSync {
             #[cfg(feature = "test")]
             GovernanceVersionSyncMessage::SetHasBootNodes(value) => {
                 self.has_boot_nodes = value;
+            }
+            #[cfg(feature = "test")]
+            GovernanceVersionSyncMessage::GetState => {
+                return Ok(GovernanceVersionSyncResponse::State {
+                    round: self.round,
+                    round_open: self.round_open,
+                    pending_peers: self.pending_peers.len(),
+                });
             }
         }
 

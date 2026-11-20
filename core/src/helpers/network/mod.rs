@@ -116,18 +116,39 @@ pub enum ActorMessage {
     },
     /// One bounded chunk of a single event that exceeds the wire cap
     /// (fragmented by identity, verified by hash before delivery).
-    /// New shape: older peers fail to decode it and drop it instead
-    /// of mistaking a partial payload for a valid batch.
+    /// Version 2 shape: older peers fail to decode it and drop it
+    /// instead of mistaking a partial payload for a valid batch.
+    /// Main and auxiliary fragments share the same group identity
+    /// (the main event hash) so the receiver only delivers when both
+    /// sides complete and verify.
     DistributionLedgerFrag {
         subject_id: DigestIdentifier,
-        /// Identity of the full event: ledger hash with the sender's
-        /// configured algorithm. Duplicates and reorders key on it.
+        /// Identity of this fragmented payload: ledger hash with the
+        /// sender configured algorithm. Duplicates and reorders key
+        /// on it within the group.
         event_hash: DigestIdentifier,
         event_sn: u64,
         total_bytes: u64,
         chunk_index: u32,
         chunk_total: u32,
         chunk: Vec<u8>,
+        /// Hash of the joined Borsh bytes, verified before any
+        /// deserialization. Different from the ledger hash, which is
+        /// checked after decoding.
+        payload_hash: DigestIdentifier,
+        /// True for auxiliary transfer fragments, false for the main
+        /// event. Both sides share the group below.
+        is_aux: bool,
+        /// Main event identity this fragment belongs to. For main
+        /// fragments it equals `event_hash`; for aux fragments it
+        /// names the main event the aux authorizes.
+        group_hash: DigestIdentifier,
+        /// Main event sequence number the group delivers.
+        group_sn: u64,
+        /// When set on main fragments, the aux hash the receiver
+        /// must also complete before delivery. None means the main
+        /// event needs no aux.
+        aux_hash: Option<DigestIdentifier>,
         /// Tip-completeness of the response this event belongs to.
         is_all: bool,
         /// Push (last-event) delivery on completion when true, pull
@@ -200,12 +221,12 @@ pub enum ActorMessage {
 
 /// Wire version spoken by this node.
 ///
-/// Bumped only when a new `ActorMessage` variant without a legacy
-/// fallback ships; every variant today requires v1. Messages carry
-/// the sender version so a
-/// newer node can degrade to the peer version instead of silencing an
-/// older one. The peer-version map ships with the first v2 variant.
-pub const WIRE_VERSION: u32 = 1;
+/// Version 2 covers hash-bound acks, bounded fragments with payload
+/// hashes and scoped pull copies. Older peers speaking v1 fail to
+/// decode those shapes and drop them; the sender treats the lack of
+/// a v2 ack as an explicit incompatibility instead of a slow copy.
+/// Unmodified v1 messages keep byte-identical encodings.
+pub const WIRE_VERSION: u32 = 2;
 
 const fn default_wire_version() -> u32 {
     1
@@ -234,12 +255,24 @@ impl NetworkMessage {
         }
     }
 
-    /// Minimum wire version understanding this message. Every variant
-    /// today is v1; a future variant without a legacy fallback returns
-    /// a higher version and the sender degrades for older peers.
+    /// Minimum wire version understanding this message. Fragments,
+    /// hash-bound acks and scoped pull copies require v2; every other
+    /// variant stays v1 so mixed connections keep working for
+    /// unmodified traffic.
     pub const fn required_wire_version(message: &ActorMessage) -> u32 {
-        let _ = message;
-        1
+        match message {
+            ActorMessage::DistributionLedgerFrag { .. }
+            | ActorMessage::DistributionLastEventRes { .. } => 2,
+            ActorMessage::DistributionLedgerReq {
+                expected_governance_id: Some(_),
+                ..
+            }
+            | ActorMessage::DistributionLedgerRes {
+                expected_governance_id: Some(_),
+                ..
+            } => 2,
+            _ => 1,
+        }
     }
 }
 
@@ -308,7 +341,7 @@ mod tests {
     #[test]
     fn new_messages_stamp_current_wire_version() {
         let (info, message) = sample();
-        assert_eq!(NetworkMessage::required_wire_version(&message), 1);
+        assert_eq!(NetworkMessage::required_wire_version(&message), 2);
         let bytes = rmp_serde::to_vec(&NetworkMessage::new(info, message))
             .expect("encode");
         let decoded: NetworkMessage =

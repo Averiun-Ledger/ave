@@ -8729,7 +8729,21 @@ async fn manual_transfer_distribution_includes_pending_owner() {
         .await
         .unwrap();
     alice.manual_distribution(subject_f.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Poll: failed transfer adds nobody, so Carol never sees the subject.
+    // No fixed wait for the plan to terminate: the plan excludes the
+    // stranger, so no push exists to Carol; stability over a bounded
+    // window proves no delayed gossip, not an assumed termination.
+    {
+        let start = tokio::time::Instant::now();
+        loop {
+            assert!(carol.get_subject_state(subject_f.clone()).await.is_err(), "failed transfer never delivers");
+            assert!(carol.test_get_tracker_ledger(subject_f.clone(), 10).await.unwrap_or_default().is_empty(), "no journal");
+            if start.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     assert!(
         carol.get_subject_state(subject_f.clone()).await.is_err(),
         "a failed transfer must not deliver its new owner by manual plan"
