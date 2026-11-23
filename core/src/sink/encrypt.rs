@@ -46,8 +46,9 @@ const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
 /// AES-256-GCM key length in bytes.
 const AES256_KEY_LEN: usize = 32;
 /// Upper bound of the *fixed* per-event encryption overhead on the wire:
-/// KEM encapsulations, nonce, tag, `key_id`/`suite` and JSON framing. The
-/// ciphertext itself scales with the body (base64 of cleartext + 16-byte
+/// KEM encapsulations, nonce, tag, `key_id`/`suite` and JSON framing.
+///
+/// The ciphertext itself scales with the body (base64 of cleartext + 16-byte
 /// tag), so the total envelope is `b64(n + 16) + <= MAX bytes`.
 /// Pinned by `envelope_overhead_is_bounded`.
 pub const MAX_ENCRYPTION_OVERHEAD_BYTES: usize = 2048;
@@ -235,7 +236,7 @@ fn encrypt_inner(
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext =
         cipher
-            .encrypt(&nonce, plaintext)
+            .encrypt(nonce, plaintext)
             .map_err(|_| SinkError::Delivery {
                 message: "sink encryption failed".to_string(),
                 retryable: false,
@@ -246,7 +247,7 @@ fn encrypt_inner(
         suite: SUITE_ID.to_owned(),
         key_id: entry.key_id.clone(),
         eph_pub: BASE64_URL_SAFE_NO_PAD.encode(ephemeral_public.as_bytes()),
-        enc_ct: BASE64_URL_SAFE_NO_PAD.encode(ct.to_vec()),
+        enc_ct: BASE64_URL_SAFE_NO_PAD.encode(ct),
         nonce: BASE64_URL_SAFE_NO_PAD.encode(nonce.as_slice()),
         ciphertext: BASE64_URL_SAFE_NO_PAD.encode(ciphertext),
     };

@@ -310,6 +310,19 @@ struct ProduceMessage<'a> {
     request_id: &'a str,
 }
 
+/// Delivery parameters for one [`KafkaTransport::produce`] call:
+/// topic, key, payload, metadata, headers, encryption and request
+/// id. Bundled so the retrying produce keeps a short signature.
+struct ProduceRequest<'a> {
+    topic: &'a str,
+    key: Option<&'a str>,
+    payload: &'a [u8],
+    meta: Option<&'a DeliveryMeta>,
+    additional_headers: Option<OwnedHeaders>,
+    encryption: Option<EncryptionAttachment>,
+    request_id: &'a str,
+}
+
 impl KafkaTransport {
     pub async fn new(
         sink_name: String,
@@ -570,14 +583,17 @@ impl KafkaTransport {
 
     async fn produce(
         &self,
-        topic: &str,
-        key: Option<&str>,
-        payload: &[u8],
-        meta: Option<&DeliveryMeta>,
-        additional_headers: Option<OwnedHeaders>,
-        encryption: Option<EncryptionAttachment>,
-        request_id: &str,
+        request: ProduceRequest<'_>,
     ) -> Result<(), SinkError> {
+        let ProduceRequest {
+            topic,
+            key,
+            payload,
+            meta,
+            additional_headers,
+            encryption,
+            request_id,
+        } = request;
         let signature_headers = self.sign_payload(payload, meta).await?;
 
         crate::sink::deliver_with_retries(
@@ -911,15 +927,15 @@ impl SinkTransport for KafkaTransport {
         let meta = DeliveryMeta::from_data(&data);
 
         let key = self.compute_key(&subject_id, &schema_id);
-        self.produce(
-            &topic,
-            key.as_deref(),
-            &prepared.bytes,
-            Some(&meta),
-            None,
-            prepared.encryption,
-            &request_id,
-        )
+        self.produce(ProduceRequest {
+            topic: &topic,
+            key: key.as_deref(),
+            payload: &prepared.bytes,
+            meta: Some(&meta),
+            additional_headers: None,
+            encryption: prepared.encryption,
+            request_id: &request_id,
+        })
         .await
     }
 
@@ -939,15 +955,15 @@ impl SinkTransport for KafkaTransport {
         let meta = DeliveryMeta::from_light(&light);
 
         let key = self.compute_key(&light.subject_id, &light.schema_id);
-        self.produce(
-            &topic,
-            key.as_deref(),
-            &prepared.bytes,
-            Some(&meta),
-            None,
-            prepared.encryption,
-            &request_id,
-        )
+        self.produce(ProduceRequest {
+            topic: &topic,
+            key: key.as_deref(),
+            payload: &prepared.bytes,
+            meta: Some(&meta),
+            additional_headers: None,
+            encryption: prepared.encryption,
+            request_id: &request_id,
+        })
         .await
     }
 
@@ -978,15 +994,15 @@ impl SinkTransport for KafkaTransport {
                     else {
                         return Ok(());
                     };
-                    self.produce(
-                        &topic,
-                        key.as_deref(),
-                        &prepared.bytes,
-                        None,
-                        None,
-                        prepared.encryption,
-                        &request_id,
-                    )
+                    self.produce(ProduceRequest {
+                        topic: &topic,
+                        key: key.as_deref(),
+                        payload: &prepared.bytes,
+                        meta: None,
+                        additional_headers: None,
+                        encryption: prepared.encryption,
+                        request_id: &request_id,
+                    })
                     .await
                 });
         futures::future::try_join_all(sends).await?;
@@ -1043,15 +1059,15 @@ impl SinkTransport for KafkaTransport {
             self.topic_template.render_with_event_type("-", "-", "test");
         let request_id = generate_request_id();
         let (key, payload, headers) = build_test_delivery(&request_id)?;
-        self.produce(
-            &topic,
-            Some(&key),
-            &payload,
-            None,
-            Some(headers),
-            None,
-            &request_id,
-        )
+        self.produce(ProduceRequest {
+            topic: &topic,
+            key: Some(&key),
+            payload: &payload,
+            meta: None,
+            additional_headers: Some(headers),
+            encryption: None,
+            request_id: &request_id,
+        })
         .await
     }
 

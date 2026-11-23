@@ -85,7 +85,7 @@ fn check_timestamp_in_sqlite_range(nanos: u64) -> Result<(), SubjectError> {
 // means the local properties diverge and evaluation evidence,
 // which commits to those properties, can not be rechecked here.
 async fn prefix_properties_complete<A>(
-    ctx: &mut ActorContext<A>,
+    ctx: &ActorContext<A>,
     metadata: &Metadata,
 ) -> bool
 where

@@ -20,6 +20,7 @@ use crate::model::common::{
 use crate::{
     distribution::error::DistributorError,
     distribution::transfer_verifier::AuxEvidence,
+    distribution::transfer_verifier::AuxEvidenceInput,
     distribution::transfer_verifier::TransferSimulationResult,
     distribution::worker::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
@@ -51,6 +52,19 @@ use crate::{
     tracker::{Tracker, TrackerMessage, TrackerResponse},
 };
 use tracing::{debug, error, warn};
+
+/// What `DistriWorker::tracker_delivery_modes` resolves: the
+/// identity and schema of the events under review plus the events
+/// themselves. Bundled so the visibility check keeps a short
+/// signature.
+struct TrackerDeliveryQuery<'a> {
+    governance_id: &'a DigestIdentifier,
+    subject_id: &'a DigestIdentifier,
+    node: PublicKey,
+    namespace: String,
+    schema_id: SchemaType,
+    ledger: &'a [Ledger],
+}
 
 impl DistriWorker {
     pub(crate) async fn process_ledger_chunks(
@@ -584,21 +598,21 @@ impl DistriWorker {
                         }
                     }
                     Err(e) => {
-                        if transfer_recorded && !common.is_gov {
-                            if let Err(remove_err) = remove_verified_transfer(
+                        if transfer_recorded
+                            && !common.is_gov
+                            && let Err(remove_err) = remove_verified_transfer(
                                 ctx,
                                 &common.governance_id,
                                 &subject_id,
                             )
                             .await
-                            {
-                                warn!(
-                                    msg_type = "LedgerDistribution",
-                                    subject_id = %subject_id,
-                                    error = %remove_err,
-                                    "Failed to drop transfer proof"
-                                );
-                            }
+                        {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                error = %remove_err,
+                                "Failed to drop transfer proof"
+                            );
                         }
                         // A failed first copy must leave no trace:
                         // the prefix was authorized by a suffix the
@@ -717,7 +731,7 @@ impl DistriWorker {
     /// rollback. Best-effort like `note_copy_success`: a registry
     /// failure must not fail the copy itself.
     pub(crate) async fn begin_attempt(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         attempt: u64,
     ) {
@@ -748,7 +762,7 @@ impl DistriWorker {
     /// are dropped. Best-effort; runs on every exit path via the
     /// entry-point wrappers, never skipped on early returns.
     pub(crate) async fn end_attempt(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         attempt: u64,
     ) {
@@ -780,7 +794,7 @@ impl DistriWorker {
     /// itself. Only call after the creation or application has
     /// actually succeeded.
     async fn note_copy_success(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         attempt: u64,
     ) {
@@ -878,7 +892,7 @@ impl DistriWorker {
     /// alive on the rollback paths that back off after reloading.
     /// Best-effort; a missing entry is a no-op.
     async fn finish_rollback_up(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) {
         if let Ok(manager) = ctx
@@ -887,21 +901,19 @@ impl DistriWorker {
                 "/user/node/subject_manager",
             ))
             .await
-        {
-            if let Err(error) = manager
+            && let Err(error) = manager
                 .ask(SubjectManagerMessage::Finish {
                     subject_id: subject_id.clone(),
                     requester: "rollback".to_owned(),
                 })
                 .await
-            {
-                warn!(
-                    msg_type = "LedgerDistribution",
-                    subject_id = %subject_id,
-                    error = %error,
-                    "Rollback reload requester not released",
-                );
-            }
+        {
+            warn!(
+                msg_type = "LedgerDistribution",
+                subject_id = %subject_id,
+                error = %error,
+                "Rollback reload requester not released",
+            );
         }
     }
 
@@ -1741,11 +1753,13 @@ impl DistriWorker {
                 .verify_aux_evidence(
                     &mut scratch,
                     ctx,
-                    &common.governance_id,
-                    &common.subject_id,
-                    chunk,
-                    transfer_event,
-                    &[],
+                    AuxEvidenceInput {
+                        governance_id: &common.governance_id,
+                        subject_id: &common.subject_id,
+                        sender_ledger: chunk,
+                        transfer_event,
+                        buffered: &[],
+                    },
                 )
                 .await;
             match verdict {
@@ -1789,7 +1803,7 @@ impl DistriWorker {
     /// would wedge legit sync.
     async fn reproject_receipt_visibility(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         ledger: &mut [Ledger],
         subject_id: &DigestIdentifier,
         sender: &PublicKey,
@@ -1807,12 +1821,14 @@ impl DistriWorker {
         let modes = self
             .tracker_delivery_modes(
                 ctx,
-                &common.governance_id,
-                subject_id,
-                (*self.our_key).clone(),
-                common.namespace.clone(),
-                common.schema_id.clone(),
-                ledger,
+                TrackerDeliveryQuery {
+                    governance_id: &common.governance_id,
+                    subject_id,
+                    node: (*self.our_key).clone(),
+                    namespace: common.namespace.clone(),
+                    schema_id: common.schema_id.clone(),
+                    ledger,
+                },
             )
             .await
             .map_err(|e| DistributorError::VisibilityCheckFailed {
@@ -1860,14 +1876,17 @@ impl DistriWorker {
 
     async fn tracker_delivery_modes(
         &self,
-        ctx: &mut ActorContext<Self>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        node: PublicKey,
-        namespace: String,
-        schema_id: SchemaType,
-        ledger: &[Ledger],
+        ctx: &ActorContext<Self>,
+        query: TrackerDeliveryQuery<'_>,
     ) -> Result<Vec<TrackerDeliveryMode>, ActorError> {
+        let TrackerDeliveryQuery {
+            governance_id,
+            subject_id,
+            node,
+            namespace,
+            schema_id,
+            ledger,
+        } = query;
         // Test-only one-shot fault: fail the lookup or answer with
         // no modes, so the fail-closed receipt paths can be pinned.
         // Production never arms this flag.
@@ -1970,7 +1989,7 @@ impl DistriWorker {
     /// running.
     async fn notify_update_done(
         &self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         sn: u64,
         round: u64,
@@ -2115,12 +2134,14 @@ impl DistriWorker {
                 let modes = self
                     .tracker_delivery_modes(
                         ctx,
-                        &governance_id,
-                        &subject_id,
-                        (*self.our_key).clone(),
-                        namespace,
-                        schema_id,
-                        std::slice::from_ref(&ledger),
+                        TrackerDeliveryQuery {
+                            governance_id: &governance_id,
+                            subject_id: &subject_id,
+                            node: (*self.our_key).clone(),
+                            namespace,
+                            schema_id,
+                            ledger: std::slice::from_ref(&ledger),
+                        },
                     )
                     .await
                     .map_err(|e| DistributorError::VisibilityCheckFailed {

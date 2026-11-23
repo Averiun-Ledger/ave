@@ -6,8 +6,9 @@ use borsh::object_length;
 use crate::metrics::try_core_metrics;
 use crate::model::event::Ledger;
 
-/// Bounds for staged first-copy prefixes, per worker. A staged
-/// batch is a prefix the receiver could not verify yet; without
+/// Bounds for staged first-copy prefixes, per worker.
+///
+/// A staged batch is a prefix the receiver could not verify yet; without
 /// bounds a sender trickling one event per batch (or fanning out
 /// over subjects) pins unbounded RAM with no write ever landing.
 /// The caps sit well above a single honest batch (ingress rejects
@@ -63,19 +64,19 @@ struct DeferredEntry {
 }
 
 impl DeferredEntry {
-    fn live_len(&self) -> usize {
+    const fn live_len(&self) -> usize {
         self.events.len() - self.live_from
     }
 
-    fn stored_len(&self) -> usize {
+    const fn stored_len(&self) -> usize {
         self.events.len()
     }
 
-    fn live_bytes(&self) -> u64 {
+    const fn live_bytes(&self) -> u64 {
         self.live_bytes
     }
 
-    fn stored_bytes(&self) -> u64 {
+    const fn stored_bytes(&self) -> u64 {
         self.stored_bytes
     }
 

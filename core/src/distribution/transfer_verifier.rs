@@ -203,10 +203,11 @@ impl VerifyCursorStore {
     ) -> Option<&mut VerifyCursor> {
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        self.cursors.get_mut(subject_id).map(|cursor| {
-            cursor.last_used = seq;
-            cursor
-        })
+        let mut cursor = self.cursors.get_mut(subject_id);
+        if let Some(inner) = cursor.as_mut() {
+            inner.last_used = seq;
+        }
+        cursor
     }
 
     pub(crate) fn store(
@@ -377,6 +378,42 @@ pub(crate) struct TransferVerifier {
     /// once. Production never arms it.
     #[cfg(feature = "test")]
     pub(crate) test_tracker_resolve_fault: AtomicU8,
+}
+
+/// Inputs for [`TransferVerifier::verify_aux_evidence`]: the aux
+/// hint under test and the ledgers it must reproduce over.
+/// Bundled so the evidence gate keeps a short signature.
+pub(crate) struct AuxEvidenceInput<'a> {
+    pub governance_id: &'a DigestIdentifier,
+    pub subject_id: &'a DigestIdentifier,
+    pub sender_ledger: &'a [Ledger],
+    pub transfer_event: &'a Ledger,
+    pub buffered: &'a [Ledger],
+}
+
+/// Inputs for the incremental aux check: the evidence inputs plus
+/// the covered hash and tip the delta replays from.
+struct AuxSuffixInput<'a> {
+    governance_id: &'a DigestIdentifier,
+    subject_id: &'a DigestIdentifier,
+    sender_ledger: &'a [Ledger],
+    transfer_event: &'a Ledger,
+    buffered: &'a [Ledger],
+    aux_hash: &'a DigestIdentifier,
+    local_sn: Option<u64>,
+}
+
+/// Inputs for the suffix replay: the evidence identity plus the
+/// rebased events and the exact-replay fingerprint.
+struct ReplaySuffixInput<'a> {
+    governance_id: &'a DigestIdentifier,
+    subject_id: &'a DigestIdentifier,
+    transfer_event: &'a Ledger,
+    aux_hash: &'a DigestIdentifier,
+    fresh: Vec<Ledger>,
+    tip_sn: u64,
+    local_sn: Option<u64>,
+    suffix_fp: Option<DigestIdentifier>,
 }
 
 impl TransferVerifier {
@@ -966,10 +1003,8 @@ impl TransferVerifier {
                 let Some(head) = events.get(idx[run]) else {
                     continue;
                 };
-                let is_earlier = match best {
-                    None => true,
-                    Some(kept) => head.sn < runs[kept][idx[kept]].sn,
-                };
+                let is_earlier =
+                    best.is_none_or(|kept| head.sn < runs[kept][idx[kept]].sn);
                 if is_earlier {
                     best = Some(run);
                 }
@@ -992,14 +1027,17 @@ impl TransferVerifier {
         &self,
         cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        sender_ledger: &[Ledger],
-        transfer_event: &Ledger,
-        buffered: &[Ledger],
-        aux_hash: &DigestIdentifier,
-        local_sn: Option<u64>,
+        input: AuxSuffixInput<'_>,
     ) -> Option<AuxEvidence> {
+        let AuxSuffixInput {
+            governance_id,
+            subject_id,
+            sender_ledger,
+            transfer_event,
+            buffered,
+            aux_hash,
+            local_sn,
+        } = input;
         // Snapshot what the continuity check needs, then release
         // the borrow before any await below.
         let (tip_sn, tip_hash, covered) = {
@@ -1053,27 +1091,26 @@ impl TransferVerifier {
         // In consistent states both tips coincide (or the verified
         // tip leads after an ahead-of-tip proof), so the loaded
         // window is exactly the same as before.
-        let resume_from = match covered {
-            Some(applied) => Some(applied.min(tip_sn)),
-            None => None,
-        };
-        let mut delta: Vec<Ledger> = Vec::new();
-        if local_sn.is_some_and(|current| Some(current) > resume_from) {
-            let Some(loaded) = self
-                .load_local_ledger(
-                    ctx,
-                    subject_id,
-                    resume_from,
-                    local_sn.unwrap_or(0),
-                )
-                .await
-            else {
-                return Some(AuxEvidence::Missing);
+        let resume_from = covered.map(|applied| applied.min(tip_sn));
+        let delta: Vec<Ledger> =
+            if local_sn.is_some_and(|current| Some(current) > resume_from) {
+                let Some(loaded) = self
+                    .load_local_ledger(
+                        ctx,
+                        subject_id,
+                        resume_from,
+                        local_sn.unwrap_or(0),
+                    )
+                    .await
+                else {
+                    return Some(AuxEvidence::Missing);
+                };
+                // A first delta with no coverage at all is a full
+                // reload, like the full path.
+                loaded
+            } else {
+                Vec::new()
             };
-            // A first delta with no coverage at all is a full
-            // reload, like the full path.
-            delta = loaded;
-        }
         let hold_from = buffered.partition_point(|event| event.sn < tip_sn);
         let held_window = &buffered[hold_from..];
         let sender_from =
@@ -1152,12 +1189,11 @@ impl TransferVerifier {
                 continue;
             }
             if event.sn == tip_sn {
-                let same = match event.ledger_hash(self.hash) {
-                    Ok(hash) => hash == tip_hash,
-                    // Unmeasurable tip bytes never pass as
-                    // covered: replay decides over them.
-                    _ => false,
-                };
+                // Unmeasurable tip bytes never pass as
+                // covered: replay decides over them.
+                let same = event
+                    .ledger_hash(self.hash)
+                    .is_ok_and(|hash| hash == tip_hash);
                 if same {
                     continue;
                 }
@@ -1181,14 +1217,16 @@ impl TransferVerifier {
                     self.replay_suffix(
                         cursors,
                         ctx,
-                        governance_id,
-                        subject_id,
-                        transfer_event,
-                        aux_hash,
-                        fresh,
-                        tip_sn,
-                        local_sn,
-                        None,
+                        ReplaySuffixInput {
+                            governance_id,
+                            subject_id,
+                            transfer_event,
+                            aux_hash,
+                            fresh,
+                            tip_sn,
+                            local_sn,
+                            suffix_fp: None,
+                        },
                     )
                     .await,
                 );
@@ -1224,14 +1262,16 @@ impl TransferVerifier {
             self.replay_suffix(
                 cursors,
                 ctx,
-                governance_id,
-                subject_id,
-                transfer_event,
-                aux_hash,
-                fresh,
-                tip_sn,
-                local_sn,
-                Some(suffix_fp),
+                ReplaySuffixInput {
+                    governance_id,
+                    subject_id,
+                    transfer_event,
+                    aux_hash,
+                    fresh,
+                    tip_sn,
+                    local_sn,
+                    suffix_fp: Some(suffix_fp),
+                },
             )
             .await,
         )
@@ -1245,15 +1285,18 @@ impl TransferVerifier {
         &self,
         cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        transfer_event: &Ledger,
-        aux_hash: &DigestIdentifier,
-        fresh: Vec<Ledger>,
-        tip_sn: u64,
-        local_sn: Option<u64>,
-        suffix_fp: Option<DigestIdentifier>,
+        input: ReplaySuffixInput<'_>,
     ) -> AuxEvidence {
+        let ReplaySuffixInput {
+            governance_id,
+            subject_id,
+            transfer_event,
+            aux_hash,
+            fresh,
+            tip_sn,
+            local_sn,
+            suffix_fp,
+        } = input;
         let Some(cursor) = cursors.get_mut(subject_id) else {
             // Evicted concurrently: nothing to resume; the caller
             // rebuilds authoritatively instead.
@@ -1291,9 +1334,10 @@ impl TransferVerifier {
             && trust != CursorTrust::Opaque
         {
             AuxEvidence::Refuted
-        } else if cursor.metadata.sn == transfer_event.sn {
-            AuxEvidence::Unverifiable
-        } else if skipped_opaque || trust == CursorTrust::Opaque {
+        } else if cursor.metadata.sn == transfer_event.sn
+            || skipped_opaque
+            || trust == CursorTrust::Opaque
+        {
             AuxEvidence::Unverifiable
         } else {
             AuxEvidence::Missing
@@ -1352,12 +1396,15 @@ impl TransferVerifier {
         &self,
         cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
-        governance_id: &DigestIdentifier,
-        subject_id: &DigestIdentifier,
-        sender_ledger: &[Ledger],
-        transfer_event: &Ledger,
-        buffered: &[Ledger],
+        input: AuxEvidenceInput<'_>,
     ) -> AuxEvidence {
+        let AuxEvidenceInput {
+            governance_id,
+            subject_id,
+            sender_ledger,
+            transfer_event,
+            buffered,
+        } = input;
         let local_sn =
             get_local_subject_sn(ctx, subject_id).await.ok().flatten();
         if let Some(lsn) = local_sn
@@ -1377,15 +1424,17 @@ impl TransferVerifier {
         if cursors.get_mut(subject_id).is_some() {
             match self
                 .verify_aux_suffix(
-                    cursors,
-                    ctx,
-                    governance_id,
-                    subject_id,
-                    sender_ledger,
-                    transfer_event,
-                    buffered,
-                    &aux_hash,
-                    local_sn,
+                    &mut *cursors,
+                    &mut *ctx,
+                    AuxSuffixInput {
+                        governance_id,
+                        subject_id,
+                        sender_ledger,
+                        transfer_event,
+                        buffered,
+                        aux_hash: &aux_hash,
+                        local_sn,
+                    },
                 )
                 .await
             {
@@ -1399,16 +1448,17 @@ impl TransferVerifier {
         // opaque spans and unverifiable evidence yield Missing (the
         // aux may still prove itself once the chain is available);
         // only checkable-but-wrong evidence yields Refuted.
-        let mut local_ledger: Vec<Ledger> = Vec::new();
-        if local_sn.is_some() {
+        let local_ledger: Vec<Ledger> = if local_sn.is_some() {
             let Some(ledger) = self
                 .load_local_ledger(ctx, subject_id, None, local_sn.unwrap_or(0))
                 .await
             else {
                 return AuxEvidence::Missing;
             };
-            local_ledger = ledger;
-        }
+            ledger
+        } else {
+            Vec::new()
+        };
         // Deferred batches held locally count as prefix too: they are
         // exactly what this node already received but could not apply
         // yet for lack of evidence. Anything at or below the applied
@@ -1634,7 +1684,7 @@ impl TransferVerifier {
             if evaluation.is_ok()
                 && let Some(result) = evaluation.evaluator_response_ok()
             {
-                apply_patch(&mut cursor.properties, result.patch.clone())?;
+                apply_patch(&mut cursor.properties, result.patch)?;
             }
             cursor.sn = event.sn;
             Ok(())
@@ -1847,8 +1897,7 @@ impl TransferVerifier {
             Protocols::Transfer { evaluation, .. }
                 if evaluation.is_ok()
         );
-        let mut covered = false;
-        if transfer_opens_passage
+        let covered = if transfer_opens_passage
             && let Ok(Some((proven_sn, _, speculative))) =
                 crate::model::common::get_verified_transfer_detail(
                     ctx,
@@ -1859,18 +1908,22 @@ impl TransferVerifier {
             && !speculative
             && proven_sn >= transfer_event.sn
         {
-            covered = true;
-        }
+            true
+        } else {
+            false
+        };
         if transfer_opens_passage && !covered {
             let aux_evidence = self
                 .verify_aux_evidence(
                     cursors,
                     ctx,
-                    &governance_id,
-                    subject_id,
-                    sender_ledger,
-                    transfer_event,
-                    buffered,
+                    AuxEvidenceInput {
+                        governance_id: &governance_id,
+                        subject_id,
+                        sender_ledger,
+                        transfer_event,
+                        buffered,
+                    },
                 )
                 .await;
             match aux_evidence {

@@ -338,7 +338,7 @@ impl WitnessesRegister {
                             })
                             .map(|stint| stint.incoming_transfer_sn)
                     } else {
-                        let from_sn = params.actual_sn.map_or(0, |sn| sn);
+                        let from_sn = params.actual_sn.unwrap_or(0);
                         data.ownership_transitions
                             .iter()
                             .find(|stint| {

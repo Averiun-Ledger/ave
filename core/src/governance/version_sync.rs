@@ -109,7 +109,7 @@ pub struct GovernanceVersionSync {
     /// Test-only count of idle certifications: silent, failed or
     /// backed-off rounds must never increment it.
     #[cfg(feature = "test")]
-    idle_rounds: u64,
+    idle_rounds: std::sync::atomic::AtomicU64,
     /// When the current `update_target` was adopted. A target that
     /// never resolves (dead peer, failed distribution) must not pin
     /// the sync forever: once stale, the next tick drops it and opens
@@ -204,7 +204,7 @@ impl GovernanceVersionSync {
             target_set_at: None,
             idle_notified_at_version: None,
             #[cfg(feature = "test")]
-            idle_rounds: 0,
+            idle_rounds: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -346,10 +346,11 @@ impl GovernanceVersionSync {
     /// at the tip — tell the governance actor that deferred artifact
     /// acquisitions (if any) are due. Covers a reboot with pending
     /// markers where no distribution round will ever fire.
-    async fn notify_idle_round(&mut self, ctx: &ActorContext<Self>) {
+    async fn notify_idle_round(&self, ctx: &ActorContext<Self>) {
         #[cfg(feature = "test")]
         {
-            self.idle_rounds = self.idle_rounds.saturating_add(1);
+            self.idle_rounds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         match ctx.get_parent::<Governance>().await {
             Ok(governance) => {
@@ -696,7 +697,7 @@ impl Handler<Self> for GovernanceVersionSync {
             #[cfg(feature = "test")]
             GovernanceVersionSyncMessage::GetIdleRounds => {
                 return Ok(GovernanceVersionSyncResponse::IdleRounds(
-                    self.idle_rounds,
+                    self.idle_rounds.load(std::sync::atomic::Ordering::Relaxed),
                 ));
             }
             #[cfg(feature = "test")]

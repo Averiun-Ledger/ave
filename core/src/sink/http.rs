@@ -780,7 +780,7 @@ impl HttpTransport {
         encrypt: bool,
     ) -> Result<PreparedBody, SinkError> {
         let encryption =
-            encrypt.then(|| self.config.encryption.as_ref()).flatten();
+            encrypt.then_some(self.config.encryption.as_ref()).flatten();
         let prepared = prepare_body(body, &self.sink_name, encryption)?;
         if prepared.encryption.is_some() {
             return Ok(prepared);

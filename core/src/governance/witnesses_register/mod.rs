@@ -185,8 +185,9 @@ pub struct OldOwnerData {
 
 /// One confirmed ownership stint: who owned the subject, the transfer
 /// that closed the stint (the event right before its end, which
-/// installed the successor), and where the stint ended. For the latest
-/// confirmed stint this closing transfer coincides with the current
+/// installed the successor), and where the stint ended.
+///
+/// For the latest confirmed stint this closing transfer coincides with the current
 /// owner's own installing transfer. Rejected proposals are logged too,
 /// marked as such: the rejected node still needs its own transfer to
 /// copy, but a rejection must never serve as another owner's link.
@@ -1511,8 +1512,7 @@ impl Handler<Self> for WitnessesRegister {
                             .collect()
                     })
                     .unwrap_or_default();
-                old_owners
-                    .sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+                old_owners.sort_by_key(|a| a.0.to_string());
                 let (owner, pending, stints) = data
                     .map(|data| {
                         (

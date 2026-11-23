@@ -349,10 +349,33 @@ pub(crate) enum BatchPayload {
         transfer_event: Option<Ledger>,
     },
     OversizedSingle {
-        event: Ledger,
+        event: Box<Ledger>,
         transfer_event: Option<Ledger>,
         is_all: bool,
     },
+}
+
+/// One batch under the incremental without-aux check: the sender
+/// it came from, the staged prefix plus the current batch in order,
+/// and the current tail end as the offered tip. Bundled so the
+/// incremental check keeps a short signature.
+pub(crate) struct AuthBatch<'a> {
+    pub sender: PublicKey,
+    pub held: &'a [Ledger],
+    pub current: &'a [Ledger],
+    pub offered_hi: u64,
+}
+
+/// One inbound ledger batch with the delivery metadata its
+/// verification needs. Batches cross handler boundaries as a unit
+/// instead of a long argument list.
+pub(crate) struct InboundBatch {
+    pub ledger: Vec<Ledger>,
+    pub is_all: bool,
+    pub transfer_event: Option<Box<Ledger>>,
+    pub info: ComunicateInfo,
+    pub sender: PublicKey,
+    pub expected_governance_id: Option<DigestIdentifier>,
 }
 
 impl DistriWorker {
@@ -362,7 +385,7 @@ impl DistriWorker {
     /// silently. Test-only: production pays nothing here.
     #[cfg(feature = "test")]
     fn note_deferred_stats(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         store: &super::deferred::DeferredStore,
         subject_id: &DigestIdentifier,
     ) {
@@ -439,7 +462,7 @@ impl DistriWorker {
     /// prefix per delivery.
     #[cfg(feature = "test")]
     fn note_auth_work(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         visited: u64,
     ) {
@@ -462,7 +485,7 @@ impl DistriWorker {
     /// of rescanning it per delivery.
     #[cfg(feature = "test")]
     fn note_buffer_cloned(
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         cloned: u64,
     ) {
@@ -1229,12 +1252,15 @@ impl DistriWorker {
         hash: HashAlgorithm,
         our_key: &PublicKey,
         pending_auth: &mut HashMap<DigestIdentifier, PendingAuthState>,
-        sender: PublicKey,
-        held: &[Ledger],
-        current: &[Ledger],
-        offered_hi: u64,
+        batch: AuthBatch<'_>,
         common: &CheckAuthCommon,
     ) -> Result<DistributionAuth, ActorError> {
+        let AuthBatch {
+            sender,
+            held,
+            current,
+            offered_hi,
+        } = batch;
         use crate::governance::witnesses_register::WitnessesRegister;
         use ave_common::bridge::request::EventRequestType;
 
@@ -1256,17 +1282,15 @@ impl DistriWorker {
         let held_tip_sn = held.last().map(|event| event.sn);
         let held_tip_hash =
             held.last().and_then(|event| event.ledger_hash(hash).ok());
-        let state_needs_rebuild = match pending_auth.get(subject_id) {
-            Some(state) => {
+        let state_needs_rebuild =
+            pending_auth.get(subject_id).is_none_or(|state| {
                 state.is_register != is_register
                     || state.tip_sn != held_tip_sn
                     || match (&state.tip_hash, &held_tip_hash) {
                         (Some(cached), Some(held_hash)) => cached != held_hash,
                         _ => false,
                     }
-            }
-            None => true,
-        };
+            });
         if state_needs_rebuild {
             let mut fresh = PendingAuthState::fresh(is_register);
             let mut max_gov = 0u64;
@@ -1323,7 +1347,7 @@ impl DistriWorker {
                 let tail = if held.first().is_some_and(|first| first.sn == 0) {
                     &held[1..]
                 } else {
-                    &held[..]
+                    held
                 };
                 let (proven, _, _, _) = verifier
                     .verify_chain(
@@ -1519,7 +1543,7 @@ impl DistriWorker {
                         }) {
                             &held[1..]
                         } else {
-                            &held[..]
+                            held
                         };
                         if !held_tail.is_empty() {
                             let metadata_ref = state
@@ -1699,7 +1723,7 @@ impl DistriWorker {
                                     }),
                                 _ => None,
                             };
-                            let minimal = state.transfer_data.as_ref().and_then(
+                            let minimal = state.transfer_data.as_ref().map(
                                 |data| {
                                     let mut olds = HashMap::new();
                                     if let Some(key) = new_key.as_ref()
@@ -1711,23 +1735,21 @@ impl DistriWorker {
                                             entry.clone(),
                                         );
                                     }
-                                    Some(
-                                        crate::governance::witnesses_register::TransferData {
-                                            actual_owner: data
-                                                .actual_owner
-                                                .clone(),
-                                            actual_new_owner_data: data
-                                                .actual_new_owner_data
-                                                .clone(),
-                                            sn: data.sn,
-                                            gov_version: data.gov_version,
-                                            old_owners: olds,
-                                            ownership_transitions: Vec::new(),
-                                            visibility_state: data
-                                                .visibility_state
-                                                .clone(),
-                                        },
-                                    )
+                                    crate::governance::witnesses_register::TransferData {
+                                        actual_owner: data
+                                            .actual_owner
+                                            .clone(),
+                                        actual_new_owner_data: data
+                                            .actual_new_owner_data
+                                            .clone(),
+                                        sn: data.sn,
+                                        gov_version: data.gov_version,
+                                        old_owners: olds,
+                                        ownership_transitions: Vec::new(),
+                                        visibility_state: data
+                                            .visibility_state
+                                            .clone(),
+                                    }
                                 },
                             );
                             if let Some(light) = minimal
@@ -1806,11 +1828,6 @@ impl DistriWorker {
                                         });
                                     incremental_done = true;
                                 }
-                                // Re-borrow for the trailing bookkeeping below.
-                                state =
-                                    pending_auth.get_mut(subject_id).ok_or(
-                                        DistributorError::ReceiverNoAccess,
-                                    )?;
                             } else {
                                 let sender_key = sender.clone();
                                 let gov_version = common.gov_version;
@@ -1828,12 +1845,11 @@ impl DistriWorker {
                                         });
                                     incremental_done = true;
                                 }
-                                // Re-borrow for the trailing bookkeeping below.
-                                state =
-                                    pending_auth.get_mut(subject_id).ok_or(
-                                        DistributorError::ReceiverNoAccess,
-                                    )?;
                             }
+                            // Re-borrow for the trailing bookkeeping below.
+                            state = pending_auth
+                                .get_mut(subject_id)
+                                .ok_or(DistributorError::ReceiverNoAccess)?;
                         } else {
                             // New old key, if Confirm/Reject closed one entry.
                             let new_key: Option<PublicKey> = {
@@ -1856,7 +1872,7 @@ impl DistriWorker {
                             };
                             // Minimal projection: new actual/pending plus at
                             // most one old entry. Transfers carry no new old.
-                            let minimal = state.transfer_data.as_ref().and_then(
+                            let minimal = state.transfer_data.as_ref().map(
                             |data| {
                                 let mut olds = HashMap::new();
                                 if let Some(key) = new_key.as_ref()
@@ -1868,21 +1884,19 @@ impl DistriWorker {
                                         entry.clone(),
                                     );
                                 }
-                                Some(
-                                    crate::governance::witnesses_register::TransferData {
-                                        actual_owner: data.actual_owner.clone(),
-                                        actual_new_owner_data: data
-                                            .actual_new_owner_data
-                                            .clone(),
-                                        sn: data.sn,
-                                        gov_version: data.gov_version,
-                                        old_owners: olds,
-                                        ownership_transitions: Vec::new(),
-                                        visibility_state: data
-                                            .visibility_state
-                                            .clone(),
-                                    },
-                                )
+                                crate::governance::witnesses_register::TransferData {
+                                    actual_owner: data.actual_owner.clone(),
+                                    actual_new_owner_data: data
+                                        .actual_new_owner_data
+                                        .clone(),
+                                    sn: data.sn,
+                                    gov_version: data.gov_version,
+                                    old_owners: olds,
+                                    ownership_transitions: Vec::new(),
+                                    visibility_state: data
+                                        .visibility_state
+                                        .clone(),
+                                }
                             },
                         );
                             if let Some(light) = minimal {
@@ -1937,12 +1951,11 @@ impl DistriWorker {
                                 );
                                 if let Ok((new_status, new_window, ..)) =
                                     outcome
-                                {
-                                    if let Some(state) =
+                                    && let Some(state) =
                                         pending_auth.get_mut(subject_id)
-                                    {
-                                        state.ownership_version = new_version;
-                                        state.cached_without_aux = Some(
+                                {
+                                    state.ownership_version = new_version;
+                                    state.cached_without_aux = Some(
                                         CachedWithoutAux {
                                             sender: sender_key,
                                             gov_version,
@@ -1988,8 +2001,7 @@ impl DistriWorker {
                                                 .max(),
                                         },
                                     );
-                                        incremental_done = true;
-                                    }
+                                    incremental_done = true;
                                 }
                                 // Re-borrow for the trailing bookkeeping below.
                                 state =
@@ -2225,7 +2237,7 @@ impl DistriWorker {
         let raw_receiver_limit = [
             receiver_hi_limit,
             receiver_create_gov_limit,
-            receiver_window_sn.clone(),
+            receiver_window_sn,
         ]
         .into_iter()
         .flatten()
@@ -3007,7 +3019,7 @@ impl DistriWorker {
             let event = ledger.remove(0);
             return Ok(BatchPayload::OversizedSingle {
                 is_all: raw_is_all && event.sn == tip_sn,
-                event,
+                event: Box::new(event),
                 transfer_event,
             });
         }
@@ -3042,7 +3054,7 @@ impl DistriWorker {
     /// incremental auth state covering them.
     pub(crate) fn prune_deferred(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         applied_tip: Option<u64>,
     ) {
@@ -3068,7 +3080,7 @@ impl DistriWorker {
     /// appending keeps the order with no scan and no re-sort.
     pub(crate) fn stage_deferred(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         batch: Vec<Ledger>,
         applied_tip: Option<u64>,
@@ -3104,7 +3116,7 @@ impl DistriWorker {
     /// it: the next delivery rebuilds from the new tip.
     pub(crate) fn take_deferred_prefix(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         applied_tip: Option<u64>,
     ) -> Vec<Ledger> {
@@ -3128,7 +3140,7 @@ impl DistriWorker {
     /// applied later. The sender re-sends anything still needed.
     pub(crate) fn drop_deferred(
         &mut self,
-        ctx: &mut ActorContext<Self>,
+        ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
     ) {
         self.deferred.drop(subject_id);
@@ -3476,7 +3488,7 @@ impl DistriWorker {
                 let main_sn = event.sn;
                 self.send_fragmented_event(FragmentSend {
                     info: new_info,
-                    event,
+                    event: *event,
                     transfer_event,
                     spec: FragmentSpec {
                         subject_id: subject_id.clone(),
@@ -3596,16 +3608,14 @@ impl DistriWorker {
         // the receiver synthesizes it from the reassembled transfer
         // itself, as in the whole-batch path. Any distinct hint is
         // preserved and fragmented under the same group.
-        let aux_to_send: Option<Ledger> = match &transfer_event {
-            Some(aux) => {
+        let aux_to_send: Option<Ledger> =
+            transfer_event.as_ref().and_then(|aux| {
                 let same = matches!(
                     (aux.ledger_hash(self.hash), event.ledger_hash(self.hash)),
                     (Ok(a), Ok(m)) if a == m
                 );
                 if same { None } else { Some(aux.clone()) }
-            }
-            None => None,
-        };
+            });
         let aux_hash = match &aux_to_send {
             Some(aux) => Some(aux.ledger_hash(self.hash).map_err(|e| {
                 ActorError::Functional {
@@ -3668,7 +3678,7 @@ impl DistriWorker {
     /// reorders are idempotent. The store is bounded and
     /// memory-only: completed, failed and expired assemblies never
     /// accumulate, and a restart clears them outright.
-    fn frag_ttl() -> std::time::Duration {
+    const fn frag_ttl() -> std::time::Duration {
         #[cfg(feature = "test")]
         {
             std::time::Duration::from_secs(1)
@@ -3679,28 +3689,32 @@ impl DistriWorker {
         }
     }
 
-    fn note_frag_stats(&self, ctx: &mut ActorContext<Self>) {
-        #[cfg(feature = "test")]
+    /// Snapshot one subject's staged prefix into the test-only
+    /// stats helper, live and stored. Called after every mutation
+    /// so the exact accounting the tests assert can never drift
+    /// silently. Test-only: production pays nothing here.
+    #[cfg(feature = "test")]
+    fn note_frag_stats(&self, ctx: &ActorContext<Self>) {
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedFragStats>("frag_stats")
+            && let Ok(mut guard) = stats.lock()
         {
-            if let Some(stats) =
-                ctx.system().get_helper::<SharedFragStats>("frag_stats")
-                && let Ok(mut guard) = stats.lock()
-            {
-                guard.assemblies = self.frag_assemblies.len() as u64;
-                guard.ready_mains = self.frag_ready_mains.len() as u64;
-                guard.ready_auxes = self.frag_ready_auxes.len() as u64;
-                guard.decode_attempts = self
-                    .frag_decode_attempts
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                guard.expired =
-                    self.frag_expired.load(std::sync::atomic::Ordering::SeqCst);
-            }
+            guard.assemblies = self.frag_assemblies.len() as u64;
+            guard.ready_mains = self.frag_ready_mains.len() as u64;
+            guard.ready_auxes = self.frag_ready_auxes.len() as u64;
+            guard.decode_attempts = self
+                .frag_decode_attempts
+                .load(std::sync::atomic::Ordering::SeqCst);
+            guard.expired =
+                self.frag_expired.load(std::sync::atomic::Ordering::SeqCst);
         }
-        #[cfg(not(feature = "test"))]
-        {
-            let _ = ctx;
-            let _ = self;
-        }
+    }
+
+    /// No-op without the test feature: production pays nothing here.
+    #[cfg(not(feature = "test"))]
+    const fn note_frag_stats(&self, ctx: &ActorContext<Self>) {
+        let _ = ctx;
+        let _ = self;
     }
 
     fn arm_frag_expire(
@@ -3903,12 +3917,14 @@ impl DistriWorker {
         self.note_frag_stats(ctx);
         self.handle_ledger_distribution(
             ctx,
-            vec![main_entry.ledger],
-            main_entry.is_all,
-            Some(Box::new(aux_entry.ledger)),
-            main_entry.info,
-            main_entry.sender,
-            main_entry.expected_governance_id,
+            InboundBatch {
+                ledger: vec![main_entry.ledger],
+                is_all: main_entry.is_all,
+                transfer_event: Some(Box::new(aux_entry.ledger)),
+                info: main_entry.info,
+                sender: main_entry.sender,
+                expected_governance_id: main_entry.expected_governance_id,
+            },
         )
         .await
     }
@@ -4252,12 +4268,15 @@ impl DistriWorker {
                     };
                     self.handle_ledger_distribution(
                         ctx,
-                        vec![ledger],
-                        assembly.is_all,
-                        aux,
-                        assembly.info,
-                        assembly.sender,
-                        assembly.expected_governance_id,
+                        InboundBatch {
+                            ledger: vec![ledger],
+                            is_all: assembly.is_all,
+                            transfer_event: aux,
+                            info: assembly.info,
+                            sender: assembly.sender,
+                            expected_governance_id: assembly
+                                .expected_governance_id,
+                        },
                     )
                     .await
                 }
@@ -4351,33 +4370,17 @@ impl DistriWorker {
     async fn handle_ledger_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        ledger: Vec<Ledger>,
-        is_all: bool,
-        transfer_event: Option<Box<Ledger>>,
-        info: ComunicateInfo,
-        sender: PublicKey,
-        expected_governance_id: Option<DigestIdentifier>,
+        batch: InboundBatch,
     ) -> Result<(), ActorError> {
         // Attempt lifecycle: every batch owns an attempt from here
         // until this entry point returns, including parked
         // rollbacks. Batches without a subject never open one.
-        let maybe_subject = ledger.first().map(|e| e.get_subject_id());
+        let maybe_subject = batch.ledger.first().map(|e| e.get_subject_id());
         let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
         if let Some(subject_id) = &maybe_subject {
             Self::begin_attempt(ctx, subject_id, attempt).await;
         }
-        let result = self
-            .run_ledger_distribution(
-                ctx,
-                ledger,
-                is_all,
-                transfer_event,
-                info,
-                sender,
-                attempt,
-                expected_governance_id,
-            )
-            .await;
+        let result = self.run_ledger_distribution(ctx, batch, attempt).await;
         if let Some(subject_id) = &maybe_subject {
             Self::end_attempt(ctx, subject_id, attempt).await;
         }
@@ -4387,14 +4390,17 @@ impl DistriWorker {
     async fn run_ledger_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
-        mut ledger: Vec<Ledger>,
-        is_all: bool,
-        transfer_event: Option<Box<Ledger>>,
-        info: ComunicateInfo,
-        sender: PublicKey,
+        batch: InboundBatch,
         attempt: u64,
-        expected_governance_id: Option<DigestIdentifier>,
     ) -> Result<(), ActorError> {
+        let InboundBatch {
+            mut ledger,
+            is_all,
+            transfer_event,
+            info,
+            sender,
+            expected_governance_id,
+        } = batch;
         {}
         if ledger.is_empty() {
             warn!(
@@ -4674,10 +4680,12 @@ impl DistriWorker {
                 self.hash,
                 &self.our_key,
                 &mut self.pending_auth,
-                sender.clone(),
-                held_prefix,
-                &ledger,
-                offered_hi,
+                AuthBatch {
+                    sender: sender.clone(),
+                    held: held_prefix,
+                    current: &ledger,
+                    offered_hi,
+                },
                 &common,
             )
             .await;
@@ -5059,12 +5067,14 @@ impl Handler<Self> for DistriWorker {
                 let result = self
                     .handle_ledger_distribution(
                         ctx,
-                        ledger,
-                        is_all,
-                        transfer_event,
-                        info,
-                        sender.clone(),
-                        expected_governance_id,
+                        InboundBatch {
+                            ledger,
+                            is_all,
+                            transfer_event,
+                            info,
+                            sender: sender.clone(),
+                            expected_governance_id,
+                        },
                     )
                     .await;
                 handle_distri_error!(

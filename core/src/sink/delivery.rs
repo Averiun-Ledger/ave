@@ -343,7 +343,9 @@ pub struct PreparedBody {
 }
 
 /// Serialize `body` to JSON and, when `encryption` enables it, replace the
-/// cleartext with its encrypted envelope. Callers must only compress when
+/// cleartext with its encrypted envelope.
+///
+/// Callers must only compress when
 /// the returned `encryption` is `None`: ciphertext is already random, so
 /// compressing it only wastes CPU.
 pub fn prepare_body<T: serde::Serialize + ?Sized>(

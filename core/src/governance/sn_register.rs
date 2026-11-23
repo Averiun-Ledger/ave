@@ -37,23 +37,20 @@ impl SnRegister {
         subject_id: &DigestIdentifier,
         gov_version: u64,
     ) -> SnLimit {
-        if let Some(gov_version_register) = self.register.get(subject_id) {
-            // Serve the mapped prefix only: the previous mapped SN at or
-            // below the requested version. A version newer than anything
-            // recorded resolves to the last mapped SN instead of the tip
-            // (the map may lag behind the ledger: independent tells, no
-            // barrier, and claiming tip coverage would invent
-            // authorization). Callers retry once the register catches up.
-            if let Some(sn) =
-                gov_version_register.get_prev_or_equal(gov_version)
-            {
-                SnLimit::Sn(sn)
-            } else {
-                SnLimit::NotSn
-            }
-        } else {
-            SnLimit::NotSn
-        }
+        self.register.get(subject_id).map_or(
+            SnLimit::NotSn,
+            |gov_version_register| {
+                // Serve the mapped prefix only: the previous mapped SN at or
+                // below the requested version. A version newer than anything
+                // recorded resolves to the last mapped SN instead of the tip
+                // (the map may lag behind the ledger: independent tells, no
+                // barrier, and claiming tip coverage would invent
+                // authorization). Callers retry once the register catches up.
+                gov_version_register
+                    .get_prev_or_equal(gov_version)
+                    .map_or(SnLimit::NotSn, SnLimit::Sn)
+            },
+        )
     }
 }
 

@@ -1975,9 +1975,10 @@ pub struct SinkEncryptionKey {
 }
 
 /// Asymmetric payload encryption of sink deliveries (HPKE hybrid
-/// post-quantum, suite `HPKE-v1-hybrid12`). The node holds only public
-/// keys; the full canonical body is encrypted and the Ed25519 signature
-/// goes outside, over the envelope.
+/// post-quantum, suite `HPKE-v1-hybrid12`).
+///
+/// The node holds only public keys; the full canonical body is
+/// encrypted and the Ed25519 signature goes outside, over the envelope.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(TS))]
 #[cfg_attr(feature = "typescript", ts(export))]

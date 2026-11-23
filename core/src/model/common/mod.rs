@@ -385,8 +385,9 @@ where
 }
 
 /// Reads back the stored transfer proof only when it was recorded
-/// with validated evidence. Speculative hints (recorded without
-/// evidence) never count: callers must keep requesting the aux so
+/// with validated evidence.
+///
+/// Speculative hints (recorded without evidence) never count: callers must keep requesting the aux so
 /// it can be verified or refuted once its chain is available.
 pub async fn get_verified_transfer_sn_firm<A>(
     ctx: &mut ActorContext<A>,
