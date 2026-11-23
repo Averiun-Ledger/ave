@@ -290,17 +290,22 @@ impl Update {
 
         // Scope the copy to our own governance: the receiver
         // rejects any Create outside it before writing.
-        let expected_governance_id =
-            match get_subject_data(ctx, &self.subject_id).await.ok().flatten()
-            {
-                Some(SubjectData::Tracker { governance_id, .. }) => {
-                    Some(governance_id)
-                }
-                Some(SubjectData::Governance { .. }) => {
-                    Some(self.subject_id.clone())
-                }
-                None => None,
-            };
+        let expected_governance_id = match get_subject_data(
+            ctx,
+            &self.subject_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            Some(SubjectData::Tracker { governance_id, .. }) => {
+                Some(governance_id)
+            }
+            Some(SubjectData::Governance { .. }) => {
+                Some(self.subject_id.clone())
+            }
+            None => None,
+        };
 
         let message = ActorMessage::DistributionLedgerReq {
             actual_sn: self.our_sn,

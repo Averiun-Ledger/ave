@@ -3519,12 +3519,12 @@ impl DistriWorker {
             event
                 .ledger_hash(hash)
                 .map_err(|e| ActorError::Functional {
-                description: format!("Can not hash fragmented event: {e}"),
-        })?;
+                    description: format!("Can not hash fragmented event: {e}"),
+                })?;
         let bytes =
             borsh::to_vec(event).map_err(|e| ActorError::Functional {
                 description: format!("Can not encode fragmented event: {e}"),
-        })?;
+            })?;
         let total_bytes = bytes.len() as u64;
         if total_bytes == 0
             || total_bytes > Self::MAX_FRAGMENT_EVENT_BYTES as u64
@@ -3686,17 +3686,16 @@ impl DistriWorker {
                 ctx.system().get_helper::<SharedFragStats>("frag_stats")
                 && let Ok(mut guard) = stats.lock()
             {
-                    guard.assemblies = self.frag_assemblies.len() as u64;
-                    guard.ready_mains = self.frag_ready_mains.len() as u64;
-                    guard.ready_auxes = self.frag_ready_auxes.len() as u64;
-                    guard.decode_attempts = self
-                        .frag_decode_attempts
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    guard.expired = self
-                        .frag_expired
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                }
+                guard.assemblies = self.frag_assemblies.len() as u64;
+                guard.ready_mains = self.frag_ready_mains.len() as u64;
+                guard.ready_auxes = self.frag_ready_auxes.len() as u64;
+                guard.decode_attempts = self
+                    .frag_decode_attempts
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                guard.expired =
+                    self.frag_expired.load(std::sync::atomic::Ordering::SeqCst);
             }
+        }
         #[cfg(not(feature = "test"))]
         {
             let _ = ctx;
@@ -3723,8 +3722,8 @@ impl DistriWorker {
         if let Some(assembly) = self.frag_assemblies.get_mut(&key)
             && let Some(previous) = assembly.expire_timer.replace(timer)
         {
-                ctx.cancel_timer(previous);
-            }
+            ctx.cancel_timer(previous);
+        }
         Ok(())
     }
 
@@ -3996,15 +3995,15 @@ impl DistriWorker {
                 || assembly.info.request_id != info.request_id
                 || assembly.info.version != info.version
                 || assembly.info.receiver_actor != info.receiver_actor)
-            {
-                warn!(
-                    msg_type = "LedgerFrag",
-                    subject_id = %subject_id,
-                    sender = %sender,
-                    "Dropping mixed fragment without delivery"
-                );
-                return Ok(());
-            }
+        {
+            warn!(
+                msg_type = "LedgerFrag",
+                subject_id = %subject_id,
+                sender = %sender,
+                "Dropping mixed fragment without delivery"
+            );
+            return Ok(());
+        }
         if self.frag_assemblies.len()
             >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
             && !self.frag_assemblies.contains_key(&key)
@@ -4017,11 +4016,11 @@ impl DistriWorker {
                 .min_by_key(|(_, assembly)| assembly.last_active)
                 .map(|(key, _)| key.clone())
                 && let Some(assembly) = self.frag_assemblies.remove(&oldest)
-                    && let Some(timer) = assembly.expire_timer
-                {
-                    ctx.cancel_timer(timer);
-                }
+                && let Some(timer) = assembly.expire_timer
+            {
+                ctx.cancel_timer(timer);
             }
+        }
         if !self.frag_assemblies.contains_key(&key) {
             self.frag_assemblies.insert(
                 key.clone(),
@@ -4308,7 +4307,7 @@ impl DistriWorker {
                         >= Self::MAX_CONCURRENT_FRAGMENT_ASSEMBLIES
                     {
                         self.evict_oldest_ready_side(ctx);
-                        }
+                    }
                     self.frag_generation = self.frag_generation.wrapping_add(1);
                     let generation = self.frag_generation;
                     let subject_id = assembly.subject_id.clone();

@@ -278,10 +278,8 @@ impl Intermediary {
                 let network_message = match message.encoded {
                     Some(bytes) => {
                         #[cfg(feature = "test")]
-                        if let Some(stats) =
-                            system.get_helper::<SharedEncodeStats>(
-                                "encode_stats",
-                            )
+                        if let Some(stats) = system
+                            .get_helper::<SharedEncodeStats>("encode_stats")
                             && let Ok(mut guard) = stats.lock()
                         {
                             guard.forwarded += 1;
@@ -290,10 +288,8 @@ impl Intermediary {
                     }
                     None => {
                         #[cfg(feature = "test")]
-                        if let Some(stats) =
-                            system.get_helper::<SharedEncodeStats>(
-                                "encode_stats",
-                            )
+                        if let Some(stats) = system
+                            .get_helper::<SharedEncodeStats>("encode_stats")
                             && let Ok(mut guard) = stats.lock()
                         {
                             guard.fallback_encodes += 1;
@@ -402,7 +398,8 @@ impl Intermediary {
                         );
                     if required > message.wire_version {
                         if let Some(metrics) = try_core_metrics() {
-                            metrics.observe_network_wire_version("incompatible");
+                            metrics
+                                .observe_network_wire_version("incompatible");
                         }
                         warn!(
                             sender = %sender,

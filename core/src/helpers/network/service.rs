@@ -130,7 +130,9 @@ impl NetworkSender {
         // mutations above already applied, so the stored bytes are
         // exactly what the peer receives.
         if let Command::SendMessage {
-            mut message, delivery, ..
+            mut message,
+            delivery,
+            ..
         } = command
         {
             let encoded = rmp_serde::to_vec(&message).map_err(|e| {
@@ -159,15 +161,18 @@ impl NetworkSender {
             message.encoded = Some(encoded);
 
             let sender = self.command_sender.clone();
-            sender.send(Command::SendMessage { message, delivery }).await.map_err(|e| {
-                error!(
-                    error = %e,
-                    "Failed to send command to network worker"
-                );
-                ActorError::Functional {
-                    description: e.to_string(),
-                }
-            })
+            sender
+                .send(Command::SendMessage { message, delivery })
+                .await
+                .map_err(|e| {
+                    error!(
+                        error = %e,
+                        "Failed to send command to network worker"
+                    );
+                    ActorError::Functional {
+                        description: e.to_string(),
+                    }
+                })
         } else {
             let sender = match &command {
                 Command::ReceivedMessage { .. } => self.inbound_sender(),
@@ -205,16 +210,12 @@ mod tests {
         DigestIdentifier, PublicKey, keys::DSAlgorithm,
     };
 
-    use crate::compilation::artifact::{
-        ArtifactData, ArtifactFetchResult,
-    };
-    use crate::helpers::network::{
-        ActorMessage, NetworkMessage, delivery_of,
-    };
+    use crate::compilation::artifact::{ArtifactData, ArtifactFetchResult};
     use crate::helpers::network::test_faults::{
         FaultAction, FaultDirection, FaultMessage, FaultRule,
         SharedFaultRegistry, TestFaultRegistry,
     };
+    use crate::helpers::network::{ActorMessage, NetworkMessage, delivery_of};
 
     fn test_key() -> PublicKey {
         PublicKey::new(DSAlgorithm::Ed25519, vec![0u8; 32]).unwrap()
@@ -241,8 +242,7 @@ mod tests {
         let faults: SharedFaultRegistry =
             Arc::new(Mutex::new(TestFaultRegistry::new(tx.clone())));
         (
-            NetworkSender::new(tx, faults.clone())
-                .with_max_message_bytes(cap),
+            NetworkSender::new(tx, faults.clone()).with_max_message_bytes(cap),
             faults,
         )
     }
@@ -284,9 +284,7 @@ mod tests {
             sender
                 .send_command(Command::SendMessage {
                     message,
-                    delivery: delivery_of(
-                        &forwarded.message
-                    ),
+                    delivery: delivery_of(&forwarded.message),
                 })
                 .await
                 .is_err(),

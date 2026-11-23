@@ -527,11 +527,11 @@ async fn inject_sync_page(
     api.test_inject_inbound(message, from).await.unwrap();
 }
 
-
 /// Nodes with manual version-sync ticks (long intervals, long
 /// timeouts): no round opens or closes unless the test drives it,
 /// so interleavings are exact.
-async fn create_manual_sync_nodes() -> (Vec<common::NodeData>, Vec<tempfile::TempDir>) {
+async fn create_manual_sync_nodes()
+-> (Vec<common::NodeData>, Vec<tempfile::TempDir>) {
     let gov_sync = || {
         Some(GovernanceSyncConfig {
             interval_secs: 3600,
@@ -644,8 +644,12 @@ async fn sync_stale_round_timeout_does_not_close_new_round() {
     })
     .await
     .unwrap();
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     // Round 2 is now open with B pending; round 1 never closed.
     // A timeout from round 1 (and its duplicate) must be ignored:
     // it must not close round 2, drain B or touch backoff.
@@ -744,7 +748,9 @@ async fn sync_unanswered_peers_never_prove_idle() {
     .unwrap();
 
     // Round 1 times out with B pending: silence is not a tip proof.
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     a.test_version_sync_stale_timeout(governance_id.clone(), 1)
         .await
         .unwrap();
@@ -757,12 +763,17 @@ async fn sync_unanswered_peers_never_prove_idle() {
     // Round 2 finds B backed off from that silence and selects
     // nobody: an empty selection with known peers is still not a
     // tip proof.
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     // Barrier ensures the tick was processed (ticks are tells): empty
     // selection with known peers closes immediately with no timer, no
     // fixed wait needed (no answers can arrive: B is held and backed
     // off, and no other peer exists).
-    let _ = a.test_version_sync_state(governance_id.clone()).await.unwrap();
+    let _ = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         idle_count(&a, &governance_id).await,
         0,
@@ -780,7 +791,9 @@ async fn sync_unanswered_peers_never_prove_idle() {
     })
     .await
     .unwrap();
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     a.test_version_sync_stale_timeout(governance_id.clone(), 3)
         .await
         .unwrap();
@@ -794,7 +807,9 @@ async fn sync_unanswered_peers_never_prove_idle() {
     // Control: with answers flowing, a round where every selected
     // peer answers and none is ahead reports idle exactly once.
     b.test_release_held().await.unwrap();
-    a.test_version_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     for _ in 0..100 {
         if idle_count(&a, &governance_id).await >= 1 {
             break;
@@ -902,7 +917,9 @@ async fn sync_higher_page_version_does_not_spin() {
         format!("/user/node/subject_manager/{governance_id}/tracker_sync");
 
     // Round 1 at v1: exactly one fetch.
-    a.test_tracker_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     let f1 = wait_tracker_fetch(&a, &b_key, None).await;
     assert_eq!(tracker_fetch_versions(&a, &b_key).await, vec![1]);
 
@@ -911,8 +928,8 @@ async fn sync_higher_page_version_does_not_spin() {
     // no update, no new requests. Pre-fix this mints a fetch at v2
     // via `max`, and the next v2 page would spin fetch/update
     // forever without hitting the page cap.
-    let ghost = DigestIdentifier::new(HashAlgorithm::Blake3, vec![7u8; 32])
-        .unwrap();
+    let ghost =
+        DigestIdentifier::new(HashAlgorithm::Blake3, vec![7u8; 32]).unwrap();
     inject_sync_page_versioned(
         &a,
         &a_key,
@@ -933,7 +950,10 @@ async fn sync_higher_page_version_does_not_spin() {
     // before asks): no fixed wait needed. Poll the final state plus
     // absence of growth on the next transition (Round 2 below) instead
     // of assuming termination after an arbitrary sleep.
-    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
+    let _ = a
+        .test_tracker_sync_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         1,
@@ -951,13 +971,27 @@ async fn sync_higher_page_version_does_not_spin() {
 
     // Round 2: the equal version is accepted, the empty page
     // completes the cycle with no follow-up fetch.
-    a.test_tracker_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     let seen = HashSet::from([f1]);
     let f2 = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
-    inject_sync_page_versioned(&a, &a_key, &b_key, &sync_actor, f2, 1, vec![], None)
-        .await;
+    inject_sync_page_versioned(
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        f2,
+        1,
+        vec![],
+        None,
+    )
+    .await;
     // Barrier ensures the accepted page completed (no follow-up fetch).
-    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
+    let _ = a
+        .test_tracker_sync_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         2,
@@ -965,13 +999,27 @@ async fn sync_higher_page_version_does_not_spin() {
     );
 
     // Round 3: an older version is stale and dropped the same way.
-    a.test_tracker_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     let seen = HashSet::from([f1, f2]);
     let f3 = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
-    inject_sync_page_versioned(&a, &a_key, &b_key, &sync_actor, f3, 0, vec![], None)
-        .await;
+    inject_sync_page_versioned(
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        f3,
+        0,
+        vec![],
+        None,
+    )
+    .await;
     // Barrier ensures the stale page was dropped (no new fetch).
-    let _ = a.test_tracker_sync_state(governance_id.clone()).await.unwrap();
+    let _ = a
+        .test_tracker_sync_state(governance_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         tracker_fetch_nonces(&a, &b_key).await.len(),
         3,
@@ -1008,10 +1056,21 @@ async fn sync_higher_page_version_does_not_spin() {
     get_subject(&a, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    a.test_tracker_sync_tick(governance_id.clone()).await.unwrap();
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
     let f4 = wait_tracker_fetch(&a, &b_key, None).await;
-    inject_sync_page_versioned(&a, &a_key, &b_key, &sync_actor, f4, 2, vec![], None)
-        .await;
+    inject_sync_page_versioned(
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        f4,
+        2,
+        vec![],
+        None,
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let versions = tracker_fetch_versions(&a, &b_key).await;
     assert_eq!(versions.len(), 1, "exactly the round-4 fetch");
@@ -1030,8 +1089,7 @@ async fn sync_page_items_are_deduplicated_and_scoped() {
     fn item(
         subject_id: DigestIdentifier,
         target_sn: u64,
-    ) -> ave_core::governance::witnesses_register::CurrentWitnessSubject
-    {
+    ) -> ave_core::governance::witnesses_register::CurrentWitnessSubject {
         ave_core::governance::witnesses_register::CurrentWitnessSubject {
             subject_id,
             target_sn,
@@ -1152,8 +1210,7 @@ async fn sync_page_items_are_deduplicated_and_scoped() {
     // G2 before any local work. Pre-fix this mints 4 (3 + 1).
     hold_outbound(&a, FaultMessage::TrackerSyncReq).await;
     hold_outbound(&a, FaultMessage::DistributionLedgerReq).await;
-    let sync_actor =
-        format!("/user/node/subject_manager/{g1}/tracker_sync");
+    let sync_actor = format!("/user/node/subject_manager/{g1}/tracker_sync");
     a.test_tracker_sync_tick(g1.clone()).await.unwrap();
     let f1 = wait_tracker_fetch(&a, &b_key, None).await;
     inject_sync_page_versioned(
@@ -1253,8 +1310,7 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
     fn item(
         subject_id: DigestIdentifier,
         target_sn: u64,
-    ) -> ave_core::governance::witnesses_register::CurrentWitnessSubject
-    {
+    ) -> ave_core::governance::witnesses_register::CurrentWitnessSubject {
         ave_core::governance::witnesses_register::CurrentWitnessSubject {
             subject_id,
             target_sn,
@@ -1360,8 +1416,7 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
     let n1 = wait_tracker_fetch(&a, &b_key, None).await;
     let stale_subject =
         DigestIdentifier::new(HashAlgorithm::Blake3, vec![9u8; 32]).unwrap();
-    let sync_actor =
-        format!("/user/node/subject_manager/{g1}/tracker_sync");
+    let sync_actor = format!("/user/node/subject_manager/{g1}/tracker_sync");
 
     // Restart A keeping keys and stores: same identity, new
     // incarnation. Holds live in the dead registry: arm them again.
@@ -1435,8 +1490,14 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
     // The retained page answers nothing: no state change, no copies,
     // no new fetch. Only nonces never seen satisfy a fetch.
     inject_sync_page_versioned(
-        &a, &a_key, &b_key, &sync_actor, n1, 1,
-        vec![item(stale_subject, 5)], None,
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        n1,
+        1,
+        vec![item(stale_subject, 5)],
+        None,
     )
     .await;
     // Barrier ensures the stale page was processed (discarded, no copies, no new fetch).
@@ -1455,8 +1516,14 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
     // The live page answers: exactly its item produces a copy, and
     // the cycle holds no other request.
     inject_sync_page_versioned(
-        &a, &a_key, &b_key, &sync_actor, n1_new, 1,
-        vec![item(t.clone(), 0)], None,
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        n1_new,
+        1,
+        vec![item(t.clone(), 0)],
+        None,
     )
     .await;
     for _ in 0..100 {

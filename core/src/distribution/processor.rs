@@ -292,9 +292,9 @@ impl DistriWorker {
                         && *expected != subject_id
                     {
                         return Err(DistributorError::UnexpectedGovernance {
-                                expected: expected.clone(),
-                                found: subject_id.clone(),
-                            }
+                            expected: expected.clone(),
+                            found: subject_id.clone(),
+                        }
                         .into());
                     }
                     let result =
@@ -329,9 +329,9 @@ impl DistriWorker {
                         && *expected != request.governance_id
                     {
                         return Err(DistributorError::UnexpectedGovernance {
-                                expected: expected.clone(),
-                                found: request.governance_id.clone(),
-                            }
+                            expected: expected.clone(),
+                            found: request.governance_id.clone(),
+                        }
                         .into());
                     }
 
@@ -1714,9 +1714,9 @@ impl DistriWorker {
                     && let Ok(event_hash) = event.ledger_hash(self.hash)
                     && event_hash == tip_hash
                 {
-                            continue;
-                        }
-                    }
+                    continue;
+                }
+            }
             pending.push(event);
         }
         if pending.is_empty() {

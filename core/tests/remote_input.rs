@@ -17293,8 +17293,8 @@ async fn remote_update_restart_rejects_stale_offer() {
         t.clone(),
         ave_core::auth::AuthWitness::One(b_key.clone()),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Sweep 1 stalls at the offer: B's answer is held for cloning.
     hold(&b, FaultMessage::UpdateOffer).await;
@@ -17982,7 +17982,7 @@ async fn remote_registered_refuted_inline_transfer_cannot_unmask_prefix() {
     };
     let forged4 = forge_ok_evaluation(&transfer4, fact3_result, &alice_keys);
     inject_ledger_batch(&rita, &alice_key, vec![fact3.clone(), forged4], None)
-    .await;
+        .await;
     // Poll rejection: SN stays, no proof, deferred empty (no fixed sleep).
     {
         let start = tokio::time::Instant::now();
@@ -18000,7 +18000,7 @@ async fn remote_registered_refuted_inline_transfer_cannot_unmask_prefix() {
                 .unwrap_or(None);
             let deferred =
                 rita.test_deferred_stats().await.unwrap_or((1, 1, 1));
-            if sn == 2 && proof.is_none() && deferred == (0,0,0) {
+            if sn == 2 && proof.is_none() && deferred == (0, 0, 0) {
                 break;
             }
             assert!(
@@ -18747,8 +18747,8 @@ async fn byte_capped_batches_make_progress_once(
         PublicKey::from_str(&a.public_key()).unwrap(),
         true,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let tip = fact_count + 1;
     get_subject(&b, subject_id.clone(), Some(tip), true)
         .await
@@ -18876,7 +18876,7 @@ async fn remote_byte_capped_batches_make_progress() {
         200 * 1024,
         12,
     )
-        .await;
+    .await;
 }
 
 // A single event above the wire cap travels fragmented and is only
@@ -19753,13 +19753,13 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
         Protocols::TrackerFactFull { event_request, .. } => match event_request
             .content()
         {
-                EventRequest::Fact(req) => {
-                    let mut req = req.clone();
+            EventRequest::Fact(req) => {
+                let mut req = req.clone();
                 req.payload =
                     ave_common::ValueWrapper(json!({"ModOne": {"data": 999}}));
-                    EventRequest::Fact(req)
-                }
-                other => panic!("premise: fact request, got {other:?}"),
+                EventRequest::Fact(req)
+            }
+            other => panic!("premise: fact request, got {other:?}"),
         },
         _ => panic!("premise: fact1 is a full fact"),
     };
@@ -20075,12 +20075,12 @@ async fn remote_full_rebuild_detects_same_sn_divergence() {
 async fn remote_oversized_fact_keeps_external_transfer_aux() {
     let (mut nodes, dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0], vec![0]],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let carol = nodes[2].api.clone();
@@ -20147,14 +20147,14 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
         ] {
             alice
                 .test_install_fault(FaultRule {
-                direction: FaultDirection::Outbound,
-                message,
-                peer: Some(peer.clone()),
-                remaining: None,
-                action: FaultAction::Drop,
-            })
-            .await
-            .unwrap();
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
         }
     }
     let (subject_id, _) =
@@ -20249,12 +20249,12 @@ async fn remote_oversized_fact_keeps_external_transfer_aux() {
 async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
     let (mut nodes, dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0], vec![0]],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let carol = nodes[2].api.clone();
@@ -20320,14 +20320,14 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
         ] {
             alice
                 .test_install_fault(FaultRule {
-                direction: FaultDirection::Outbound,
-                message,
-                peer: Some(peer.clone()),
-                remaining: None,
-                action: FaultAction::Drop,
-            })
-            .await
-            .unwrap();
+                    direction: FaultDirection::Outbound,
+                    message,
+                    peer: Some(peer.clone()),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                })
+                .await
+                .unwrap();
         }
     }
     let (subject_id, _) =
@@ -20362,7 +20362,7 @@ async fn remote_oversized_transfer_aux_is_fragmented_and_verified() {
         if let Ok(state) = carol.get_subject_state(subject_id.clone()).await {
             if state.sn == 2 {
                 break;
-        }
+            }
         }
         assert!(
             start.elapsed() < Duration::from_secs(60),
@@ -20435,12 +20435,12 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
     }
     let (mut nodes, dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0], vec![0]],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let boot_addr = nodes[0].listen_address.clone();
@@ -20613,8 +20613,8 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
             .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
             .unwrap_or(None);
-        let deferred = rita.test_deferred_stats().await.unwrap_or((1,1,1));
-        if proof.is_none() && deferred == (0,0,0) {
+        let deferred = rita.test_deferred_stats().await.unwrap_or((1, 1, 1));
+        if proof.is_none() && deferred == (0, 0, 0) {
             break;
         }
         assert!(
@@ -20630,7 +20630,7 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
         .iter()
         .map(|e| e.sn)
         .collect();
-    assert_eq!(stored, vec![0,1,2], "no prefix rewritten");
+    assert_eq!(stored, vec![0, 1, 2], "no prefix rewritten");
     sink_empty_from(&rita, &subject_id, 3).await;
     // Identical aux reuses correctly: genuine fact+transfer with the
     // same aux bytes succeeds and leaves the cursor intact.
@@ -20661,7 +20661,7 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
         .iter()
         .map(|e| e.sn)
         .collect();
-    assert_eq!(stored2, vec![0,1,2,3,4], "identical aux delivers");
+    assert_eq!(stored2, vec![0, 1, 2, 3, 4], "identical aux delivers");
     let _ = rebuilds_before;
     for node in nodes.iter_mut() {
         node.token.cancel();
@@ -20688,12 +20688,12 @@ async fn remote_preflight_same_sn_different_aux_hash_rejected() {
 async fn remote_preflight_multiple_transfers_stays_linear() {
     let (mut nodes, dirs) =
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
-        bootstrap: vec![vec![]],
-        addressable: vec![vec![0], vec![0]],
-        always_accept: true,
-        ..Default::default()
-    })
-    .await;
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
     let owner = nodes[0].api.clone();
     let alice = nodes[1].api.clone();
     let boot_addr = nodes[0].listen_address.clone();
@@ -23029,7 +23029,9 @@ async fn remote_fragment_capacity_oldest_pair_delivers_first() {
         for message in set {
             let mut aux = message.clone();
             if let ActorMessage::DistributionLedgerFrag {
-                is_aux, aux_hash, ..
+                is_aux,
+                aux_hash,
+                ..
             } = &mut aux.message
             {
                 *is_aux = true;

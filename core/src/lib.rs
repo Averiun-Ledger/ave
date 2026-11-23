@@ -3802,7 +3802,10 @@ impl Api {
         &self,
         governance_id: DigestIdentifier,
     ) -> Result<(u64, bool, usize), Error> {
-        use crate::governance::version_sync::{GovernanceVersionSync, GovernanceVersionSyncMessage, GovernanceVersionSyncResponse};
+        use crate::governance::version_sync::{
+            GovernanceVersionSync, GovernanceVersionSyncMessage,
+            GovernanceVersionSyncResponse,
+        };
         let actor = self
             .system
             .get_actor::<GovernanceVersionSync>(&ActorPath::from(format!(
@@ -3821,7 +3824,11 @@ impl Api {
                 name: "version_sync".to_owned(),
                 reason: "Version sync state failed".to_owned(),
             })? {
-            GovernanceVersionSyncResponse::State { round, round_open, pending_peers } => Ok((round, round_open, pending_peers)),
+            GovernanceVersionSyncResponse::State {
+                round,
+                round_open,
+                pending_peers,
+            } => Ok((round, round_open, pending_peers)),
             _ => Err(Error::UnexpectedResponse {
                 actor: "version_sync".to_owned(),
                 expected: "State".to_owned(),
@@ -4010,7 +4017,9 @@ impl Api {
         &self,
         governance_id: DigestIdentifier,
     ) -> Result<(u64, u64, u32, bool, bool), Error> {
-        use crate::governance::tracker_sync::{TrackerSync, TrackerSyncMessage, TrackerSyncResponse};
+        use crate::governance::tracker_sync::{
+            TrackerSync, TrackerSyncMessage, TrackerSyncResponse,
+        };
         let actor = self
             .system
             .get_actor::<TrackerSync>(&ActorPath::from(format!(
@@ -4022,20 +4031,25 @@ impl Api {
                 name: "tracker_sync".to_owned(),
                 reason: "Tracker sync not found".to_owned(),
             })?;
-        match actor
-            .ask(TrackerSyncMessage::GetState)
-            .await
-            .map_err(|_| Error::MissingResource {
+        match actor.ask(TrackerSyncMessage::GetState).await.map_err(|_| {
+            Error::MissingResource {
                 name: "tracker_sync".to_owned(),
                 reason: "Tracker sync state failed".to_owned(),
-            })? {
+            }
+        })? {
             TrackerSyncResponse::State {
                 round,
                 next_nonce,
                 pages_this_cycle,
                 has_fetch_timeout,
                 has_update_timeout,
-            } => Ok((round, next_nonce, pages_this_cycle, has_fetch_timeout, has_update_timeout)),
+            } => Ok((
+                round,
+                next_nonce,
+                pages_this_cycle,
+                has_fetch_timeout,
+                has_update_timeout,
+            )),
             _ => Err(Error::UnexpectedResponse {
                 actor: "tracker_sync".to_owned(),
                 expected: "State".to_owned(),

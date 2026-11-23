@@ -21,9 +21,7 @@ use ave_common::{
 use ave_core::auth::AuthWitness;
 use ave_core::helpers::network::{
     ActorMessage, NetworkMessage,
-    test_faults::{
-        FaultAction, FaultDirection, FaultMessage, FaultRule,
-    },
+    test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
 };
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
@@ -39,9 +37,9 @@ use test_log::test;
 use crate::common::sink_setup::example_schema_governance_fact;
 use crate::common::sink_setup::governance_with_viewpoints_fact;
 use crate::common::{
-    CreateNodeConfig, CreateNodesAndConnectionsConfig, NodeData,
-    PORT_COUNTER, create_node, emit_fact_signed, get_abort_request,
-    node_running, wait_request, wait_request_state,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, NodeData, PORT_COUNTER,
+    create_node, emit_fact_signed, get_abort_request, node_running,
+    wait_request, wait_request_state,
 };
 
 #[test(tokio::test)]
@@ -8016,7 +8014,6 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
     join_all(witness.handler.iter_mut()).await;
 }
 
-
 /// Bounded wait shared by the reconcile page-boundary tests below:
 /// every fallible await carries a finite budget and fails with
 /// context instead of spinning forever. These tests must pass or
@@ -8231,8 +8228,7 @@ async fn transfer_chain(
                 ComunicateInfo {
                     request_id: String::new(),
                     version: 0,
-                    receiver: PublicKey::from_str(carol.public_key())
-                        .unwrap(),
+                    receiver: PublicKey::from_str(carol.public_key()).unwrap(),
                     receiver_actor: "/user/node/distributor".to_owned(),
                 },
                 ActorMessage::DistributionLedgerRes {
@@ -8816,16 +8812,14 @@ async fn transfer_replay(total: u64) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         };
-        assert_eq!(
-            seen, *total,
-            "carol must walk exactly {total} entries"
-        );
+        assert_eq!(seen, *total, "carol must walk exactly {total} entries");
         assert!(
             resent > 0,
             "the replay must resend derived writes for {total} events"
         );
         let (owner_now, pending, _, _) = must(
-            carol_api.test_witnesses_ownership(&governance_id, subject_id.clone()),
+            carol_api
+                .test_witnesses_ownership(&governance_id, subject_id.clone()),
             60,
             "ownership must be readable after reconcile",
         )
@@ -8895,8 +8889,7 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     let alice = nodes[1].api.clone();
     let carol = nodes[2].api.clone();
     let dave = nodes[3].api.clone();
-    let carol_key =
-        PublicKey::from_str(carol.public_key()).unwrap();
+    let carol_key = PublicKey::from_str(carol.public_key()).unwrap();
     let dave_key = PublicKey::from_str(dave.public_key()).unwrap();
 
     let governance_id =
@@ -8957,8 +8950,7 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     // Silence automatic pushes from Alice so every delivery below
     // is manual, never ambient gossip.
     for target in [&carol, &dave] {
-        let peer =
-            PublicKey::from_str(target.public_key()).unwrap();
+        let peer = PublicKey::from_str(target.public_key()).unwrap();
         for message in [
             FaultMessage::DistributionLedgerRes,
             FaultMessage::DistributionLastEventReq,
@@ -9007,7 +8999,9 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     get_subject(&carol, subject_id.clone(), Some(2), true)
         .await
         .unwrap();
-    emit_confirm(&carol, subject_id.clone(), None, true).await.unwrap();
+    emit_confirm(&carol, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     get_subject(&alice, subject_id.clone(), Some(3), true)
         .await
         .unwrap();
@@ -9017,8 +9011,7 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     // receives exactly one copy of each event. Silence automatic
     // pushes again so the manual plan is what delivers.
     for target in [&dave] {
-        let peer =
-            PublicKey::from_str(target.public_key()).unwrap();
+        let peer = PublicKey::from_str(target.public_key()).unwrap();
         for message in [
             FaultMessage::DistributionLedgerRes,
             FaultMessage::DistributionLastEventReq,
@@ -9108,8 +9101,18 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     {
         let start = tokio::time::Instant::now();
         loop {
-            assert!(carol.get_subject_state(subject_f.clone()).await.is_err(), "failed transfer never delivers");
-            assert!(carol.test_get_tracker_ledger(subject_f.clone(), 10).await.unwrap_or_default().is_empty(), "no journal");
+            assert!(
+                carol.get_subject_state(subject_f.clone()).await.is_err(),
+                "failed transfer never delivers"
+            );
+            assert!(
+                carol
+                    .test_get_tracker_ledger(subject_f.clone(), 10)
+                    .await
+                    .unwrap_or_default()
+                    .is_empty(),
+                "no journal"
+            );
             if start.elapsed() > Duration::from_secs(2) {
                 break;
             }
@@ -9124,10 +9127,7 @@ async fn manual_transfer_distribution_includes_pending_owner() {
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(
-        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
-    )
-    .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }
@@ -9258,7 +9258,9 @@ async fn transport_single_encode_reused_end_to_end() {
 
     // Bob confirms and becomes owner; further batches keep reusing
     // the single origin encoding.
-    emit_confirm(&bob, subject_id.clone(), None, true).await.unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
     get_subject(&bob, subject_id.clone(), Some(6), true)
         .await
         .unwrap();
@@ -9309,8 +9311,7 @@ async fn transport_single_encode_reused_end_to_end() {
     get_subject(&bob, subject_id.clone(), Some(8), true)
         .await
         .unwrap();
-    let (fwd_post_drop, fb_post_drop) =
-        bob.test_encode_stats().await.unwrap();
+    let (fwd_post_drop, fb_post_drop) = bob.test_encode_stats().await.unwrap();
     assert_eq!(
         fb_post_drop, 0,
         "faulted sends must not fall back to a second encode"
@@ -9324,10 +9325,7 @@ async fn transport_single_encode_reused_end_to_end() {
     for node in nodes.iter_mut() {
         node.token.cancel();
     }
-    join_all(
-        nodes.iter_mut().flat_map(|node| node.handler.iter_mut()),
-    )
-    .await;
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
     drop(nodes);
     drop(dirs);
 }

@@ -565,8 +565,7 @@ impl TrackerSync {
             // dropped before any request. Unknown subjects stay
             // eligible: the copy request carries the scope and the
             // receiver validates the Create against it pre-write.
-            if let Some(data) = get_subject_data(ctx, &item.subject_id).await?
-            {
+            if let Some(data) = get_subject_data(ctx, &item.subject_id).await? {
                 let in_scope = matches!(
                     &data,
                     SubjectData::Tracker { governance_id, .. }
@@ -1070,8 +1069,7 @@ impl Handler<Self> for TrackerSync {
                             || governance_version != local_governance_version
                         {
                             Self::observe_round("gov_changed");
-                            if governance_version > local_governance_version
-                            {
+                            if governance_version > local_governance_version {
                                 self.nudge_governance_update(ctx).await;
                             }
                             self.finish_cycle(ctx).await?;

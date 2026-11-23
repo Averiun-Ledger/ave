@@ -22,8 +22,6 @@ use ave_actors::{ActorContext, ActorError, ActorPath, ActorRef};
 use tracing::debug;
 
 use super::Tracker;
-#[cfg(feature = "test")]
-use crate::system::ConfigHelper;
 use crate::governance::sn_register::{
     SnRegister, SnRegisterMessage, SnRegisterResponse,
 };
@@ -39,6 +37,8 @@ use crate::governance::witnesses_register::{
 use crate::model::common::{TrackerVisibilityState, get_n_events};
 use crate::model::event::{Ledger, Protocols};
 use crate::node::{Node, NodeMessage, TransferSubject};
+#[cfg(feature = "test")]
+use crate::system::ConfigHelper;
 use ave_common::request::EventRequest;
 
 /// Ledger page size for the reconcile scan.
@@ -228,8 +228,7 @@ impl Tracker {
         #[cfg(not(feature = "test"))]
         let page = RECONCILE_PAGE;
         loop {
-            let events: Vec<Ledger> =
-                get_n_events(ctx, last_sn, page).await?;
+            let events: Vec<Ledger> = get_n_events(ctx, last_sn, page).await?;
             if events.is_empty() {
                 break;
             }

@@ -997,9 +997,7 @@ impl Handler<Self> for SubjectManager {
                 let mut requesters: Vec<String> = self
                     .subjects
                     .get(&subject_id)
-                    .map(|entry| {
-                        entry.requesters.iter().cloned().collect()
-                    })
+                    .map(|entry| entry.requesters.iter().cloned().collect())
                     .unwrap_or_default();
                 requesters.sort();
                 Ok(SubjectManagerResponse::Requesters(requesters))

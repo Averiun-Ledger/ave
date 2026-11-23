@@ -1418,9 +1418,7 @@ impl TransferVerifier {
         // being filtered away before any hash comparison.
         let held: Vec<Ledger> = buffered
             .iter()
-            .filter(|event| {
-                local_sn.is_none_or(|applied| event.sn > applied)
-            })
+            .filter(|event| local_sn.is_none_or(|applied| event.sn > applied))
             .cloned()
             .collect();
         let sender_window: Vec<Ledger> = sender_ledger

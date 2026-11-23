@@ -3,8 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, Handler, IntervalStrategy,
-    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy,
-    TimerKey,
+    Message, NotPersistentActor, RetryActor, RetryMessage, Strategy, TimerKey,
 };
 use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_network::ComunicateInfo;
@@ -223,13 +222,10 @@ impl DistriCoordinator {
         // Same total bound as the pull path: an event that can
         // never be accepted must fail before the first send instead
         // of retrying forever.
-        let probe_bytes = borsh::to_vec(&*ledger).map_err(|e| {
-            ActorError::Functional {
-                description: format!(
-                    "Can not encode fragmented event: {e}"
-                ),
-            }
-        })?;
+        let probe_bytes =
+            borsh::to_vec(&*ledger).map_err(|e| ActorError::Functional {
+                description: format!("Can not encode fragmented event: {e}"),
+            })?;
         if probe_bytes.len() as u64
             > DistriWorker::MAX_FRAGMENT_EVENT_BYTES as u64
         {
@@ -259,7 +255,8 @@ impl DistriCoordinator {
             },
         )?;
         let frag_count = frags.len();
-        self.send_frags(&frags, &request_id, &receiver_actor).await?;
+        self.send_frags(&frags, &request_id, &receiver_actor)
+            .await?;
 
         #[cfg(any(test, feature = "test"))]
         let tries = 2u32;
