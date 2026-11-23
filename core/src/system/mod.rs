@@ -40,6 +40,10 @@ pub struct ConfigHelper {
     pub always_accept: bool,
     pub safe_mode: bool,
     pub tracking_size: usize,
+    /// Ledger page size for tracker boot reconciliation scans — TEST
+    /// BUILDS ONLY (production always uses 256).
+    #[cfg(feature = "test")]
+    pub reconcile_page: u64,
     pub only_clear_events: bool,
     pub ledger_batch_size: usize,
     pub hash_algorithm: ave_common::identity::HashAlgorithm,
@@ -112,6 +116,8 @@ impl ConfigHelper {
             always_accept: config.always_accept,
             safe_mode: config.safe_mode,
             tracking_size: config.tracking_size,
+            #[cfg(feature = "test")]
+            reconcile_page: config.reconcile_page,
             only_clear_events: config.only_clear_events,
             ledger_batch_size: config.sync.ledger_batch_size,
             sync_governance: config.sync.governance,
@@ -431,6 +437,7 @@ pub mod tests {
             contracts_path,
             always_accept: false,
             tracking_size: 100,
+            reconcile_page: 256,
             safe_mode: false,
             is_service: true,
             only_clear_events: false,
@@ -530,6 +537,7 @@ pub mod tests {
             contracts_path: dir_contracts.path().to_path_buf(),
             always_accept: false,
             tracking_size: 100,
+            reconcile_page: 256,
             safe_mode: false,
             is_service: true,
             only_clear_events: false,

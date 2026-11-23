@@ -1,5 +1,8 @@
 use std::{
-    collections::BTreeSet, str::FromStr, sync::atomic::Ordering, time::Duration,
+    collections::BTreeSet,
+    str::FromStr,
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
 };
 
 mod common;
@@ -36,9 +39,9 @@ use test_log::test;
 use crate::common::sink_setup::example_schema_governance_fact;
 use crate::common::sink_setup::governance_with_viewpoints_fact;
 use crate::common::{
-    CreateNodeConfig, CreateNodesAndConnectionsConfig, PORT_COUNTER,
-    create_node, emit_fact_signed, get_abort_request, node_running,
-    wait_request, wait_request_state,
+    CreateNodeConfig, CreateNodesAndConnectionsConfig, NodeData,
+    PORT_COUNTER, create_node, emit_fact_signed, get_abort_request,
+    node_running, wait_request, wait_request_state,
 };
 
 #[test(tokio::test)]
@@ -8014,37 +8017,72 @@ async fn reconcile_visibility_replay_ignores_stale_sn() {
 }
 
 
-/// The tracker reconcile cursor is exclusive: reprocessing a page
-/// boundary would walk the frontier event twice and resend its
-/// derived writes. After wiping the derived registers and rebooting,
-/// every page must be walked exactly once, whatever the ledger size.
-#[test(tokio::test)]
-async fn tracker_reconcile_does_not_replay_page_boundary() {
-    let (mut nodes, mut dirs) =
+/// Bounded wait shared by the reconcile page-boundary tests below:
+/// every fallible await carries a finite budget and fails with
+/// context instead of spinning forever. These tests must pass or
+/// fail, never hang.
+async fn must<T, E: std::fmt::Debug>(
+    fut: impl std::future::Future<Output = Result<T, E>>,
+    secs: u64,
+    what: &str,
+) -> T {
+    match tokio::time::timeout(Duration::from_secs(secs), fut).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => panic!("{what} failed: {error:?}"),
+        Err(_) => panic!("{what} timed out"),
+    }
+}
+
+/// Page size driving the boundary tests below. Production runs
+/// 256; these tests override it per node (see `reconcile_page`) so
+/// every boundary below lands within tens of events instead of
+/// hundreds. The cursor property under test is page-size agnostic.
+const PAGE: u64 = 16;
+
+struct BoundaryBase {
+    nodes: Vec<NodeData>,
+    dirs: Vec<tempfile::TempDir>,
+    owner: ave_core::Api,
+    emitter: ave_core::Api,
+    governance_id: DigestIdentifier,
+    carol_key: PublicKey,
+    carol_signer: Ed25519Signer,
+}
+
+/// Two nodes plus a governance naming an emitter and carol, with the
+/// emitter synced: the starting point of every page-boundary test.
+async fn boundary_base() -> BoundaryBase {
+    let (nodes, dirs) = tokio::time::timeout(
+        Duration::from_secs(120),
         create_nodes_and_connections(CreateNodesAndConnectionsConfig {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            reconcile_page: Some(PAGE),
             ..Default::default()
-        })
-        .await;
+        }),
+    )
+    .await
+    .expect("create test nodes");
     let owner = nodes[0].api.clone();
     let emitter = nodes[1].api.clone();
 
-    // Freeze background tracker pulls and auto-pushes on both
-    // emitters: every event below is committed locally, so the
-    // ledgers under test never gain a synced suffix that would
-    // move the page boundaries under test.
+    // Freeze background tracker pulls on the emitter: every event
+    // below is committed locally, so the ledgers under test never
+    // gain a synced suffix that would move the page boundaries.
     for api in [&emitter] {
-        api.test_install_fault(FaultRule {
-            direction: FaultDirection::Outbound,
-            message: FaultMessage::TrackerSyncReq,
-            peer: None,
-            remaining: None,
-            action: FaultAction::Drop,
-        })
-        .await
-        .unwrap();
+        must(
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message: FaultMessage::TrackerSyncReq,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            }),
+            60,
+            "install tracker-sync drop",
+        )
+        .await;
     }
 
     let carol_signer = Ed25519Signer::generate().unwrap();
@@ -8054,307 +8092,614 @@ async fn tracker_reconcile_does_not_replay_page_boundary() {
     )
     .unwrap();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![&emitter]).await;
-    emit_fact(
-        &owner,
-        governance_id.clone(),
-        json!({
-            "members": {
-                "add": [
-                    {"name": "Emitter", "key": emitter.public_key()},
-                    {"name": "Carol", "key": carol_key.to_string()},
-                ]
-            },
-            "schemas": {
-                "add": [
-                    {
-                        "id": "Example",
-                        "contract": EXAMPLE_CONTRACT,
-                        "initial_value": {"one": 0, "two": 0, "three": 0}
-                    }
-                ]
-            },
-            "roles": {
-                "governance": {"add": {"witness": ["Emitter"]}},
-                "schema": [
-                    {
-                        "schema_id": "Example",
-                        "add": {
-                            "evaluator": [{"name": "Owner", "namespace": []}],
-                            "validator": [{"name": "Owner", "namespace": []}],
-                            "witness": [{"name": "Owner", "namespace": []}],
-                            "creator": [
-                                {
-                                    "name": "Emitter",
-                                    "namespace": [],
-                                    "quantity": "infinity"
-                                },
-                                {
-                                    "name": "Carol",
-                                    "namespace": [],
-                                    "quantity": "infinity"
-                                }
-                            ],
-                            "issuer": [
-                                {"name": "Owner", "namespace": []},
-                                {"name": "Emitter", "namespace": []},
-                                {"name": "Carol", "namespace": []}
-                            ]
-                        }
-                    }
-                ]
-            }
-        }),
-        true,
+    let governance_id = tokio::time::timeout(
+        Duration::from_secs(180),
+        create_and_authorize_governance(&owner, vec![&emitter]),
     )
     .await
-    .unwrap();
-    emitter.update_subject(governance_id.clone()).await.unwrap();
-
-    // A second node holds the pending side of the boundary
-    // transfer below: it confirms it, then keeps emitting the tail
-    // as the new owner.
-    let carol_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut carol_node, mut carol_dirs) = create_node(CreateNodeConfig {
-        node_type: NodeType::Addressable,
-        listen_address: format!("/memory/{carol_port}"),
-        peers: vec![RoutingNode {
-            peer_id: nodes[0].api.peer_id().to_string(),
-            address: vec![nodes[0].listen_address.clone()],
-        }],
-        always_accept: true,
-        keys: Some(KeyPair::Ed25519(carol_signer.clone())),
-        ..Default::default()
-    })
-    .await;
-    dirs.append(&mut carol_dirs);
-    let carol = carol_node.api.clone();
-    node_running(&carol).await.unwrap();
-    for api in [&carol] {
-        for message in [
-            FaultMessage::TrackerSyncReq,
-            FaultMessage::DistributionLastEventReq,
-        ] {
-            api.test_install_fault(FaultRule {
-                direction: FaultDirection::Outbound,
-                message,
-                // Only the emitter must never observe carol's tail:
-                // anything else keeps flowing so requests complete.
-                peer: Some(
-                    PublicKey::from_str(emitter.public_key()).unwrap(),
-                ),
-                remaining: None,
-                action: FaultAction::Drop,
-            })
-            .await
-            .unwrap();
-        }
-    }
-    carol
-        .authorize_governance(
+    .expect("create and authorize governance");
+    must(
+        emit_fact(
+            &owner,
             governance_id.clone(),
-            AuthWitness::Many(vec![
-                PublicKey::from_str(owner.public_key()).unwrap(),
-                PublicKey::from_str(emitter.public_key()).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
-    carol.update_subject(governance_id.clone()).await.unwrap();
-    get_subject(&carol, governance_id.clone(), None, true)
-        .await
-        .unwrap();
-
-    // Subjects sized at the page limits: 1 (genesis only), 255 and
-    // 256 (single pages, exact and short), 257 (two pages), 512 and
-    // 513 (several pages with a transfer and its confirm straddling
-    // the first page boundary at SN 256/257).
-    let mut subjects: Vec<(DigestIdentifier, u64)> = Vec::new();
-    for total in [1u64, 255, 256, 257, 512, 513] {
-        let (subject_id, _) = create_subject(
-            &emitter,
-            governance_id.clone(),
-            "Example",
-            "",
-            true,
-        )
-        .await
-        .unwrap();
-        // Facts fire without waiting; the transfer below waits for
-        // its prefix first so it can never commit out of order.
-        let fire_facts = |api: ave_core::Api, from: u64, to: u64| {
-            let subject_id = subject_id.clone();
-            async move {
-                for sn in from..to {
-                    let request = EventRequest::Fact(FactRequest {
-                        subject_id: subject_id.clone(),
-                        payload: ValueWrapper(json!({"ModOne": {"data": sn}})),
-                        viewpoints: Default::default(),
-                    });
-                    api.own_request(request).await.unwrap();
+            json!({
+                "members": {
+                    "add": [
+                        {"name": "Emitter", "key": emitter.public_key()},
+                        {"name": "Carol", "key": carol_key.to_string()},
+                    ]
+                },
+                "schemas": {
+                    "add": [
+                        {
+                            "id": "Example",
+                            "contract": EXAMPLE_CONTRACT,
+                            "initial_value": {"one": 0, "two": 0, "three": 0}
+                        }
+                    ]
+                },
+                "roles": {
+                    "governance": {"add": {"witness": ["Emitter"]}},
+                    "schema": [
+                        {
+                            "schema_id": "Example",
+                            "add": {
+                                "evaluator": [{"name": "Owner", "namespace": []}],
+                                "validator": [{"name": "Owner", "namespace": []}],
+                                "witness": [{"name": "Owner", "namespace": []}],
+                                "creator": [
+                                    {
+                                        "name": "Emitter",
+                                        "namespace": [],
+                                        "quantity": "infinity"
+                                    },
+                                    {
+                                        "name": "Carol",
+                                        "namespace": [],
+                                        "quantity": "infinity"
+                                    }
+                                ],
+                                "issuer": [
+                                    {"name": "Owner", "namespace": []},
+                                    {"name": "Emitter", "namespace": []},
+                                    {"name": "Carol", "namespace": []}
+                                ]
+                            }
+                        }
+                    ]
                 }
-            }
-        };
-        if total >= 512 {
-            fire_facts(emitter.clone(), 1, 256).await;
-            get_subject(&emitter, subject_id.clone(), Some(255), true)
-                .await
-                .unwrap();
-            emit_transfer(
+            }),
+            true,
+        ),
+        180,
+        "governance setup fact",
+    )
+    .await;
+    must(
+        emitter.update_subject(governance_id.clone()),
+        90,
+        "emitter syncs governance",
+    )
+    .await;
+    BoundaryBase {
+        nodes,
+        dirs,
+        owner,
+        emitter,
+        governance_id,
+        carol_key,
+        carol_signer,
+    }
+}
+
+/// One boundary-straddling chain: the emitter fires a full page of
+/// facts, transfers at the page boundary, carol confirms and emits
+/// the tail as the new owner. Facts burst-submit while commits land
+/// in the background (the `test_300_events` pattern): sequential
+/// submits keep the SN order the page layout depends on.
+async fn transfer_chain(
+    emitter: ave_core::Api,
+    carol: ave_core::Api,
+    carol_key: PublicKey,
+    governance_id: DigestIdentifier,
+    total: u64,
+) -> DigestIdentifier {
+    let (subject_id, _) = must(
+        create_subject(&emitter, governance_id.clone(), "Example", "", true),
+        120,
+        "create subject",
+    )
+    .await;
+    for sn in 1..PAGE {
+        let request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(json!({"ModOne": {"data": sn}})),
+            viewpoints: Default::default(),
+        });
+        must(emitter.own_request(request), 60, "submit fact").await;
+    }
+    must(
+        get_subject(&emitter, subject_id.clone(), Some(PAGE - 1), true),
+        150,
+        "prefix applied before transfer",
+    )
+    .await;
+    must(
+        emit_transfer(&emitter, subject_id.clone(), carol_key.clone(), true),
+        180,
+        "transfer commits",
+    )
+    .await;
+    // Carol takes the prefix as a first copy instead of a pull: she
+    // only needs it to confirm the transfer.
+    let prefix = must(
+        emitter.test_get_tracker_ledger(subject_id.clone(), PAGE),
+        60,
+        "read prefix for carol",
+    )
+    .await;
+    assert_eq!(prefix.len(), (PAGE + 1) as usize);
+    must(
+        carol.test_ensure_distributor(subject_id.clone()),
+        60,
+        "ensure carol distributor",
+    )
+    .await;
+    must(
+        carol.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: PublicKey::from_str(carol.public_key())
+                        .unwrap(),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: prefix,
+                    is_all: true,
+                    transfer_event: None,
+                    expected_governance_id: None,
+                },
+            ),
+            &PublicKey::from_str(emitter.public_key()).unwrap(),
+        ),
+        60,
+        "inject prefix into carol",
+    )
+    .await;
+    must(
+        get_subject(&carol, subject_id.clone(), Some(PAGE), true),
+        150,
+        "carol applies injected prefix",
+    )
+    .await;
+    must(
+        emit_confirm(&carol, subject_id.clone(), None, true),
+        180,
+        "confirm commits",
+    )
+    .await;
+    // The confirm may arrive with newer events already synced behind
+    // it; only the tip below is exact.
+    must(
+        emit_fact(
+            &carol,
+            subject_id.clone(),
+            json!({"ModOne": {"data": -1}}),
+            true,
+        ),
+        180,
+        "carol fact commits",
+    )
+    .await;
+    for sn in (PAGE + 3)..total {
+        let request = EventRequest::Fact(FactRequest {
+            subject_id: subject_id.clone(),
+            payload: ValueWrapper(json!({"ModOne": {"data": sn}})),
+            viewpoints: Default::default(),
+        });
+        must(carol.own_request(request), 60, "submit fact").await;
+    }
+    subject_id
+}
+
+/// Reconcile page-boundary replay for short ledgers: genesis only
+/// and the single/two-page sizes around the page. Facts
+/// burst-submit while commits land in the background (the
+/// `test_300_events` pattern); sequential submits keep the SN order
+/// the page layout depends on.
+async fn small_replay(totals: &[u64]) {
+    let BoundaryBase {
+        mut nodes,
+        mut dirs,
+        owner,
+        emitter,
+        governance_id,
+        ..
+    } = boundary_base().await;
+
+    let mut subjects: Vec<(DigestIdentifier, u64)> = Vec::new();
+    for &total in totals {
+        let (subject_id, _) = must(
+            create_subject(
                 &emitter,
-                subject_id.clone(),
-                carol_key.clone(),
+                governance_id.clone(),
+                "Example",
+                "",
                 true,
-            )
-            .await
-            .unwrap();
-            // Carol takes the prefix as a first copy instead of a
-            // pull: she only needs it to confirm the transfer. No
-            // exact-SN wait here: background sync may already have
-            // moved her past SN 256, and the confirm below waits
-            // for its own apply.
-            let prefix = emitter
-                .test_get_tracker_ledger(subject_id.clone(), 256)
-                .await
-                .unwrap();
-            assert_eq!(prefix.len(), 257);
-            carol.test_ensure_distributor(subject_id.clone()).await.unwrap();
-            carol
-                .test_inject_inbound(
-                    NetworkMessage::new(
-                        ComunicateInfo {
-                            request_id: String::new(),
-                            version: 0,
-                            receiver: PublicKey::from_str(
-                                carol.public_key(),
-                            )
-                            .unwrap(),
-                            receiver_actor: "/user/node/distributor".to_owned(),
-                        },
-                        ActorMessage::DistributionLedgerRes {
-                            ledger: prefix,
-                            is_all: true,
-                            transfer_event: None,
-                            expected_governance_id: None,
-                        },
-                    ),
-                    &PublicKey::from_str(emitter.public_key()).unwrap(),
-                )
-                .await
-                .unwrap();
-            // Wait for the injected prefix: the confirm below
-            // needs the subject present locally.
-            get_subject(&carol, subject_id.clone(), Some(256), true)
-                .await
-                .unwrap();
-            emit_confirm(&carol, subject_id.clone(), None, true)
-                .await
-                .unwrap();
-            // The confirm may arrive with newer events already
-            // synced behind it; only the tip below is exact.
-            emit_fact(&carol, subject_id.clone(), json!({"ModOne": {"data": -1}}), true)
-                .await
-                .unwrap();
-            fire_facts(carol.clone(), 259, total).await;
-        } else {
-            fire_facts(emitter.clone(), 1, total).await;
+            ),
+            120,
+            "create subject",
+        )
+        .await;
+        for sn in 1..total {
+            let request = EventRequest::Fact(FactRequest {
+                subject_id: subject_id.clone(),
+                payload: ValueWrapper(json!({"ModOne": {"data": sn}})),
+                viewpoints: Default::default(),
+            });
+            must(emitter.own_request(request), 60, "submit fact").await;
         }
         subjects.push((subject_id, total));
     }
+
     for (subject_id, total) in &subjects {
-        // The emitter only holds its own prefix: transferred
-        // subjects stop at the transfer SN 256 here.
-        let tip = (total - 1).min(256);
-        get_subject(&emitter, subject_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
-    }
-    // The tail belongs to carol now: wait for her tip too.
-    for (subject_id, total) in &subjects {
-        if *total < 512 {
-            continue;
-        }
-        let tip = total.saturating_sub(1);
-        get_subject(&carol, subject_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
+        must(
+            get_subject(&emitter, subject_id.clone(), Some(total - 1), true),
+            150,
+            "emitter reaches its tip",
+        )
+        .await;
     }
 
     // Wipe every derived write and reboot on the same stores: the
     // replay must walk each page exactly once.
-    emitter
-        .test_purge_register(governance_id.clone(), "sn")
-        .await
-        .unwrap();
-    emitter
-        .test_purge_register(governance_id.clone(), "witnesses")
-        .await
-        .unwrap();
+    must(
+        emitter.test_purge_register(governance_id.clone(), "sn"),
+        60,
+        "purge sn register",
+    )
+    .await;
+    must(
+        emitter.test_purge_register(governance_id.clone(), "witnesses"),
+        60,
+        "purge witnesses register",
+    )
+    .await;
 
     nodes[1].token.cancel();
-    join_all(nodes[1].handler.iter_mut()).await;
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        join_all(nodes[1].handler.iter_mut()),
+    )
+    .await
+    .expect("emitter node shuts down");
 
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut new_node, mut new_dirs) = create_node(CreateNodeConfig {
-        node_type: NodeType::Addressable,
-        listen_address: format!("/memory/{port}"),
-        peers: vec![RoutingNode {
-            peer_id: nodes[0].api.peer_id().to_string(),
-            address: vec![nodes[0].listen_address.clone()],
-        }],
-        always_accept: true,
-        keys: Some(nodes[1].keys.clone()),
-        local_db: Some(dirs[2].path().to_path_buf()),
-        ext_db: Some(dirs[3].path().to_path_buf()),
-        ..Default::default()
-    })
-    .await;
+    let (mut new_node, mut new_dirs) = tokio::time::timeout(
+        Duration::from_secs(180),
+        create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: nodes[0].api.peer_id().to_string(),
+                address: vec![nodes[0].listen_address.clone()],
+            }],
+            always_accept: true,
+            keys: Some(nodes[1].keys.clone()),
+            local_db: Some(dirs[2].path().to_path_buf()),
+            ext_db: Some(dirs[3].path().to_path_buf()),
+            reconcile_page: Some(PAGE),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("reboot emitter node");
     dirs.append(&mut new_dirs);
 
     let api = new_node.api.clone();
-    node_running(&api).await.unwrap();
+    must(node_running(&api), 60, "rebooted node runs").await;
 
     // Barrier: a live register read queues behind governance
     // pre_start, so everything below observes post-boot state.
-    let evaluators = api
-        .test_gov_evaluators(governance_id.clone())
-        .await
-        .unwrap();
+    let evaluators = must(
+        api.test_gov_evaluators(governance_id.clone()),
+        60,
+        "read evaluators after reboot",
+    )
+    .await;
     assert!(
         evaluators
             .iter()
             .any(|key| { key.to_string() == owner.public_key() })
     );
 
-    // Exact replay sizes: 257 events walk 257 entries, never 258;
-    // single and exact pages never re-read their frontier. Trackers
+    // Exact replay sizes: PAGE + 1 events walk PAGE + 1 entries,
+    // never PAGE + 2; single and exact pages never re-read their
+    // frontier. Trackers
+    // boot on first access, so touch each ledger first (which starts
+    // its boot reconcile) and then poll for the report.
+    for (subject_id, total) in &subjects {
+        let expected = (*total).min(PAGE + 1);
+        let _ = must(
+            api.test_get_tracker_ledger(subject_id.clone(), expected - 1),
+            60,
+            "touch ledger to start boot reconcile",
+        )
+        .await;
+    }
+    for (subject_id, total) in &subjects {
+        let expected = (*total).min(PAGE + 1);
+        let (seen, resent) = {
+            let start = Instant::now();
+            loop {
+                let (s, r) = must(
+                    api.test_tracker_reconcile_report(subject_id.clone()),
+                    60,
+                    "read reconcile report",
+                )
+                .await;
+                if s == expected {
+                    break (s, r);
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(90),
+                    "reconcile stuck at {s}/{expected} for subject with {total} events"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        assert_eq!(
+            seen, expected,
+            "subject with {total} events must walk exactly {expected} entries here"
+        );
+        assert!(
+            resent > 0,
+            "the replay must resend derived writes for {total} events"
+        );
+    }
+
+    nodes[0].token.cancel();
+    new_node.token.cancel();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        join_all(
+            nodes[0]
+                .handler
+                .iter_mut()
+                .chain(new_node.handler.iter_mut()),
+        ),
+    )
+    .await
+    .expect("nodes shut down");
+    drop(nodes);
+    drop(dirs);
+    drop(new_node);
+    drop(new_dirs);
+}
+
+/// Genesis only and the short single page: the cursor-exclusivity
+/// property above, walked exactly once after wipe and reboot.
+#[test(tokio::test)]
+async fn tracker_reconcile_page_boundary_genesis_and_short() {
+    small_replay(&[1, 15]).await;
+}
+
+/// The exact single page: same property at the page boundary.
+#[test(tokio::test)]
+async fn tracker_reconcile_page_boundary_exact_page() {
+    small_replay(&[16]).await;
+}
+
+/// The first two-page ledger: same property across the boundary.
+#[test(tokio::test)]
+async fn tracker_reconcile_page_boundary_two_pages() {
+    small_replay(&[17]).await;
+}
+
+/// Reconcile replay for one multi-page ledger with a transfer and
+/// its confirm straddling the first page boundary at SN PAGE/PAGE
+/// + 1: the emitter keeps the prefix, carol owns the tail, and both
+/// replays must walk each entry exactly once.
+async fn transfer_replay(total: u64) {
+    let BoundaryBase {
+        mut nodes,
+        mut dirs,
+        owner,
+        emitter,
+        governance_id,
+        carol_key,
+        carol_signer,
+    } = boundary_base().await;
+
+    // A second node holds the pending side of the boundary
+    // transfer below: it confirms it, then keeps emitting the tail
+    // as the new owner.
+    let carol_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut carol_node, mut carol_dirs) = tokio::time::timeout(
+        Duration::from_secs(120),
+        create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{carol_port}"),
+            peers: vec![RoutingNode {
+                peer_id: nodes[0].api.peer_id().to_string(),
+                address: vec![nodes[0].listen_address.clone()],
+            }],
+            always_accept: true,
+            keys: Some(KeyPair::Ed25519(carol_signer.clone())),
+            reconcile_page: Some(PAGE),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("create carol node");
+    dirs.append(&mut carol_dirs);
+    let carol = carol_node.api.clone();
+    must(node_running(&carol), 60, "carol node runs").await;
+    for api in [&carol] {
+        for message in [
+            FaultMessage::TrackerSyncReq,
+            FaultMessage::DistributionLastEventReq,
+        ] {
+            must(
+                api.test_install_fault(FaultRule {
+                    direction: FaultDirection::Outbound,
+                    message,
+                    // Only the emitter must never observe carol's tail:
+                    // anything else keeps flowing so requests complete.
+                    peer: Some(
+                        PublicKey::from_str(emitter.public_key()).unwrap(),
+                    ),
+                    remaining: None,
+                    action: FaultAction::Drop,
+                }),
+                60,
+                "install carol drop",
+            )
+            .await;
+        }
+    }
+    must(
+        carol.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::Many(vec![
+                PublicKey::from_str(owner.public_key()).unwrap(),
+                PublicKey::from_str(emitter.public_key()).unwrap(),
+            ]),
+        ),
+        60,
+        "carol authorizes governance",
+    )
+    .await;
+    must(
+        carol.update_subject(governance_id.clone()),
+        90,
+        "carol syncs governance",
+    )
+    .await;
+    must(
+        get_subject(&carol, governance_id.clone(), None, true),
+        90,
+        "carol observes governance",
+    )
+    .await;
+
+    // Subjects sized at the multi-page limits with a transfer and
+    // its confirm straddling the first page boundary at SN PAGE /
+    // PAGE + 1.
+    // The two chains are independent, so they build concurrently
+    // while each chain submits sequentially.
+    let subject_id = transfer_chain(
+        emitter.clone(),
+        carol.clone(),
+        carol_key.clone(),
+        governance_id.clone(),
+        total,
+    )
+    .await;
+    let subjects = vec![(subject_id, total)];
+    for (subject_id, total) in &subjects {
+        // The emitter only holds its own prefix: the transferred
+        // subject stops at the transfer SN (PAGE) here.
+        let tip = (total - 1).min(PAGE);
+        must(
+            get_subject(&emitter, subject_id.clone(), Some(tip), true),
+            150,
+            "emitter reaches its tip",
+        )
+        .await;
+    }
+    // The tail belongs to carol now: wait for her tip too.
+    for (subject_id, total) in &subjects {
+        let tip = total.saturating_sub(1);
+        must(
+            get_subject(&carol, subject_id.clone(), Some(tip), true),
+            150,
+            "carol reaches her tip",
+        )
+        .await;
+    }
+
+    // Wipe every derived write and reboot on the same stores: the
+    // replay must walk each page exactly once.
+    must(
+        emitter.test_purge_register(governance_id.clone(), "sn"),
+        60,
+        "purge sn register",
+    )
+    .await;
+    must(
+        emitter.test_purge_register(governance_id.clone(), "witnesses"),
+        60,
+        "purge witnesses register",
+    )
+    .await;
+
+    nodes[1].token.cancel();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        join_all(nodes[1].handler.iter_mut()),
+    )
+    .await
+    .expect("emitter node shuts down");
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut new_node, mut new_dirs) = tokio::time::timeout(
+        Duration::from_secs(180),
+        create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: nodes[0].api.peer_id().to_string(),
+                address: vec![nodes[0].listen_address.clone()],
+            }],
+            always_accept: true,
+            keys: Some(nodes[1].keys.clone()),
+            local_db: Some(dirs[2].path().to_path_buf()),
+            ext_db: Some(dirs[3].path().to_path_buf()),
+            reconcile_page: Some(PAGE),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("reboot emitter node");
+    dirs.append(&mut new_dirs);
+
+    let api = new_node.api.clone();
+    must(node_running(&api), 60, "rebooted node runs").await;
+
+    // Barrier: a live register read queues behind governance
+    // pre_start, so everything below observes post-boot state.
+    let evaluators = must(
+        api.test_gov_evaluators(governance_id.clone()),
+        60,
+        "read evaluators after reboot",
+    )
+    .await;
+    assert!(
+        evaluators
+            .iter()
+            .any(|key| { key.to_string() == owner.public_key() })
+    );
+
+    // Exact replay sizes: PAGE + 1 events walk PAGE + 1 entries,
+    // never PAGE + 2; single and exact pages never re-read their
+    // frontier. Trackers
     // boot on first access, so touch each ledger first (which starts
     // its boot reconcile) and then poll for the report. This node
     // only holds the prefix its own commits wrote: the transferred
     // subjects stop at the transfer SN 256 here.
     for (subject_id, total) in &subjects {
-        let expected = (*total).min(257);
-        let _ = api
-            .test_get_tracker_ledger(subject_id.clone(), expected - 1)
-            .await;
+        let expected = (*total).min(PAGE + 1);
+        let _ = must(
+            api.test_get_tracker_ledger(subject_id.clone(), expected - 1),
+            60,
+            "touch ledger to start boot reconcile",
+        )
+        .await;
     }
     for (subject_id, total) in &subjects {
-        let expected = (*total).min(257);
-        let mut seen = 0u64;
-        let mut resent = 0u64;
-        for _ in 0..1200 {
-            let (s, r) = api
-                .test_tracker_reconcile_report(subject_id.clone())
-                .await
-                .unwrap();
-            seen = s;
-            resent = r;
-            if seen == expected {
-                break;
+        let expected = (*total).min(PAGE + 1);
+        let (seen, resent) = {
+            let start = Instant::now();
+            loop {
+                let (s, r) = must(
+                    api.test_tracker_reconcile_report(subject_id.clone()),
+                    60,
+                    "read reconcile report",
+                )
+                .await;
+                if s == expected {
+                    break (s, r);
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(90),
+                    "reconcile stuck at {s}/{expected} for subject with {total} events"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        };
         assert_eq!(
             seen, expected,
             "subject with {total} events must walk exactly {expected} entries here"
@@ -8368,45 +8713,50 @@ async fn tracker_reconcile_does_not_replay_page_boundary() {
     // Ownership pending converges on the emitter side: the
     // transfer straddling the first page boundary stays pending
     // for carol here.
-    for (subject_id, total) in &subjects {
-        if *total < 512 {
-            continue;
-        }
-        match api
-            .test_witnesses_ownership(&governance_id, subject_id.clone())
-            .await
-        {
-            Err(_) => panic!("ownership must be readable after reconcile"),
-            Ok((owner_now, pending, _, _)) => {
-                assert_eq!(
-                    owner_now,
-                    Some(PublicKey::from_str(emitter.public_key()).unwrap()),
-                    "no ownership rotation may appear here"
-                );
-                assert_eq!(
-                    pending,
-                    Some(carol_key.clone()),
-                    "the boundary transfer stays pending here"
-                );
-            }
-        }
+    for (subject_id, _) in &subjects {
+        let (owner_now, pending, _, _) = must(
+            api.test_witnesses_ownership(&governance_id, subject_id.clone()),
+            60,
+            "ownership must be readable after reconcile",
+        )
+        .await;
+        assert_eq!(
+            owner_now,
+            Some(PublicKey::from_str(emitter.public_key()).unwrap()),
+            "no ownership rotation may appear here"
+        );
+        assert_eq!(
+            pending,
+            Some(carol_key.clone()),
+            "the boundary transfer stays pending here"
+        );
     }
 
     // Carol reboots on her own stores as well: her replay must walk
-    // all 512/513 entries exactly once, with ownership and pending
+    // all 32/33 entries exactly once, with ownership and pending
     // converged after the confirm.
-    carol
-        .test_purge_register(governance_id.clone(), "sn")
-        .await
-        .unwrap();
-    carol
-        .test_purge_register(governance_id.clone(), "witnesses")
-        .await
-        .unwrap();
+    must(
+        carol.test_purge_register(governance_id.clone(), "sn"),
+        60,
+        "purge carol sn register",
+    )
+    .await;
+    must(
+        carol.test_purge_register(governance_id.clone(), "witnesses"),
+        60,
+        "purge carol witnesses register",
+    )
+    .await;
     carol_node.token.cancel();
-    join_all(carol_node.handler.iter_mut()).await;
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        join_all(carol_node.handler.iter_mut()),
+    )
+    .await
+    .expect("carol node shuts down");
     let carol_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let (mut carol_new_node, mut carol_new_dirs) =
+    let (mut carol_new_node, mut carol_new_dirs) = tokio::time::timeout(
+        Duration::from_secs(180),
         create_node(CreateNodeConfig {
             node_type: NodeType::Addressable,
             listen_address: format!("/memory/{carol_port}"),
@@ -8418,47 +8768,54 @@ async fn tracker_reconcile_does_not_replay_page_boundary() {
             keys: Some(KeyPair::Ed25519(carol_signer)),
             local_db: Some(dirs[4].path().to_path_buf()),
             ext_db: Some(dirs[5].path().to_path_buf()),
+            reconcile_page: Some(PAGE),
             ..Default::default()
-        })
-        .await;
+        }),
+    )
+    .await
+    .expect("reboot carol node");
     dirs.append(&mut carol_new_dirs);
     let carol_api = carol_new_node.api.clone();
-    node_running(&carol_api).await.unwrap();
-    let carol_evaluators = carol_api
-        .test_gov_evaluators(governance_id.clone())
-        .await
-        .unwrap();
+    must(node_running(&carol_api), 60, "rebooted carol runs").await;
+    let carol_evaluators = must(
+        carol_api.test_gov_evaluators(governance_id.clone()),
+        60,
+        "read evaluators after carol reboot",
+    )
+    .await;
     assert!(
         carol_evaluators
             .iter()
             .any(|key| { key.to_string() == owner.public_key() })
     );
     for (subject_id, total) in &subjects {
-        if *total < 512 {
-            continue;
-        }
-        let _ = carol_api
-            .test_get_tracker_ledger(subject_id.clone(), total - 1)
-            .await;
+        let _ = must(
+            carol_api.test_get_tracker_ledger(subject_id.clone(), total - 1),
+            60,
+            "touch carol ledger to start boot reconcile",
+        )
+        .await;
     }
     for (subject_id, total) in &subjects {
-        if *total < 512 {
-            continue;
-        }
-        let mut seen = 0u64;
-        let mut resent = 0u64;
-        for _ in 0..1200 {
-            let (s, r) = carol_api
-                .test_tracker_reconcile_report(subject_id.clone())
-                .await
-                .unwrap();
-            seen = s;
-            resent = r;
-            if seen == *total {
-                break;
+        let (seen, resent) = {
+            let start = Instant::now();
+            loop {
+                let (s, r) = must(
+                    carol_api.test_tracker_reconcile_report(subject_id.clone()),
+                    60,
+                    "read carol reconcile report",
+                )
+                .await;
+                if s == *total {
+                    break (s, r);
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(90),
+                    "carol reconcile stuck at {s}/{total}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        };
         assert_eq!(
             seen, *total,
             "carol must walk exactly {total} entries"
@@ -8467,41 +8824,56 @@ async fn tracker_reconcile_does_not_replay_page_boundary() {
             resent > 0,
             "the replay must resend derived writes for {total} events"
         );
-        match carol_api
-            .test_witnesses_ownership(&governance_id, subject_id.clone())
-            .await
-        {
-            Err(_) => panic!("ownership must be readable after reconcile"),
-            Ok((owner_now, pending, _, _)) => {
-                assert_eq!(
-                    owner_now,
-                    Some(carol_key.clone()),
-                    "the confirmed transfer stays applied"
-                );
-                assert_eq!(
-                    pending, None,
-                    "no pending transfer may remain after confirm"
-                );
-            }
-        }
+        let (owner_now, pending, _, _) = must(
+            carol_api.test_witnesses_ownership(&governance_id, subject_id.clone()),
+            60,
+            "ownership must be readable after reconcile",
+        )
+        .await;
+        assert_eq!(
+            owner_now,
+            Some(carol_key.clone()),
+            "the confirmed transfer stays applied"
+        );
+        assert_eq!(
+            pending, None,
+            "no pending transfer may remain after confirm"
+        );
     }
 
     nodes[0].token.cancel();
     new_node.token.cancel();
     carol_new_node.token.cancel();
-    join_all(
-        nodes[0]
-            .handler
-            .iter_mut()
-            .chain(new_node.handler.iter_mut())
-            .chain(carol_new_node.handler.iter_mut()),
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        join_all(
+            nodes[0]
+                .handler
+                .iter_mut()
+                .chain(new_node.handler.iter_mut())
+                .chain(carol_new_node.handler.iter_mut()),
+        ),
     )
-    .await;
+    .await
+    .expect("nodes shut down");
     drop(nodes);
     drop(dirs);
     drop(new_node);
     drop(new_dirs);
     drop(carol_new_node);
+}
+
+/// Three pages with the transfer straddling the first boundary:
+/// the emitter replays its 17-entry prefix, carol replays all 32.
+#[test(tokio::test)]
+async fn tracker_reconcile_page_boundary_transfer_32() {
+    transfer_replay(32).await;
+}
+
+/// Same as above with one more tail event: 33 entries on carol.
+#[test(tokio::test)]
+async fn tracker_reconcile_page_boundary_transfer_33() {
+    transfer_replay(33).await;
 }
 
 /// A manual distribution of a successful transfer reaches its new

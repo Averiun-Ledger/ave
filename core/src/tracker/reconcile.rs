@@ -22,6 +22,8 @@ use ave_actors::{ActorContext, ActorError, ActorPath, ActorRef};
 use tracing::debug;
 
 use super::Tracker;
+#[cfg(feature = "test")]
+use crate::system::ConfigHelper;
 use crate::governance::sn_register::{
     SnRegister, SnRegisterMessage, SnRegisterResponse,
 };
@@ -213,9 +215,21 @@ impl Tracker {
             .await?;
 
         let mut last_sn = tail_start;
+        // Per-node page size — TEST BUILDS ONLY (production always
+        // uses 256): tests override it per node to cross page
+        // boundaries with small ledgers. A missing helper reads as
+        // the default (today's behavior).
+        #[cfg(feature = "test")]
+        let page = ctx
+            .system()
+            .get_helper::<ConfigHelper>("config")
+            .map(|config| config.reconcile_page)
+            .unwrap_or(RECONCILE_PAGE);
+        #[cfg(not(feature = "test"))]
+        let page = RECONCILE_PAGE;
         loop {
             let events: Vec<Ledger> =
-                get_n_events(ctx, last_sn, RECONCILE_PAGE).await?;
+                get_n_events(ctx, last_sn, page).await?;
             if events.is_empty() {
                 break;
             }
@@ -233,7 +247,7 @@ impl Tracker {
                 )
                 .await?;
             }
-            if (events.len() as u64) < RECONCILE_PAGE {
+            if (events.len() as u64) < page {
                 break;
             }
         }

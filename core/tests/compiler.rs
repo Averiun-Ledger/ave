@@ -15940,23 +15940,27 @@ async fn test_deferred_acquisition_idle_sync_round_at_tip() {
     node2.token.cancel();
     join_all(node2.handler.iter_mut()).await;
 
-    // Reboot AISLADO (Bootstrap sin peers: patrón canónico de reinicio
-    // aislado) con pool vivo. Sin eventos nuevos en la red, ninguna
-    // ronda de distribución fireará: la ronda idle de version_sync
-    // dispara la pasada y el compiler compila la v2 localmente. El
-    // hijo `version_sync` SOLO se crea con `is_service: true`
-    // (governance/mod.rs); sin él no hay rondas idle. El intervalo de
-    // sync se reduce solo en este nodo para no pagar los 10 s + 5 s
-    // por defecto del config de tests.
+    // Reboot conectado al Owner con pool vivo: el nodo conoce a su
+    // witness y no puede certificar silencio como tip, así que la ronda
+    // idle solo firea cuando el witness responde sin nada nuevo. Sin
+    // eventos nuevos en la red ninguna ronda de distribución fireará:
+    // la ronda de version_sync respondida dispara la pasada y el
+    // compiler compila la v2 localmente. El hijo `version_sync` SOLO se
+    // crea con `is_service: true` (governance/mod.rs); sin él no hay
+    // rondas idle. El intervalo de sync se reduce solo en este nodo
+    // para no pagar los 10 s + 5 s por defecto del config de tests.
     let scripted = ScriptedCompiler::start(ScriptedTransform::Identity);
 
     let (mut node2, _node2_dirs) = create_node(CreateNodeConfig {
-        node_type: NodeType::Bootstrap,
+        node_type: NodeType::Addressable,
         listen_address: format!(
             "/memory/{}",
             PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
         ),
-        peers: vec![],
+        peers: vec![RoutingNode {
+            peer_id: node1.api.peer_id().to_string(),
+            address: vec![node1.listen_address.clone()],
+        }],
         keys: Some(node2.keys.clone()),
         local_db: Some(node2_local.path().to_path_buf()),
         ext_db: Some(node2_ext.path().to_path_buf()),

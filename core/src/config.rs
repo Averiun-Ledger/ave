@@ -93,6 +93,12 @@ pub struct Config {
     pub safe_mode: bool,
     /// Tracking lru cache size
     pub tracking_size: usize,
+    /// Ledger page size for tracker boot reconciliation scans — TEST
+    /// BUILDS ONLY (production always uses 256): tests that cross
+    /// page boundaries set a small page per node instead of hundreds
+    /// of events per case.
+    #[cfg(feature = "test")]
+    pub reconcile_page: u64,
     /// Is a service node
     pub is_service: bool,
     /// Reject tracker opaque events and only commit clear tracker events.
@@ -172,6 +178,8 @@ impl Default for Config {
             always_accept: Default::default(),
             safe_mode: false,
             tracking_size: 100,
+            #[cfg(feature = "test")]
+            reconcile_page: 256,
             is_service: false,
             only_clear_events: false,
             sync: Default::default(),
@@ -242,6 +250,13 @@ impl Config {
         if self.tracking_size == 0 {
             return Err(Error::InvalidConfiguration {
                 component: "node.tracking_size".to_string(),
+                reason: "must be greater than zero".to_string(),
+            });
+        }
+        #[cfg(feature = "test")]
+        if self.reconcile_page == 0 {
+            return Err(Error::InvalidConfiguration {
+                component: "node.reconcile_page".to_string(),
                 reason: "must be greater than zero".to_string(),
             });
         }

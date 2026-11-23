@@ -1033,6 +1033,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         local_db: Some(local_db),
         ext_db: Some(ext_db),
         ledger_batch_size: None,
+        reconcile_page: None,
         safe_mode,
         sinks,
         #[cfg(feature = "test")]

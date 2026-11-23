@@ -134,6 +134,10 @@ pub struct CreateNodesAndConnectionsConfig {
     pub is_service: bool,
     pub only_clear_events: bool,
     pub ledger_batch_size: Option<usize>,
+    /// Explicit tracker reconcile page size; `None` uses the
+    /// production default (256). Tests that cross page boundaries
+    /// set a small page to avoid hundreds of events per case.
+    pub reconcile_page: Option<u64>,
     /// Uniform toolchain map for every node; per-node differences need
     /// `create_node` directly.
     pub toolchains: Option<std::collections::BTreeMap<String, String>>,
@@ -156,6 +160,10 @@ pub struct CreateNodeConfig {
     pub local_db: Option<PathBuf>,
     pub ext_db: Option<PathBuf>,
     pub ledger_batch_size: Option<usize>,
+    /// Explicit tracker reconcile page size; `None` uses the
+    /// production default (256). Tests that cross page boundaries
+    /// set a small page to avoid hundreds of events per case.
+    pub reconcile_page: Option<u64>,
     pub safe_mode: bool,
     pub sinks: Vec<SinkConfigEntry>,
     /// Explicit compiler configuration; `None` uses the default (in tests,
@@ -216,6 +224,8 @@ pub async fn try_create_node(
         local_db,
         ext_db,
         ledger_batch_size,
+        #[cfg(feature = "test")]
+        reconcile_page,
         safe_mode,
         sinks,
         #[cfg(feature = "test")]
@@ -290,6 +300,8 @@ pub async fn try_create_node(
         always_accept,
         approval: approval.unwrap_or_default(),
         tracking_size: 100,
+        #[cfg(feature = "test")]
+        reconcile_page: reconcile_page.unwrap_or(256),
         sync: SyncConfig {
             ledger_batch_size: ledger_batch_size.unwrap_or(100),
             governance: governance_sync.unwrap_or(GovernanceSyncConfig {
@@ -355,6 +367,7 @@ pub async fn create_nodes_and_connections(
         is_service,
         only_clear_events,
         ledger_batch_size,
+        reconcile_page,
         toolchains,
         tracker_sync,
     } = config;
@@ -387,6 +400,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
             ..Default::default()
@@ -418,6 +432,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
             ..Default::default()
@@ -449,6 +464,7 @@ pub async fn create_nodes_and_connections(
             is_service,
             only_clear_events,
             ledger_batch_size,
+            reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
             ..Default::default()
