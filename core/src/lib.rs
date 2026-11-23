@@ -3419,6 +3419,146 @@ impl Api {
         }
     }
 
+    /// Reads back the stored transfer proof with its hash when the
+    /// register keeps one (migrated proofs always carry it; legacy
+    /// proofs read back as `None`). Used to pin exact-identity
+    /// replay: only a proof whose stored hash matches the aux under
+    /// test may cover it.
+    pub async fn test_get_verified_transfer_detail(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<Option<(u64, PublicKey, Option<DigestIdentifier>, bool)>, Error>
+    {
+        use crate::governance::transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<TransferVerificationRegister>(&ActorPath::from(
+                format!(
+                    "/user/node/subject_manager/\
+                    {governance_id}/transfer_verification_register"
+                ),
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "transfer_verification_register".to_owned(),
+                reason: "Transfer verification register not found".to_owned(),
+            })?;
+        match actor
+            .ask(
+                TransferVerificationRegisterMessage::GetVerifiedTransferDetail {
+                    subject_id,
+                },
+            )
+            .await?
+        {
+            TransferVerificationRegisterResponse::VerifiedTransferDetail(
+                result,
+            ) => Ok(result),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "transfer_verification_register".to_owned(),
+                expected: "VerifiedTransferDetail".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    async fn test_record_verified_transfer_inner(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        transfer_sn: u64,
+        sender: PublicKey,
+        transfer_hash: Option<DigestIdentifier>,
+    ) -> Result<(), Error> {
+        use crate::governance::transfer_verification_register::{
+            TransferVerificationRegister, TransferVerificationRegisterMessage,
+            TransferVerificationRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<TransferVerificationRegister>(&ActorPath::from(
+                format!(
+                    "/user/node/subject_manager/\
+                    {governance_id}/transfer_verification_register"
+                ),
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "transfer_verification_register".to_owned(),
+                reason: "Transfer verification register not found".to_owned(),
+            })?;
+        let message = match transfer_hash {
+            Some(transfer_hash) => {
+                TransferVerificationRegisterMessage::RecordVerifiedTransferV2 {
+                    subject_id,
+                    transfer_sn,
+                    sender,
+                    transfer_hash,
+                }
+            }
+            None => {
+                TransferVerificationRegisterMessage::RecordVerifiedTransfer {
+                    subject_id,
+                    transfer_sn,
+                    sender,
+                }
+            }
+        };
+        match actor.ask(message).await? {
+            TransferVerificationRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "transfer_verification_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Records a legacy transfer proof without hash, like journals
+    /// written before proofs carried one. Used to prove that legacy
+    /// proofs never auto-cover an aux (they must be revalidated
+    /// once and replaced by a hashed proof).
+    pub async fn test_record_legacy_verified_transfer(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        transfer_sn: u64,
+        sender: PublicKey,
+    ) -> Result<(), Error> {
+        self.test_record_verified_transfer_inner(
+            governance_id,
+            subject_id,
+            transfer_sn,
+            sender,
+            None,
+        )
+        .await
+    }
+
+    /// Records a hashed proof directly so tests can exercise SN-only
+    /// mismatches independently from legacy migration.
+    pub async fn test_record_hashed_verified_transfer(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        transfer_sn: u64,
+        sender: PublicKey,
+        transfer_hash: DigestIdentifier,
+    ) -> Result<(), Error> {
+        self.test_record_verified_transfer_inner(
+            governance_id,
+            subject_id,
+            transfer_sn,
+            sender,
+            Some(transfer_hash),
+        )
+        .await
+    }
+
     /// Arms a one-shot visibility fault on the node's distributor:
     /// the next modes lookup fails. Test deliveries address the
     /// node-level distributor, which always exists.

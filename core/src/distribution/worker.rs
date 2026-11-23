@@ -119,6 +119,7 @@ pub struct DistriWorker {
     pub(crate) frag_expired: std::sync::atomic::AtomicU64,
 }
 
+use super::transfer_verifier::SimulateInput;
 use super::transfer_verifier::TransferSimulationResult;
 
 pub(crate) struct CheckAuthCommon {
@@ -2407,10 +2408,13 @@ impl DistriWorker {
                 .verify_and_simulate(
                     &mut self.verify_cursors,
                     ctx,
-                    &subject_id,
-                    ledger,
-                    first_ledger,
-                    single_buffered,
+                    SimulateInput {
+                        subject_id: &subject_id,
+                        sender_ledger: ledger,
+                        transfer_event: first_ledger,
+                        buffered: single_buffered,
+                        sender: &sender,
+                    },
                 )
                 .await?
             {
@@ -4609,10 +4613,13 @@ impl DistriWorker {
                     .verify_and_simulate(
                         &mut self.verify_cursors,
                         ctx,
-                        &subject_id,
-                        &ledger,
-                        transfer_event,
-                        held_prefix,
+                        SimulateInput {
+                            subject_id: &subject_id,
+                            sender_ledger: &ledger,
+                            transfer_event,
+                            buffered: held_prefix,
+                            sender: &sender,
+                        },
                     )
                     .await?
                 {

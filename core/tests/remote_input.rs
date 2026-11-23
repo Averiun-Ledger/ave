@@ -23997,3 +23997,1180 @@ async fn remote_v1_ack_never_closes_generation() {
     drop(nodes);
     drop(dirs);
 }
+
+/// A recorded firm proof covers only an aux with the exact same
+/// subject, sn, sender and ledger hash. A divergent aux with the
+/// same SN, the same bytes from another sender and a higher-sn
+/// hashed proof over an older aux all force a fresh re-verification
+/// instead of reusing the verdict. A legacy proof without hash never
+/// covers: it is revalidated once and replaced by a hashed proof.
+#[test(tokio::test)]
+async fn remote_proof_only_covers_exact_aux_identity() {
+    async fn poll_sn(
+        api: &ave_core::Api,
+        subject_id: &DigestIdentifier,
+        want: u64,
+    ) {
+        let start = tokio::time::Instant::now();
+        loop {
+            if let Ok(state) = api.get_subject_state(subject_id.clone()).await {
+                if state.sn == want {
+                    return;
+                }
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timeout waiting for sn {want}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    async fn sink_empty_from(
+        api: &ave_core::Api,
+        subject: &DigestIdentifier,
+        from_sn: u64,
+    ) {
+        use ave_common::bridge::request::SinkEventsQuery;
+        let page = api
+            .get_sink_events(
+                subject.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(from_sn),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "rejected aux must emit nothing to sinks"
+        );
+    }
+    async fn ownership_of(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) -> (Option<PublicKey>, Option<PublicKey>) {
+        match api
+            .test_witnesses_ownership(governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => panic!("ownership must be readable"),
+            Ok((owner_now, pending, _, _)) => (owner_now, pending),
+        }
+    }
+    async fn tip_of(api: &ave_core::Api, subject_id: &DigestIdentifier) -> u64 {
+        api.get_subject_state(subject_id.clone()).await.unwrap().sn
+    }
+    async fn ledger_sns(
+        api: &ave_core::Api,
+        subject_id: &DigestIdentifier,
+        hi: u64,
+    ) -> Vec<u64> {
+        api.test_get_tracker_ledger(subject_id.clone(), hi)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|event| event.sn)
+            .collect::<Vec<_>>()
+    }
+    async fn proof_of(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) -> Option<(u64, PublicKey, Option<DigestIdentifier>, bool)> {
+        api.test_get_verified_transfer_detail(governance_id, subject_id.clone())
+            .await
+            .unwrap()
+    }
+
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let alice_keys = nodes[1].keys.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Rita", "key": rita_key.to_string()},
+            ]},
+            "schemas": { "add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0}
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}, {"name": "Rita", "namespace": []}],
+                        "creator": [
+                            {"name": "Alice", "namespace": [], "quantity": "infinity"},
+                            {"name": "Rita", "namespace": [], "quantity": "infinity"}
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).expect("node key");
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Four subjects with the same shape: create(0), two facts and a
+    // transfer(3, alice -> rita). Each one exercises a different
+    // proof/aux identity combination below. Built concurrently: the
+    // chains are independent.
+    async fn make_chain(
+        alice: &ave_core::Api,
+        governance_id: DigestIdentifier,
+        rita_key: PublicKey,
+        alice_keys: &ave_common::identity::keys::KeyPair,
+    ) -> (DigestIdentifier, Ledger, Ledger) {
+        let (subject_id, _) =
+            create_subject(alice, governance_id.clone(), "Example", "", true)
+                .await
+                .unwrap();
+        for data in [1u64, 2] {
+            emit_fact(
+                alice,
+                subject_id.clone(),
+                json!({"ModOne": {"data": data}}),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        emit_transfer(alice, subject_id.clone(), rita_key.clone(), true)
+            .await
+            .unwrap();
+        let history = alice
+            .test_get_tracker_ledger(subject_id.clone(), 3)
+            .await
+            .unwrap();
+        let fact = history
+            .iter()
+            .find(|event| event.sn == 2)
+            .expect("fact event")
+            .clone();
+        let transfer = history
+            .iter()
+            .find(|event| event.sn == 3)
+            .expect("transfer event")
+            .clone();
+        let fact_result = match &fact.protocols {
+            Protocols::TrackerFactFull { evaluation, .. } => evaluation
+                .evaluator_response_ok()
+                .expect("fact evaluation ok"),
+            _ => panic!("expected a full fact"),
+        };
+        let forged = forge_ok_evaluation(&transfer, fact_result, alice_keys);
+        (subject_id, transfer, forged)
+    }
+    let (chain_a, chain_b, chain_c, chain_d) = tokio::join!(
+        make_chain(
+            &alice,
+            governance_id.clone(),
+            rita_key.clone(),
+            &alice_keys
+        ),
+        make_chain(
+            &alice,
+            governance_id.clone(),
+            rita_key.clone(),
+            &alice_keys
+        ),
+        make_chain(
+            &alice,
+            governance_id.clone(),
+            rita_key.clone(),
+            &alice_keys
+        ),
+        make_chain(
+            &alice,
+            governance_id.clone(),
+            rita_key.clone(),
+            &alice_keys
+        )
+    );
+    let (subject_a, transfer_a, forged_a) = chain_a;
+    let (subject_b, transfer_b, _) = chain_b;
+    let (subject_c, transfer_c, forged_c) = chain_c;
+    let (subject_d, _transfer_d, forged_d) = chain_d;
+    let hash_a = transfer_a
+        .ledger_hash(HashAlgorithm::Blake3)
+        .expect("aux hashes");
+    assert!(
+        forged_a
+            .ledger_hash(HashAlgorithm::Blake3)
+            .expect("forged aux hashes")
+            != hash_a,
+        "same SN, different bytes is the divergent case"
+    );
+
+    let flow_a = async {
+        // Subject A: a proven aux records a firm proof. A divergent aux
+        // with the same SN must be re-verified and refuted, never
+        // covered; the exact aux then completes without re-verifying.
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_a.clone(), 1)
+                .await
+                .unwrap(),
+            None,
+        )
+        .await;
+        poll_sn(&rita, &subject_a, 1).await;
+        assert_eq!(
+            rita.test_get_verified_transfer_sn(
+                &governance_id,
+                subject_a.clone()
+            )
+            .await
+            .unwrap(),
+            None,
+            "no proof before the aux is verified"
+        );
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_a.clone(), 2)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.sn == 2)
+                .collect::<Vec<_>>(),
+            Some(transfer_a.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_a, 2).await;
+        let (proof_sn, proof_sender) = rita
+            .test_get_verified_transfer_sn(&governance_id, subject_a.clone())
+            .await
+            .unwrap()
+            .expect("proven aux records a firm proof");
+        assert_eq!(proof_sn, 3, "proof pins the aux sn");
+        assert_eq!(proof_sender, alice_key, "proof pins the sender");
+        // Divergent aux, same SN, different hash: must be re-verified
+        // and refuted instead of covered by the firm proof.
+        let verify_a1 =
+            rita.test_verify_stats(subject_a.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![forged_a.clone()],
+            Some(forged_a.clone()),
+        )
+        .await;
+        // Wait for the re-verification to run (work counters move) or
+        // fail fast if the tip advances (the bug: covered + applied).
+        // Falling out of the loop means the aux was re-verified.
+        let start = tokio::time::Instant::now();
+        loop {
+            let tip = tip_of(&rita, &subject_a).await;
+            let verify =
+                rita.test_verify_stats(subject_a.clone()).await.unwrap();
+            if tip != 2 {
+                panic!(
+                    "divergent aux must not advance the tip: sn advanced to {tip}"
+                );
+            }
+            if verify.0 > verify_a1.0 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "divergent aux was never re-verified"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            ledger_sns(&rita, &subject_a, 10).await,
+            vec![0, 1, 2],
+            "divergent aux writes nothing"
+        );
+        assert_eq!(
+            ownership_of(&rita, &governance_id, &subject_a).await,
+            (Some(alice_key.clone()), None),
+            "divergent aux must not move ownership"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_a).await,
+            Some((3, alice_key.clone(), Some(hash_a.clone()), false)),
+            "firm proof survives a refuted aux"
+        );
+        sink_empty_from(&rita, &subject_a, 3).await;
+        // The exact aux reuses the verdict without re-verifying and
+        // completes the copy with the genuine bytes.
+        let verify_a2 =
+            rita.test_verify_stats(subject_a.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![transfer_a.clone()],
+            Some(transfer_a.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_a, 3).await;
+        assert_eq!(
+            ledger_sns(&rita, &subject_a, 10).await,
+            vec![0, 1, 2, 3],
+            "exact aux applies"
+        );
+        let applied_hash = rita
+            .test_get_tracker_ledger(subject_a.clone(), 3)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.sn == 3)
+            .expect("applied transfer")
+            .ledger_hash(HashAlgorithm::Blake3)
+            .unwrap();
+        assert_eq!(applied_hash, hash_a, "exact bytes applied");
+        assert_eq!(
+            ownership_of(&rita, &governance_id, &subject_a).await,
+            (Some(alice_key.clone()), Some(rita_key.clone())),
+            "applied transfer opens pending ownership"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_a).await,
+            None,
+            "applied transfer spends the proof (single-use)"
+        );
+        assert_eq!(
+            rita.test_verify_stats(subject_a.clone()).await.unwrap(),
+            verify_a2,
+            "an exact aux reuses the verdict without re-verifying"
+        );
+    };
+
+    let flow_b = async {
+        // Subject B: the same bytes from another sender are verified again.
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_b.clone(), 1)
+                .await
+                .unwrap(),
+            None,
+        )
+        .await;
+        poll_sn(&rita, &subject_b, 1).await;
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_b.clone(), 2)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.sn == 2)
+                .collect::<Vec<_>>(),
+            Some(transfer_b.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_b, 2).await;
+        let verify_b0 =
+            rita.test_verify_stats(subject_b.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &owner_key,
+            vec![transfer_b.clone()],
+            Some(transfer_b.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_b, 3).await;
+        let verify_b1 =
+            rita.test_verify_stats(subject_b.clone()).await.unwrap();
+        assert!(
+            verify_b1.0 > verify_b0.0,
+            "another sender's aux re-verifies instead of reusing the proof"
+        );
+        assert_eq!(
+            tip_of(&rita, &subject_b).await,
+            3,
+            "relayed genuine aux still applies"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_b).await,
+            None,
+            "applied transfer spends the proof instead of it being stolen"
+        );
+    };
+
+    let flow_c = async {
+        // Subject C: a legacy proof without hash never covers.
+        let hash_c = transfer_c
+            .ledger_hash(HashAlgorithm::Blake3)
+            .expect("aux hashes");
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_c.clone(), 1)
+                .await
+                .unwrap(),
+            None,
+        )
+        .await;
+        poll_sn(&rita, &subject_c, 1).await;
+        rita.test_record_legacy_verified_transfer(
+            &governance_id,
+            subject_c.clone(),
+            3,
+            alice_key.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_c).await,
+            Some((3, alice_key.clone(), None, false)),
+            "legacy proof carries no hash"
+        );
+        // A divergent aux chained behind the genuine fact forces a full
+        // evidence replay and refutes; the wait below ends only once
+        // that verdict ran (counters move), never on a fixed sleep.
+        let fact2_c = alice
+            .test_get_tracker_ledger(subject_c.clone(), 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.sn == 2)
+            .expect("fact 2");
+        let verify_c_div =
+            rita.test_verify_stats(subject_c.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![fact2_c, forged_c.clone()],
+            Some(forged_c.clone()),
+        )
+        .await;
+        let start = tokio::time::Instant::now();
+        loop {
+            if rita.test_verify_stats(subject_c.clone()).await.unwrap().0
+                > verify_c_div.0
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "divergent aux against a legacy proof was never re-verified"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            tip_of(&rita, &subject_c).await,
+            1,
+            "divergent aux against a legacy proof must not advance"
+        );
+        assert_eq!(
+            ledger_sns(&rita, &subject_c, 10).await,
+            vec![0, 1],
+            "divergent aux against a legacy proof writes nothing"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_c).await,
+            Some((3, alice_key.clone(), None, false)),
+            "legacy proof survives a refuted aux"
+        );
+        sink_empty_from(&rita, &subject_c, 2).await;
+        // The genuine aux revalidates the legacy proof and replaces it
+        // with a hashed one; afterwards the exact aux is covered.
+        let verify_c0 =
+            rita.test_verify_stats(subject_c.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_c.clone(), 2)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.sn == 2)
+                .collect::<Vec<_>>(),
+            Some(transfer_c.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_c, 2).await;
+        let detail_c = proof_of(&rita, &governance_id, &subject_c).await;
+        assert_eq!(
+            detail_c,
+            Some((3, alice_key.clone(), Some(hash_c.clone()), false)),
+            "revalidated proof replaces the legacy entry with its hash"
+        );
+        assert!(
+            rita.test_verify_stats(subject_c.clone()).await.unwrap().0
+                > verify_c0.0,
+            "replacing a legacy proof replays the evidence"
+        );
+        let verify_c1 =
+            rita.test_verify_stats(subject_c.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![transfer_c.clone()],
+            Some(transfer_c.clone()),
+        )
+        .await;
+        poll_sn(&rita, &subject_c, 3).await;
+        assert_eq!(
+            rita.test_verify_stats(subject_c.clone()).await.unwrap(),
+            verify_c1,
+            "the exact aux after replacement reuses the verdict"
+        );
+        assert_eq!(
+            ownership_of(&rita, &governance_id, &subject_c).await,
+            (Some(alice_key.clone()), Some(rita_key.clone())),
+            "applied transfer opens pending ownership"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_c).await,
+            None,
+            "applied transfer spends the replaced proof (single-use)"
+        );
+    };
+
+    let flow_d = async {
+        // Subject D: a higher-sn hashed proof does not cover an older aux,
+        // even when its stored hash matches that aux exactly.
+        let hash_d = forged_d
+            .ledger_hash(HashAlgorithm::Blake3)
+            .expect("aux hash");
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            alice
+                .test_get_tracker_ledger(subject_d.clone(), 1)
+                .await
+                .unwrap(),
+            None,
+        )
+        .await;
+        poll_sn(&rita, &subject_d, 1).await;
+        rita.test_record_hashed_verified_transfer(
+            &governance_id,
+            subject_d.clone(),
+            5,
+            alice_key.clone(),
+            hash_d.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_d).await,
+            Some((5, alice_key.clone(), Some(hash_d.clone()), false)),
+            "hashed higher-sn proof is installed"
+        );
+        let fact2_d = alice
+            .test_get_tracker_ledger(subject_d.clone(), 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.sn == 2)
+            .expect("fact 2");
+        // Same bounded-verdict wait as above: the higher-sn proof must
+        // not cover, so the older aux replays its evidence and refutes.
+        let verify_d_div =
+            rita.test_verify_stats(subject_d.clone()).await.unwrap();
+        inject_ledger_batch(
+            &rita,
+            &alice_key,
+            vec![fact2_d, forged_d.clone()],
+            Some(forged_d.clone()),
+        )
+        .await;
+        let start = tokio::time::Instant::now();
+        loop {
+            if rita.test_verify_stats(subject_d.clone()).await.unwrap().0
+                > verify_d_div.0
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "older aux under a higher-sn proof was never re-verified"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            tip_of(&rita, &subject_d).await,
+            1,
+            "a higher-sn proof must not cover an older aux"
+        );
+        assert_eq!(
+            ledger_sns(&rita, &subject_d, 10).await,
+            vec![0, 1],
+            "a higher-sn proof writes nothing for an older aux"
+        );
+        assert_eq!(
+            proof_of(&rita, &governance_id, &subject_d).await,
+            Some((5, alice_key.clone(), Some(hash_d.clone()), false)),
+            "hashed higher-sn proof survives a refuted aux"
+        );
+        sink_empty_from(&rita, &subject_d, 2).await;
+    };
+
+    // The four subjects are independent: run their flows concurrently.
+    tokio::join!(flow_a, flow_b, flow_c, flow_d);
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}
+
+/// A stale push is acknowledged only when the pushed bytes match the
+/// local event at that SN. An identical duplicate gets exactly one
+/// ACK without rewriting anything; a same-SN divergence gets no ACK,
+/// no success and no writes, while the correction request still goes
+/// out. Covers SN0 (an alternative Create) and later SNs, and a
+/// genuine next event still applies afterwards.
+#[test(tokio::test)]
+async fn remote_divergent_duplicate_push_is_not_acknowledged() {
+    async fn poll_sn(
+        api: &ave_core::Api,
+        subject_id: &DigestIdentifier,
+        want: u64,
+    ) {
+        let start = tokio::time::Instant::now();
+        loop {
+            if let Ok(state) = api.get_subject_state(subject_id.clone()).await {
+                if state.sn == want {
+                    return;
+                }
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timeout waiting for sn {want}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    async fn sink_empty_from(
+        api: &ave_core::Api,
+        subject: &DigestIdentifier,
+        from_sn: u64,
+    ) {
+        use ave_common::bridge::request::SinkEventsQuery;
+        let page = api
+            .get_sink_events(
+                subject.clone(),
+                SinkEventsQuery {
+                    from_sn: Some(from_sn),
+                    to_sn: None,
+                    limit: Some(100),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "a divergent or duplicate push must emit nothing new"
+        );
+    }
+    async fn inject_single(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Ledger,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).expect("node key");
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLastEventReq {
+                    ledger: Box::new(ledger),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    async fn held_acks(api: &ave_core::Api) -> Vec<DigestIdentifier> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|message| match message.message {
+                ActorMessage::DistributionLastEventRes { event_hash } => {
+                    Some(event_hash)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    async fn held_reqs(
+        api: &ave_core::Api,
+        subject_id: &DigestIdentifier,
+    ) -> Vec<Option<u64>> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|message| match message.message {
+                ActorMessage::DistributionLedgerReq {
+                    actual_sn,
+                    subject_id: req_subject,
+                    ..
+                } if &req_subject == subject_id => Some(actual_sn),
+                _ => None,
+            })
+            .collect()
+    }
+    async fn ownership_of(
+        api: &ave_core::Api,
+        governance_id: &DigestIdentifier,
+        subject_id: &DigestIdentifier,
+    ) -> (Option<PublicKey>, Option<PublicKey>) {
+        match api
+            .test_witnesses_ownership(governance_id, subject_id.clone())
+            .await
+        {
+            Err(_) => panic!("ownership must be readable"),
+            Ok((owner_now, pending, _, _)) => (owner_now, pending),
+        }
+    }
+
+    let (mut nodes, dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let rita_signer = Ed25519Signer::generate().unwrap();
+    let rita_key = PublicKey::new(
+        ave_common::identity::keys::DSAlgorithm::Ed25519,
+        rita_signer.public_key_bytes(),
+    )
+    .unwrap();
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Rita", "key": rita_key.to_string()},
+            ]},
+            "schemas": { "add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0}
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["Alice"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}, {"name": "Rita", "namespace": []}],
+                        "creator": [{"name": "Alice", "namespace": [], "quantity": "infinity"}],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    alice.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&alice, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let rita_port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut rita_node, rita_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{rita_port}"),
+        peers: vec![RoutingNode {
+            peer_id: boot_peer.clone(),
+            address: vec![boot_addr.clone()],
+        }],
+        always_accept: true,
+        keys: Some(ave_common::identity::keys::KeyPair::Ed25519(rita_signer)),
+        ..Default::default()
+    })
+    .await;
+    let rita = rita_node.api.clone();
+    node_running(&rita).await.unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        ave_core::auth::AuthWitness::One(
+            PublicKey::from_str(owner.public_key()).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let alice_key = PublicKey::from_str(alice.public_key()).unwrap();
+    let rita_public = PublicKey::from_str(rita.public_key()).expect("node key");
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLedgerReq,
+    ] {
+        alice
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(rita_public.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    // Hold rita's ACKs and correction requests so the test can count
+    // exactly what each injected push would have sent.
+    for message in [
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionLedgerReq,
+    ] {
+        rita.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(alice_key.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [1u64, 2] {
+        emit_fact(
+            &alice,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let history = alice
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    let hfind = |sn: u64| {
+        history
+            .iter()
+            .find(|event| event.sn == sn)
+            .expect("history")
+            .clone()
+    };
+    let create = hfind(0);
+    let fact1 = hfind(1);
+    let fact2 = hfind(2);
+    let hash_create =
+        create.ledger_hash(HashAlgorithm::Blake3).expect("hashes");
+    let hash_fact1 = fact1.ledger_hash(HashAlgorithm::Blake3).expect("hashes");
+    // Same SN, different bytes: bumping the governance version is
+    // enough to change the ledger hash. The stale path never
+    // inspects signatures, so no re-signing is needed.
+    let mut divergent_create = create.clone();
+    divergent_create.gov_version += 1;
+    let mut divergent_fact1 = fact1.clone();
+    divergent_fact1.gov_version += 1;
+    assert_ne!(
+        divergent_create.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        hash_create,
+        "divergent SN0 must hash differently"
+    );
+    assert_ne!(
+        divergent_fact1.ledger_hash(HashAlgorithm::Blake3).unwrap(),
+        hash_fact1,
+        "divergent SN1 must hash differently"
+    );
+
+    // Seed the subject via the batch path (a lone pushed Create for
+    // an unknown subject carries no receiver access on its own):
+    // the push tests below start from this applied tip.
+    inject_ledger_batch(&rita, &alice_key, vec![create.clone()], None).await;
+    poll_sn(&rita, &subject_id, 0).await;
+    assert!(
+        held_acks(&rita).await.is_empty(),
+        "batch seeding sends no push acks"
+    );
+    // A genuine SN0 push is an identical duplicate: acked exactly once.
+    inject_single(&rita, &alice_key, create.clone()).await;
+    let start = tokio::time::Instant::now();
+    loop {
+        if !held_acks(&rita).await.is_empty() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "genuine SN0 push must be acknowledged"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        held_acks(&rita).await,
+        vec![hash_create.clone()],
+        "genuine push acks exactly once"
+    );
+    // A divergent SN0 is not applied and, crucially, not acked, but
+    // the correction request still goes out.
+    inject_single(&rita, &alice_key, divergent_create.clone()).await;
+    let start = tokio::time::Instant::now();
+    loop {
+        if held_acks(&rita).await.len() > 1 {
+            panic!("divergent SN0 must never be acknowledged");
+        }
+        if !held_reqs(&rita, &subject_id).await.is_empty() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "divergent SN0 push produced no correction request"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Hold the wait a beat: an ack racing the request must still show up.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        held_acks(&rita).await,
+        vec![hash_create.clone()],
+        "no ack for the divergent SN0"
+    );
+    assert_eq!(
+        rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+        0,
+        "divergent create writes nothing"
+    );
+    assert_eq!(
+        ownership_of(&rita, &governance_id, &subject_id).await,
+        (Some(alice_key.clone()), None),
+        "divergent create changes no ownership"
+    );
+    sink_empty_from(&rita, &subject_id, 1).await;
+    // An identical SN0 is acked exactly once without rewriting.
+    inject_single(&rita, &alice_key, create.clone()).await;
+    let start = tokio::time::Instant::now();
+    loop {
+        if held_acks(&rita).await.len() >= 2 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "identical SN0 must be acknowledged"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        held_acks(&rita).await,
+        vec![hash_create.clone(), hash_create.clone()],
+        "identical SN0 acks exactly once, no rewrite"
+    );
+    assert_eq!(
+        rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+        0,
+        "identical duplicate applies nothing new"
+    );
+
+    // The genuine SN1 applies on top and acks.
+    inject_single(&rita, &alice_key, fact1.clone()).await;
+    poll_sn(&rita, &subject_id, 1).await;
+    assert_eq!(
+        rita.test_verify_stats(subject_id.clone()).await.unwrap().0,
+        0,
+        "no verification work is tracked for plain pushes"
+    );
+    // A divergent SN1 with the same shape is dropped silently.
+    inject_single(&rita, &alice_key, divergent_fact1.clone()).await;
+    let start = tokio::time::Instant::now();
+    loop {
+        if held_reqs(&rita, &subject_id).await.len() >= 3 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "divergent SN1 push produced no correction request"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let acks_after_divergent = held_acks(&rita).await.len();
+    assert_eq!(
+        acks_after_divergent, 3,
+        "no ack for the divergent SN1 (acks so far: genuine SN0, identical SN0, genuine SN1)"
+    );
+    assert_eq!(
+        rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+        1,
+        "divergent SN1 writes nothing"
+    );
+    let stored: Vec<u64> = rita
+        .test_get_tracker_ledger(subject_id.clone(), 10)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|event| event.sn)
+        .collect();
+    assert_eq!(stored, vec![0, 1], "divergent SN1 is not stored");
+    assert_eq!(
+        ownership_of(&rita, &governance_id, &subject_id).await,
+        (Some(alice_key.clone()), None),
+        "divergent fact changes no ownership"
+    );
+    sink_empty_from(&rita, &subject_id, 2).await;
+    // An identical SN1 is acked exactly once without rewriting.
+    inject_single(&rita, &alice_key, fact1.clone()).await;
+    let start = tokio::time::Instant::now();
+    loop {
+        if held_acks(&rita).await.len() >= 4 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "identical SN1 must be acknowledged"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        held_acks(&rita).await.len(),
+        4,
+        "identical SN1 acks exactly once"
+    );
+    assert_eq!(
+        held_acks(&rita).await[3],
+        hash_fact1,
+        "identical SN1 ack carries the local hash"
+    );
+    // A genuine next event still applies and completes.
+    inject_single(&rita, &alice_key, fact2.clone()).await;
+    poll_sn(&rita, &subject_id, 2).await;
+    assert_eq!(
+        rita.get_subject_state(subject_id.clone()).await.unwrap().sn,
+        2,
+        "genuine next event still applies after divergents"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    rita_node.token.cancel();
+    join_all(
+        nodes
+            .iter_mut()
+            .flat_map(|node| node.handler.iter_mut())
+            .chain(rita_node.handler.iter_mut()),
+    )
+    .await;
+    drop(nodes);
+    drop(dirs);
+    drop(rita_node);
+    drop(rita_dirs);
+}

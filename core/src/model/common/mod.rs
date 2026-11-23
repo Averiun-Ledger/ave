@@ -274,6 +274,7 @@ pub async fn record_verified_transfer<A>(
     subject_id: &DigestIdentifier,
     transfer_sn: u64,
     sender: PublicKey,
+    transfer_hash: DigestIdentifier,
 ) -> Result<(), ActorError>
 where
     A: Actor + Handler<A>,
@@ -288,10 +289,11 @@ where
 
     let response = actor
         .ask(
-            TransferVerificationRegisterMessage::RecordVerifiedTransfer {
+            TransferVerificationRegisterMessage::RecordVerifiedTransferV2 {
                 subject_id: subject_id.to_owned(),
                 transfer_sn,
                 sender,
+                transfer_hash,
             },
         )
         .await?;
@@ -351,7 +353,7 @@ pub async fn get_verified_transfer_detail<A>(
     ctx: &mut ActorContext<A>,
     governance_id: &DigestIdentifier,
     subject_id: &DigestIdentifier,
-) -> Result<Option<(u64, PublicKey, bool)>, ActorError>
+) -> Result<Option<(u64, PublicKey, Option<DigestIdentifier>, bool)>, ActorError>
 where
     A: Actor + Handler<A>,
 {
@@ -399,8 +401,8 @@ where
 {
     Ok(get_verified_transfer_detail(ctx, governance_id, subject_id)
         .await?
-        .filter(|(_, _, speculative)| !speculative)
-        .map(|(sn, sender, _)| (sn, sender)))
+        .filter(|(_, _, _, speculative)| !speculative)
+        .map(|(sn, sender, _, _)| (sn, sender)))
 }
 
 pub async fn remove_verified_transfer<A>(

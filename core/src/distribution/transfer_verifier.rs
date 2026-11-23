@@ -380,6 +380,17 @@ pub(crate) struct TransferVerifier {
     pub(crate) test_tracker_resolve_fault: AtomicU8,
 }
 
+/// Inputs for [`TransferVerifier::verify_and_simulate`]: the aux
+/// hint under test, the ledgers it must reproduce over and the peer
+/// it arrived from. Bundled so the gate keeps a short signature.
+pub(crate) struct SimulateInput<'a> {
+    pub subject_id: &'a DigestIdentifier,
+    pub sender_ledger: &'a [Ledger],
+    pub transfer_event: &'a Ledger,
+    pub buffered: &'a [Ledger],
+    pub sender: &'a PublicKey,
+}
+
 /// Inputs for [`TransferVerifier::verify_aux_evidence`]: the aux
 /// hint under test and the ledgers it must reproduce over.
 /// Bundled so the evidence gate keeps a short signature.
@@ -1834,11 +1845,15 @@ impl TransferVerifier {
         &self,
         cursors: &mut VerifyCursorStore,
         ctx: &mut ActorContext<super::worker::DistriWorker>,
-        subject_id: &DigestIdentifier,
-        sender_ledger: &[Ledger],
-        transfer_event: &Ledger,
-        buffered: &[Ledger],
+        input: SimulateInput<'_>,
     ) -> Result<TransferSimulationResult, ActorError> {
+        let SimulateInput {
+            subject_id,
+            sender_ledger,
+            transfer_event,
+            buffered,
+            sender,
+        } = input;
         let first_ledger =
             sender_ledger
                 .first()
@@ -1898,15 +1913,22 @@ impl TransferVerifier {
                 if evaluation.is_ok()
         );
         let covered = if transfer_opens_passage
-            && let Ok(Some((proven_sn, _, speculative))) =
-                crate::model::common::get_verified_transfer_detail(
-                    ctx,
-                    &governance_id,
-                    subject_id,
-                )
-                .await
+            && let Ok(Some((
+                proven_sn,
+                proven_sender,
+                proven_hash,
+                speculative,
+            ))) = crate::model::common::get_verified_transfer_detail(
+                ctx,
+                &governance_id,
+                subject_id,
+            )
+            .await
             && !speculative
-            && proven_sn >= transfer_event.sn
+            && proven_sn == transfer_event.sn
+            && proven_sender == *sender
+            && let Ok(aux_hash) = transfer_event.ledger_hash(self.hash)
+            && proven_hash.as_ref() == Some(&aux_hash)
         {
             true
         } else {

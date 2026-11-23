@@ -26,7 +26,7 @@ use crate::{
         CheckAuthCommon, DistriWorker, DistributionContext, TransferBatch,
     },
     governance::{
-        Governance, GovernanceMessage,
+        Governance, GovernanceMessage, GovernanceResponse,
         sn_register::{SnRegister, SnRegisterMessage, SnRegisterResponse},
         subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
@@ -80,7 +80,7 @@ impl DistriWorker {
         // consumes the register when it applies any transfer, so
         // recording before the apply would let an earlier inline
         // transfer wipe the proof this batch just earned.
-        let mut pending_proof_sn: Option<u64> = None;
+        let mut pending_proof: Option<(u64, DigestIdentifier)> = None;
         let sender_is_all = dist_ctx.sender_is_all;
         let mut verified_transfer_sn = transfer_batch.verified_sn;
         let info = &dist_ctx.info;
@@ -174,9 +174,22 @@ impl DistriWorker {
                     // Refresh verified_transfer_sn so the next loop
                     // iteration can use Path C (free passage). The
                     // register write waits until the chunk applies
-                    // (see pending_proof_sn below).
+                    // (see pending_proof below).
                     verified_transfer_sn = Some(transfer_event.sn);
-                    pending_proof_sn = Some(transfer_event.sn);
+                    match transfer_event.ledger_hash(self.hash) {
+                        Ok(aux_hash) => {
+                            pending_proof = Some((transfer_event.sn, aux_hash));
+                        }
+                        Err(error) => {
+                            warn!(
+                                msg_type = "LedgerDistribution",
+                                subject_id = %subject_id,
+                                sn = transfer_event.sn,
+                                error = %error,
+                                "Proven aux hash failed, recording no proof"
+                            );
+                        }
+                    }
                 } else if matches!(
                     transfer_simulation,
                     Some(TransferSimulationResult::WitnessUnproven)
@@ -496,7 +509,8 @@ impl DistriWorker {
                         // applies a transfer: if this chunk already
                         // applied the proven aux itself, the proof is
                         // spent and must not be resurrected here.
-                        if let Some(proof_sn) = pending_proof_sn.take()
+                        if let Some((proof_sn, proof_hash)) =
+                            pending_proof.take()
                             && last_sn < proof_sn
                         {
                             record_verified_transfer(
@@ -505,6 +519,7 @@ impl DistriWorker {
                                 &subject_id,
                                 proof_sn,
                                 sender.clone(),
+                                proof_hash,
                             )
                             .await?;
                             transfer_recorded = true;
@@ -862,7 +877,7 @@ impl DistriWorker {
                 subject_id,
             )
             .await,
-            Ok(Some((sn, _, true))) if sn == aux_sn
+            Ok(Some((sn, _, _, true))) if sn == aux_sn
         );
         if !speculative {
             return;
@@ -2028,6 +2043,82 @@ impl DistriWorker {
         result
     }
 
+    /// Hash of the locally stored event at `sn`, if readable. Used
+    /// by the stale-push branch: only a byte-identical duplicate
+    /// earns an ACK, never a same-SN divergence.
+    async fn local_event_hash(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        sn: u64,
+    ) -> Result<Option<DigestIdentifier>, ActorError> {
+        let (path, subject_data) =
+            get_subject_path_and_data(ctx, subject_id).await?;
+        // `lo_sn` is exclusive in `GetLedger`: ask from just below.
+        let lo_sn = sn.checked_sub(1);
+        let found: Option<Ledger> = match subject_data {
+            crate::node::SubjectData::Tracker { .. } => {
+                let lease = acquire_subject(
+                    ctx,
+                    subject_id,
+                    format!("stale_push_check:{subject_id}"),
+                    None,
+                    true,
+                )
+                .await?;
+                let tracker_actor =
+                    match ctx.system().get_actor::<Tracker>(&path).await {
+                        Ok(actor) => actor,
+                        Err(error) => {
+                            lease.finish(ctx).await?;
+                            return Err(error.into());
+                        }
+                    };
+                let response = tracker_actor
+                    .ask(TrackerMessage::GetLedger { lo_sn, hi_sn: sn })
+                    .await;
+                lease.finish(ctx).await?;
+                match response? {
+                    TrackerResponse::Ledger { mut ledger, .. } => ledger.pop(),
+                    _ => {
+                        return Err(ActorError::UnexpectedResponse {
+                            path,
+                            expected: "TrackerResponse::Ledger".to_owned(),
+                        });
+                    }
+                }
+            }
+            crate::node::SubjectData::Governance { .. } => {
+                let governance_actor =
+                    ctx.system().get_actor::<Governance>(&path).await?;
+                match governance_actor
+                    .ask(GovernanceMessage::GetLedger { lo_sn, hi_sn: sn })
+                    .await?
+                {
+                    GovernanceResponse::Ledger { mut ledger, .. } => {
+                        ledger.pop()
+                    }
+                    _ => {
+                        return Err(ActorError::UnexpectedResponse {
+                            path,
+                            expected: "GovernanceResponse::Ledger".to_owned(),
+                        });
+                    }
+                }
+            }
+        };
+        found
+            .filter(|event| event.sn == sn)
+            .map(|event| {
+                event.ledger_hash(self.hash).map_err(|e| {
+                    ActorError::Functional {
+                        description: format!("Can not hash local event: {e}"),
+                    }
+                })
+            })
+            .transpose()
+    }
+
     pub(crate) async fn run_last_event_distribution(
         &mut self,
         ctx: &mut ActorContext<Self>,
@@ -2061,8 +2152,43 @@ impl DistriWorker {
                 get_local_subject_sn(ctx, &subject_id).await?
                 && local_sn >= sn
             {
-                self.send_last_event_ack(sender.clone(), &info, &received_hash)
-                    .await?;
+                // Stale push: only an identical duplicate earns an
+                // ACK. A same-SN divergence is never acknowledged (the
+                // correction request above already went out); acking
+                // the received hash would confirm bytes we do not hold.
+                match self.local_event_hash(ctx, &subject_id, sn).await? {
+                    Some(local_hash) if local_hash == received_hash => {
+                        self.send_last_event_ack(
+                            sender.clone(),
+                            &info,
+                            &received_hash,
+                        )
+                        .await?;
+                    }
+                    Some(_) => {
+                        warn!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            "Stale push diverges from local event, no ack",
+                        );
+                        if let Some(metrics) =
+                            crate::metrics::try_core_metrics()
+                        {
+                            metrics.observe_distribution_failure(
+                                "stale_divergent_push",
+                            );
+                        }
+                    }
+                    None => {
+                        warn!(
+                            msg_type = "LastEventDistribution",
+                            subject_id = %subject_id,
+                            sn = sn,
+                            "Stale push for unreadable local event, no ack",
+                        );
+                    }
+                }
             }
             return Ok(());
         }
