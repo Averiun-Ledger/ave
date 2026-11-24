@@ -240,6 +240,8 @@ pub struct Governance {
     /// Skip boot reconciliation (clean boot or already reconciled
     /// this boot): the subject manager decides once per boot.
     pub skip_reconcile: bool,
+    #[cfg(feature = "test")]
+    pub deferred_acquisition_count: u64,
     pub state: Arc<GovernanceState>,
 }
 
@@ -250,6 +252,8 @@ impl Clone for Governance {
             service: self.service,
             hash: self.hash,
             skip_reconcile: self.skip_reconcile,
+            #[cfg(feature = "test")]
+            deferred_acquisition_count: self.deferred_acquisition_count,
             state: self.state.clone(),
         }
     }
@@ -5097,6 +5101,8 @@ pub enum GovernanceMessage {
         from_sn: u64,
         batch_size: usize,
     },
+    #[cfg(feature = "test")]
+    TestDeferredAcquisitionCount,
 }
 
 impl Message for GovernanceMessage {}
@@ -5125,6 +5131,8 @@ pub enum GovernanceResponse {
     SchemaRoles(Option<RolesSchema>),
     TrackerRoles(RolesTrackerSchemas),
     SinkEvents(Vec<DataToSink>),
+    #[cfg(feature = "test")]
+    DeferredAcquisitionCount(u64),
     Ok,
 }
 impl Response for GovernanceResponse {}
@@ -5540,7 +5548,18 @@ impl Handler<Self> for Governance {
         msg: GovernanceMessage,
         ctx: &mut ActorContext<Self>,
     ) -> Result<GovernanceResponse, ActorError> {
+        #[cfg(feature = "test")]
+        if matches!(&msg, GovernanceMessage::RunDeferredAcquisition) {
+            self.deferred_acquisition_count =
+                self.deferred_acquisition_count.saturating_add(1);
+        }
         match msg {
+            #[cfg(feature = "test")]
+            GovernanceMessage::TestDeferredAcquisitionCount => {
+                Ok(GovernanceResponse::DeferredAcquisitionCount(
+                    self.deferred_acquisition_count,
+                ))
+            }
             GovernanceMessage::GetVersion => {
                 Ok(GovernanceResponse::Version(self.properties.version))
             }
@@ -5788,6 +5807,8 @@ impl PersistentActor for Governance {
             our_key: params.1,
             service: params.3,
             skip_reconcile: params.4,
+            #[cfg(feature = "test")]
+            deferred_acquisition_count: 0,
             state: Arc::new(GovernanceState {
                 subject_metadata,
                 properties,

@@ -17,8 +17,9 @@ use updater::{Updater, UpdaterMessage};
 
 use crate::{
     NetworkMessage,
-    governance::witnesses_register::{
-        TrackerDeliveryMode, TrackerDeliveryRange,
+    governance::{
+        Governance, GovernanceMessage,
+        witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
     },
     helpers::network::{ActorMessage, delivery_of, service::NetworkSender},
     model::common::{
@@ -119,10 +120,6 @@ impl Update {
 
     const fn should_retry_auth_rounds(&self) -> bool {
         matches!(self.update_type, UpdateType::Auth)
-            && !matches!(
-                self.subject_kind_hint,
-                Some(UpdateSubjectKind::Governance)
-            )
     }
 
     fn has_progress(&self, sn: u64) -> bool {
@@ -423,6 +420,40 @@ impl Update {
         self.pending_retry = Some(key);
         Ok(())
     }
+
+    async fn trigger_deferred_if_governance(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) {
+        if self.subject_kind_hint != Some(UpdateSubjectKind::Governance) {
+            return;
+        }
+        let path = ActorPath::from(format!(
+            "/user/node/subject_manager/{}",
+            self.subject_id
+        ));
+        let Ok(governance) =
+            ctx.system().get_actor::<Governance>(&path).await
+        else {
+            debug!(
+                msg_type = "DistributionDone",
+                subject_id = %self.subject_id,
+                "Governance actor not found for deferred acquisition"
+            );
+            return;
+        };
+        if let Err(e) = governance
+            .tell(GovernanceMessage::RunDeferredAcquisition)
+            .await
+        {
+            warn!(
+                msg_type = "DistributionDone",
+                subject_id = %self.subject_id,
+                error = %e,
+                "Failed to trigger deferred acquisition on certified tip"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -548,6 +579,7 @@ impl Handler<Self> for Update {
                         expected_target_sn = expected_target_sn,
                         "Update target already reached before retry round restart"
                     );
+                    self.trigger_deferred_if_governance(ctx).await;
                     ctx.stop(None).await;
                     return Ok(());
                 }
@@ -615,22 +647,39 @@ impl Handler<Self> for Update {
                         if let Some((better_node, offer, target_sn)) =
                             selected_request.clone()
                         {
+                            // A first copy has no local metadata from
+                            // which to infer the subject kind. The selected
+                            // offer is the first authoritative kind and
+                            // governs completion and deferred acquisition.
+                            let selected_kind = offer.kind;
+                            self.subject_kind_hint = Some(selected_kind);
                             // Only offers covering our next sn count:
                             // a stale witness must not inflate the
                             // target beyond the selected peer's reach.
-                            let mut expected_target_sn = self
-                                .offers
-                                .values()
-                                .filter(|offer| {
-                                    offer.kind == UpdateSubjectKind::Tracker
-                                })
-                                .filter(|offer| {
-                                    self.next_tracker_range(&offer.ranges)
-                                        .is_some()
-                                })
-                                .map(|offer| offer.sn)
-                                .max()
-                                .unwrap_or(target_sn);
+                            // Tracker offers need a range covering the
+                            // next sn; governance offers only need to be
+                            // ahead of us. Offers of another kind cannot
+                            // move this subject's target.
+                            let mut expected_target_sn = target_sn;
+                            for candidate in self.offers.values() {
+                                if candidate.kind != selected_kind {
+                                    continue;
+                                }
+                                let covered = match candidate.kind {
+                                    UpdateSubjectKind::Tracker => self
+                                        .next_tracker_range(
+                                            &candidate.ranges,
+                                        )
+                                        .is_some(),
+                                    UpdateSubjectKind::Governance => {
+                                        self.has_progress(candidate.sn)
+                                    }
+                                };
+                                if covered {
+                                    expected_target_sn =
+                                        expected_target_sn.max(candidate.sn);
+                                }
+                            }
 
                             let verified_sn = self
                                 .already_verified_transfer_sn(ctx, &better_node)
@@ -695,9 +744,7 @@ impl Handler<Self> for Update {
                                 );
                             }
 
-                            if matches!(offer.kind, UpdateSubjectKind::Tracker)
-                                && self.should_retry_auth_rounds()
-                            {
+                            if self.should_retry_auth_rounds() {
                                 keep_running = true;
                                 self.pending_target_sn =
                                     Some(expected_target_sn);
@@ -842,6 +889,7 @@ impl Handler<Self> for Update {
                     ctx.cancel_timer(key);
                 }
                 self.pending_target_sn = None;
+                self.trigger_deferred_if_governance(ctx).await;
                 ctx.stop(None).await;
             }
         };

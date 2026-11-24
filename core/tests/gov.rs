@@ -23,12 +23,16 @@ use ave_common::{
 use ave_core::Api;
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
+use ave_core::helpers::network::test_faults::{
+    FaultAction, FaultDirection, FaultMessage, FaultRule,
+};
+use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::governance::model::{
     CreatorWitness, PolicyGov, PolicySchema, Quorum, RoleCreator,
     RoleGovIssuer, RolesGov, RolesSchema, RolesTrackerSchemas, Schema,
 };
 
-use ave_network::{NodeType, RoutingNode};
+use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     CHANGED_SCHEMA_CONTRACT, CreateNodeConfig, CreateNodesAndConnectionsConfig,
     EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
@@ -6752,4 +6756,595 @@ async fn approvals_listing_covers_all_governances_paged() {
     })
     .await
     .expect("approvals listing hung");
+}
+
+// Auth governance copies are supervised to the offered
+// SN. Single witness, no periodic sync to mask the fault.
+#[test(tokio::test)]
+async fn gov_copy_auth_req_lost_retries_to_tip() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let learner_key =
+        PublicKey::from_str(learner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B", "C", "D"] {
+        let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+        emit_fact(
+            &owner,
+            governance_id.clone(),
+            serde_json::json!({"members": {"add": [{"name": name, "key": key}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    learner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    let state =
+        get_subject(&learner, governance_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    assert_eq!(state.sn, tip);
+    let held = learner.test_held_outbound().await.unwrap();
+    let held_reqs = held
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerReq { .. }
+            )
+        })
+        .count();
+    assert_eq!(held_reqs, 1, "first request must stay held, copy via retry");
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Lost first ledger response is retried to the tip.
+#[test(tokio::test)]
+async fn gov_copy_auth_res_lost_retries_to_tip() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let learner_key =
+        PublicKey::from_str(learner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B", "C", "D"] {
+        let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+        emit_fact(
+            &owner,
+            governance_id.clone(),
+            serde_json::json!({"members": {"add": [{"name": name, "key": key}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerRes,
+            peer: Some(learner_key.clone()),
+            remaining: Some(1),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    let state =
+        get_subject(&learner, governance_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    assert_eq!(state.sn, tip);
+    let held = owner.test_held_outbound().await.unwrap();
+    let held_res = held
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerRes { .. }
+            )
+        })
+        .count();
+    assert_eq!(held_res, 1, "first response must stay held, copy via retry");
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Authentic prefix with premature is_all is partial,
+// the copy continues to the offered tip once real traffic flows.
+#[test(tokio::test)]
+async fn gov_copy_premature_is_all_treated_as_partial() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let learner_key =
+        PublicKey::from_str(learner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B", "C", "D", "E", "F"] {
+        let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+        emit_fact(
+            &owner,
+            governance_id.clone(),
+            serde_json::json!({"members": {"add": [{"name": name, "key": key}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    assert!(tip >= 6, "need a multi-batch tip, got {tip}");
+
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerRes,
+            peer: Some(learner_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+
+    let mut prefix = Vec::new();
+    for sn in 0..=2 {
+        prefix.push(owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap());
+    }
+    learner
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: learner_key.clone(),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: prefix,
+                    is_all: true,
+                    transfer_event: None,
+                    expected_governance_id: Some(governance_id.clone()),
+                },
+            ),
+            &owner_key,
+        )
+        .await
+        .unwrap();
+    get_subject(&learner, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        learner
+            .test_deferred_acquisition_count(governance_id.clone())
+            .await
+            .unwrap(),
+        0,
+        "deferred acquisition stays blocked below the offered tip"
+    );
+
+    owner.test_clear_faults().await.unwrap();
+    let state =
+        get_subject(&learner, governance_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    assert_eq!(state.sn, tip);
+    let start = tokio::time::Instant::now();
+    loop {
+        let count = learner
+            .test_deferred_acquisition_count(governance_id.clone())
+            .await
+            .unwrap();
+        if count >= 1 {
+            assert_eq!(count, 1, "certified tip triggers acquisition once");
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "certified tip never triggered deferred acquisition"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Control: prefix with is_all false continues normally to the tip.
+#[test(tokio::test)]
+async fn gov_copy_partial_is_all_false_continues_to_tip() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let learner_key =
+        PublicKey::from_str(learner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B", "C", "D", "E", "F"] {
+        let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+        emit_fact(
+            &owner,
+            governance_id.clone(),
+            serde_json::json!({"members": {"add": [{"name": name, "key": key}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    owner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerRes,
+            peer: Some(learner_key.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+
+    let mut prefix = Vec::new();
+    for sn in 0..=2 {
+        prefix.push(owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap());
+    }
+    learner
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: learner_key.clone(),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: prefix,
+                    is_all: false,
+                    transfer_event: None,
+                    expected_governance_id: Some(governance_id.clone()),
+                },
+            ),
+            &owner_key,
+        )
+        .await
+        .unwrap();
+    get_subject(&learner, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    owner.test_release_held().await.unwrap();
+    let state =
+        get_subject(&learner, governance_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    assert_eq!(state.sn, tip);
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Termination by ledger SN, not properties.version.
+// Trailing failed events freeze the version while the SN advances;
+// the supervised copy must still reach the SN tip.
+#[test(tokio::test)]
+async fn gov_copy_failed_events_terminate_by_sn_not_version() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(PublicKey::from_str(learner.public_key()).unwrap()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let key_a = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({"members": {"add": [{"name": "A", "key": key_a}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    // Two trailing failures: unknown schema change and duplicate add.
+    // Both record SN without moving properties.version.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({"schemas": {"change": [{
+            "actual_id": "NotASchema",
+            "new_initial_value": {"one": 1},
+        }]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        serde_json::json!({"schemas": {"add": [{
+            "id": "Example",
+            "contract": EXAMPLE_CONTRACT,
+            "initial_value": {"one": 0, "two": 0, "three": 0},
+        }]}}),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let owner_state = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    let tip = owner_state.sn;
+    let version = governance_properties(owner_state.properties).version;
+    assert!(tip > version, "trailing failures must split SN {tip} from version {version}");
+
+    learner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: Some(1),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    let learner_state =
+        get_subject(&learner, governance_id.clone(), Some(tip), true)
+            .await
+            .unwrap();
+    assert_eq!(learner_state.sn, tip);
+    assert_eq!(
+        governance_properties(learner_state.properties).version,
+        version,
+    );
+    let held = learner.test_held_outbound().await.unwrap();
+    let held_reqs = held
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                ActorMessage::DistributionLedgerReq { .. }
+            )
+        })
+        .count();
+    assert_eq!(held_reqs, 1, "first request must stay held, copy via retry");
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
 }

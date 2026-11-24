@@ -3864,6 +3864,39 @@ impl Api {
         Ok((guard.forwarded, guard.fallback_encodes))
     }
 
+    /// Number of deferred-acquisition triggers received by one
+    /// governance actor. Runtime-only observability; no persisted
+    /// state or artifact behavior is changed by this accessor.
+    pub async fn test_deferred_acquisition_count(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        use crate::governance::{
+            Governance, GovernanceMessage, GovernanceResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<Governance>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "governance".to_owned(),
+                reason: "Governance actor not found".to_owned(),
+            })?;
+        match actor
+            .ask(GovernanceMessage::TestDeferredAcquisitionCount)
+            .await?
+        {
+            GovernanceResponse::DeferredAcquisitionCount(count) => Ok(count),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "governance".to_owned(),
+                expected: "DeferredAcquisitionCount".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Test-only: idle certifications reported by the governance
     /// version sync of one governance. Silent, failed or backed-off
     /// rounds must never increment it; a completed round with no

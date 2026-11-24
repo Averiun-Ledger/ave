@@ -597,17 +597,38 @@ impl DistriWorker {
                                 return Err(crash_system(ctx, e).await);
                             };
                         } else if is_gov {
-                            // The catch-up round reached the
-                            // witness-certified tip: run the deferred
-                            // artifact acquisition pass.
-                            self.trigger_deferred_acquisition(ctx, &subject_id)
+                            // A governance batch claiming completeness is
+                            // only certified by the supervising update
+                            // round: notify it with the applied tip and let
+                            // it decide (by ledger SN, failed events
+                            // included) whether the offered target was
+                            // reached. The deferred pass runs there on
+                            // certification; only an unsupervised copy
+                            // (periodic version sync with no update round)
+                            // runs it here directly.
+                            let notified = self
+                                .notify_update_done(
+                                    ctx,
+                                    &subject_id,
+                                    last_sn,
+                                    info.version,
+                                    true,
+                                )
                                 .await;
+                            if !notified {
+                                self.trigger_deferred_acquisition(
+                                    ctx,
+                                    &subject_id,
+                                )
+                                .await;
+                            }
                         } else {
                             self.notify_update_done(
                                 ctx,
                                 &subject_id,
                                 last_sn,
                                 info.version,
+                                false,
                             )
                             .await;
                         }
@@ -721,15 +742,29 @@ impl DistriWorker {
                         return Err(crash_system(ctx, e).await);
                     };
                 } else if is_gov {
-                    // The catch-up round reached the witness-certified
-                    // tip: run the deferred artifact acquisition pass.
-                    self.trigger_deferred_acquisition(ctx, &subject_id).await;
+                    // Same certified-tip rule as the apply path above:
+                    // the supervising update decides by ledger SN,
+                    // unsupervised version-sync copies run it here.
+                    let notified = self
+                        .notify_update_done(
+                            ctx,
+                            &subject_id,
+                            applied_hi_sn,
+                            info.version,
+                            true,
+                        )
+                        .await;
+                    if !notified {
+                        self.trigger_deferred_acquisition(ctx, &subject_id)
+                            .await;
+                    }
                 } else {
                     self.notify_update_done(
                         ctx,
                         &subject_id,
                         applied_hi_sn,
                         info.version,
+                        false,
                     )
                     .await;
                 }
@@ -2001,24 +2036,47 @@ impl DistriWorker {
     /// moot and the actor can stop now instead of lingering for
     /// it. Partial rounds send nothing; their timer still
     /// supervises them. A missing actor just means no round is
-    /// running.
+    /// running. For governance also tries the manual round; reports
+    /// whether any round was notified so governance copies only run
+    /// deferred acquisition when no supervisor exists (unsupervised
+    /// version-sync path). Trackers only use the auth round.
     async fn notify_update_done(
         &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
         sn: u64,
         round: u64,
-    ) {
+        is_gov: bool,
+    ) -> bool {
         use crate::update::{Update, UpdateMessage};
-        let path = ave_actors::ActorPath::from(format!(
+        let mut notified = false;
+        let auth_path = ave_actors::ActorPath::from(format!(
             "/user/node/auth/{subject_id}"
         ));
-        let Ok(actor) = ctx.system().get_actor::<Update>(&path).await else {
-            return;
-        };
-        let _ = actor
-            .tell(UpdateMessage::DistributionDone { sn, round })
-            .await;
+        if let Ok(actor) =
+            ctx.system().get_actor::<Update>(&auth_path).await
+            && actor
+                .tell(UpdateMessage::DistributionDone { sn, round })
+                .await
+                .is_ok()
+        {
+            notified = true;
+        }
+        if is_gov
+            && let Ok(actor) = ctx
+                .system()
+                .get_actor::<Update>(&ave_actors::ActorPath::from(format!(
+                    "/user/node/subject_manager/{subject_id}/gov_manual_update"
+                )))
+                .await
+            && actor
+                .tell(UpdateMessage::DistributionDone { sn, round })
+                .await
+                .is_ok()
+        {
+            notified = true;
+        }
+        notified
     }
 
     pub(crate) async fn process_last_event_distribution(
