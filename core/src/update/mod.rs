@@ -454,6 +454,38 @@ impl Update {
             );
         }
     }
+
+    /// Test-only exhausted-round barrier hit: an `Auth` round that
+    /// reached its retry budget with the target still ahead parks
+    /// here, so a test can interleave the final response before the
+    /// stop drains it. Production never arms it.
+    #[cfg(feature = "test")]
+    fn update_retry_exhausted_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.update_retry_exhausted_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Test-only record of an exhausted-round barrier hit: proves
+    /// the parked round really reached its retry budget instead of
+    /// passing vacuously on an early stop.
+    #[cfg(feature = "test")]
+    fn note_update_retry_exhausted_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_update_retry_exhausted_hold();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -480,7 +512,14 @@ pub enum UpdateMessage {
     },
 }
 
-impl Message for UpdateMessage {}
+impl Message for UpdateMessage {
+    fn is_critical(&self) -> bool {
+        // A completion accepted before the stop must still certify
+        // the supervised SN: dropping it here would skip the single
+        // deferred acquisition it triggers.
+        matches!(self, Self::DistributionDone { .. })
+    }
+}
 
 #[async_trait]
 impl Actor for Update {
@@ -585,6 +624,22 @@ impl Handler<Self> for Update {
                 }
 
                 if attempt >= self.max_round_retries {
+                    #[cfg(feature = "test")]
+                    {
+                        // Test-only barrier: park the exhausted round
+                        // after its target check read, so a test can
+                        // interleave the final response before the stop
+                        // drains it. Production never arms it.
+                        if Self::update_retry_exhausted_paused(ctx) {
+                            Self::note_update_retry_exhausted_hold(ctx);
+                            while Self::update_retry_exhausted_paused(ctx) {
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(100),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     if let Some(metrics) = crate::metrics::try_core_metrics() {
                         metrics.observe_update_retries_exceeded();
                     }

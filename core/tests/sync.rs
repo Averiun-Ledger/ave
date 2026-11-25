@@ -1,6 +1,7 @@
 mod common;
 
 use ave_common::identity::{DigestIdentifier, PublicKey};
+use ave_common::identity::keys::{Ed25519Signer, KeyPair};
 use ave_core::{
     Api,
     config::{GovernanceSyncConfig, TrackerSyncConfig},
@@ -12,7 +13,8 @@ use ave_core::{
 use ave_network::{NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, create_and_authorize_governance, create_node,
-    create_subject, emit_fact, get_subject, node_running,
+    create_subject, emit_fact, get_subject, governance_properties,
+    node_running,
 };
 use serde_json::json;
 use std::collections::HashSet;
@@ -22,6 +24,13 @@ use std::time::Duration;
 use test_log::test;
 
 use crate::common::PORT_COUNTER;
+
+/// Fresh public key string for member-add facts.
+fn fresh_key() -> String {
+    KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+        .public_key()
+        .to_string()
+}
 
 /// Nodes with short governance-sync ticks (TTL = 10 ticks): the stale
 /// target test would take ~2 minutes with default intervals.
@@ -397,6 +406,378 @@ async fn test_sync_serving_gate() {
     panic!("member got no sync answer");
 }
 
+/// A tracker sync answer must carry the server's real governance
+/// version, never the ledger tip or the requester's version. `A` at
+/// V1 asking `B` at V2/SN3 gets V2 back, so `A` drops the stale page
+/// and updates governance first instead of copying under V1.
+#[test(tokio::test)]
+async fn tracker_sync_response_uses_actual_governance_version() {
+    let (nodes, _dirs) = create_sync_nodes().await;
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let a_key = PublicKey::from_str(&nodes[1].api.public_key()).unwrap();
+    let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
+    let _ = nodes;
+
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // Requester side first: A syncs V1, then pushes and version sync
+    // go blind, so only the tracker page can teach it about V2.
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(a_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    for message in [
+        FaultMessage::GovernanceVersionReq,
+        FaultMessage::GovernanceVersionRes,
+    ] {
+        a.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    hold_outbound(&a, FaultMessage::DistributionLedgerReq).await;
+
+    // A trailing failure: SN2 records without moving the version, so
+    // tip and version differ on purpose; V2 then lands at SN3.
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({"schemas": {"change": [{
+            "actual_id": "NotASchema",
+            "new_initial_value": {"one": 1},
+        }]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "C", "key": fresh_key()}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let b_state = get_subject(&b, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(b_state.sn, 3, "failure plus V2 must sit at SN3");
+    assert_eq!(
+        governance_properties(b_state.properties).version,
+        2,
+        "the failure must leave the version at V2"
+    );
+
+    // The next tracker round answers V2 to a V1 request: A drops the
+    // page and updates governance instead of copying under V1. The
+    // version sync is blind, so this fetch is the only teacher.
+    let mut gov_fetch = false;
+    for _ in 0..300 {
+        for message in a.test_held_outbound().await.unwrap_or_default() {
+            if let ActorMessage::DistributionLedgerReq { subject_id, .. } =
+                &message.message
+                && subject_id == &governance_id
+            {
+                gov_fetch = true;
+            }
+        }
+        if gov_fetch {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        gov_fetch,
+        "A must update governance before copying under V1"
+    );
+    a.test_release_held().await.unwrap();
+    let a_state = get_subject(&a, governance_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        governance_properties(a_state.properties).version,
+        2,
+        "A converges to V2 through the triggered update"
+    );
+
+    // Serving side: a behind (V1) and an ahead (V3) request both get
+    // the actual V2 answer; the tip (3) and the requester version
+    // never leak into the response.
+    hold_outbound(&b, FaultMessage::TrackerSyncRes).await;
+    let sync_actor =
+        format!("/user/node/subject_manager/{governance_id}/tracker_sync");
+    inject_sync_req_version(
+        &b,
+        &b_key,
+        &a_key,
+        &governance_id,
+        &sync_actor,
+        1,
+        11,
+    )
+    .await;
+    inject_sync_req_version(
+        &b,
+        &b_key,
+        &a_key,
+        &governance_id,
+        &sync_actor,
+        3,
+        12,
+    )
+    .await;
+    let mut behind = None;
+    let mut ahead = None;
+    for _ in 0..300 {
+        for message in b.test_held_outbound().await.unwrap_or_default() {
+            if let ActorMessage::TrackerSyncRes {
+                request_nonce,
+                governance_version,
+                ..
+            } = &message.message
+            {
+                if *request_nonce == 11 {
+                    behind = Some(*governance_version);
+                }
+                if *request_nonce == 12 {
+                    ahead = Some(*governance_version);
+                }
+            }
+        }
+        if behind.is_some() && ahead.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(behind, Some(2), "a V1 requester must read V2");
+    assert_eq!(ahead, Some(2), "a V3 requester must read V2, not its own");
+
+    // Interleave an update between the version read and the register
+    // listing. The response must be rebuilt at V3, never tag the new
+    // listing with the V2 read that preceded it.
+    hold_outbound(&a, FaultMessage::TrackerSyncReq).await;
+    b.test_pause_tracker_sync_version(true).await.unwrap();
+    inject_sync_req_version(
+        &b,
+        &b_key,
+        &a_key,
+        &governance_id,
+        &sync_actor,
+        2,
+        13,
+    )
+    .await;
+    for _ in 0..300 {
+        if b.test_tracker_sync_version_hold_count().await.unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        b.test_tracker_sync_version_hold_count().await.unwrap_or(0) >= 1,
+        "the request never reached the version/listing boundary"
+    );
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({"members": {"add": [{"name": "D", "key": fresh_key()}]}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let b_state = get_subject(&b, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    assert_eq!(governance_properties(b_state.properties).version, 3);
+    b.test_pause_tracker_sync_version(false).await.unwrap();
+
+    let mut raced = None;
+    for _ in 0..300 {
+        for message in b.test_held_outbound().await.unwrap_or_default() {
+            if let ActorMessage::TrackerSyncRes {
+                request_nonce,
+                governance_version,
+                ..
+            } = &message.message
+                && *request_nonce == 13
+            {
+                raced = Some(*governance_version);
+            }
+        }
+        if raced.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        raced,
+        Some(3),
+        "a listing that raced V2 -> V3 must be retried at V3"
+    );
+}
+
+/// A new tracker-sync cycle restarts the page budget even when it
+/// resumes from a saved cursor: after a capped batch, the next
+/// cycle must serve continuations again instead of ending on its
+/// first page. Every fetch keeps advancing after the saved cursor,
+/// never rescanning from scratch.
+#[test(tokio::test)]
+async fn tracker_sync_resume_resets_page_budget() {
+    let (nodes, _dirs) = create_sync_nodes().await;
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let a_key = PublicKey::from_str(&nodes[1].api.public_key()).unwrap();
+    let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
+    let _ = nodes;
+
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // A's own fetch requests are held; forged responses drive the
+    // cycle deterministically, so B never answers for real.
+    hold_outbound(&a, FaultMessage::TrackerSyncReq).await;
+    let sync_actor =
+        format!("/user/node/subject_manager/{governance_id}/tracker_sync");
+
+    // First batch: spend the whole 100-page budget with a repeating
+    // cursor, exactly like a huge fleet would.
+    let first_nonce = wait_tracker_fetch(&a, &b_key, None).await;
+    let first_cursor = DigestIdentifier::default();
+    let mut seen = HashSet::from([first_nonce]);
+    let mut nonce = first_nonce;
+    for _ in 0..100 {
+        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, first_cursor.clone())
+            .await;
+        nonce = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
+        seen.insert(nonce);
+    }
+    // The last fresh fetch is the new cycle resuming after the saved
+    // cursor, never from scratch.
+    let resumed = tracker_fetch_full(&a, &b_key).await;
+    assert_eq!(
+        resumed.last(),
+        Some(&Some(first_cursor.clone())),
+        "the new cycle must resume after the saved cursor"
+    );
+
+    // Second batch: the new cycle must serve continuations again. A
+    // spent budget would cut it on the first page and limp on one
+    // page per tick with a triple-digit count; a restarted one serves
+    // every page inside the same cycle with a small count.
+    let second_cursor = governance_id.clone();
+    for i in 0..10 {
+        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, second_cursor.clone())
+            .await;
+        nonce = wait_tracker_fetch_unseen_short(&a, &b_key, &seen).await;
+        seen.insert(nonce);
+        let fetches = tracker_fetch_full(&a, &b_key).await;
+        let last = fetches.last().unwrap_or(&None);
+        assert_eq!(
+            *last,
+            Some(second_cursor.clone()),
+            "continuation #{i} must keep the newer cursor"
+        );
+    }
+    // Budget proof: a restarted cycle serves 10 continuations with a
+    // small page count; a spent one would sit at 100+.
+    let (_, _, pages, _, _) = a
+        .test_tracker_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(
+        pages < 20,
+        "resumed cycle must restart its page budget, got {pages}"
+    );
+}
+
+/// Waits for a TrackerSyncReq to `peer` with a nonce not in `seen`,
+/// with a short budget: a resumed cycle answers at once, a capped
+/// one never does.
+async fn wait_tracker_fetch_unseen_short(
+    api: &Api,
+    peer: &PublicKey,
+    seen: &HashSet<u64>,
+) -> u64 {
+    for _ in 0..100 {
+        let fresh: Vec<u64> = tracker_fetch_nonces(api, peer)
+            .await
+            .into_iter()
+            .filter(|n| !seen.contains(n))
+            .collect();
+        if let Some(last) = fresh.last() {
+            return *last;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("resumed cycle served no continuation in time");
+}
+
 /// Injects a forged sync-list request as if `from` asked `api` for
 /// its witness subjects.
 async fn inject_sync_req(
@@ -417,6 +798,36 @@ async fn inject_sync_req(
             subject_id: governance_id.clone(),
             request_nonce: 7,
             governance_version: 1,
+            after_subject_id: None,
+            limit: 10,
+            receiver_actor: sync_actor.to_owned(),
+        },
+    );
+    api.test_inject_inbound(message, from).await.unwrap();
+}
+
+/// Injects a forged sync-list request with an explicit requester
+/// version and nonce, so the served version can be pinned down.
+async fn inject_sync_req_version(
+    api: &Api,
+    receiver: &PublicKey,
+    from: &PublicKey,
+    governance_id: &DigestIdentifier,
+    sync_actor: &str,
+    governance_version: u64,
+    request_nonce: u64,
+) {
+    let message = NetworkMessage::new(
+        ave_network::ComunicateInfo {
+            request_id: String::new(),
+            version: 0,
+            receiver: receiver.clone(),
+            receiver_actor: sync_actor.to_owned(),
+        },
+        ActorMessage::TrackerSyncReq {
+            subject_id: governance_id.clone(),
+            request_nonce,
+            governance_version,
             after_subject_id: None,
             limit: 10,
             receiver_actor: sync_actor.to_owned(),

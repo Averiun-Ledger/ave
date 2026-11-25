@@ -175,6 +175,10 @@ pub enum ActorMessage {
     GovernanceVersionRes {
         version: u64,
     },
+    GovernanceVersionResV2 {
+        version: u64,
+        sn: u64,
+    },
     TrackerSyncReq {
         subject_id: DigestIdentifier,
         request_nonce: u64,
@@ -262,7 +266,8 @@ impl NetworkMessage {
     pub const fn required_wire_version(message: &ActorMessage) -> u32 {
         match message {
             ActorMessage::DistributionLedgerFrag { .. }
-            | ActorMessage::DistributionLastEventRes { .. } => 2,
+            | ActorMessage::DistributionLastEventRes { .. }
+            | ActorMessage::GovernanceVersionResV2 { .. } => 2,
             ActorMessage::DistributionLedgerReq {
                 expected_governance_id: Some(_),
                 ..

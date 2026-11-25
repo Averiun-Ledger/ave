@@ -110,6 +110,9 @@ pub(crate) fn classify(message: &ActorMessage) -> FaultMessage {
         ActorMessage::GovernanceVersionRes { .. } => {
             FaultMessage::GovernanceVersionRes
         }
+        ActorMessage::GovernanceVersionResV2 { .. } => {
+            FaultMessage::GovernanceVersionRes
+        }
         ActorMessage::TrackerSyncReq { .. } => FaultMessage::TrackerSyncReq,
         ActorMessage::TrackerSyncRes { .. } => FaultMessage::TrackerSyncRes,
         ActorMessage::CompilationReq { .. } => FaultMessage::CompilationReq,
@@ -210,6 +213,15 @@ pub struct TestFaultRegistry {
     single_push_attempts: std::collections::HashMap<String, u64>,
     pre_purge_holds: u64,
     pre_purge_paused: bool,
+    get_ledger_up_holds: u64,
+    get_ledger_up_paused: bool,
+    fail_next_get_ledger_resolve: bool,
+    update_retry_exhausted_holds: u64,
+    update_retry_exhausted_paused: bool,
+    tracker_sync_version_holds: u64,
+    tracker_sync_version_paused: bool,
+    fail_next_sink: bool,
+    fail_next_node_register: bool,
 }
 
 impl TestFaultRegistry {
@@ -238,6 +250,15 @@ impl TestFaultRegistry {
             single_push_attempts: std::collections::HashMap::new(),
             pre_purge_holds: 0,
             pre_purge_paused: false,
+            get_ledger_up_holds: 0,
+            get_ledger_up_paused: false,
+            fail_next_get_ledger_resolve: false,
+            update_retry_exhausted_holds: 0,
+            update_retry_exhausted_paused: false,
+            tracker_sync_version_holds: 0,
+            tracker_sync_version_paused: false,
+            fail_next_sink: false,
+            fail_next_node_register: false,
         }
     }
 
@@ -428,6 +449,94 @@ impl TestFaultRegistry {
 
     pub fn pre_purge_paused(&self) -> bool {
         self.pre_purge_paused
+    }
+
+    pub fn note_get_ledger_up_hold(&mut self) {
+        self.get_ledger_up_holds += 1;
+    }
+
+    pub fn get_ledger_up_hold_count(&self) -> u64 {
+        self.get_ledger_up_holds
+    }
+
+    pub fn set_get_ledger_up_paused(&mut self, paused: bool) {
+        self.get_ledger_up_paused = paused;
+    }
+
+    pub fn get_ledger_up_paused(&self) -> bool {
+        self.get_ledger_up_paused
+    }
+
+    /// Arms a one-shot resolve failure for the next serving read:
+    /// consumed by `get_ledger` right after its `Up`, before it
+    /// resolves the tracker.
+    pub fn arm_fail_get_ledger_resolve(&mut self) {
+        self.fail_next_get_ledger_resolve = true;
+    }
+
+    /// Takes a pending resolve failure, if armed: only the serving
+    /// read that finds it armed fails, the next ones proceed.
+    pub fn take_fail_get_ledger_resolve(&mut self) -> bool {
+        std::mem::replace(&mut self.fail_next_get_ledger_resolve, false)
+    }
+
+    /// Arms a one-shot sink-setup failure for the next subject
+    /// creation on this node: consumed by the sink runner before it
+    /// touches any state, so the child stays missing.
+    pub fn arm_fail_next_sink(&mut self) {
+        self.fail_next_sink = true;
+    }
+
+    /// Takes a pending sink-setup failure, if armed: only the
+    /// creation that finds it armed fails, the next ones proceed.
+    pub fn take_fail_next_sink(&mut self) -> bool {
+        std::mem::replace(&mut self.fail_next_sink, false)
+    }
+
+    /// Arms a one-shot node-registration failure for the next
+    /// subject creation on this node: consumed right before the
+    /// node registration, so genesis already landed when it fires.
+    pub fn arm_fail_next_node_register(&mut self) {
+        self.fail_next_node_register = true;
+    }
+
+    /// Takes a pending node-registration failure, if armed: only
+    /// the creation that finds it armed fails, the next ones
+    /// proceed.
+    pub fn take_fail_next_node_register(&mut self) -> bool {
+        std::mem::replace(&mut self.fail_next_node_register, false)
+    }
+
+    pub fn note_update_retry_exhausted_hold(&mut self) {
+        self.update_retry_exhausted_holds += 1;
+    }
+
+    pub fn update_retry_exhausted_hold_count(&self) -> u64 {
+        self.update_retry_exhausted_holds
+    }
+
+    pub fn set_update_retry_exhausted_paused(&mut self, paused: bool) {
+        self.update_retry_exhausted_paused = paused;
+    }
+
+    pub fn update_retry_exhausted_paused(&self) -> bool {
+        self.update_retry_exhausted_paused
+    }
+
+    pub fn note_tracker_sync_version_hold(&mut self) {
+        self.tracker_sync_version_holds += 1;
+    }
+
+    pub fn tracker_sync_version_hold_count(&self) -> u64 {
+        self.tracker_sync_version_holds
+    }
+
+    pub fn set_tracker_sync_version_paused(&mut self, paused: bool) {
+        self.tracker_sync_version_paused = paused;
+    }
+
+    pub fn tracker_sync_version_paused(&self) -> bool {
+        self.tracker_sync_version_paused
     }
 
     /// Clones of the outbound messages currently held, so a test can

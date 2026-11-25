@@ -1,7 +1,6 @@
 use ave_actors::{
     Actor, ActorContext, ActorError, ActorPath, ActorRef, Handler,
 };
-use std::future::Future;
 use tracing::warn;
 
 use ave_common::{
@@ -456,7 +455,7 @@ where
     })
 }
 
-pub async fn with_subject_up<A, F, Fut, T>(
+pub async fn with_subject_up<A, F, T>(
     ctx: &mut ActorContext<A>,
     subject_id: &DigestIdentifier,
     requester: String,
@@ -466,8 +465,9 @@ pub async fn with_subject_up<A, F, Fut, T>(
 ) -> Result<T, ActorError>
 where
     A: Actor + Handler<A>,
-    F: FnOnce(&mut ActorContext<A>) -> Fut,
-    Fut: Future<Output = Result<T, ActorError>>,
+    F: core::ops::AsyncFnOnce(
+        &mut ActorContext<A>,
+    ) -> Result<T, ActorError>,
 {
     let lease =
         acquire_subject(ctx, subject_id, requester, create_ledger, active)

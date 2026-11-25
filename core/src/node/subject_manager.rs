@@ -605,8 +605,10 @@ impl SubjectManager {
     ) -> Result<(), ActorError> {
         // Fresh tracker: no history to heal, the create flow writes
         // everything live. Skip without marking (future boots with
-        // history decide via `needs_sync`).
-        let tracker_actor: ActorRef<Tracker> = match ctx
+        // history decide via `needs_sync`). An existing child resumes
+        // the idempotent steps below; only a new child is stopped when
+        // a step fails, never a preexisting actor.
+        let (tracker_actor, is_new): (ActorRef<Tracker>, bool) = match ctx
             .create_child(
                 &subject_id.to_string(),
                 Tracker::initial(InitParamsTracker {
@@ -620,14 +622,28 @@ impl SubjectManager {
             )
             .await
         {
-            Ok(actor) => actor,
-            Err(ActorError::Exists { .. }) => {
-                ctx.get_child::<Tracker>(&subject_id.to_string()).await?
-            }
+            Ok(actor) => (actor, true),
+            Err(ActorError::Exists { .. }) => (
+                ctx.get_child::<Tracker>(&subject_id.to_string()).await?,
+                false,
+            ),
             Err(e) => return Err(e),
         };
 
-        self.run_tracker_sink(ctx, tracker_actor.clone()).await?;
+        if let Err(error) =
+            self.run_tracker_sink(ctx, tracker_actor.clone()).await
+        {
+            if is_new
+                && let Err(stop_error) = tracker_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial tracker cleanup failed: {stop_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
 
         if let Err(error) = tracker_actor
             .ask(TrackerMessage::UpdateLedger {
@@ -635,22 +651,43 @@ impl SubjectManager {
             })
             .await
         {
-            tracker_actor.tell_stop().await;
+            if is_new
+                && let Err(stop_error) = tracker_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial tracker cleanup failed: {stop_error}"
+                    ),
+                });
+            }
             return Err(error);
         }
 
-        self.register_subject_in_node(
-            ctx,
-            metadata.owner.clone(),
-            metadata.subject_id.clone(),
-            SubjectData::Tracker {
-                governance_id: metadata.governance_id.clone(),
-                schema_id: metadata.schema_id.clone(),
-                namespace: metadata.namespace.to_string(),
-                active: true,
-            },
-        )
-        .await?;
+        if let Err(error) = self
+            .register_subject_in_node(
+                ctx,
+                metadata.owner.clone(),
+                metadata.subject_id.clone(),
+                SubjectData::Tracker {
+                    governance_id: metadata.governance_id.clone(),
+                    schema_id: metadata.schema_id.clone(),
+                    namespace: metadata.namespace.to_string(),
+                    active: true,
+                },
+            )
+            .await
+        {
+            if is_new
+                && let Err(stop_error) = tracker_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial tracker cleanup failed: {stop_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -671,10 +708,17 @@ impl SubjectManager {
             ),
         })?;
 
+        // Fast path only for a completely initialized and registered
+        // governance: a leftover child from a failed attempt resumes
+        // the idempotent steps below instead of confirming a partial
+        // creation.
         if ctx
             .get_child::<Governance>(&subject_id.to_string())
             .await
             .is_ok()
+            && crate::model::common::node::get_subject_data(ctx, subject_id)
+                .await?
+                .is_some()
         {
             return Ok(());
         }
@@ -683,7 +727,7 @@ impl SubjectManager {
         // writes everything live. Skip without marking (future boots
         // with history decide via `needs_sync`).
         let skip_reconcile = true;
-        let governance_actor: ActorRef<Governance> = match ctx
+        let (governance_actor, is_new) = match ctx
             .create_child(
                 &subject_id.to_string(),
                 Governance::initial((
@@ -696,16 +740,32 @@ impl SubjectManager {
             )
             .await
         {
-            Ok(actor) => actor,
-            Err(ActorError::Exists { .. }) => {
-                ctx.get_child::<Governance>(&subject_id.to_string()).await?
-            }
+            Ok(actor) => (actor, true),
+            Err(ActorError::Exists { .. }) => (
+                ctx.get_child::<Governance>(&subject_id.to_string()).await?,
+                false,
+            ),
             Err(e) => return Err(e),
         };
 
-        self.run_governance_sink(ctx, governance_actor.clone())
-            .await?;
+        if let Err(error) =
+            self.run_governance_sink(ctx, governance_actor.clone()).await
+        {
+            if is_new
+                && let Err(stop_error) = governance_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial governance cleanup failed: {stop_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
 
+        // Idempotent resume: a duplicate genesis is skipped by
+        // sequence number, so re-sending it to an already applied
+        // child heals nothing and breaks nothing.
         if let Err(error) = governance_actor
             .ask(GovernanceMessage::UpdateLedger {
                 events: vec![ledger],
@@ -715,17 +775,38 @@ impl SubjectManager {
             })
             .await
         {
-            governance_actor.tell_stop().await;
+            if is_new
+                && let Err(stop_error) = governance_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial governance cleanup failed: {stop_error}"
+                    ),
+                });
+            }
             return Err(error);
         }
 
-        self.register_subject_in_node(
-            ctx,
-            metadata.owner.clone(),
-            metadata.subject_id.clone(),
-            SubjectData::Governance { active: true },
-        )
-        .await?;
+        if let Err(error) = self
+            .register_subject_in_node(
+                ctx,
+                metadata.owner.clone(),
+                metadata.subject_id.clone(),
+                SubjectData::Governance { active: true },
+            )
+            .await
+        {
+            if is_new
+                && let Err(stop_error) = governance_actor.ask_stop().await
+            {
+                return Err(ActorError::Functional {
+                    description: format!(
+                        "{error}; partial governance cleanup failed: {stop_error}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -760,6 +841,23 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Tracker>,
     ) -> Result<(), ActorError> {
+        #[cfg(feature = "test")]
+        if ctx
+            .system()
+            .get_helper::<
+                crate::helpers::network::test_faults::SharedFaultRegistry,
+            >("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|mut faults| {
+                    faults.take_fail_next_sink()
+                })
+            })
+            .unwrap_or(false)
+        {
+            return Err(ActorError::Functional {
+                description: "injected sink setup failure".to_owned(),
+            });
+        };
         let safe_mode = if let Some(config) =
             ctx.system()
                 .get_helper::<crate::system::ConfigHelper>("config")
@@ -795,6 +893,23 @@ impl SubjectManager {
         ctx: &ActorContext<Self>,
         actor: ActorRef<Governance>,
     ) -> Result<(), ActorError> {
+        #[cfg(feature = "test")]
+        if ctx
+            .system()
+            .get_helper::<
+                crate::helpers::network::test_faults::SharedFaultRegistry,
+            >("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|mut faults| {
+                    faults.take_fail_next_sink()
+                })
+            })
+            .unwrap_or(false)
+        {
+            return Err(ActorError::Functional {
+                description: "injected sink setup failure".to_owned(),
+            });
+        };
         let safe_mode = if let Some(config) =
             ctx.system()
                 .get_helper::<crate::system::ConfigHelper>("config")
@@ -832,6 +947,23 @@ impl SubjectManager {
         subject_id: DigestIdentifier,
         data: SubjectData,
     ) -> Result<(), ActorError> {
+        #[cfg(feature = "test")]
+        if ctx
+            .system()
+            .get_helper::<
+                crate::helpers::network::test_faults::SharedFaultRegistry,
+            >("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|mut faults| {
+                    faults.take_fail_next_node_register()
+                })
+            })
+            .unwrap_or(false)
+        {
+            return Err(ActorError::Functional {
+                description: "injected node registration failure".to_owned(),
+            });
+        };
         let node = ctx.get_parent::<Node>().await?;
         let response = node
             .ask(NodeMessage::RegisterSubject {

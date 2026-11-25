@@ -12068,8 +12068,8 @@ async fn sink_pending_admission_does_not_scan_queue() {
 #[traced_test]
 #[tokio::test]
 async fn sink_deliveries_reports_per_subject_cursors() {
-    // Ops audit: per-subject delivery positions with subject/sink
-    // filters. The cursor answers "sink X has subject Y up to N".
+    // Delivery positions per subject with subject/sink filters.
+    // The cursor answers "sink X has subject Y up to N".
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, mut dirs) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,

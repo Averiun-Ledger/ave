@@ -2299,9 +2299,9 @@ where
     /// Re-sends a registration to the node register, skipping cleanly
     /// when the register actor is absent (unit-test systems).
     /// Crash backstop for register-table tails lost between publish
-    /// and projection write; rows are upserts, so re-emission is
-    /// idempotent. Callers send only for active subjects: re-emitting
-    /// a deleted one would resurrect its listing row.
+    /// and projection write. Registration rows are upserts and EOL
+    /// marks are idempotent, so re-emission converges without
+    /// duplicating rows. Deleted subjects are never re-emitted.
     async fn reemit_registration(
         ctx: &mut ActorContext<Self>,
         message: RegisterMessage,

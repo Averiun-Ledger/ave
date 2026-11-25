@@ -1010,6 +1010,7 @@ impl Governance {
         let _ = version_sync
             .ask(GovernanceVersionSyncMessage::RefreshGovernance {
                 version: self.properties.version,
+                sn: self.subject_metadata.sn,
                 governance_peers,
             })
             .await?;
@@ -5048,6 +5049,7 @@ pub enum GovernanceMessage {
     SyncRoundIdle,
     GetGovernance,
     GetVersion,
+    GetVersionAndSn,
     /// A contract compiler could not obtain an artifact from anyone:
     /// force a manual governance update round in case this node is so
     /// outdated that it is asking nodes that no longer serve it.
@@ -5121,6 +5123,7 @@ pub enum GovernanceResponse {
     },
     Governance(Box<GovernanceData>),
     Version(u64),
+    VersionAndSn(u64, u64),
     Bool(bool),
     Witnesses(HashSet<PublicKey>),
     SchemaViewpoints(Option<BTreeSet<String>>),
@@ -5513,6 +5516,7 @@ impl Actor for Governance {
                         our_key: self.our_key.clone(),
                         network: network.clone(),
                         local_version: self.properties.version,
+                        local_sn: self.subject_metadata.sn,
                         sample_size: config.sync_governance.sample_size,
                         tick_interval: version_sync_tick_interval,
                         response_timeout: version_sync_response_timeout,
@@ -5531,6 +5535,7 @@ impl Actor for Governance {
             let _ = version_sync
                 .ask(GovernanceVersionSyncMessage::RefreshGovernance {
                     version: self.properties.version,
+                    sn: self.subject_metadata.sn,
                     governance_peers,
                 })
                 .await?;
@@ -5562,6 +5567,12 @@ impl Handler<Self> for Governance {
             }
             GovernanceMessage::GetVersion => {
                 Ok(GovernanceResponse::Version(self.properties.version))
+            }
+            GovernanceMessage::GetVersionAndSn => {
+                Ok(GovernanceResponse::VersionAndSn(
+                    self.properties.version,
+                    self.subject_metadata.sn,
+                ))
             }
             GovernanceMessage::TriggerGovUpdate => {
                 self.trigger_gov_update(ctx).await?;

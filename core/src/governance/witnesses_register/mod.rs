@@ -249,6 +249,7 @@ pub enum WitnessesRegisterMessage {
     ListCurrentWitnessSubjects {
         node: PublicKey,
         governance_version: u64,
+        local_version: u64,
         after_subject_id: Option<DigestIdentifier>,
         limit: usize,
     },
@@ -609,6 +610,99 @@ impl WitnessesRegister {
             || intervals.max_covered_in(owner_lo, owner_hi).is_some()
     }
 
+    /// Coverage of one membership (closed intervals plus an open
+    /// tail) clamped to `[lo, hi]`: the versions where this exact
+    /// membership held inside the queried range.
+    fn coverage_in(
+        current_from: Option<u64>,
+        intervals: &IntervalSet,
+        lo: u64,
+        hi: u64,
+    ) -> IntervalSet {
+        let mut out = IntervalSet::new();
+        for iv in intervals.iter() {
+            if iv.hi < lo {
+                continue;
+            }
+            if iv.lo > hi {
+                break;
+            }
+            out.insert(Interval {
+                lo: iv.lo.max(lo),
+                hi: iv.hi.min(hi),
+            });
+        }
+        if let Some(from) = current_from
+            && from <= hi
+        {
+            out.insert(Interval { lo: from.max(lo), hi });
+        }
+        out
+    }
+
+    /// Intersection of two sorted disjoint interval sets.
+    fn intersect_sets(
+        first: &IntervalSet,
+        second: &IntervalSet,
+    ) -> IntervalSet {
+        let mut out = IntervalSet::new();
+        let (mut i, mut j) = (0, 0);
+        let (first, second) = (first.as_slice(), second.as_slice());
+        while i < first.len() && j < second.len() {
+            let lo = first[i].lo.max(second[j].lo);
+            let hi = first[i].hi.min(second[j].hi);
+            if lo <= hi {
+                out.insert(Interval { lo, hi });
+            }
+            if first[i].hi < second[j].hi {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        out
+    }
+
+    /// Versions inside `[owner_lo, owner_hi]` where `node` held the
+    /// schema witness role for this namespace (either the exact
+    /// schema or the tracker-wide fallback): union over every
+    /// matching namespace entry.
+    fn schema_role_coverage_in(
+        &self,
+        node: &PublicKey,
+        schema_id: &SchemaType,
+        namespace: &Namespace,
+        owner_lo: u64,
+        owner_hi: u64,
+    ) -> IntervalSet {
+        let mut out = IntervalSet::new();
+        for key in [
+            (node.clone(), schema_id.clone()),
+            (node.clone(), SchemaType::TrackerSchemas),
+        ] {
+            let Some(witness_data) = self.witnesses.get(&key) else {
+                continue;
+            };
+            for (current_namespace, (intervals, current_from)) in witness_data
+            {
+                if !current_namespace.is_ancestor_or_equal_of(namespace) {
+                    continue;
+                }
+                for iv in Self::coverage_in(
+                    *current_from,
+                    intervals,
+                    owner_lo,
+                    owner_hi,
+                )
+                .iter()
+                {
+                    out.insert(*iv);
+                }
+            }
+        }
+        out
+    }
+
     fn covered_old_owner_intervals(
         current_from: Option<u64>,
         intervals: &IntervalSet,
@@ -694,37 +788,6 @@ impl WitnessesRegister {
         None
     }
 
-    fn schema_witness_covers_owner_interval(
-        &self,
-        node: &PublicKey,
-        schema_id: &SchemaType,
-        namespace: &Namespace,
-        owner_lo: u64,
-        owner_hi: u64,
-    ) -> bool {
-        let matches = |witness_data: &HashMap<Namespace, IntervalData>| {
-            witness_data.iter().any(
-                |(current_namespace, (intervals, current_from))| {
-                    current_namespace.is_ancestor_or_equal_of(namespace)
-                        && Self::interval_overlaps_owner(
-                            *current_from,
-                            intervals,
-                            owner_lo,
-                            owner_hi,
-                        )
-                },
-            )
-        };
-
-        self.witnesses
-            .get(&(node.clone(), schema_id.clone()))
-            .is_some_and(matches)
-            || self
-                .witnesses
-                .get(&(node.clone(), SchemaType::TrackerSchemas))
-                .is_some_and(matches)
-    }
-
     fn creator_grant_for_owner_interval(
         &self,
         node: &PublicKey,
@@ -761,17 +824,36 @@ impl WitnessesRegister {
         if let (Some(history), Some((creator_intervals, creator_current_from))) = (
             grants.get(&WitnessesType::Witnesses),
             intervals.get(&WitnessesType::Witnesses),
-        ) && Self::interval_overlaps_owner(
-            *creator_current_from,
-            creator_intervals,
-            owner_lo,
-            owner_hi,
-        ) && self.schema_witness_covers_owner_interval(
-            node, schema_id, namespace, owner_lo, owner_hi,
-        ) && let Some(grant) =
-            Self::grant_for_owner_interval(history, owner_lo, owner_hi)
-        {
-            out = Some(Self::merge_grant(out, grant));
+        ) {
+            // The generic grant only applies where creator membership
+            // and schema role actually coexisted inside the ownership:
+            // each condition may overlap the ownership on its own while
+            // the three never hold together. The grant history must
+            // overlap that triple intersection, not just the ownership.
+            let creator_cov = Self::coverage_in(
+                *creator_current_from,
+                creator_intervals,
+                owner_lo,
+                owner_hi,
+            );
+            let role_cov = self.schema_role_coverage_in(
+                node,
+                schema_id,
+                namespace,
+                owner_lo,
+                owner_hi,
+            );
+            let mut generic = None;
+            for iv in Self::intersect_sets(&creator_cov, &role_cov).iter() {
+                if let Some(grant) =
+                    Self::grant_for_owner_interval(history, iv.lo, iv.hi)
+                {
+                    generic = Some(Self::merge_grant(generic, grant));
+                }
+            }
+            if let Some(grant) = generic {
+                out = Some(Self::merge_grant(out, &grant));
+            }
         }
 
         out
@@ -1197,6 +1279,7 @@ impl Handler<Self> for WitnessesRegister {
             WitnessesRegisterMessage::ListCurrentWitnessSubjects {
                 node,
                 governance_version,
+                local_version,
                 after_subject_id,
                 limit,
             } => {
@@ -1205,18 +1288,21 @@ impl Handler<Self> for WitnessesRegister {
                         ctx,
                         &node,
                         governance_version,
+                        local_version,
                         after_subject_id,
                         limit,
                     )
                     .await?;
 
-                // Tag with the requested version clamped by the local
-                // ledger tip: `gov_sn` counts every event while versions
-                // count successes, so tagging raw `gov_sn` makes the
-                // requester adopt an sn as its version and refetch
-                // forever once a failed event exists.
+                // Tag with this node's actual version: the ledger tip
+                // (`gov_sn`) counts every event while versions count
+                // successes, so tagging the tip makes the requester
+                // adopt an sn as its version, and echoing the
+                // requester's version lets a stale page pass as
+                // current. The requester discards higher versions and
+                // updates governance first.
                 return Ok(WitnessesRegisterResponse::CurrentWitnessSubjects {
-                    governance_version: governance_version.min(self.gov_sn),
+                    governance_version: local_version,
                     items,
                     next_cursor,
                 });

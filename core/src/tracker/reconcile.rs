@@ -26,17 +26,18 @@ use crate::governance::sn_register::{
     SnRegister, SnRegisterMessage, SnRegisterResponse,
 };
 use crate::governance::subject_register::{
-    SubjectRegister, SubjectRegisterMessage,
+    SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
 };
 use crate::governance::transfer_verification_register::{
     TransferVerificationRegister, TransferVerificationRegisterMessage,
+    TransferVerificationRegisterResponse,
 };
 use crate::governance::witnesses_register::{
     WitnessesRegister, WitnessesRegisterMessage, WitnessesRegisterResponse,
 };
 use crate::model::common::{TrackerVisibilityState, get_n_events};
 use crate::model::event::{Ledger, Protocols};
-use crate::node::{Node, NodeMessage, TransferSubject};
+use crate::node::{Node, NodeMessage, NodeResponse, TransferSubject};
 #[cfg(feature = "test")]
 use crate::system::ConfigHelper;
 use ave_common::request::EventRequest;
@@ -129,9 +130,11 @@ impl Tracker {
     /// Replays derived writes from the ledger so shared registers
     /// catch up to the persisted tip. Runs inside `pre_start`
     /// (before the mailbox opens) after its own governance replay.
-    /// Only the tail past the lowest processed-sn marker rescans: crash cuts are suffixes of single-sender FIFO
-    /// streams, so everything below it landed. Safe to re-run: every
-    /// write is key-anchored with immutable per-key data.
+    /// Marker gaps are suffixes of single-sender FIFO streams, so
+    /// normally only their tail rescans. Ownership projections are
+    /// verified independently and force a genesis walk when they
+    /// diverge below those markers. Safe to re-run: every write is
+    /// key-anchored with immutable per-key data.
     pub(crate) async fn reconcile_registers(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -153,16 +156,70 @@ impl Tracker {
         // landed everywhere instead of trusting the flag blindly. A
         // graceful drain processes every critical send, and the live
         // path awaits every ownership ask before the visibility tell,
-        // so tip markers at tip mean complete. Otherwise fall through
-        // to the tail below.
-        if self.skip_reconcile && self.tip_landed(ctx).await? {
+        // so tip markers at tip mean complete. Derived destinations
+        // are verified too: a cut below the markers (or a second
+        // crash inside a previous replay) would otherwise skip
+        // forever. Otherwise fall through to the tail below.
+        let landed = self.tip_landed(ctx).await?;
+        let owned = self.ownership_landed(ctx).await?;
+        if self.skip_reconcile && landed && owned {
             debug!(
                 subject_id = %self.subject_metadata.subject_id,
                 "Boot reconciliation skipped (clean boot)"
             );
             return Ok(TrackerReconcileReport::default());
         }
+        // Registers boot alongside this tracker: a first pass can
+        // read them before their journals replayed, healing nothing
+        // while looking diverged, or miss a write racing the walk.
+        // Re-verify after each pass, bounded: every pass is
+        // idempotent, and a later pass sees settled registers. The
+        // returned report is the last pass.
         let mut report = TrackerReconcileReport::default();
+        let mut reconciled = false;
+        for _ in 0..3 {
+            report = TrackerReconcileReport::default();
+            self.replay_once(ctx, &mut report).await?;
+            reconciled = self.ownership_landed(ctx).await?;
+            if reconciled {
+                break;
+            }
+        }
+        if !reconciled {
+            return Err(ActorError::Functional {
+                description: format!(
+                    "Tracker {} ownership projections did not converge after three reconciliation passes",
+                    self.subject_metadata.subject_id
+                ),
+            });
+        }
+
+        debug!(
+            subject_id = %self.subject_metadata.subject_id,
+            versions_seen = report.versions_seen,
+            writes_resent = report.writes_resent,
+            "Tracker boot reconciliation complete"
+        );
+        #[cfg(feature = "test")]
+        if let Some(stats) = ctx
+            .system()
+            .get_helper::<SharedReconcileStats>("reconcile_stats")
+            && let Ok(mut guard) = stats.lock()
+        {
+            guard.note(&self.subject_metadata.subject_id, &report);
+        }
+        Ok(report)
+    }
+
+    /// One replay pass over the ledger from the tail (or genesis
+    /// when derived writes are missing below the markers). Every
+    /// write is key-anchored and idempotent, so repeated passes
+    /// converge instead of corrupting.
+    async fn replay_once(
+        &self,
+        ctx: &mut ActorContext<Self>,
+        report: &mut TrackerReconcileReport,
+    ) -> Result<(), ActorError> {
         let mut fold = TrackerReconcileFold::default();
 
         // Witness entry missing (wiped register) blocks every
@@ -170,7 +227,18 @@ impl Tracker {
         // subjects): recreate it first. The read above doubles as the
         // tail marker query, so this costs nothing extra. Idempotent:
         // a present entry is never default-empty.
-        let (tail_start, entry_missing) = self.replay_tail_start(ctx).await?;
+        let (mut tail_start, entry_missing) =
+            self.replay_tail_start(ctx).await?;
+        if !self.ownership_landed(ctx).await? {
+            // Derived writes lost below the markers (a cut between
+            // their landing and a later visibility/sn persist, or a
+            // second crash inside a previous replay): the tail would
+            // start past the missing event and keep the divergence.
+            // Walk the derives from genesis instead; every write is
+            // key-anchored and idempotent, so this only costs a pass
+            // on genuinely diverged boots.
+            tail_start = 0;
+        }
         if entry_missing {
             use crate::model::common::get_last_event;
             let tip_gov_version = get_last_event(ctx)
@@ -242,7 +310,7 @@ impl Tracker {
                     &sn_register,
                     event,
                     &mut fold,
-                    &mut report,
+                    report,
                 )
                 .await?;
             }
@@ -281,28 +349,14 @@ impl Tracker {
                 })
                 .await?;
         }
-
-        debug!(
-            subject_id = %self.subject_metadata.subject_id,
-            versions_seen = report.versions_seen,
-            writes_resent = report.writes_resent,
-            "Tracker boot reconciliation complete"
-        );
-        #[cfg(feature = "test")]
-        if let Some(stats) = ctx
-            .system()
-            .get_helper::<SharedReconcileStats>("reconcile_stats")
-            && let Ok(mut guard) = stats.lock()
-        {
-            guard.note(&self.subject_metadata.subject_id, &report);
-        }
-        Ok(report)
+        Ok(())
     }
 
-    /// Whether the tip event provably landed on both registers:
-    /// its sn mapping is recorded and its visibility range covers
-    /// it. Crash cuts are suffixes, so a landed tip means nothing
-    /// below is missing either.
+    /// Whether the tip event provably landed on both marker
+    /// registers: its sn mapping is recorded and its visibility range
+    /// covers it. Ownership projections are checked separately because
+    /// a replay crash can leave them behind even with these markers
+    /// at the tip.
     async fn tip_landed(
         &self,
         ctx: &mut ActorContext<Self>,
@@ -359,6 +413,105 @@ impl Tracker {
             });
         };
         Ok(visibility_covers_tip(&state, tip.sn))
+    }
+
+    /// Whether the derived ownership writes for the persisted tip
+    /// provably landed. Node must agree on effective and pending
+    /// ownership, the subject register must contain the subject under
+    /// its effective owner, and no proof already consumed by the local
+    /// ledger may remain. A proof above the local tip is still needed
+    /// by a deferred copy and is not divergence. Inactive subjects read
+    /// as landed here: their external row is healed by the register
+    /// backstop instead. Actor errors propagate and fail the boot loud.
+    async fn ownership_landed(
+        &self,
+        ctx: &ActorContext<Self>,
+    ) -> Result<bool, ActorError> {
+        if !self.subject_metadata.active {
+            return Ok(true);
+        }
+        let subject_id = self.subject_metadata.subject_id.clone();
+        let node_path = ActorPath::from("/user/node");
+        let node = ctx.system().get_actor::<Node>(&node_path).await?;
+        let NodeResponse::IOwnerNewOwner {
+            i_owner,
+            i_new_owner,
+        } = node
+            .ask(NodeMessage::IOwnerNewOwnerSubject(subject_id.clone()))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: node_path,
+                expected: "NodeResponse::IOwnerNewOwner".to_owned(),
+            });
+        };
+        let expected_owner = *self.our_key == self.subject_metadata.owner;
+        let expected_pending = self
+            .subject_metadata
+            .new_owner
+            .as_ref()
+            .map(|owner| owner == self.our_key.as_ref());
+        if i_owner != expected_owner || i_new_owner != expected_pending {
+            return Ok(false);
+        }
+
+        let gov_path = format!(
+            "/user/node/subject_manager/{}",
+            self.governance_id
+        );
+        let subject_register_path =
+            ActorPath::from(format!("{gov_path}/subject_register"));
+        let subject_register = ctx
+            .system()
+            .get_actor::<SubjectRegister>(&subject_register_path)
+            .await?;
+        let SubjectRegisterResponse::SubjectsBatch(entries) = subject_register
+            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch {
+                queries: vec![(
+                    self.subject_metadata.owner.clone(),
+                    self.subject_metadata.schema_id.clone(),
+                    self.namespace.to_string(),
+                )],
+            })
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: subject_register_path,
+                expected: "SubjectRegisterResponse::SubjectsBatch".to_owned(),
+            });
+        };
+        if !entries
+            .first()
+            .is_some_and(|subjects| subjects.contains(&subject_id))
+        {
+            return Ok(false);
+        }
+
+        // A pending transfer is always the tip. The tail therefore
+        // replays its proof consumption without requiring a genesis
+        // walk solely for that proof.
+        if self.subject_metadata.new_owner.is_some() {
+            return Ok(true);
+        }
+        let transfer_verification_register = ctx
+            .system()
+            .get_actor::<TransferVerificationRegister>(&ActorPath::from(
+                format!("{gov_path}/transfer_verification_register"),
+            ))
+            .await?;
+        let stale = matches!(
+            transfer_verification_register
+                .ask(
+                    TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+                        subject_id: subject_id.clone(),
+                    },
+                )
+                .await?,
+            TransferVerificationRegisterResponse::VerifiedTransferSn(
+                Some((proof_sn, _)),
+            ) if proof_sn <= self.subject_metadata.sn
+        );
+        Ok(!stale)
     }
 
     /// Lowest processed-sn marker across the sn map (highest
@@ -566,12 +719,31 @@ impl Tracker {
                         )),
                     )
                     .await?;
-                transfer_verification_register
-                    .tell(TransferVerificationRegisterMessage::Remove {
-                        subject_id: subject_id.clone(),
-                    })
+                // Only remove a proof this transfer consumed: a newer
+                // proof (speculative, for a later transfer) must
+                // survive the replay, and a genesis walk replays every
+                // older transfer. Missing proof: nothing to remove.
+                let verified = transfer_verification_register
+                    .ask(
+                        TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+                            subject_id: subject_id.clone(),
+                        },
+                    )
                     .await?;
-                report.writes_resent += 1;
+                let consumed = matches!(
+                    verified,
+                    TransferVerificationRegisterResponse::VerifiedTransferSn(
+                        Some((proof_sn, _)),
+                    ) if proof_sn <= event.sn
+                );
+                if consumed {
+                    transfer_verification_register
+                        .tell(TransferVerificationRegisterMessage::Remove {
+                            subject_id: subject_id.clone(),
+                        })
+                        .await?;
+                    report.writes_resent += 1;
+                }
             }
             EventRequest::Reject(..) => {
                 node.tell(NodeMessage::RejectTransfer(subject_id.clone()))

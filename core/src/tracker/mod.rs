@@ -1245,8 +1245,14 @@ impl Actor for Tracker {
 
         // Crash backstop for register-table tails: re-emit this
         // subject's registration (upsert, idempotent). Dirty boots
-        // only; deleted subjects stay deleted.
-        if !self.skip_reconcile && self.subject_metadata.active {
+        // only; deleted subjects stay deleted. An inactive subject
+        // re-emits the end-of-life marker too: a crash between the
+        // live EOL sends can leave the external row active or absent
+        // while ledger and node already went inactive, and later
+        // replays never touch the external table again.
+        if !self.skip_reconcile
+            && crate::model::common::get_last_event(ctx).await?.is_some()
+        {
             use crate::node::register::RegisterMessage;
             if let Err(e) = Self::reemit_registration(
                 ctx,
@@ -1264,6 +1270,22 @@ impl Actor for Tracker {
                 error!(
                     error = %e,
                     "Failed to re-emit subject registration at boot"
+                );
+                return Err(e);
+            }
+            if !self.subject_metadata.active
+                && let Err(e) = Self::reemit_registration(
+                    ctx,
+                    RegisterMessage::EOLSubj {
+                        gov_id: self.governance_id.to_string(),
+                        subj_id: self.subject_metadata.subject_id.to_string(),
+                    },
+                )
+                .await
+            {
+                error!(
+                    error = %e,
+                    "Failed to re-emit subject EOL at boot"
                 );
                 return Err(e);
             }

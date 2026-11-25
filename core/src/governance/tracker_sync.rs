@@ -292,6 +292,31 @@ impl TrackerSync {
         }
     }
 
+    #[cfg(feature = "test")]
+    fn tracker_sync_version_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.tracker_sync_version_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_tracker_sync_version_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_tracker_sync_version_hold();
+        }
+    }
+
     async fn get_governance_version(
         &self,
         ctx: &ActorContext<Self>,
@@ -753,8 +778,13 @@ impl TrackerSync {
         Self::observe_round("started");
         // Resume where the page cap cut the previous cycle, if
         // anywhere: a huge fleet is covered over successive cycles
-        // instead of rescanning the head forever.
+        // instead of rescanning the head forever. A new cycle
+        // restarts the page budget even when resuming: the saved
+        // cursor only carries the peer position, never the spent
+        // count, or every cycle after the first would end on its
+        // first page with a continuation.
         let resume = self.resume_cursor.clone();
+        self.pages_this_cycle = 0;
         self.start_fetch(ctx, peer, governance_version, resume)
             .await
     }
@@ -787,48 +817,75 @@ impl TrackerSync {
             self.governance_id
         ));
         let actor = ctx.system().get_actor::<WitnessesRegister>(&path).await?;
-        let response = actor
-            .ask(WitnessesRegisterMessage::ListCurrentWitnessSubjects {
-                node: request.sender.clone(),
-                governance_version: request.governance_version,
-                after_subject_id: request.after_subject_id,
-                limit: request.limit,
-            })
-            .await?;
+        // Version and listing live in different actors. Only answer
+        // when the version stays stable across the listing; otherwise
+        // retry against the settled register instead of tagging new
+        // data with the old version. Continuous updates degrade to one
+        // dropped request, which the requester's normal timeout retries.
+        for _ in 0..3 {
+            let local_version = self.get_governance_version(ctx).await?;
+            #[cfg(feature = "test")]
+            {
+                if Self::tracker_sync_version_paused(ctx) {
+                    Self::note_tracker_sync_version_hold(ctx);
+                    while Self::tracker_sync_version_paused(ctx) {
+                        tokio::time::sleep(
+                            std::time::Duration::from_millis(100),
+                        )
+                        .await;
+                    }
+                }
+            }
+            let response = actor
+                .ask(WitnessesRegisterMessage::ListCurrentWitnessSubjects {
+                    node: request.sender.clone(),
+                    governance_version: request.governance_version,
+                    local_version,
+                    after_subject_id: request.after_subject_id.clone(),
+                    limit: request.limit,
+                })
+                .await?;
+            if self.get_governance_version(ctx).await? != local_version {
+                continue;
+            }
 
-        let WitnessesRegisterResponse::CurrentWitnessSubjects {
-            governance_version,
-            items,
-            next_cursor,
-        } = response
-        else {
-            return Err(ActorError::UnexpectedResponse {
-                path,
-                expected: "WitnessesRegisterResponse::CurrentWitnessSubjects"
-                    .to_owned(),
-            });
-        };
+            let WitnessesRegisterResponse::CurrentWitnessSubjects {
+                governance_version,
+                items,
+                next_cursor,
+            } = response
+            else {
+                return Err(ActorError::UnexpectedResponse {
+                    path,
+                    expected:
+                        "WitnessesRegisterResponse::CurrentWitnessSubjects"
+                            .to_owned(),
+                });
+            };
 
-        let message = ActorMessage::TrackerSyncRes {
-            request_nonce: request.request_nonce,
-            governance_version,
-            items,
-            next_cursor,
-        };
-        self.network
-            .send_command(ave_network::CommandHelper::SendMessage {
-                delivery: delivery_of(&message),
-                message: NetworkMessage::new(
-                    ComunicateInfo {
-                        receiver: request.sender,
-                        request_id: request.info.request_id,
-                        version: request.info.version,
-                        receiver_actor: request.receiver_actor,
-                    },
-                    message,
-                ),
-            })
-            .await
+            let message = ActorMessage::TrackerSyncRes {
+                request_nonce: request.request_nonce,
+                governance_version,
+                items,
+                next_cursor,
+            };
+            return self
+                .network
+                .send_command(ave_network::CommandHelper::SendMessage {
+                    delivery: delivery_of(&message),
+                    message: NetworkMessage::new(
+                        ComunicateInfo {
+                            receiver: request.sender,
+                            request_id: request.info.request_id,
+                            version: request.info.version,
+                            receiver_actor: request.receiver_actor,
+                        },
+                        message,
+                    ),
+                })
+                .await;
+        }
+        Ok(())
     }
 
     async fn finish_cycle(

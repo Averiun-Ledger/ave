@@ -33,10 +33,10 @@ use crate::{
             check_witness_status, crash_system, get_verified_transfer_sn_firm,
             node::get_subject_data,
             subject::{
-                acquire_subject, check_witness_status_and_window, get_gov_sn,
+                check_witness_status_and_window, get_gov_sn,
                 get_local_subject_sn,
                 get_tracker_window as resolve_tracker_window, get_version,
-                has_role,
+                has_role, with_subject_up,
             },
         },
         event::{EvaluationResponse, Ledger, Protocols},
@@ -411,6 +411,51 @@ impl DistriWorker {
         }
     }
 
+    /// Test-only serving-read barrier hit: a `get_ledger` parked
+    /// here already owns its per-read lease, so a test can prove a
+    /// second concurrent read owns a different one. Production
+    /// never arms it.
+    #[cfg(feature = "test")]
+    fn get_ledger_up_paused(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|faults| {
+                    faults.get_ledger_up_paused()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_get_ledger_up_hold(ctx: &ActorContext<Self>) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_get_ledger_up_hold();
+        }
+    }
+
+    /// Test-only one-shot resolve failure for the next serving
+    /// read: the read fails right after its `Up`, before resolving
+    /// the tracker. Production never arms it.
+    #[cfg(feature = "test")]
+    fn take_fail_get_ledger_resolve(ctx: &ActorContext<Self>) -> bool {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry.lock().ok().map(|mut faults| {
+                    faults.take_fail_get_ledger_resolve()
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Sender-side batch budget, clamped to the shared inbound
     /// limit: a configured size above it must shrink the window,
     /// never emit a batch the receiver drops on sight.
@@ -664,31 +709,55 @@ impl DistriWorker {
                 }),
             }
         } else {
-            let lease = acquire_subject(
+            // One lease per read: concurrent readers must not share
+            // a requester entry, or the first one to finish stops the
+            // tracker while the other still needs it.
+            let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
+            let requester =
+                format!("send_distribution:{subject_id}:{attempt}");
+            with_subject_up(
                 ctx,
                 subject_id,
-                format!("send_distribution:{subject_id}"),
+                requester,
                 None,
                 true,
+                async move |ctx| {
+                    #[cfg(feature = "test")]
+                    {
+                        if Self::get_ledger_up_paused(ctx) {
+                            Self::note_get_ledger_up_hold(ctx);
+                            while Self::get_ledger_up_paused(ctx) {
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(100),
+                                )
+                                .await;
+                            }
+                        }
+                        if Self::take_fail_get_ledger_resolve(ctx) {
+                            return Err(ActorError::NotFound {
+                                path: path.clone(),
+                            });
+                        }
+                    }
+                    let tracker_actor = ctx
+                        .system()
+                        .get_actor::<Tracker>(&path)
+                        .await?;
+                    let response = tracker_actor
+                        .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
+                        .await?;
+                    match response {
+                        TrackerResponse::Ledger { ledger, is_all } => {
+                            Ok((ledger, is_all))
+                        }
+                        _ => Err(ActorError::UnexpectedResponse {
+                            expected: "TrackerResponse::Ledger".to_owned(),
+                            path,
+                        }),
+                    }
+                },
             )
-            .await?;
-            let tracker_actor =
-                ctx.system().get_actor::<Tracker>(&path).await?;
-            let response = tracker_actor
-                .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
-                .await;
-            lease.finish(ctx).await?;
-            let response = response?;
-
-            match response {
-                TrackerResponse::Ledger { ledger, is_all } => {
-                    Ok((ledger, is_all))
-                }
-                _ => Err(ActorError::UnexpectedResponse {
-                    expected: "TrackerResponse::Ledger".to_owned(),
-                    path,
-                }),
-            }
+            .await
         }
     }
 
@@ -735,9 +804,9 @@ impl DistriWorker {
         &self,
         ctx: &ActorContext<Self>,
         subject_id: &DigestIdentifier,
-    ) -> Result<u64, ActorError> {
+    ) -> Result<(u64, u64), ActorError> {
         // Deliberately unauthenticated: ex-witnesses and members need
-        // the version to sync governance at all; only a u64 is
+        // the version to sync governance at all; only two u64 are
         // disclosed and the ledger itself stays gated.
         let data = get_subject_data(ctx, subject_id).await?;
         let Some(SubjectData::Governance { .. }) = data else {
@@ -752,16 +821,17 @@ impl DistriWorker {
             .system()
             .get_actor::<Governance>(&governance_path)
             .await?;
-        let response =
-            governance_actor.ask(GovernanceMessage::GetVersion).await?;
-        let GovernanceResponse::Version(version) = response else {
+        let response = governance_actor
+            .ask(GovernanceMessage::GetVersionAndSn)
+            .await?;
+        let GovernanceResponse::VersionAndSn(version, sn) = response else {
             return Err(ActorError::UnexpectedResponse {
                 path: governance_path,
-                expected: "GovernanceResponse::Version".to_owned(),
+                expected: "GovernanceResponse::VersionAndSn".to_owned(),
             });
         };
 
-        Ok(version)
+        Ok((version, sn))
     }
 
     async fn authorized_subj(
@@ -3414,13 +3484,14 @@ impl DistriWorker {
         sender: PublicKey,
         receiver_actor: String,
     ) -> Result<(), ActorError> {
-        let version = self.get_governance_version(ctx, &subject_id).await?;
+        let (version, sn) =
+            self.get_governance_version(ctx, &subject_id).await?;
         let new_info =
             self.build_response_info(sender.clone(), &info, receiver_actor);
 
         self.send_network_message(
             new_info,
-            ActorMessage::GovernanceVersionRes { version },
+            ActorMessage::GovernanceVersionResV2 { version, sn },
         )
         .await?;
 

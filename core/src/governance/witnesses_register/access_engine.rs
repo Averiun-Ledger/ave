@@ -116,18 +116,33 @@ impl WitnessesRegister {
                             continue;
                         }
 
-                        grant = Some(Self::merge_grant(
-                            grant,
-                            &self
-                                .creator_grant_for_owner_interval(
+                        // Exact first; only its absence permits the
+                        // fallback limited to this very stint. A grant
+                        // conceded mid-stint opens its history
+                        // retroactively, but never replaces an exact
+                        // restrictive grant nor leaks across reigns.
+                        let stint = self
+                            .creator_grant_for_owner_interval(
+                                node,
+                                creator,
+                                schema_id,
+                                namespace,
+                                gov_version,
+                                gov_version,
+                            )
+                            .or_else(|| {
+                                self.creator_grant_for_owner_interval(
                                     node,
                                     creator,
                                     schema_id,
                                     namespace,
-                                    gov_version,
-                                    gov_version,
+                                    range.lo,
+                                    range.hi,
                                 )
-                                .unwrap_or(CreatorWitnessGrant::Hash),
+                            });
+                        grant = Some(Self::merge_grant(
+                            grant,
+                            &stint.unwrap_or(CreatorWitnessGrant::Hash),
                         ));
                         break;
                     }

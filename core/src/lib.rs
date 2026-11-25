@@ -3613,6 +3613,189 @@ impl Api {
         Ok(count)
     }
 
+    /// Parks (`pause == true`) or releases the serving-read
+    /// barrier on this node: while paused, a `get_ledger` that
+    /// just acquired its per-read lease waits before resolving
+    /// the tracker, so a test can overlap a second read and prove
+    /// both own independent leases. The flag lives in the shared
+    /// test registry, never in a worker mailbox (which would stay
+    /// blocked while parked).
+    pub async fn test_pause_get_ledger_up(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_get_ledger_up_paused(pause);
+        Ok(())
+    }
+
+    /// How many serving reads parked at the `Up` barrier on this
+    /// node: proves the interleaving really happened instead of
+    /// passing vacuously when only one read ran.
+    pub async fn test_get_ledger_up_hold_count(&self) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_ledger_up_hold_count();
+        Ok(count)
+    }
+
+    /// Parks (`pause == true`) or releases an exhausted `Auth`
+    /// retry round on this node: while paused, a round that reached
+    /// its retry budget with the target still ahead waits before
+    /// stopping, so a test can interleave the final response before
+    /// the stop drains it. The flag lives in the shared test
+    /// registry, never in the actor mailbox (which would stay
+    /// blocked while parked).
+    pub async fn test_pause_update_retry_exhausted(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_update_retry_exhausted_paused(pause);
+        Ok(())
+    }
+
+    /// How many exhausted retry rounds parked on this node: proves
+    /// the parked round really reached its retry budget instead of
+    /// passing vacuously on an early stop.
+    pub async fn test_update_retry_exhausted_hold_count(
+        &self,
+    ) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .update_retry_exhausted_hold_count();
+        Ok(count)
+    }
+
+    /// Parks or releases a tracker-sync serving request immediately
+    /// after its initial governance-version read, before listing the
+    /// register. Used to interleave a governance update deterministically.
+    pub async fn test_pause_tracker_sync_version(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_tracker_sync_version_paused(pause);
+        Ok(())
+    }
+
+    /// Number of tracker-sync requests parked after their initial
+    /// governance-version read.
+    pub async fn test_tracker_sync_version_hold_count(
+        &self,
+    ) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tracker_sync_version_hold_count();
+        Ok(count)
+    }
+
+    /// Arms a one-shot resolve failure for the next serving read
+    /// on this node: that `get_ledger` fails right after its `Up`
+    /// instead of resolving the tracker. The following reads
+    /// proceed normally.
+    pub async fn test_arm_fail_get_ledger_resolve(
+        &self,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .arm_fail_get_ledger_resolve();
+        Ok(())
+    }
+
+    /// Arms a one-shot sink-setup failure for the next subject
+    /// creation on this node. The creation fails before touching
+    /// any state; the following ones proceed normally.
+    pub async fn test_arm_fail_next_sink(&self) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .arm_fail_next_sink();
+        Ok(())
+    }
+
+    /// Arms a one-shot node-registration failure for the next
+    /// subject creation on this node. Genesis already landed when it
+    /// fires; the following creations proceed normally.
+    pub async fn test_arm_fail_next_node_register(
+        &self,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .arm_fail_next_node_register();
+        Ok(())
+    }
+
+    /// Test-only: whether Node has completed registration of a
+    /// subject. External projections may already contain genesis
+    /// while creation is still partial, so they cannot answer this.
+    pub async fn test_node_has_subject(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        match self
+            .node
+            .ask(NodeMessage::GetSubjectData(subject_id))
+            .await?
+        {
+            NodeResponse::SubjectData(data) => Ok(data.is_some()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "node".to_owned(),
+                expected: "SubjectData".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: runs a subject creation through the subject
+    /// manager with the given genesis ledger, surfacing partial
+    /// creations instead of confirming them.
+    pub async fn test_up_subject_with_create(
+        &self,
+        subject_id: DigestIdentifier,
+        ledger: crate::model::event::Ledger,
+    ) -> Result<(), Error> {
+        let actor = self
+            .system
+            .get_actor::<SubjectManager>(&ActorPath::from(
+                "/user/node/subject_manager",
+            ))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject_manager".to_owned(),
+                reason: "Subject manager not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectManagerMessage::Up {
+                subject_id,
+                requester: "test-create".to_owned(),
+                create_ledger: Some(Box::new(ledger)),
+            })
+            .await?
+        {
+            SubjectManagerResponse::Up => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_manager".to_owned(),
+                expected: "Up".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Attempt id captured when the rollback barrier last fired:
     /// lets a test prove which parked copy it is asserting on.
     pub async fn test_rollback_attempt(&self) -> Result<Option<u64>, Error> {
@@ -4152,6 +4335,35 @@ impl Api {
             .is_ok())
     }
 
+    /// Test-only: asks this node's governance actor to start a
+    /// manual catch-up round, the same entry point the tracker sync
+    /// nudge uses. Lets a test drive the `gov_manual_update`
+    /// supervised round without staging a full sync cycle.
+    pub async fn test_trigger_gov_update(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        use crate::governance::{Governance, GovernanceMessage};
+        let actor = self
+            .system
+            .get_actor::<Governance>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "governance".to_owned(),
+                reason: "Governance actor not found".to_owned(),
+            })?;
+        actor
+            .tell(GovernanceMessage::TriggerGovUpdate)
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "governance".to_owned(),
+                reason: "Governance trigger tell failed".to_owned(),
+            })?;
+        Ok(())
+    }
+
     /// Test-only: opens a tracker sync round on demand by delivering
     /// a tick to the actor. Lets a test drive fetch/update cycles
     /// without waiting for the configured interval.
@@ -4516,6 +4728,195 @@ impl Api {
             _ => Err(Error::UnexpectedResponse {
                 actor: "subject_register".to_owned(),
                 expected: "SubjectPresent".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: delete a subject register entry, simulating a
+    /// crash cut that lost the derived write while later markers
+    /// persisted. The next dirty boot must replay it from the ledger.
+    pub async fn test_delete_subject_register_entry(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        use crate::governance::subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/subject_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject register".to_owned(),
+                reason: "Subject register not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectRegisterMessage::DeleteSubject { subject_id })
+            .await?
+        {
+            SubjectRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: move both ownership projections to one owner,
+    /// leaving the tracker ledger and its markers untouched. Used to
+    /// plant a crash cut where Create/Confirm-derived state stayed
+    /// behind a later fact.
+    pub async fn test_move_ownership_projection(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        owner: PublicKey,
+        schema_id: ave_common::SchemaType,
+        namespace: String,
+        gov_version: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        };
+        let data = match self.node.ask(NodeMessage::GetSubjectData(subject_id.clone())).await? {
+            NodeResponse::SubjectData(Some(data)) => data,
+            NodeResponse::SubjectData(None) => {
+                return Err(Error::MissingResource {
+                    name: "subject".to_owned(),
+                    reason: "Subject is not registered in node".to_owned(),
+                });
+            }
+            _ => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_owned(),
+                    expected: "SubjectData".to_owned(),
+                    received: "other".to_owned(),
+                });
+            }
+        };
+        match self
+            .node
+            .ask(NodeMessage::DeleteSubject(subject_id.clone()))
+            .await?
+        {
+            NodeResponse::Ok => {}
+            _ => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_owned(),
+                    expected: "Ok".to_owned(),
+                    received: "other".to_owned(),
+                });
+            }
+        }
+        match self
+            .node
+            .ask(NodeMessage::RegisterSubject {
+                owner: owner.clone(),
+                subject_id: subject_id.clone(),
+                data,
+            })
+            .await?
+        {
+            NodeResponse::Ok => {}
+            _ => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_owned(),
+                    expected: "Ok".to_owned(),
+                    received: "other".to_owned(),
+                });
+            }
+        }
+        let actor = self
+            .system
+            .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/subject_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject register".to_owned(),
+                reason: "Subject register not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectRegisterMessage::UpdateSubject {
+                new_owner: owner.clone(),
+                old_owner: owner,
+                subject_id,
+                namespace,
+                schema_id,
+                gov_version,
+            })
+            .await?
+        {
+            SubjectRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: read node ownership/pending state and whether the
+    /// subject register contains the subject under the expected owner.
+    pub async fn test_ownership_projection(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        owner: PublicKey,
+        schema_id: ave_common::SchemaType,
+        namespace: String,
+    ) -> Result<(bool, Option<bool>, bool), Error> {
+        use crate::governance::subject_register::{
+            SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
+        };
+        let (node_owner, node_pending) = match self
+            .node
+            .ask(NodeMessage::IOwnerNewOwnerSubject(subject_id.clone()))
+            .await?
+        {
+            NodeResponse::IOwnerNewOwner {
+                i_owner,
+                i_new_owner,
+            } => (i_owner, i_new_owner),
+            _ => {
+                return Err(Error::UnexpectedResponse {
+                    actor: "node".to_owned(),
+                    expected: "IOwnerNewOwner".to_owned(),
+                    received: "other".to_owned(),
+                });
+            }
+        };
+        let actor = self
+            .system
+            .get_actor::<SubjectRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/subject_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "subject register".to_owned(),
+                reason: "Subject register not found".to_owned(),
+            })?;
+        match actor
+            .ask(SubjectRegisterMessage::GetSubjectsByOwnerSchemaBatch {
+                queries: vec![(owner, schema_id, namespace)],
+            })
+            .await?
+        {
+            SubjectRegisterResponse::SubjectsBatch(entries) => Ok((
+                node_owner,
+                node_pending,
+                entries.first().is_some_and(|subjects| {
+                    subjects.contains(&subject_id)
+                }),
+            )),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "subject_register".to_owned(),
+                expected: "SubjectsBatch".to_owned(),
                 received: "other".to_owned(),
             }),
         }

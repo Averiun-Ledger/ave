@@ -255,13 +255,14 @@ impl DistriCoordinator {
             },
         )?;
         let frag_count = frags.len();
-        self.send_frags(&frags, &request_id, &receiver_actor)
-            .await?;
-
         #[cfg(any(test, feature = "test"))]
         let tries = 2u32;
         #[cfg(not(any(test, feature = "test")))]
         let tries = 3u32;
+        // Install the resend state and its timer before the first
+        // send: a failure there must behave like any retry round
+        // (log and keep the group for the next round) instead of
+        // killing the coordinator with nothing armed.
         self.frag_pending = Some(FragSendState {
             frags,
             request_id,
@@ -277,6 +278,28 @@ impl DistriCoordinator {
                 "Failed to arm fragment retry"
             );
             return Err(crash_system(ctx, e).await);
+        }
+        if let Err(e) = {
+            let pending = self
+                .frag_pending
+                .as_ref()
+                .ok_or_else(|| ActorError::Functional {
+                    description: "Fragment retry state missing".to_owned(),
+                })?;
+            self.send_frags(
+                &pending.frags,
+                &pending.request_id,
+                &pending.receiver_actor,
+            )
+            .await
+        } {
+            warn!(
+                msg_type = "NetworkDistribution",
+                subject_id = %subject_id,
+                sn = sn,
+                error = %e,
+                "Initial fragment send failed, keeping retry alive"
+            );
         }
 
         debug!(

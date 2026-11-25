@@ -40,6 +40,7 @@ impl WitnessesRegister {
         ctx: &ActorContext<Self>,
         node: &PublicKey,
         governance_version: u64,
+        local_version: u64,
         after_subject_id: Option<DigestIdentifier>,
         limit: usize,
     ) -> Result<
@@ -107,8 +108,10 @@ impl WitnessesRegister {
         // The listing is always current state: honor the cursor
         // whenever the requester is not ahead of this node, so
         // pagination terminates; a requester ahead restarts from
-        // scratch against newer data.
-        let effective_cursor = if governance_version <= self.gov_sn {
+        // scratch against newer data. The comparison uses the real
+        // local version, never the ledger tip: failed events move
+        // the tip without moving the version.
+        let effective_cursor = if governance_version <= local_version {
             after_subject_id
         } else {
             None

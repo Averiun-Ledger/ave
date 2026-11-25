@@ -24,6 +24,9 @@ use crate::{
         TrackerSync, TrackerSyncMessage, TrackerSyncNetworkRequest,
         TrackerSyncNetworkResponse,
     },
+    governance::version_sync::{
+        GovernanceVersionSync, GovernanceVersionSyncMessage,
+    },
     update::updater::{Updater, UpdaterMessage},
     validation::{
         coordinator::{ValiCoordinator, ValiCoordinatorMessage},
@@ -245,6 +248,36 @@ impl Intermediary {
                 }
             }
         }
+    }
+
+    async fn forward_governance_version(
+        system: &SystemRef,
+        path: &ActorPath,
+        sender: &PublicKey,
+        version: u64,
+        sn: Option<u64>,
+    ) -> Result<(), IntermediaryError> {
+        // Both wire shapes land on the same version-sync message:
+        // the legacy answer carries no tip.
+        let actor = system
+            .get_actor::<GovernanceVersionSync>(path)
+            .await
+            .map_err(|_| IntermediaryError::ActorNotFound {
+                path: path.to_string(),
+            })?;
+
+        actor
+            .tell(GovernanceVersionSyncMessage::PeerVersion {
+                peer: sender.clone(),
+                version,
+                sn,
+            })
+            .await
+            .map_err(|e| IntermediaryError::SendMessageFailed {
+                path: path.to_string(),
+                details: e.to_string(),
+            })?;
+        Ok(())
     }
 
     async fn handle_command(
@@ -548,27 +581,20 @@ impl Intermediary {
                             })?;
                     }
                     ActorMessage::GovernanceVersionRes { version } => {
-                        let actor = system
-                            .get_actor::<crate::governance::version_sync::GovernanceVersionSync>(&path)
-                            .await
-                            .map_err(|_| IntermediaryError::ActorNotFound {
-                                path: path.to_string(),
-                            })?;
-
-                        actor
-                            .tell(
-                                crate::governance::version_sync::GovernanceVersionSyncMessage::PeerVersion {
-                                    peer: sender.clone(),
-                                    version,
-                                },
-                            )
-                            .await
-                            .map_err(|e| {
-                                IntermediaryError::SendMessageFailed {
-                                    path: path.to_string(),
-                                    details: e.to_string(),
-                                }
-                            })?;
+                        Self::forward_governance_version(
+                            system, &path, &sender, version, None,
+                        )
+                        .await?;
+                    }
+                    ActorMessage::GovernanceVersionResV2 { version, sn } => {
+                        Self::forward_governance_version(
+                            system,
+                            &path,
+                            &sender,
+                            version,
+                            Some(sn),
+                        )
+                        .await?;
                     }
                     ActorMessage::TrackerSyncReq {
                         request_nonce,

@@ -24,6 +24,7 @@ use super::{Governance, GovernanceMessage};
 pub struct UpdateTarget {
     pub peer: PublicKey,
     pub version: u64,
+    pub sn: Option<u64>,
 }
 
 /// Constructor parameters for the version sync worker, grouped so the
@@ -34,6 +35,7 @@ pub struct GovernanceVersionSyncConfig {
     pub our_key: Arc<PublicKey>,
     pub network: Arc<NetworkSender>,
     pub local_version: u64,
+    pub local_sn: u64,
     pub sample_size: usize,
     pub tick_interval: Duration,
     pub response_timeout: Duration,
@@ -44,6 +46,7 @@ pub struct GovernanceVersionSyncConfig {
 pub enum GovernanceVersionSyncMessage {
     RefreshGovernance {
         version: u64,
+        sn: u64,
         governance_peers: HashSet<PublicKey>,
     },
     Tick,
@@ -53,6 +56,7 @@ pub enum GovernanceVersionSyncMessage {
     PeerVersion {
         peer: PublicKey,
         version: u64,
+        sn: Option<u64>,
     },
     /// Test-only read of the idle-round counter: proves silent or
     /// failed rounds never certify the tip.
@@ -95,6 +99,7 @@ pub struct GovernanceVersionSync {
     our_key: Arc<PublicKey>,
     network: Arc<NetworkSender>,
     local_version: u64,
+    local_sn: u64,
     sample_size: usize,
     tick_interval: Duration,
     response_timeout: Duration,
@@ -118,7 +123,7 @@ pub struct GovernanceVersionSync {
     /// Last local version an idle round was reported for. Idle is a
     /// state, not an event: re-notifying every tick is noise
     ///
-    idle_notified_at_version: Option<u64>,
+    idle_notified_at_version: Option<(u64, u64)>,
 }
 
 /// Ticks a stale update target may survive without our version
@@ -180,6 +185,7 @@ impl GovernanceVersionSync {
             our_key,
             network,
             local_version,
+            local_sn,
             sample_size,
             tick_interval,
             response_timeout,
@@ -190,6 +196,7 @@ impl GovernanceVersionSync {
             our_key,
             network,
             local_version,
+            local_sn,
             sample_size: sample_size.max(1),
             tick_interval,
             response_timeout,
@@ -244,23 +251,27 @@ impl GovernanceVersionSync {
     fn refresh_governance(
         &mut self,
         version: u64,
+        sn: u64,
         mut governance_peers: HashSet<PublicKey>,
     ) {
         governance_peers.remove(&*self.our_key);
         self.peer_backoff.prune(&governance_peers);
-        if version != self.local_version {
-            // New version, new idle state: a past idle report says
-            // nothing about this one.
+        if version != self.local_version || sn != self.local_sn {
+            // New version or new ledger tip, new idle state: a past
+            // idle report says nothing about this one. Failed events
+            // move the tip without moving the version, so both must
+            // reset the idle marker.
             self.idle_notified_at_version = None;
         }
         self.local_version = version;
+        self.local_sn = sn;
         self.governance_peers = governance_peers;
 
-        if self
-            .update_target
-            .as_ref()
-            .is_some_and(|target| target.version <= version)
-        {
+        if self.update_target.as_ref().is_some_and(|target| {
+            version > target.version
+                || (version == target.version
+                    && target.sn.is_none_or(|s| sn >= s))
+        }) {
             self.update_target = None;
             self.target_set_at = None;
         }
@@ -295,8 +306,11 @@ impl GovernanceVersionSync {
     /// is a state, and every tick re-proving it would spam the
     /// governance actor with full acquisition passes.
     async fn maybe_notify_idle_round(&mut self, ctx: &ActorContext<Self>) {
-        if self.idle_notified_at_version != Some(self.local_version) {
-            self.idle_notified_at_version = Some(self.local_version);
+        if self.idle_notified_at_version
+            != Some((self.local_version, self.local_sn))
+        {
+            self.idle_notified_at_version =
+                Some((self.local_version, self.local_sn));
             self.notify_idle_round(ctx).await;
         }
     }
@@ -328,7 +342,7 @@ impl GovernanceVersionSync {
         };
 
         let message = ActorMessage::DistributionLedgerReq {
-            actual_sn: Some(self.local_version),
+            actual_sn: Some(self.local_sn),
             target_sn: None,
             subject_id: self.governance_id.clone(),
             already_verified_transfer_sn: None,
@@ -422,7 +436,12 @@ impl GovernanceVersionSync {
             .sample(&mut rng, self.sample_size.min(peers.len()))
     }
 
-    fn peer_version(&mut self, peer: PublicKey, version: u64) -> bool {
+    fn peer_version(
+        &mut self,
+        peer: PublicKey,
+        version: u64,
+        sn: Option<u64>,
+    ) -> bool {
         if !self.round_open || !self.pending_peers.remove(&peer) {
             return false;
         }
@@ -430,16 +449,24 @@ impl GovernanceVersionSync {
         // forgive any silence backoff on the spot.
         self.peer_backoff.note_success(&peer);
 
-        if version <= self.local_version {
+        let ahead = version > self.local_version
+            || (version == self.local_version
+                && sn.is_some_and(|s| s > self.local_sn));
+        if !ahead {
             return self.pending_peers.is_empty();
         }
 
-        let should_replace = self
-            .update_target
-            .as_ref()
-            .is_none_or(|target| version > target.version);
+        let should_replace = self.update_target.as_ref().is_none_or(|target| {
+            version > target.version
+                || (version == target.version
+                    && sn.is_some_and(|s| target.sn.is_none_or(|t| s > t)))
+        });
         if should_replace {
-            self.update_target = Some(UpdateTarget { peer, version });
+            self.update_target = Some(UpdateTarget {
+                peer,
+                version,
+                sn,
+            });
             self.target_set_at = Some(Instant::now());
         }
 
@@ -589,9 +616,10 @@ impl Handler<Self> for GovernanceVersionSync {
         match msg {
             GovernanceVersionSyncMessage::RefreshGovernance {
                 version,
+                sn,
                 governance_peers,
             } => {
-                self.refresh_governance(version, governance_peers);
+                self.refresh_governance(version, sn, governance_peers);
             }
             GovernanceVersionSyncMessage::Tick => {
                 if let Err(error) = self.handle_tick(ctx).await {
@@ -650,8 +678,8 @@ impl Handler<Self> for GovernanceVersionSync {
                     }
                 }
             }
-            GovernanceVersionSyncMessage::PeerVersion { peer, version } => {
-                if self.peer_version(peer.clone(), version) {
+            GovernanceVersionSyncMessage::PeerVersion { peer, version, sn } => {
+                if self.peer_version(peer.clone(), version, sn) {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
                     if let Err(error) =
@@ -668,12 +696,17 @@ impl Handler<Self> for GovernanceVersionSync {
                             "Failed to trigger governance update after round completion"
                         );
                     }
-                } else if version > self.local_version
+                } else if (version > self.local_version
+                    || (version == self.local_version
+                        && sn.is_some_and(|s| s > self.local_sn)))
                     && self.governance_peers.contains(&peer)
-                    && self
-                        .update_target
-                        .as_ref()
-                        .is_none_or(|target| version > target.version)
+                    && self.update_target.as_ref().is_none_or(|target| {
+                        version > target.version
+                            || (version == target.version
+                                && sn.is_some_and(|s| {
+                                    target.sn.is_none_or(|t| s > t)
+                                }))
+                    })
                 {
                     // Late but valuable: the round already closed, yet
                     // a known peer is ahead of us (and of any target).
@@ -681,7 +714,11 @@ impl Handler<Self> for GovernanceVersionSync {
                     // dropping the intel until the next tick.
                     // Not an idle proof, so no idle notify.
                     self.peer_backoff.note_success(&peer);
-                    self.update_target = Some(UpdateTarget { peer, version });
+                    self.update_target = Some(UpdateTarget {
+                        peer,
+                        version,
+                        sn,
+                    });
                     self.target_set_at = Some(Instant::now());
                     if let Err(error) =
                         self.trigger_update_if_needed(ctx, false).await

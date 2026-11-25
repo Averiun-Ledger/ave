@@ -17521,7 +17521,7 @@ async fn remote_update_restart_refreshes_snapshot() {
 
     // Tracker T on B: its creation push lands on A (schema
     // witness) with no sweep involved, so sweep 1 below starts from
-    // actual_sn 0 as the audit requires.
+    // actual_sn 0, proving the first pull starts with no prior sweep.
     let (t, _) = create_subject(&b, g1.clone(), "Example", "", true)
         .await
         .unwrap();
@@ -22093,6 +22093,33 @@ async fn remote_scope_mismatch_rejects_before_write() {
         .unwrap();
 }
 
+/// Waits until the witnesses register names the expected pending
+/// owner for the subject, polling observable register state with a
+/// bounded budget: the transfer event lands in the ledger before the
+/// register catches up with it.
+async fn poll_pending_ownership(
+    api: &ave_core::Api,
+    gov: &DigestIdentifier,
+    subject: &DigestIdentifier,
+    want: Option<ave_common::identity::PublicKey>,
+) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let (_, pending, _, _) = api
+            .test_witnesses_ownership(&gov.clone(), subject.clone())
+            .await
+            .unwrap();
+        if pending == want {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "pending ownership never converged to {want:?}, got {pending:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // Grouped main+aux delivery only completes when both sides share the
 // full identity: sender, scope, completeness, request, version, route
 // and aux hash. A mixed counterpart discards both sides with no apply,
@@ -22383,15 +22410,8 @@ async fn remote_fragment_ready_mixed_identity_discarded_before_delivery() {
     get_subject(&a, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
-    let (_, pending, _, _) = a
-        .test_witnesses_ownership(&governance_id, subject_id.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        pending,
-        Some(carol_key),
-        "grouped aux opens pending ownership"
-    );
+    poll_pending_ownership(&a, &governance_id, &subject_id, Some(carol_key.clone()))
+        .await;
     let (assemblies, mains_n, auxes_n, _, _) =
         a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
     assert_eq!(
@@ -22651,15 +22671,8 @@ async fn remote_fragment_group_sn_identity() {
     get_subject(&a, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
-    let (_, pending, _, _) = a
-        .test_witnesses_ownership(&governance_id, subject_id.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        pending,
-        Some(carol_key),
-        "grouped aux opens pending ownership"
-    );
+    poll_pending_ownership(&a, &governance_id, &subject_id, Some(carol_key.clone()))
+        .await;
     let (assemblies, mains_n, auxes_n, _, _) =
         a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
     assert_eq!(
@@ -25173,4 +25186,208 @@ async fn remote_divergent_duplicate_push_is_not_acknowledged() {
     drop(dirs);
     drop(rita_node);
     drop(rita_dirs);
+}
+
+/// Runs one fragmented-push case: the first send fails either on
+/// the initial fragment or, with two sends held back first, on an
+/// intermediate one. Fresh nodes per case so no retry or assembly
+/// state leaks between them.
+async fn fragmented_push_retry_case(intermediate: bool) {
+    let cap = ave_network::MAX_APP_MESSAGE_BYTES as usize;
+    let mut nodes = vec![];
+    let mut dirs = vec![];
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (boot, mut d) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![],
+        always_accept: true,
+        is_service: true,
+        network_max_message_bytes: Some(cap),
+        ..Default::default()
+    })
+    .await;
+    dirs.append(&mut d);
+    node_running(&boot.api).await.unwrap();
+    nodes.push(boot);
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let boot_addr = nodes[0].listen_address.clone();
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: format!("/memory/{port}"),
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            network_max_message_bytes: Some(cap),
+            ledger_batch_size: Some(100),
+            ..Default::default()
+        })
+        .await;
+        dirs.append(&mut d);
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+    }
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let a_key = PublicKey::from_str(&a.public_key()).unwrap();
+    let _ = nodes;
+
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+            ]},
+            "schemas": { "add": [
+                {
+                    "id": "Big",
+                    "contract": ave_core::test_contracts::CHANGED_SCHEMA_CONTRACT,
+                    "initial_value": {"data": ""},
+                },
+            ]},
+            "roles": {
+                "schema": [
+                    {
+                        "schema_id": "Big",
+                        "add": {
+                            "evaluator": [{"name": "Owner", "namespace": []}],
+                            "validator": [{"name": "Owner", "namespace": []}],
+                            "witness": [
+                                {"name": "Owner", "namespace": []},
+                                {"name": "A", "namespace": []},
+                            ],
+                            "creator": [
+                                {
+                                    "name": "Owner",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                },
+                                {
+                                    "name": "A",
+                                    "namespace": [],
+                                    "quantity": "infinity",
+                                },
+                            ],
+                            "issuer": [{"name": "Owner", "namespace": []}],
+                        },
+                    },
+                ],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // One fact above the wire cap but below the replicable bound.
+    // Fail the first send on the initial fragment, or hold two
+    // sends back first so it fails on an intermediate one.
+    if intermediate {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerFrag,
+            peer: Some(a_key.clone()),
+            remaining: Some(2),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerFrag,
+        peer: Some(a_key.clone()),
+        remaining: Some(1),
+        action: FaultAction::FailSend,
+    })
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&b, governance_id.clone(), "Big", "", true)
+            .await
+            .unwrap();
+    let bulk = "y".repeat(1200 * 1024);
+    emit_fact(
+        &b,
+        subject_id.clone(),
+        json!({"ChangeData": {"data": bulk}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // The retry resends the whole group until the receiver assembles
+    // and applies it exactly once.
+    let state = get_subject(&a, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let owner_state =
+        get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
+    assert_eq!(state.properties, owner_state.properties);
+    assert_eq!(
+        a.test_get_tracker_ledger(subject_id.clone(), 1)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "no duplicate application"
+    );
+    let (assemblies, _, _, decode_attempts, expired) =
+        a.test_fragment_stats().await.unwrap();
+    assert!(
+        decode_attempts >= 1,
+        "the retry drove a fragment join and decode"
+    );
+    assert_eq!(assemblies, 0, "no live assembly is left behind");
+    assert_eq!(expired, 0, "no assembly expired");
+    assert_eq!(
+        a.test_fragment_assembly_len().await.unwrap_or(1),
+        0,
+        "no fragment state is left behind"
+    );
+    if intermediate {
+        let held = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                matches!(
+                    m.message,
+                    ActorMessage::DistributionLedgerFrag { .. }
+                )
+            })
+            .count();
+        assert_eq!(held, 2, "the failure hit an intermediate fragment");
+    }
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+/// A fragmented push whose initial send fails still completes: the
+/// coordinator keeps its resend state and timer, so the next round
+/// resends the whole group until the receiver assembles and acks it.
+#[test(tokio::test)]
+async fn fragmented_push_retries_after_initial_fragment_send_failure() {
+    fragmented_push_retry_case(false).await;
+    fragmented_push_retry_case(true).await;
 }
