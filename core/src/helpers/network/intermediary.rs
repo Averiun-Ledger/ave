@@ -41,6 +41,8 @@ use super::ActorMessage;
 #[cfg(feature = "test")]
 use super::test_faults;
 use super::{NetworkMessage, WIRE_VERSION, service::NetworkSender};
+#[cfg(feature = "test")]
+use crate::distribution::processor::TruncationStatsRegistry;
 use crate::metrics::try_core_metrics;
 use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
@@ -145,6 +147,16 @@ impl Intermediary {
             "reconcile_stats",
             Arc::new(std::sync::Mutex::new(
                 crate::tracker::reconcile::ReconcileStatsRegistry::default(),
+            )),
+        );
+        // Test-only truncation-window counters, read by the suites
+        // through the `truncation_stats` helper. Same lifetime and
+        // threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "truncation_stats",
+            Arc::new(std::sync::Mutex::new(
+                TruncationStatsRegistry::default(),
             )),
         );
         // Test-only fragment reassembly counters, read by the suites

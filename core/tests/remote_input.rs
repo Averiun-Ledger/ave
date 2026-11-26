@@ -25391,3 +25391,1222 @@ async fn fragmented_push_retries_after_initial_fragment_send_failure() {
     fragmented_push_retry_case(false).await;
     fragmented_push_retry_case(true).await;
 }
+
+// The verified sender must switch mid-copy: a continuation still
+// attributed to A announces its proof, but the first request to B
+// after the gate flip must omit it, B must send the aux and R must
+// re-verify. Covers the Update route and the direct worker
+// continuation; the TrackerSync route has its own test.
+#[test(tokio::test)]
+async fn remote_update_switches_verified_sender_mid_copy() {
+    // Held ledger requests R sent to `peer`: (subject, actual,
+    // target, already_verified).
+    async fn held_reqs_to(
+        api: &ave_core::Api,
+        peer: &PublicKey,
+    ) -> Vec<(DigestIdentifier, Option<u64>, Option<u64>, Option<u64>)> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerReq {
+                    subject_id,
+                    actual_sn,
+                    target_sn,
+                    already_verified_transfer_sn,
+                    ..
+                } if &m.info.receiver == peer => Some((
+                    subject_id,
+                    actual_sn,
+                    target_sn,
+                    already_verified_transfer_sn,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Waits until R holds at least one ledger request to `peer`.
+    async fn wait_reqs_to(
+        api: &ave_core::Api,
+        peer: &PublicKey,
+    ) -> Vec<(DigestIdentifier, Option<u64>, Option<u64>, Option<u64>)> {
+        for _ in 0..300 {
+            let reqs = held_reqs_to(api, peer).await;
+            if !reqs.is_empty() {
+                return reqs;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let all = api
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| format!("{:?} -> {}", m.message, m.info.receiver))
+            .collect::<Vec<_>>();
+        panic!("no held ledger request to {peer} in time, held: {all:?}");
+    }
+
+    // Delivers a genuine prefix with the pending aux attached, like a
+    // sender fetching the hint ahead of its window, through the
+    // node-level worker.
+    async fn inject_state(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        aux: &Ledger,
+        gov: &DigestIdentifier,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).unwrap();
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger,
+                    is_all: false,
+                    transfer_event: Some(Box::new(aux.clone())),
+                    expected_governance_id: Some(gov.clone()),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Delivers a bare Create with no aux: crossing nothing, it applies
+    // on its own and leaves no proof behind.
+    async fn inject_create(api: &ave_core::Api, from: &PublicKey, create: Ledger) {
+        let receiver = PublicKey::from_str(api.public_key()).unwrap();
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerRes {
+                    ledger: vec![create],
+                    is_all: false,
+                    transfer_event: None,
+                    expected_governance_id: None,
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Establishes (tip, proof) on a fresh subject exactly like the
+    // live flow: the Create batch carries no aux (nothing verified
+    // yet, so its continuation announces nothing), then the fact
+    // batch verifies the aux and its continuation announces it.
+    async fn inject_fresh_prefix(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        history: &[Ledger],
+        aux: &Ledger,
+        gov: &DigestIdentifier,
+        tip: u64,
+        transfer_sn: u64,
+    ) {
+        inject_create(api, from, history[0].clone()).await;
+        for _ in 0..300 {
+            if api
+                .get_subject_state(history[0].get_subject_id())
+                .await
+                .is_ok_and(|state| state.sn == 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The Create batch always triggers its own continuation
+        // request first: observe it held before dropping it, so the
+        // drop cannot race a late send.
+        for _ in 0..300 {
+            if !held_reqs_to(api, from).await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        api.test_clear_faults().await.unwrap();
+        hold_r_reqs(api).await;
+        inject_state(
+            api,
+            from,
+            history[1..=tip as usize].to_vec(),
+            aux,
+            gov,
+        )
+        .await;
+        wait_proof_state(
+            api,
+            gov,
+            &history[0].get_subject_id(),
+            tip,
+            (transfer_sn, from.clone()),
+        )
+        .await;
+    }
+
+    // Waits until R applied `tip` and recorded exactly `proof`.
+    async fn wait_proof_state(
+        api: &ave_core::Api,
+        gov: &DigestIdentifier,
+        subject: &DigestIdentifier,
+        tip: u64,
+        proof: (u64, PublicKey),
+    ) {
+        for _ in 0..300 {
+            let at_tip = api
+                .get_subject_state(subject.clone())
+                .await
+                .is_ok_and(|state| state.sn == tip);
+            let recorded = api
+                .test_get_verified_transfer_sn(gov, subject.clone())
+                .await
+                .unwrap();
+            if at_tip && recorded == Some(proof.clone()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("R never reached tip {tip} with proof {proof:?}");
+    }
+
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let a = nodes[1].api.clone();
+    let b = nodes[2].api.clone();
+    let r = nodes[3].api.clone();
+    let a_key = PublicKey::from_str(a.public_key()).unwrap();
+    let b_key = PublicKey::from_str(b.public_key()).unwrap();
+    let r_key = PublicKey::from_str(r.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&a, &b, &r]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [
+                {"name": "A", "key": a.public_key()},
+                {"name": "B", "key": b.public_key()},
+                {"name": "R", "key": r.public_key()},
+            ]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["A", "B"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "A", "namespace": []},
+                            {"name": "B", "namespace": []},
+                        ],
+                        "creator": [
+                            {
+                                "name": "A",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "B", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "R", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "Witnesses", "viewpoints": ["AllViewpoints"]},
+                                ],
+                            },
+                            {
+                                "name": "B",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "A", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "R", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "Witnesses", "viewpoints": ["AllViewpoints"]},
+                                ],
+                            },
+                        ],
+                        "issuer": [
+                            {"name": "A", "namespace": []},
+                            {"name": "B", "namespace": []},
+                        ],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Everyone pulls the governance once the member fact above
+    // lands; R never touches the subject except through the driven
+    // steps further down.
+    for api in [&a, &b, &r] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+    }
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    for api in [&a, &b, &r] {
+        get_subject(api, governance_id.clone(), Some(gov_sn), true)
+            .await
+            .unwrap();
+    }
+
+    // No pushes to R from here on and no sync-driven updates: every
+    // request below is an explicit pull through a live round. Ledger
+    // responses are pushes too unless they answer one of R's held
+    // requests, so they stay dropped except across controlled
+    // releases.
+    async fn seal_pushes(api: &ave_core::Api, peer: &PublicKey) {
+        for message in [
+            FaultMessage::DistributionLastEventReq,
+            FaultMessage::DistributionLastEventRes,
+            FaultMessage::DistributionLedgerRes,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(peer.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    for api in [&owner, &a, &b] {
+        seal_pushes(api, &r_key).await;
+    }
+    // B stays silent until the gate flip: the first selection is
+    // necessarily A, never a race.
+    for message in [
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::DistributionLedgerRes,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    // R holds every outbound request and never syncs on its own.
+    // Every request below is released by hand after pinning its
+    // contents, so nothing completes vacuously and no retry runs
+    // ahead of the assertions.
+    async fn hold_r_reqs(api: &ave_core::Api) {
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::TrackerSyncReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    hold_r_reqs(&r).await;
+
+    // Same authentic ledger on both servers: A creates, two facts
+    // and a pending transfer to B at the tip.
+    let (subject_id, _) =
+        create_subject(&a, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [1, 2] {
+        emit_fact(
+            &a,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    emit_transfer(&a, subject_id.clone(), b_key.clone(), true)
+        .await
+        .unwrap();
+    for api in [&a, &b] {
+        api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(api, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+    }
+    // Serving needs a local distributor on every server: pulls do
+    // not always create one, so ensure them explicitly instead of
+    // depending on creation side effects.
+    for api in [&a, &b, &r] {
+        api.test_ensure_distributor(subject_id.clone())
+            .await
+            .unwrap();
+    }
+    let history = a
+        .test_get_tracker_ledger(subject_id.clone(), 3)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 3)
+        .expect("transfer event")
+        .clone();
+    assert!(
+        transfer.protocols.is_success(),
+        "pending transfer must succeed, got {:?}",
+        transfer.protocols
+    );
+    let aux_hash = transfer
+        .ledger_hash(HashAlgorithm::Blake3)
+        .expect("aux hash");
+
+    // R reaches T-1 with the genuine (T, A) proof, then its worker
+    // continuation still attributed to A must announce Some(T).
+    inject_fresh_prefix(
+        &r,
+        &a_key,
+        &history,
+        &transfer,
+        &governance_id,
+        2,
+        3,
+    )
+    .await;
+    let detail = r
+        .test_get_verified_transfer_detail(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        detail,
+        Some((3, a_key.clone(), Some(aux_hash), false)),
+        "proof, sender and aux hash must be exact and firm, got {detail:?}"
+    );
+    let reqs = wait_reqs_to(&r, &a_key).await;
+    assert!(
+        reqs.iter().all(|(_, actual, _, already)| *actual == Some(2)
+            && *already == Some(3)),
+        "the continuation still attributed to A reuses the proof, got {reqs:?}"
+    );
+
+    // The Update route sees the same proof: drop the worker request,
+    // sweep live, and the update request must still announce it.
+    r.test_clear_faults().await.unwrap();
+    hold_r_reqs(&r).await;
+    // A's answers must reach R for the live rounds, but the first
+    // one is retained to prove the omission: the push guard lifts
+    // here (nothing is emitted mid-update) and goes back on after
+    // convergence.
+    a.test_clear_faults().await.unwrap();
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        a.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerRes,
+        peer: Some(r_key.clone()),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    r.update_subject(subject_id.clone()).await.unwrap();
+    let reqs = wait_reqs_to(&r, &a_key).await;
+    assert!(
+        !reqs.is_empty()
+            && reqs.iter().all(|(_, actual, _, already)| *actual == Some(2)
+                && *already == Some(3)),
+        "the update request to A must announce the proof, got {reqs:?}"
+    );
+
+    // The announced proof makes A omit the aux: releasing the held
+    // request drives exactly one answer, which must carry no transfer
+    // event. Releasing it lets R complete and consume the proof.
+    r.test_release_held().await.unwrap();
+    let mut omitted = false;
+    let mut omit_dump = Vec::new();
+    let mut r_dump = Vec::new();
+    for _ in 0..300 {
+        let held = a
+            .test_held_outbound()
+            .await
+            .unwrap_or_default();
+        omit_dump = held
+            .iter()
+            .filter(|m| m.info.receiver == r_key)
+            .map(|m| format!("{:?}", m.message))
+            .collect();
+        r_dump = r
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| format!("{:?} -> {}", m.message, m.info.receiver))
+            .collect();
+        let answers: Vec<_> = held
+            .iter()
+            .filter(|m| {
+                m.info.receiver == r_key
+                    && matches!(
+                        m.message,
+                        ActorMessage::DistributionLedgerRes { .. }
+                    )
+            })
+            .collect();
+        omitted = !answers.is_empty()
+            && answers.iter().all(|m| match &m.message {
+                ActorMessage::DistributionLedgerRes { transfer_event, .. } => {
+                    transfer_event.is_none()
+                }
+                _ => false,
+            });
+        if omitted {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        omitted,
+        "A must omit the announced aux, A-held: {omit_dump:?} R-held: {r_dump:?}"
+    );
+    a.test_release_held().await.unwrap();
+    get_subject(&r, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert!(
+        r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the proof is consumed once its transfer applies"
+    );
+    seal_pushes(&a, &r_key).await;
+
+    // Second crossing: B confirms, extends, and transfers to A. R
+    // stays frozen at the tip while both servers move on.
+    emit_confirm(&b, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    for data in [5, 6] {
+        emit_fact(
+            &b,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    emit_transfer(&b, subject_id.clone(), a_key.clone(), true)
+        .await
+        .unwrap();
+    for api in [&a, &b] {
+        api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(api, subject_id.clone(), Some(7), true)
+            .await
+            .unwrap();
+    }
+    let history = a
+        .test_get_tracker_ledger(subject_id.clone(), 7)
+        .await
+        .unwrap();
+    let transfer2 = history
+        .iter()
+        .find(|event| event.sn == 7)
+        .expect("second transfer")
+        .clone();
+
+    // R reaches T2-1 with the genuine (T2, A) proof; its continuation
+    // still attributed to A announces it, then it is dropped.
+    r.test_clear_faults().await.unwrap();
+    hold_r_reqs(&r).await;
+    inject_state(
+        &r,
+        &a_key,
+        history[4..7].to_vec(),
+        &transfer2,
+        &governance_id,
+    )
+    .await;
+    wait_proof_state(&r, &governance_id, &subject_id, 6, (7, a_key.clone()))
+        .await;
+    let reqs = wait_reqs_to(&r, &a_key).await;
+    assert!(
+        reqs.iter().all(|(_, actual, _, already)| *actual == Some(6)
+            && *already == Some(7)),
+        "the continuation still attributed to A reuses the proof, got {reqs:?}"
+    );
+    r.test_clear_faults().await.unwrap();
+    hold_r_reqs(&r).await;
+    let (processed_before_b, _) =
+        r.test_verify_stats(subject_id.clone()).await.unwrap();
+
+    // Gate flip: A goes silent, B answers. The first request to B
+    // must omit the stored (T2, A) proof even though it is still held.
+    for message in [
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        a.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    b.test_clear_faults().await.unwrap();
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerRes,
+        peer: Some(r_key.clone()),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    r.update_subject(subject_id.clone()).await.unwrap();
+    let reqs = wait_reqs_to(&r, &b_key).await;
+    assert!(
+        !reqs.is_empty()
+            && reqs
+                .iter()
+                .all(|(_, actual, _, already)| *actual == Some(6) && already.is_none()),
+        "the first request to B must omit the A proof, got {reqs:?}"
+    );
+
+    // B's answer carries the aux (nothing was announced) and R
+    // re-verifies from B before converging: no direct-rights
+    // shortcut may complete the copy instead. Later rounds flow
+    // live around the single retained answer.
+    r.test_release_held().await.unwrap();
+    let mut aux_seen = false;
+    let mut held_summary = Vec::new();
+    for _ in 0..300 {
+        let held = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default();
+        held_summary = held
+            .iter()
+            .map(|m| format!("{:?} -> {}", m.message, m.info.receiver))
+            .collect();
+        aux_seen = held.iter().any(|m| match &m.message {
+            ActorMessage::DistributionLedgerRes {
+                transfer_event, ..
+            } if m.info.receiver == r_key => transfer_event
+                .as_ref()
+                .is_some_and(|event| event.sn == 7),
+            _ => false,
+        });
+        if aux_seen {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        aux_seen,
+        "B must send the aux R never announced, held: {held_summary:?}"
+    );
+    b.test_release_held().await.unwrap();
+    get_subject(&r, subject_id.clone(), Some(7), true)
+        .await
+        .unwrap();
+    assert!(
+        r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the B proof is consumed once its transfer applies"
+    );
+    let (processed_after_b, _) =
+        r.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        processed_after_b > processed_before_b,
+        "switching sender must re-verify the aux from B"
+    );
+    seal_pushes(&b, &r_key).await;
+
+    // Worker continuation on a fresh subject holding (T, A) at
+    // T-1: R gets an aux-less batch naming only the newer pending
+    // tip from B, so its direct continuation must request from B
+    // without the A proof, and B's aux triggers a fresh verification.
+    let (subject2, _) =
+        create_subject(&a, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &a,
+        subject2.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&a, subject2.clone(), b_key.clone(), true)
+        .await
+        .unwrap();
+    a.update_subject(subject2.clone()).await.unwrap();
+    get_subject(&a, subject2.clone(), Some(2), true)
+        .await
+        .unwrap();
+    b.update_subject(subject2.clone()).await.unwrap();
+    get_subject(&b, subject2.clone(), Some(2), true)
+        .await
+        .unwrap();
+    for api in [&a, &b, &r] {
+        api.test_ensure_distributor(subject2.clone())
+            .await
+            .unwrap();
+    }
+    let history2 =
+        a.test_get_tracker_ledger(subject2.clone(), 2).await.unwrap();
+    let transfer3 = history2
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("third transfer")
+        .clone();
+    // Second crossing on the fresh subject: confirm, extend and
+    // transfer again, so the tip the worker must fetch is one R has
+    // never verified. Both servers move on while R stays frozen.
+    emit_confirm(&b, subject2.clone(), None, true)
+        .await
+        .unwrap();
+    emit_fact(
+        &b,
+        subject2.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&b, subject2.clone(), a_key.clone(), true)
+        .await
+        .unwrap();
+    for api in [&a, &b] {
+        api.update_subject(subject2.clone()).await.unwrap();
+        get_subject(api, subject2.clone(), Some(5), true)
+            .await
+            .unwrap();
+    }
+    let history2_tip = a
+        .test_get_tracker_ledger(subject2.clone(), 5)
+        .await
+        .unwrap();
+    let transfer5 = history2_tip
+        .iter()
+        .find(|event| event.sn == 5)
+        .expect("tip transfer")
+        .clone();
+    r.test_clear_faults().await.unwrap();
+    hold_r_reqs(&r).await;
+    inject_fresh_prefix(
+        &r,
+        &a_key,
+        &history2,
+        &transfer3,
+        &governance_id,
+        1,
+        2,
+    )
+    .await;
+    // The fresh-prefix continuation is still attributed to A: it
+    // announces the proof, proving the state establishment itself
+    // went through the verified sender.
+    let reqs = wait_reqs_to(&r, &a_key).await;
+    assert!(
+        reqs.iter().all(|(subject, actual, _, already)| subject
+            == &subject2
+            && *actual == Some(1)
+            && *already == Some(2)),
+        "the fresh continuation to A reuses the proof, got {reqs:?}"
+    );
+    r.test_clear_faults().await.unwrap();
+    hold_r_reqs(&r).await;
+    // Aux-less batch from B naming only the pending tip: R holds it
+    // as a gap (its prefix ends at T-1) and must ask B, its sender,
+    // for the aux. R still holds the (T, A) proof, so omitting it is
+    // a sender decision, not an absence.
+    let receiver = PublicKey::from_str(r.public_key()).unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![transfer5.clone()],
+                is_all: false,
+                transfer_event: None,
+                expected_governance_id: Some(governance_id.clone()),
+            },
+        ),
+        &b_key,
+    )
+    .await
+    .unwrap();
+    let reqs = wait_reqs_to(&r, &b_key).await;
+    assert!(
+        !reqs.is_empty()
+            && reqs.iter().all(|(_, actual, _, already)| *actual == Some(1)
+                && already.is_none()),
+        "the worker continuation to B must omit the A proof, got {reqs:?}"
+    );
+    let (processed_before_w, _) =
+        r.test_verify_stats(subject2.clone()).await.unwrap();
+    // B's answers must reach R: lift the push guard, keeping only
+    // the offer guard so no stray batch lands mid-release. Answers
+    // flow live; R must converge by verifying B's aux, which it
+    // never announced and never verified before.
+    b.test_clear_faults().await.unwrap();
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    r.test_release_held().await.unwrap();
+    get_subject(&r, subject2.clone(), Some(5), true)
+        .await
+        .unwrap();
+    let (processed_after_w, _) =
+        r.test_verify_stats(subject2.clone()).await.unwrap();
+    assert!(
+        processed_after_w > processed_before_w,
+        "the worker continuation must verify the aux from B"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Truncation detection builds its window only when the sender claims
+// completeness: a partial batch (`is_all=false`) never pays the
+// register lookup, a complete one (`is_all=true`) builds it exactly
+// once.
+#[test(tokio::test)]
+async fn test_truncation_window_only_built_for_is_all() {
+    async fn inject_with_flag(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        ledger: Vec<Ledger>,
+        is_all: bool,
+    ) {
+        let receiver =
+            PublicKey::from_str(api.public_key()).expect("node public key");
+        let message = NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger,
+                is_all,
+                transfer_event: None,
+                expected_governance_id: None,
+            },
+        );
+        api.test_inject_inbound(message, from).await.unwrap();
+    }
+    async fn wait_tip(api: &ave_core::Api, subject: &DigestIdentifier, sn: u64) {
+        for _ in 0..200 {
+            if let Ok(state) = api.get_subject_state(subject.clone()).await
+                && state.sn == sn
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("subject {subject} never reached sn {sn}");
+    }
+
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            tracker_sync: Some(ave_core::config::TrackerSyncConfig {
+                interval_secs: 3600,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let sender = nodes[1].api.clone();
+    let receiver = nodes[2].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let sender_key =
+        PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+    let receiver_key =
+        PublicKey::from_str(nodes[2].api.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&sender, &receiver])
+            .await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [
+                {"name": "S", "key": sender.public_key()},
+                {"name": "R", "key": receiver.public_key()},
+            ]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["S"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "S", "namespace": []}],
+                        "creator": [{
+                            "name": "S",
+                            "namespace": [],
+                            "quantity": "infinity",
+                            "witnesses": [
+                                {"name": "R", "viewpoints": ["AllViewpoints"]},
+                                {"name": "Witnesses", "viewpoints": ["AllViewpoints"]},
+                            ],
+                        }, {
+                            "name": "Owner",
+                            "namespace": [],
+                            "quantity": "infinity",
+                            "witnesses": []
+                        }],
+                        "issuer": [{"name": "S", "namespace": []}],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    // Silence genuine distribution pushes: every byte below arrives
+    // through the driven injections, never a scheduler race. The
+    // drops install before any subject exists so no creation push
+    // pre-seeds the receiver.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+    ] {
+        sender
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(receiver_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    // Both ends pull the governance before any subject exists, so the
+    // injections below evaluate against real membership, not guesses.
+    for api in [&sender, &receiver] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+    }
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    for api in [&sender, &receiver] {
+        get_subject(api, governance_id.clone(), Some(gov_sn), true)
+            .await
+            .unwrap();
+        api.test_ensure_distributor(governance_id.clone())
+            .await
+            .unwrap();
+    }
+
+    // Two identical ledgers: genesis plus one fact each.
+    let (partial_subject, _) =
+        create_subject(&sender, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &sender,
+        partial_subject.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let (complete_subject, _) =
+        create_subject(&sender, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &sender,
+        complete_subject.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let partial_ledger = sender
+        .test_get_tracker_ledger(partial_subject.clone(), 1)
+        .await
+        .unwrap();
+    let complete_ledger = sender
+        .test_get_tracker_ledger(complete_subject.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(partial_ledger.len(), 2);
+    assert_eq!(complete_ledger.len(), 2);
+    // A real transfer above the offered fact gives the receiver a
+    // verified floor its `is_all` batch cannot satisfy.
+    emit_transfer(&sender, complete_subject.clone(), owner_key, true)
+        .await
+        .unwrap();
+    let complete_history = sender
+        .test_get_tracker_ledger(complete_subject.clone(), 2)
+        .await
+        .unwrap();
+    let future_transfer = complete_history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("future transfer")
+        .clone();
+    let future_hash = future_transfer
+        .ledger_hash(HashAlgorithm::Blake3)
+        .unwrap();
+    for subject in [&partial_subject, &complete_subject] {
+        receiver
+            .test_ensure_distributor(subject.clone())
+            .await
+            .unwrap();
+    }
+
+    // Genesis prefix for both: no window exists yet, and the flag is
+    // partial anyway, so no call may be recorded.
+    inject_with_flag(
+        &receiver,
+        &sender_key,
+        vec![partial_ledger[0].clone()],
+        false,
+    )
+    .await;
+    inject_with_flag(
+        &receiver,
+        &sender_key,
+        vec![complete_ledger[0].clone()],
+        false,
+    )
+    .await;
+    wait_tip(&receiver, &partial_subject, 0).await;
+    wait_tip(&receiver, &complete_subject, 0).await;
+    assert_eq!(
+        receiver
+            .test_truncation_window_calls(partial_subject.clone())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        receiver
+            .test_truncation_window_calls(complete_subject.clone())
+            .await
+            .unwrap(),
+        0
+    );
+
+    // Partial suffix: still no window build, and the worker asks for
+    // the continuation instead of treating the batch as complete.
+    receiver
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: Some(sender_key.clone()),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    inject_with_flag(
+        &receiver,
+        &sender_key,
+        vec![partial_ledger[1].clone()],
+        false,
+    )
+    .await;
+    wait_tip(&receiver, &partial_subject, 1).await;
+    assert_eq!(
+        receiver
+            .test_truncation_window_calls(partial_subject.clone())
+            .await
+            .unwrap(),
+        0,
+        "a partial batch must skip the truncation window"
+    );
+    let partial_continued = receiver
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .any(|m| match m.message {
+            ActorMessage::DistributionLedgerReq {
+                subject_id,
+                actual_sn,
+                ..
+            } => subject_id == partial_subject && actual_sn == Some(1),
+            _ => false,
+        });
+    assert!(
+        partial_continued,
+        "a partial batch must request its continuation"
+    );
+
+    // Record a firm proof above the offered fact. The batch claiming
+    // completeness below that floor is truncated: it may apply the
+    // prefix, but must request more and leave its supervisor alive.
+    receiver
+        .test_record_hashed_verified_transfer(
+            &governance_id,
+            complete_subject.clone(),
+            2,
+            sender_key.clone(),
+            future_hash,
+        )
+        .await
+        .unwrap();
+    receiver.update_subject(complete_subject.clone()).await.unwrap();
+    inject_with_flag(
+        &receiver,
+        &sender_key,
+        vec![complete_ledger[1].clone()],
+        true,
+    )
+    .await;
+    // The offered prefix applies, but the copy does not complete.
+    wait_tip(&receiver, &complete_subject, 1).await;
+    assert_eq!(
+        receiver
+            .test_truncation_window_calls(complete_subject.clone())
+            .await
+            .unwrap(),
+        1,
+        "a complete batch must build the truncation window once"
+    );
+    assert!(
+        receiver.test_update_alive(complete_subject.clone()).await.unwrap(),
+        "a truncated response must not certify DistributionDone"
+    );
+    let complete_continued = receiver
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .any(|m| match m.message {
+            ActorMessage::DistributionLedgerReq {
+                subject_id,
+                actual_sn,
+                ..
+            } => subject_id == complete_subject && actual_sn == Some(1),
+            _ => false,
+        });
+    assert!(
+        complete_continued,
+        "a truncated response must request the missing suffix"
+    );
+    assert_eq!(
+        receiver
+            .test_get_verified_transfer_sn(&governance_id, complete_subject.clone())
+            .await
+            .unwrap()
+            .map(|(sn, _)| sn),
+        Some(2),
+        "the unconsumed future proof must remain available"
+    );
+    // The partial subject never pays the lookup, even afterwards.
+    assert_eq!(
+        receiver
+            .test_truncation_window_calls(partial_subject.clone())
+            .await
+            .unwrap(),
+        0
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}

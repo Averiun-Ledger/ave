@@ -10,12 +10,13 @@ use ave_core::{
         test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
     },
 };
-use ave_network::{NodeType, RoutingNode};
+use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
     CreateNodeConfig, create_and_authorize_governance, create_node,
-    create_subject, emit_fact, get_subject, governance_properties,
-    node_running,
+    create_subject, emit_fact, emit_transfer, get_subject,
+    governance_properties, node_running,
 };
+use futures::future::join_all;
 use serde_json::json;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -1969,4 +1970,410 @@ async fn sync_stale_page_from_previous_incarnation_is_ignored() {
     );
     node_running(&a).await.unwrap();
     node_running(&b).await.unwrap();
+}
+
+// A tracker-sync continuation switches verified sender the same way
+// the update path does: R holds a firm (T, A) proof at T-1, a page
+// attributed to B lists the subject with a higher target, and the
+// resulting request to B must omit the A proof. B answers with the
+// aux and R re-verifies from B before converging.
+#[test(tokio::test)]
+async fn tracker_sync_switches_verified_sender_mid_copy() {
+    // Held ledger requests R sent to `peer`: (subject, actual,
+    // target, already_verified).
+    async fn held_reqs_to(
+        api: &Api,
+        peer: &PublicKey,
+    ) -> Vec<(DigestIdentifier, Option<u64>, Option<u64>, Option<u64>)> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerReq {
+                    subject_id,
+                    actual_sn,
+                    target_sn,
+                    already_verified_transfer_sn,
+                    ..
+                } if &m.info.receiver == peer => Some((
+                    subject_id,
+                    actual_sn,
+                    target_sn,
+                    already_verified_transfer_sn,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let (mut nodes, mut _dirs) = create_sync_nodes().await;
+    let boot_addr = nodes[0].listen_address.clone();
+    let boot_peer = nodes[0].api.peer_id().to_string();
+    let mut extra = vec![];
+    for _ in 0..2 {
+        let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let listen = format!("/memory/{port}");
+        let (node, mut d) = create_node(CreateNodeConfig {
+            node_type: NodeType::Addressable,
+            listen_address: listen,
+            peers: vec![RoutingNode {
+                peer_id: boot_peer.clone(),
+                address: vec![boot_addr.clone()],
+            }],
+            always_accept: true,
+            is_service: true,
+            governance_sync: Some(GovernanceSyncConfig {
+                interval_secs: 1,
+                sample_size: 3,
+                response_timeout_secs: 5,
+            }),
+            tracker_sync: Some(TrackerSyncConfig {
+                interval_secs: 1,
+                page_size: 10,
+                response_timeout_secs: 5,
+                update_batch_size: 2,
+                update_timeout_secs: 5,
+            }),
+            ..Default::default()
+        })
+        .await;
+        node_running(&node.api).await.unwrap();
+        nodes.push(node);
+        extra.append(&mut d);
+    }
+    _dirs.append(&mut extra);
+    let owner = nodes[3].api.clone();
+    let a = nodes[1].api.clone();
+    let b = nodes[2].api.clone();
+    let r = nodes[4].api.clone();
+    let a_key = PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+    let b_key = PublicKey::from_str(nodes[2].api.public_key()).unwrap();
+    let r_key = PublicKey::from_str(nodes[4].api.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&a, &b, &r]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [
+                {"name": "A", "key": a.public_key()},
+                {"name": "B", "key": b.public_key()},
+                {"name": "R", "key": r.public_key()},
+            ]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": ave_core::test_contracts::EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["A", "B"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "A", "namespace": []},
+                            {"name": "B", "namespace": []},
+                        ],
+                        "creator": [
+                            {
+                                "name": "A",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "B", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "R", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "Witnesses", "viewpoints": ["AllViewpoints"]},
+                                ],
+                            },
+                            {
+                                "name": "B",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "A", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "R", "viewpoints": ["AllViewpoints"]},
+                                    {"name": "Witnesses", "viewpoints": ["AllViewpoints"]},
+                                ],
+                            },
+                        ],
+                        "issuer": [
+                            {"name": "A", "namespace": []},
+                            {"name": "B", "namespace": []},
+                        ],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let sync_actor = format!(
+        "/user/node/subject_manager/{governance_id}/tracker_sync"
+    );
+
+    // Everyone pulls the governance once the member fact above
+    // lands; R never touches the subject except through the driven
+    // steps below.
+    for api in [&a, &b, &r] {
+        api.update_subject(governance_id.clone()).await.unwrap();
+    }
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    for api in [&a, &b, &r] {
+        get_subject(api, governance_id.clone(), Some(gov_sn), true)
+            .await
+            .unwrap();
+    }
+
+    // No pushes to R from here on and no genuine sync pages: every
+    // read below is a genuine pull or the single forged page.
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::TrackerSyncRes,
+    ] {
+        for api in [&owner, &a, &b] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(r_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    // Same authentic ledger on both servers: A creates, a fact and a
+    // pending transfer at the tip.
+    let (subject_id, _) =
+        create_subject(&a, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &a,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_transfer(&a, subject_id.clone(), b_key.clone(), true)
+        .await
+        .unwrap();
+    for api in [&a, &b] {
+        api.update_subject(subject_id.clone()).await.unwrap();
+        get_subject(api, subject_id.clone(), Some(2), true)
+            .await
+            .unwrap();
+    }
+    for api in [&owner, &a, &b, &r] {
+        api.test_ensure_distributor(subject_id.clone())
+            .await
+            .unwrap();
+    }
+    let history = a
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap();
+    let transfer = history
+        .iter()
+        .find(|event| event.sn == 2)
+        .expect("transfer event")
+        .clone();
+
+    // R reaches T-1 with the genuine (T, A) proof through a direct
+    // injection; every pull below is a genuine live round.
+    r.test_clear_faults().await.unwrap();
+    r.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::DistributionLedgerReq,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    // Sync fetches are held too, so the forged page can reuse a real
+    // outstanding nonce instead of racing the scheduler.
+    r.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::TrackerSyncReq,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    let receiver = PublicKey::from_str(r.public_key()).unwrap();
+    r.test_inject_inbound(
+        NetworkMessage::new(
+            ComunicateInfo {
+                request_id: String::new(),
+                version: 0,
+                receiver,
+                receiver_actor: "/user/node/distributor".to_owned(),
+            },
+            ActorMessage::DistributionLedgerRes {
+                ledger: vec![history[0].clone(), history[1].clone()],
+                is_all: false,
+                transfer_event: Some(Box::new(transfer.clone())),
+                expected_governance_id: Some(governance_id.clone()),
+            },
+        ),
+        &a_key,
+    )
+    .await
+    .unwrap();
+    for _ in 0..300 {
+        let at_tip = r
+            .get_subject_state(subject_id.clone())
+            .await
+            .is_ok_and(|state| state.sn == 1);
+        let recorded = r
+            .test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap();
+        if at_tip && recorded == Some((2, a_key.clone())) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        r.get_subject_state(subject_id.clone())
+            .await
+            .is_ok_and(|state| state.sn == 1)
+            && r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+                .await
+                .unwrap()
+                == Some((2, a_key.clone())),
+        "R must hold (T, A) at T-1 before the forged page"
+    );
+    let detail = r
+        .test_get_verified_transfer_detail(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    let Some((proof_sn, proof_sender, Some(_), false)) = detail else {
+        panic!("proof must be exact and firm, got {detail:?}");
+    };
+    assert_eq!(proof_sn, 2);
+    assert_eq!(proof_sender, a_key);
+
+    // A sync fetch to B, then a forged page attributed to B listing
+    // the subject above R's tip: the deterministic stimulus for
+    // `request_tracker_update`, never a scheduler race.
+    let mut nonce = None;
+    for _ in 0..600 {
+        r.test_tracker_sync_tick(governance_id.clone())
+            .await
+            .unwrap();
+        let nonces: Vec<u64> = r
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| match &m.message {
+                ActorMessage::TrackerSyncReq {
+                    request_nonce, ..
+                } if m.info.receiver == b_key => Some(*request_nonce),
+                _ => None,
+            })
+            .collect();
+        if let Some(last) = nonces.last() {
+            nonce = Some(*last);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let nonce = nonce.expect("R must fetch from B");
+    let gov_sn = get_subject(&r, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    inject_sync_page_versioned(
+        &r,
+        &r_key,
+        &b_key,
+        &sync_actor,
+        nonce,
+        gov_sn,
+        vec![
+            ave_core::governance::witnesses_register::CurrentWitnessSubject {
+                subject_id: subject_id.clone(),
+                target_sn: 2,
+            },
+        ],
+        None,
+    )
+    .await;
+    // The request to B must omit the stored (T, A) proof even
+    // though it is still held: same sender filter as the Update
+    // and worker paths.
+    let mut reqs = Vec::new();
+    for _ in 0..300 {
+        reqs = held_reqs_to(&r, &b_key).await;
+        if !reqs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !reqs.is_empty()
+            && reqs.iter().all(|(_, actual, _, already)| *actual == Some(1)
+                && already.is_none()),
+        "the sync request to B must omit the A proof, got {reqs:?}"
+    );
+    let (processed_before, _) =
+        r.test_verify_stats(subject_id.clone()).await.unwrap();
+
+    // Serving B answers with the aux R never announced and R
+    // re-verifies from B before converging to the tip. Lift B's push
+    // guard for the answer; the offer guard stays dropped.
+    b.test_clear_faults().await.unwrap();
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::TrackerSyncRes,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(r_key.clone()),
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    r.test_release_held().await.unwrap();
+    get_subject(&r, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert!(
+        r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "the B proof is consumed once its transfer applies"
+    );
+    let (processed_after, _) =
+        r.test_verify_stats(subject_id.clone()).await.unwrap();
+    assert!(
+        processed_after > processed_before,
+        "switching sender must re-verify the aux from B"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
 }

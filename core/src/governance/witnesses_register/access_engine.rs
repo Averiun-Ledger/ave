@@ -352,6 +352,32 @@ impl WitnessesRegister {
                                     == OwnershipStintOutcome::Confirmed
                             })
                             .map(|stint| stint.incoming_transfer_sn)
+                            .filter(|sn| {
+                                params.actual_sn.is_none_or(|a| a < *sn)
+                            })
+                            .or_else(|| {
+                                // A pending transfer past the confirmed
+                                // tip still needs its aux when the
+                                // receiver has not crossed it: the
+                                // confirmed walk alone would omit it
+                                // forever, stalling any receiver that
+                                // switched senders mid-copy with a
+                                // foreign proof. Owners pulling their
+                                // own subject keep the old behavior;
+                                // nothing commits between Transfer and
+                                // Confirm, so the tip is the pending
+                                // transfer itself.
+                                if node != &data.actual_owner
+                                    && data.actual_new_owner_data.is_some()
+                                    && params.actual_sn.is_some_and(
+                                        |sn| sn < data.sn,
+                                    )
+                                {
+                                    Some(data.sn)
+                                } else {
+                                    None
+                                }
+                            })
                     } else {
                         let from_sn = params.actual_sn.unwrap_or(0);
                         data.ownership_transitions

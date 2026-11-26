@@ -66,6 +66,34 @@ struct TrackerDeliveryQuery<'a> {
     ledger: &'a [Ledger],
 }
 
+/// Test-only truncation-window call counter, shared across workers
+/// via the `truncation_stats` helper. Counts, per subject, how many
+/// times `process_ledger_chunks` built the window to detect a
+/// truncated batch. The call only happens when the sender claims
+/// completeness, so a test can prove the window build is skipped for
+/// partial batches. Zero cost in production: the struct, helper and
+/// call site only exist under `#[cfg(feature = "test")]`.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub(crate) struct TruncationStatsRegistry {
+    checks: std::collections::HashMap<DigestIdentifier, u64>,
+}
+
+#[cfg(feature = "test")]
+pub(crate) type SharedTruncationStats =
+    std::sync::Arc<std::sync::Mutex<TruncationStatsRegistry>>;
+
+#[cfg(feature = "test")]
+impl TruncationStatsRegistry {
+    pub(crate) fn note(&mut self, subject_id: &DigestIdentifier) {
+        *self.checks.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn count(&self, subject_id: &DigestIdentifier) -> u64 {
+        self.checks.get(subject_id).copied().unwrap_or(0)
+    }
+}
+
 impl DistriWorker {
     pub(crate) async fn process_ledger_chunks(
         &mut self,
@@ -114,6 +142,8 @@ impl DistriWorker {
         let window_sn: Option<u64> = if !sender_is_all || common.is_gov {
             None
         } else if let Some(data) = common.subject_data.as_ref() {
+            #[cfg(feature = "test")]
+            Self::note_truncation_window_check(ctx, &subject_id);
             self.get_tracker_window(
                 ctx,
                 &subject_id,
@@ -1001,6 +1031,23 @@ impl DistriWorker {
     #[cfg(feature = "test")]
     fn worker_path(ctx: &ActorContext<Self>) -> String {
         ctx.path().to_string()
+    }
+
+    /// Test-only truncation-window call counter: records one call
+    /// for this subject right before building the window used for
+    /// truncation detection. Production never reads it.
+    #[cfg(feature = "test")]
+    fn note_truncation_window_check(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = ctx
+            .system()
+            .get_helper::<SharedTruncationStats>("truncation_stats")
+            && let Ok(mut guard) = stats.lock()
+        {
+            guard.note(subject_id);
+        }
     }
 
     #[cfg(feature = "test")]

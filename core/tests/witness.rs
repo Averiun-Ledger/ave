@@ -3,6 +3,7 @@ mod common;
 use ave_common::identity::keys::Ed25519Signer;
 use ave_common::identity::{DigestIdentifier, KeyPair, PublicKey};
 use ave_core::auth::AuthWitness;
+use ave_core::governance::sn_register::SnLimit;
 use common::{
     EXAMPLE_CONTRACT, assert_tracker_fact_full, assert_tracker_fact_opaque,
     create_and_authorize_governance, create_nodes_and_connections,
@@ -12,6 +13,7 @@ use common::{
 
 use ave_core::{
     Api,
+    config::TrackerSyncConfig,
     helpers::network::{
         ActorMessage, NetworkMessage,
         test_faults::{FaultAction, FaultDirection, FaultMessage, FaultRule},
@@ -12948,4 +12950,585 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
         node.token.cancel();
     }
     join_all(nodes.iter_mut().take(3).flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// An empty sn map defers every grant-dependent read: with no mapping
+// evidence the server must not evaluate SNs under an assumed version.
+// Only direct bypasses (owner, pending, old owner) may still be
+// served, keeping bootstrap unwedged while the register catches up.
+#[test(tokio::test)]
+async fn test_witness_copy_empty_mapping_defers_grant_access() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            tracker_sync: Some(TrackerSyncConfig {
+                interval_secs: 3600,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness = nodes[1].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let witness_key = PublicKey::from_str(witness.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&witness]).await;
+
+    // No pushes to the witness from here on: every read below is a
+    // genuine pull, never seeded state.
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(witness_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    // The witness pulls the governance explicitly, right after the
+    // fact below makes it a member: pushes stay dropped for the
+    // whole test, so nothing may rely on them.
+    let json = json!({
+        "members": {
+            "add": [
+                {
+                    "name": "W",
+                    "key": witness.public_key()
+                }
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {
+                        "one": 0,
+                        "two": 0,
+                        "three": 0
+                    },
+                    "viewpoints": ["agua", "basura"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {
+                "add": {
+                    "witness": [
+                        "W"
+                    ]
+                }
+            },
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "validator": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ],
+                        "creator": [
+                            {
+                                "name": "Owner",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {
+                                        "name": "W",
+                                        "viewpoints": ["agua"]
+                                    }
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {
+                                "name": "Owner",
+                                "namespace": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // The schema fact above made the witness a member: it now pulls
+    // the governance explicitly, since pushes stay dropped.
+    witness.update_subject(governance_id.clone()).await.unwrap();
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    get_subject(&witness, governance_id.clone(), Some(gov_sn), true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    let fact_payload = json!({
+        "ModOne": {
+            "data": 1
+        }
+    });
+    emit_fact_viewpoints(
+        &owner,
+        subject_id.clone(),
+        fact_payload.clone(),
+        BTreeSet::from(["agua".to_string()]),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // No pushes to the witness were ever allowed (dropped since
+    // governance setup): the register maps the fact only after the
+    // pull-free emission above. Wait for it without sleeping blindly.
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 == 1),
+        "the register must map exactly Create plus the fact, got {window:?}"
+    );
+    // Re-read the tip: the schema change above moved the version
+    // past the one pinned for the witness governance copy.
+    let gov_sn = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    let versions: Vec<u64> = (0..=gov_sn).collect();
+    let mapped: Vec<(u64, u64)> = owner
+        .test_get_sns(
+            governance_id.clone(),
+            subject_id.clone(),
+            versions.clone(),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .zip(versions.clone())
+        .filter_map(|(limit, version)| match limit {
+            SnLimit::Sn(sn) => Some((version, sn)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        mapped.iter().any(|(_, sn)| *sn == 1),
+        "the fact must be mapped before the wipe, got {mapped:?}"
+    );
+
+    // Wipe only the subject entry: ledger, grants, ownership and
+    // every other register stay exactly as they were. No tracker
+    // reads happen past this point until the restore: booting the
+    // tracker replays its writes back into this register, so any
+    // read that lifts it would rebuild the entry we just wiped.
+    owner
+        .test_delete_sn_subject(governance_id.clone(), subject_id.clone())
+        .await
+        .unwrap();
+
+    // Three pins: empty window, NotSn lookups, intact ledger and
+    // ownership. None of them may pass vacuously.
+    let window = owner
+        .test_get_gov_version_window(
+            governance_id.clone(),
+            subject_id.clone(),
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(window.is_empty(), "the wiped map reads empty, got {window:?}");
+    let limits = owner
+        .test_get_sns(
+            governance_id.clone(),
+            subject_id.clone(),
+            versions.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        limits.iter().all(|limit| matches!(limit, SnLimit::NotSn)),
+        "every version reads NotSn on an empty map, got {limits:?}"
+    );
+    let (recorded_owner, _, _, _) = owner
+        .test_witnesses_ownership(&governance_id, subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_owner,
+        Some(owner_key.clone()),
+        "ownership must survive the wipe"
+    );
+
+    // Hold every serving answer: the NoOffer proves the deferral and
+    // any LedgerRes would prove a leak.
+    for message in [
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::UpdateOffer,
+        FaultMessage::DistributionLedgerRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Hold,
+            })
+            .await
+            .unwrap();
+    }
+    let server_actor = format!("/user/node/distributor_{subject_id}");
+    owner
+        .test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
+    async fn inject_req(
+        api: &Api,
+        owner_key: &PublicKey,
+        from: &PublicKey,
+        server_actor: &str,
+        message: ActorMessage,
+    ) {
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: owner_key.clone(),
+                    receiver_actor: server_actor.to_owned(),
+                },
+                message,
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+    inject_req(
+        &owner,
+        &owner_key,
+        &witness_key,
+        &server_actor,
+        ActorMessage::DistributionGetLastSn {
+            subject_id: subject_id.clone(),
+            actual_sn: None,
+            receiver_actor: server_actor.clone(),
+        },
+    )
+    .await;
+
+    // Bounded wait for the positive signal: the server must answer
+    // the grant-dependent offer request with NoOffer.
+    let mut no_offer = 0;
+    let mut held_dump = Vec::new();
+    let mut map_dump = Vec::new();
+    for _ in 0..300 {
+        held_dump = owner
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| format!("{:?} -> {}", m.message, m.info.receiver))
+            .collect();
+        no_offer = held_dump
+            .iter()
+            .filter(|s| s.starts_with("UpdateNoOffer"))
+            .count();
+        if no_offer >= 1 {
+            break;
+        }
+        map_dump = owner
+            .test_get_sns(
+                governance_id.clone(),
+                subject_id.clone(),
+                versions.clone(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|limit| format!("{limit:?}"))
+            .collect();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        no_offer, 1,
+        "the empty map must defer the grant-dependent offer with one NoOffer, held: {held_dump:?} map: {map_dump:?}"
+    );
+
+    // The fact request itself must stay unserved while the map is
+    // empty: poll a bounded spell asserting zero serves, so a slow
+    // leak still fails instead of passing on timing.
+    inject_req(
+        &owner,
+        &owner_key,
+        &witness_key,
+        &server_actor,
+        ActorMessage::DistributionLedgerReq {
+            actual_sn: None,
+            target_sn: Some(1),
+            subject_id: subject_id.clone(),
+            already_verified_transfer_sn: None,
+            expected_governance_id: Some(governance_id.clone()),
+        },
+    )
+    .await;
+    for _ in 0..30 {
+        let served = owner
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::DistributionLedgerRes { .. })
+            })
+            .count();
+        assert_eq!(
+            served, 0,
+            "no fact may be served from an empty map"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // No fact may be written to the receiver while the map is
+    // empty: an empty ledger (or no tracker at all) proves no serve
+    // happened, without depending on background discovery state.
+    let copied = witness
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap_or_default();
+    assert!(
+        copied.is_empty(),
+        "the witness must hold no events while the map is empty"
+    );
+
+    // Owner bypass control: the same distributor serves the direct
+    // owner from the same empty map, proving the deferral is a grant
+    // gate and not a wedged worker.
+    owner
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: owner_key.clone(),
+                    receiver_actor: format!(
+                        "/user/node/distributor_{subject_id}"
+                    ),
+                },
+                ActorMessage::DistributionLedgerReq {
+                    actual_sn: None,
+                    target_sn: Some(1),
+                    subject_id: subject_id.clone(),
+                    already_verified_transfer_sn: None,
+                    expected_governance_id: Some(governance_id.clone()),
+                },
+            ),
+            &owner_key,
+        )
+        .await
+        .unwrap();
+    let mut owner_served = Vec::new();
+    for _ in 0..300 {
+        owner_served = owner
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerRes { ledger, .. }
+                    if m.info.receiver == owner_key =>
+                {
+                    Some(ledger)
+                }
+                _ => None,
+            })
+            .collect();
+        if !owner_served.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        owner_served.len(),
+        1,
+        "the owner bypass must serve exactly one batch, got {}",
+        owner_served.len()
+    );
+    assert_eq!(
+        owner_served[0].last().expect("owner batch event").sn,
+        0,
+        "the first bypass batch carries Create"
+    );
+
+    // The fact follows on continuation under the same empty map:
+    // batch size 1 serves one event per round, so the bypass must
+    // also serve the fact itself to prove it is not wedged.
+    owner
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver: owner_key.clone(),
+                    receiver_actor: format!(
+                        "/user/node/distributor_{subject_id}"
+                    ),
+                },
+                ActorMessage::DistributionLedgerReq {
+                    actual_sn: Some(0),
+                    target_sn: Some(1),
+                    subject_id: subject_id.clone(),
+                    already_verified_transfer_sn: None,
+                    expected_governance_id: Some(governance_id.clone()),
+                },
+            ),
+            &owner_key,
+        )
+        .await
+        .unwrap();
+    let mut owner_fact = Vec::new();
+    for _ in 0..300 {
+        owner_fact = owner
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerRes { ledger, .. }
+                    if m.info.receiver == owner_key
+                        && ledger.last().is_some_and(|event| event.sn == 1) =>
+                {
+                    Some(ledger)
+                }
+                _ => None,
+            })
+            .collect();
+        if !owner_fact.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        owner_fact.len(),
+        1,
+        "the bypass must serve the fact on continuation, got {}",
+        owner_fact.len()
+    );
+
+    // Restore the exact mappings read before the wipe: no version is
+    // invented for the fact.
+    owner.test_clear_faults().await.unwrap();
+    for (version, sn) in &mapped {
+        owner
+            .test_register_sn(
+                governance_id.clone(),
+                subject_id.clone(),
+                *version,
+                *sn,
+            )
+            .await
+            .unwrap();
+    }
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = owner
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 == 1),
+        "the restored map must cover the fact again, got {window:?}"
+    );
+
+    // The ledger itself was never touched: Create plus the fact are
+    // still there, in order. This read happens after the restore so
+    // the boot replay it may trigger only rewrites identical
+    // mappings instead of racing the wipe.
+    let ledger = owner
+        .test_get_tracker_ledger(subject_id.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(ledger.len(), 2, "Create plus the fact must survive");
+    assert_eq!(ledger.last().expect("fact event").sn, 1);
+
+    // The witness now copies the fact with the visibility its grant
+    // confers.
+    witness
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(owner_key.clone()),
+        )
+        .await
+        .unwrap();
+    witness.update_subject(subject_id.clone()).await.unwrap();
+    let state = get_subject(&witness, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.properties,
+        json!({
+            "one": 1,
+            "two": 0,
+            "three": 0
+        })
+    );
+    let events = get_events(&witness, subject_id.clone(), 2, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(&events[1].event, fact_payload, &["agua"]);
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
 }

@@ -4488,6 +4488,29 @@ impl Api {
             .snapshot_retained())
     }
 
+    /// Truncation-window builds for one subject: how many times
+    /// `process_ledger_chunks` built the window to detect a truncated
+    /// batch. Lets a test prove the window is only built when the
+    /// sender claims completeness, never for partial batches.
+    pub async fn test_truncation_window_calls(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::processor::SharedTruncationStats>(
+                "truncation_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "truncation_stats".to_owned(),
+                reason: "Truncation stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count(&subject_id))
+    }
+
     /// Fragment reassembly counters: assemblies, ready mains, ready
     /// auxes, decode attempts and expiries, in that order. Lets tests
     /// prove payload-hash rejection without decode, mixing rejection
@@ -5604,6 +5627,108 @@ impl Api {
             _ => Err(Error::UnexpectedResponse {
                 actor: "sn_register".to_owned(),
                 expected: "GovVersionWindow".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Deletes a single subject entry from the sn register, simulating
+    /// a register that lags behind the ledger (independent tells, no
+    /// barrier). The ledger, grants and other registers are untouched.
+    pub async fn test_delete_sn_subject(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+    ) -> Result<(), Error> {
+        use crate::governance::sn_register::{
+            SnRegister, SnRegisterMessage, SnRegisterResponse,
+        };
+        let actor: ActorRef<SnRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/sn_register"
+            )))
+            .await?;
+        let response = actor
+            .ask(SnRegisterMessage::DeleteSubject { subject_id })
+            .await
+            .map_err(|e| actor_communication_error("sn_register", e))?;
+        match response {
+            SnRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "sn_register".to_owned(),
+                expected: "Ok".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Batch sn lookups for one subject, in input-version order, so a
+    /// test can pin `NotSn` against a live ledger without guessing.
+    pub async fn test_get_sns(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        gov_versions: Vec<u64>,
+    ) -> Result<Vec<crate::governance::sn_register::SnLimit>, Error> {
+        use crate::governance::sn_register::{
+            SnRegister, SnRegisterMessage, SnRegisterResponse,
+        };
+        let actor: ActorRef<SnRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/sn_register"
+            )))
+            .await?;
+        let response = actor
+            .ask(SnRegisterMessage::GetSns {
+                subject_id,
+                gov_versions,
+            })
+            .await
+            .map_err(|e| actor_communication_error("sn_register", e))?;
+        match response {
+            SnRegisterResponse::Sns(results) => Ok(results),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "sn_register".to_owned(),
+                expected: "Sns".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Restores one exact sn mapping, so a test can rebuild the real
+    /// register state after wiping it. No version is invented here:
+    /// callers re-register pairs they read before the wipe.
+    pub async fn test_register_sn(
+        &self,
+        governance_id: DigestIdentifier,
+        subject_id: DigestIdentifier,
+        gov_version: u64,
+        sn: u64,
+    ) -> Result<(), Error> {
+        use crate::governance::sn_register::{
+            SnRegister, SnRegisterMessage, SnRegisterResponse,
+        };
+        let actor: ActorRef<SnRegister> = self
+            .system
+            .get_actor(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/sn_register"
+            )))
+            .await?;
+        let response = actor
+            .ask(SnRegisterMessage::RegisterSn {
+                subject_id,
+                gov_version,
+                sn,
+            })
+            .await
+            .map_err(|e| actor_communication_error("sn_register", e))?;
+        match response {
+            SnRegisterResponse::Ok => Ok(()),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "sn_register".to_owned(),
+                expected: "Ok".to_owned(),
                 received: "other".to_owned(),
             }),
         }

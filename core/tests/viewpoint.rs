@@ -12137,3 +12137,329 @@ async fn test_receipt_masks_over_clear_facts() {
     assert_eq!(pushed.len(), 3);
     assert_tracker_fact_opaque(&pushed[2].event, &["basura"]).unwrap();
 }
+
+// Witness copy ships only the head delivery range per offer: the
+// updater only reads the range covering its next SN, so sending the
+// whole suffix wastes the wire budget. The calendar below builds a
+// window with alternating modes (several ranges when read whole);
+// every observed offer must still carry exactly one range, headed at
+// the ledger tip, under the wire cap, while the copy tip keeps
+// moving.
+#[test(tokio::test)]
+async fn test_witness_copy_offers_only_head_range() {
+    async fn held_offers(
+        api: &ave_core::Api,
+    ) -> Vec<ave_core::update::UpdateWitnessOffer> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::UpdateOffer { offer } => Some(offer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let idle_sync = Some(TrackerSyncConfig {
+        interval_secs: 3600,
+        ..Default::default()
+    });
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            ledger_batch_size: Some(1),
+            tracker_sync: idle_sync,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let witness = nodes[1].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&witness]).await;
+    // Block every push to the witness while the calendar builds: the
+    // witness must start empty and fetch each batch through a held
+    // offer below, never via a pre-seeding push. The drops lift after
+    // the calendar so the witness can pull the gov once.
+    let witness_key =
+        PublicKey::from_str(witness.public_key()).unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+        FaultMessage::DistributionGetLastSn,
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::GovernanceVersionReq,
+        FaultMessage::GovernanceVersionRes,
+        FaultMessage::TrackerSyncReq,
+        FaultMessage::TrackerSyncRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(witness_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    let json = json!({
+        "members": {"add": [{"name": "W", "key": witness.public_key()}]},
+        "schemas": {"add": [{
+            "id": "Example",
+            "contract": EXAMPLE_CONTRACT,
+            "initial_value": {"one": 0, "two": 0, "three": 0},
+            "viewpoints": ["agua", "basura"],
+        }]},
+        "roles": {
+            "governance": {"add": {"witness": ["W"]}},
+            "schema": [{
+                "schema_id": "Example",
+                "add": {
+                    "evaluator": [{"name": "Owner", "namespace": []}],
+                    "validator": [{"name": "Owner", "namespace": []}],
+                    "creator": [{
+                        "name": "Owner",
+                        "namespace": [],
+                        "quantity": "infinity",
+                        "witnesses": [
+                            {"name": "W", "viewpoints": ["agua"]},
+                        ],
+                    }],
+                    "issuer": [{"name": "Owner", "namespace": []}],
+                },
+            }],
+        },
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, ..) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+
+    let viewpoints = ["agua", "basura"];
+    // Fixed grant (agua only) with alternating facts: W reads agua
+    // facts Clear and basura facts Opaque, so the whole suffix spans
+    // several ranges while each head offer stays a single range.
+    for (i, viewpoint) in viewpoints.iter().cycle().take(6).enumerate() {
+        let data = (i + 1) as i32;
+        // No witness gov pull here: drops already block every push,
+        // so the witness starts empty and fetches each batch through
+        // a held offer below.
+        emit_fact_viewpoints(
+            &owner,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            BTreeSet::from([viewpoint.to_string()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    // Ledger tip the offers must head at: genesis plus six facts.
+    let tip = 6u64;
+    let ledger = owner
+        .test_get_tracker_ledger(subject_id.clone(), tip)
+        .await
+        .unwrap();
+    assert_eq!(ledger.len(), (tip + 1) as usize);
+    let cap = ave_network::MAX_APP_MESSAGE_BYTES as usize;
+
+    // Drops lift: the witness pulls the gov once, still with an empty
+    // tracker tip, so every batch below needs a held offer.
+    owner.test_clear_faults().await.unwrap();
+    witness.update_subject(governance_id.clone()).await.unwrap();
+    let gov_tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    get_subject(&witness, governance_id.clone(), Some(gov_tip), true)
+        .await
+        .unwrap();
+
+    // Stepwise copy: every sweep stalls at its held offer and every
+    // fetch stalls at its held request, while answers flow freely;
+    // each observed offer is pinned to the tip below with no
+    // scheduler race. Holds are re-armed in the safe windows (no
+    // message of that type in flight), so each release moves exactly
+    // one step.
+    async fn hold_owner_offers(api: &ave_core::Api) {
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::UpdateOffer,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    async fn hold_witness_ledger_reqs(api: &ave_core::Api) {
+        api.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    hold_owner_offers(&owner).await;
+    hold_witness_ledger_reqs(&witness).await;
+    witness
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    witness.update_subject(subject_id.clone()).await.unwrap();
+
+    let mut seen = 0usize;
+    let mut transported_ranges = 0usize;
+    let mut max_ranges = 0usize;
+    let mut tips: Vec<u64> = vec![];
+    // Stepwise only the first three head batches: enough to pin
+    // single-range offers, head SN, wire cap and tip movement. The
+    // rest converges freely below, avoiding updater retry timeouts
+    // under prolonged holds.
+    for _ in 0..3 {
+        // No batch can advance while the offer is held, so the local
+        // tip names exactly the next SN this offer must cover.
+        let next_sn = witness
+            .get_subject_state(subject_id.clone())
+            .await
+            .map_or(0, |state| state.sn + 1);
+
+        // The sweep stalls at its offer: exactly one head to inspect.
+        let mut offers = Vec::new();
+        for _ in 0..100 {
+            offers = held_offers(&owner).await;
+            if !offers.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if offers.is_empty() {
+            break;
+        }
+        assert_eq!(
+            offers.len(),
+            1,
+            "each step must retain exactly one fresh offer, got {offers:?}"
+        );
+        let offer = &offers[0];
+        assert_eq!(
+            offer.ranges.len(),
+            1,
+            "every offer ships only its head range, got {offer:?}"
+        );
+        assert_eq!(
+            offer.sn, tip,
+            "the head offer always heads at the ledger tip"
+        );
+        let range = &offer.ranges[0];
+        assert!(
+            range.from_sn <= range.to_sn && range.to_sn <= tip,
+            "head range stays inside the ledger, got {range:?}"
+        );
+        let wire = rmp_serde::to_vec(offer).unwrap().len();
+        assert!(
+            wire < cap,
+            "a single head range stays under the wire cap ({wire} < {cap})"
+        );
+        max_ranges = max_ranges.max(offer.ranges.len());
+        transported_ranges += offer.ranges.len();
+        seen += 1;
+
+        assert!(
+            range.from_sn <= next_sn && next_sn <= range.to_sn,
+            "the offered range must cover the requested next SN {next_sn}, got {range:?}"
+        );
+
+        // The offer flows and launches a ledger request; re-arm both
+        // holds so the next probe and request stay stepwise.
+        owner.test_release_held().await.unwrap();
+        hold_owner_offers(&owner).await;
+        let mut req_seen = false;
+        for _ in 0..100 {
+            req_seen = witness
+                .test_held_outbound()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .any(|m| {
+                    matches!(
+                        m.message,
+                        ActorMessage::DistributionLedgerReq { .. }
+                    )
+                });
+            if req_seen {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(req_seen, "the head offer must launch exactly one fetch");
+        witness.test_release_held().await.unwrap();
+        hold_witness_ledger_reqs(&witness).await;
+        // The answer flows freely and the tip moves one head range.
+        let prev = tips.last().copied();
+        let mut moved = false;
+        for _ in 0..100 {
+            if let Ok(state) =
+                witness.get_subject_state(subject_id.clone()).await
+                && prev.is_none_or(|p| state.sn > p)
+            {
+                tips.push(state.sn);
+                moved = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(moved, "the head batch must advance the copy tip");
+        if *tips.last().unwrap() >= tip {
+            break;
+        }
+    }
+    // The head ranges walked step by step at the start.
+    assert!(
+        seen >= 2,
+        "the calendar must need several head offers, saw {seen}"
+    );
+    assert_eq!(
+        max_ranges, 1,
+        "range count never grows past the head offer"
+    );
+    assert_eq!(
+        transported_ranges, seen,
+        "the wire carries exactly one range per observed offer"
+    );
+    for window in tips.windows(2) {
+        assert!(
+            window[1] > window[0],
+            "the tip must keep moving, got {tips:?}"
+        );
+    }
+    // Drain any remainder without holds and prove convergence.
+    owner.test_clear_faults().await.unwrap();
+    witness.test_clear_faults().await.unwrap();
+    let state = get_subject(&witness, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, tip, "the copy still converges to the tip");
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
