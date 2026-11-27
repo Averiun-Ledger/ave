@@ -3168,6 +3168,18 @@ impl Api {
         Ok(messages)
     }
 
+    /// Drops every held outbound and inbound message without
+    /// delivering them, keeping the rules. Lets a test reset the
+    /// observable traffic right before the stimulus it asserts on.
+    pub async fn test_clear_held_outbound(&self) -> Result<(), Error> {
+        let faults = self.test_faults()?;
+        faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear_held();
+        Ok(())
+    }
+
     /// Delivers every held message through the node's normal flow and
     /// removes the hold rules. Returns how many messages were
     /// delivered.
@@ -3371,6 +3383,108 @@ impl Api {
             _ => Err(Error::UnexpectedResponse {
                 actor: "witnesses_register".to_owned(),
                 expected: "Ownership".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Reads back the numeric witness limits this node computes for
+    /// another node over a subject: access sn, hi sn cap and gov
+    /// version cap. Read-only; used to pin that disjoint role and
+    /// membership intervals grant nothing.
+    pub async fn test_tracker_limits(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: ave_common::SchemaType,
+    ) -> Result<
+        (
+            Option<u64>,
+            crate::governance::witnesses_register::HiSnLimit,
+            crate::governance::witnesses_register::GovVersionLimit,
+        ),
+        Error,
+    > {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(WitnessesRegisterMessage::GetTrackerLimits {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+            })
+            .await?
+        {
+            WitnessesRegisterResponse::TrackerLimits {
+                access,
+                hi_sn,
+                gov_version,
+            } => Ok((access, hi_sn, gov_version)),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "TrackerLimits".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Reads status and window over an explicit ledger: ownership is
+    /// rebuilt from the batch on the register while mappings, grants
+    /// and roles come from this node. Used to pin that a stale stored
+    /// ownership never leaks its search into a newer supplied one.
+    pub async fn test_status_and_window_over_ledger(
+        &self,
+        governance_id: &DigestIdentifier,
+        subject_id: DigestIdentifier,
+        ledger: Vec<crate::model::event::Ledger>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: ave_common::SchemaType,
+        actual_sn: Option<u64>,
+    ) -> Result<
+        (
+            Option<u64>,
+            crate::governance::witnesses_register::HiSnLimit,
+            crate::governance::witnesses_register::GovVersionLimit,
+            Option<u64>,
+        ),
+        Error,
+    > {
+        use crate::governance::witnesses_register::{
+            WitnessesRegisterMessage, WitnessesRegisterResponse,
+        };
+        let actor = self.test_witnesses_register(governance_id).await?;
+        match actor
+            .ask(
+                WitnessesRegisterMessage::QueryWitnessStatusAndWindowOverLedger {
+                    subject_id,
+                    ledger,
+                    node,
+                    namespace,
+                    schema_id,
+                    actual_sn,
+                },
+            )
+            .await?
+        {
+            WitnessesRegisterResponse::WitnessStatusAndWindow {
+                status,
+                sn,
+                ..
+            } => Ok((
+                status.access_sn,
+                status.hi_sn_limit,
+                status.gov_version_limit,
+                sn,
+            )),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "witnesses_register".to_owned(),
+                expected: "WitnessStatusAndWindow".to_owned(),
                 received: "other".to_owned(),
             }),
         }
@@ -3678,6 +3792,9 @@ impl Api {
     /// Parks or releases a tracker-sync serving request immediately
     /// after its initial governance-version read, before listing the
     /// register. Used to interleave a governance update deterministically.
+    /// One-shot: releasing lets exactly one parked pass through and
+    /// re-arms, so each release moves a single pass and the next one
+    /// parks again.
     pub async fn test_pause_tracker_sync_version(
         &self,
         pause: bool,
@@ -3689,17 +3806,18 @@ impl Api {
         Ok(())
     }
 
-    /// Number of tracker-sync requests parked after their initial
-    /// governance-version read.
-    pub async fn test_tracker_sync_version_hold_count(
+    /// Nonces parked at the tracker-sync version/listing boundary, in
+    /// park order. Lets a test prove its own request parked once per
+    /// pass while background syncs interleave theirs.
+    pub async fn test_tracker_sync_version_hold_nonces(
         &self,
-    ) -> Result<u64, Error> {
+    ) -> Result<Vec<u64>, Error> {
         let faults = self.test_faults()?;
-        let count = faults
+        let nonces = faults
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .tracker_sync_version_hold_count();
-        Ok(count)
+            .tracker_sync_version_hold_nonces();
+        Ok(nonces)
     }
 
     /// Arms a one-shot resolve failure for the next serving read
@@ -3759,6 +3877,82 @@ impl Api {
                 received: "other".to_owned(),
             }),
         }
+    }
+
+    /// Test-only: whether a live subject actor (tracker or
+    /// governance) exists for this subject right now. A present
+    /// actor must also answer a cheap status ask: a stopped remnant
+    /// reads as absent. Lets a test prove a failed creation stopped
+    /// its fresh child instead of leaking it.
+    pub async fn test_has_live_subject_actor(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> bool {
+        let tracker_path = ActorPath::from(format!(
+            "/user/node/subject_manager/{subject_id}"
+        ));
+        if let Ok(actor) = self
+            .system
+            .get_actor::<Tracker>(&tracker_path)
+            .await
+            && let Ok(TrackerResponse::Metadata(_)) =
+                actor.ask(TrackerMessage::GetMetadata).await
+        {
+            return true;
+        }
+        use crate::governance::{
+            Governance, GovernanceMessage, GovernanceResponse,
+        };
+        if let Ok(actor) = self
+            .system
+            .get_actor::<Governance>(&tracker_path)
+            .await
+            && let Ok(GovernanceResponse::Version(_)) =
+                actor.ask(GovernanceMessage::GetVersion).await
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Test-only: the Node registration entry for a subject, if
+    /// any. Lets a test prove a dirty-boot replay restored the entry
+    /// itself (`Some(Tracker { .. })`), not just the derived
+    /// registers that the replay also heals.
+    pub async fn test_get_node_subject_data(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<Option<node::SubjectData>, Error> {
+        match self
+            .node
+            .ask(NodeMessage::GetSubjectData(subject_id))
+            .await?
+        {
+            NodeResponse::SubjectData(data) => Ok(data),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "node".to_owned(),
+                expected: "SubjectData".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
+    /// Test-only: whether this node's per-subject distributor actor
+    /// exists. Lets a test prove a replay restored distribution,
+    /// which the Node registration spawns, instead of only the ledger
+    /// and the registers.
+    pub async fn test_has_distributor(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<bool, Error> {
+        use crate::distribution::worker::DistriWorker;
+        Ok(self
+            .system
+            .get_actor::<DistriWorker>(&ActorPath::from(format!(
+                "/user/node/distributor_{subject_id}"
+            )))
+            .await
+            .is_ok())
     }
 
     /// Test-only: runs a subject creation through the subject
@@ -3931,6 +4125,37 @@ impl Api {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .post_success_attempt())
+    }
+
+    /// Parks (`pause == true`) or releases the aux pre-read barrier
+    /// on this node: while paused, transfer evidence verification
+    /// waits before reading the local tip, so a test can apply a
+    /// concurrent same-SN variant first and prove the late hint is
+    /// judged against the winner, never by SN alone. The flag lives
+    /// in the shared test registry, never in a worker mailbox.
+    pub async fn test_pause_verify_before_sn(
+        &self,
+        pause: bool,
+    ) -> Result<(), Error> {
+        self.test_faults()?
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_verify_before_sn_paused(pause);
+        Ok(())
+    }
+
+    /// How many times the aux pre-read barrier was hit on this node:
+    /// proves the late hint really parked before its local-tip read
+    /// instead of racing past it.
+    pub async fn test_verify_before_sn_hold_count(
+        &self,
+    ) -> Result<u64, Error> {
+        let faults = self.test_faults()?;
+        let count = faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .verify_before_sn_hold_count();
+        Ok(count)
     }
 
     /// Parks (`pause == true`) or releases the single-push
@@ -4335,6 +4560,57 @@ impl Api {
             .is_ok())
     }
 
+    /// Test-only: whether a dead supervised round was recorded for
+    /// this subject and generation. The record travels by
+    /// fire-and-forget tell, so a test waits on this instead of
+    /// pacing the late batch with a sleep.
+    pub async fn test_has_dead_supervised_round(
+        &self,
+        subject_id: DigestIdentifier,
+        generation: u64,
+    ) -> Result<bool, Error> {
+        let faults = self.test_faults()?;
+        Ok(faults
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .has_dead_supervised_round(&subject_id.to_string(), generation))
+    }
+
+    /// Test-only: pending deferred-acquisition markers of one
+    /// governance. Lets a test prove a premature batch neither
+    /// cleared markers nor unblocked serving.
+    pub async fn test_governance_pending_acquisitions(
+        &self,
+        governance_id: DigestIdentifier,
+    ) -> Result<Vec<String>, Error> {
+        use crate::governance::contract_register::{
+            ContractRegister, ContractRegisterMessage,
+            ContractRegisterResponse,
+        };
+        let actor = self
+            .system
+            .get_actor::<ContractRegister>(&ActorPath::from(format!(
+                "/user/node/subject_manager/{governance_id}/contract_register"
+            )))
+            .await
+            .map_err(|_| Error::MissingResource {
+                name: "contract_register".to_owned(),
+                reason: "Contract register not found".to_owned(),
+            })?;
+        match actor
+            .ask(ContractRegisterMessage::ListPending)
+            .await
+            .map_err(|e| actor_communication_error("contract_register", e))?
+        {
+            ContractRegisterResponse::Contracts(names) => Ok(names),
+            _ => Err(Error::UnexpectedResponse {
+                actor: "contract_register".to_owned(),
+                expected: "Contracts".to_owned(),
+                received: "other".to_owned(),
+            }),
+        }
+    }
+
     /// Test-only: asks this node's governance actor to start a
     /// manual catch-up round, the same entry point the tracker sync
     /// nudge uses. Lets a test drive the `gov_manual_update`
@@ -4511,6 +4787,30 @@ impl Api {
             .count(&subject_id))
     }
 
+    /// Processed `SendDistribution` requests for one subject: the
+    /// worker notes after every batch build resolves, served or
+    /// refused. Lets a test prove its request was processed before
+    /// asserting that nothing was served, instead of inferring it
+    /// from silence.
+    pub async fn test_serve_processed_count(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<u64, Error> {
+        let stats = self
+            .system
+            .get_helper::<crate::distribution::worker::SharedServeStats>(
+                "serve_stats",
+            )
+            .ok_or_else(|| Error::MissingResource {
+                name: "serve_stats".to_owned(),
+                reason: "Serve stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .count(&subject_id))
+    }
+
     /// Fragment reassembly counters: assemblies, ready mains, ready
     /// auxes, decode attempts and expiries, in that order. Lets tests
     /// prove payload-hash rejection without decode, mixing rejection
@@ -4546,6 +4846,31 @@ impl Api {
         let (assemblies, ready_mains, ready_auxes, _, _) =
             self.test_fragment_stats().await?;
         Ok((assemblies + ready_mains + ready_auxes) as usize)
+    }
+
+    /// Push-fragment lifecycle for one subject: failed initial
+    /// sends, resent group identities, consumed acks, live groups
+    /// and live timers, in that order. Lets a test prove the
+    /// injected first-send failure really fired, the retry resent
+    /// the whole group under the same identity, the ack was consumed
+    /// exactly once and no group or timer is left pending.
+    pub async fn test_push_frag_stats(
+        &self,
+        subject_id: DigestIdentifier,
+    ) -> Result<(u64, Vec<DigestIdentifier>, u64, i64, i64), Error> {
+        let stats = self
+            .system
+            .get_helper::<
+                crate::distribution::coordinator::SharedPushFragStats,
+            >("push_frag_stats")
+            .ok_or_else(|| Error::MissingResource {
+                name: "push_frag_stats".to_owned(),
+                reason: "Push frag stats helper not found".to_owned(),
+            })?;
+        Ok(stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot(&subject_id))
     }
 
     /// Replaces the node-level distributor's deferred-store bounds

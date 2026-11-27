@@ -17,6 +17,7 @@ use updater::{Updater, UpdaterMessage};
 
 use crate::{
     NetworkMessage,
+    distribution::worker::{DistriWorker, DistriWorkerMessage},
     governance::{
         Governance, GovernanceMessage,
         witnesses_register::{TrackerDeliveryMode, TrackerDeliveryRange},
@@ -651,6 +652,40 @@ impl Handler<Self> for Update {
                         attempt = attempt,
                         "Update retry round exhausted before reaching target"
                     );
+                    // The round dies uncertified: record its
+                    // generation and target outside the supervisor
+                    // so a late batch naming it is not mistaken
+                    // for an unsupervised copy. Best effort: a
+                    // missing distributor only loses the record.
+                    // Both the node-level and the per-subject
+                    // workers can process a late batch, so both
+                    // remember the dead round.
+                    let target = self
+                        .pending_target_sn
+                        .unwrap_or(expected_target_sn);
+                    for path in [
+                        ActorPath::from("/user/node/distributor".to_owned()),
+                        ActorPath::from(format!(
+                            "/user/node/distributor_{}",
+                            self.subject_id
+                        )),
+                    ] {
+                        if let Ok(worker) = ctx
+                            .system()
+                            .get_actor::<DistriWorker>(&path)
+                            .await
+                        {
+                            let _ = worker
+                                .tell(
+                                    DistriWorkerMessage::NoteDeadSupervisedRound {
+                                        subject_id: self.subject_id.clone(),
+                                        generation: self.retry_round,
+                                        target_sn: target,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                     ctx.stop(None).await;
                     return Ok(());
                 }
@@ -926,10 +961,30 @@ impl Handler<Self> for Update {
                 }
             }
             UpdateMessage::DistributionDone { sn, round } => {
-                // A completion from another generation must not stop
-                // this round: only the sweep that requested the copy
-                // may close its own timer.
+                // A completion from another generation must not blindly
+                // close this round — but it must not lose a reached
+                // target either. The round may have exhausted its
+                // retries just before the batch landed: re-read the
+                // persisted tip and certify now if the objective is
+                // already fulfilled, exactly once, instead of
+                // abandoning the acquisition. A mailbox delivery that
+                // arrives after the stop drains the same way.
                 if round != self.retry_round {
+                    let current_sn =
+                        get_local_subject_sn(ctx, &self.subject_id)
+                            .await
+                            .ok()
+                            .flatten();
+                    if self.pending_target_sn.is_some_and(|t| {
+                        current_sn.is_some_and(|s| s >= t)
+                    }) {
+                        if let Some(key) = self.pending_retry.take() {
+                            ctx.cancel_timer(key);
+                        }
+                        self.pending_target_sn = None;
+                        self.trigger_deferred_if_governance(ctx).await;
+                        ctx.stop(None).await;
+                    }
                     return Ok(());
                 }
                 // Fast stop on proven completion: the distributor

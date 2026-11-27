@@ -645,7 +645,17 @@ impl DistriWorker {
                                     true,
                                 )
                                 .await;
-                            if !notified {
+                            // A late answer of a dead supervised round
+                            // below its target is not an unsupervised
+                            // copy: acquiring here would clear markers
+                            // and unblock serving ahead of the tip.
+                            if !notified
+                                && !self.is_late_supervised_below_target(
+                                    &subject_id,
+                                    info.version,
+                                    last_sn,
+                                )
+                            {
                                 self.trigger_deferred_acquisition(
                                     ctx,
                                     &subject_id,
@@ -775,6 +785,8 @@ impl DistriWorker {
                     // Same certified-tip rule as the apply path above:
                     // the supervising update decides by ledger SN,
                     // unsupervised version-sync copies run it here.
+                    // A late supervised answer below its target runs
+                    // neither: it must not acquire or unblock serving.
                     let notified = self
                         .notify_update_done(
                             ctx,
@@ -784,7 +796,13 @@ impl DistriWorker {
                             true,
                         )
                         .await;
-                    if !notified {
+                    if !notified
+                        && !self.is_late_supervised_below_target(
+                            &subject_id,
+                            info.version,
+                            applied_hi_sn,
+                        )
+                    {
                         self.trigger_deferred_acquisition(ctx, &subject_id)
                             .await;
                     }
@@ -2548,8 +2566,50 @@ impl DistriWorker {
                     return Ok(());
                 }
                 Ok((..)) => {
-                    Self::note_copy_success(ctx, &subject_id, attempt).await;
-                    lease
+                    // The entry stale check raced with a concurrent
+                    // apply: only ack the exact bytes this node holds.
+                    // A same-SN divergence that skipped as stale earns
+                    // no ack, no success and no effects.
+                    let local_hash = match self
+                        .local_event_hash(ctx, &subject_id, sn)
+                        .await
+                    {
+                        Err(e) => {
+                            if let Some(lease) = lease {
+                                lease.finish(ctx).await?;
+                            }
+                            return Err(e);
+                        }
+                        Ok(local_hash) => local_hash,
+                    };
+                    match local_hash {
+                        Some(local_hash) if local_hash == received_hash => {
+                            Self::note_copy_success(
+                                ctx, &subject_id, attempt,
+                            )
+                            .await;
+                            lease
+                        }
+                        _ => {
+                            warn!(
+                                msg_type = "LastEventDistribution",
+                                subject_id = %subject_id,
+                                sn = sn,
+                                "Stale push diverges from local event, no ack",
+                            );
+                            if let Some(metrics) =
+                                crate::metrics::try_core_metrics()
+                            {
+                                metrics.observe_distribution_failure(
+                                    "stale_divergent_push",
+                                );
+                            }
+                            if let Some(lease) = lease {
+                                lease.finish(ctx).await?;
+                            }
+                            return Ok(());
+                        }
+                    }
                 }
                 Err(e) => {
                     if let ActorError::FunctionalCritical { .. } = e.clone() {

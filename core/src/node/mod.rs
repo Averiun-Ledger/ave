@@ -468,6 +468,10 @@ impl Node {
                         deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
+                        dead_supervised_rounds:
+                            std::collections::HashMap::new(),
+                        dead_supervised_round_order:
+                            std::collections::VecDeque::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
@@ -509,6 +513,10 @@ impl Node {
                         deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
+                        dead_supervised_rounds:
+                            std::collections::HashMap::new(),
+                        dead_supervised_round_order:
+                            std::collections::VecDeque::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
@@ -973,6 +981,11 @@ pub enum NodeEvent {
     /// gracefully, so the next boot may skip reconciliation. Appended
     /// last: old journals decode without it.
     MarkCleanShutdown,
+    /// New boot marker: opening a boot cycle voids any previous
+    /// clean state, so a crash before the next clean handshake can
+    /// never be misread as clean. Appended last like the clean
+    /// marker, for the same Borsh index stability.
+    MarkDirtyBoot,
 }
 
 impl Event for NodeEvent {}
@@ -1013,6 +1026,21 @@ impl Actor for Node {
             );
             return Err(e);
         }
+
+        // The restored flag describes how the PREVIOUS cycle ended:
+        // capture it for this boot's decision, then immediately open
+        // the new cycle as dirty. The marker is durable before any
+        // child starts, so a crash anywhere below can never be
+        // misread as clean on the next boot.
+        let dirty_boot = self.dirty_shutdown;
+        if let Err(e) = self.persist(NodeEvent::MarkDirtyBoot, ctx).await {
+            error!(
+                error = %e,
+                "Failed to persist dirty boot marker"
+            );
+            return Err(e);
+        }
+        self.dirty_shutdown = true;
 
         // Create SinkRegistry and populate it from current config.
         let Some(config_helper) =
@@ -1210,7 +1238,7 @@ impl Actor for Node {
         if let Err(e) = subject_manager
             .ask(SubjectManagerMessage::UpGovernances {
                 governance_ids: self.governance_ids(),
-                dirty_boot: self.dirty_shutdown,
+                dirty_boot,
             })
             .await
         {
@@ -1249,6 +1277,10 @@ impl Actor for Node {
                         deferred: crate::distribution::deferred::DeferredStore::new(),
                         verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
+                        dead_supervised_rounds:
+                            std::collections::HashMap::new(),
+                        dead_supervised_round_order:
+                            std::collections::VecDeque::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
@@ -1375,6 +1407,10 @@ impl Handler<Self> for Node {
                             deferred: crate::distribution::deferred::DeferredStore::new(),
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
+                        dead_supervised_rounds:
+                            std::collections::HashMap::new(),
+                        dead_supervised_round_order:
+                            std::collections::VecDeque::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
@@ -1427,6 +1463,10 @@ impl Handler<Self> for Node {
                             deferred: crate::distribution::deferred::DeferredStore::new(),
                             verify_cursors: crate::distribution::transfer_verifier::VerifyCursorStore::new(),
                         pending_auth: std::collections::HashMap::new(),
+                        dead_supervised_rounds:
+                            std::collections::HashMap::new(),
+                        dead_supervised_round_order:
+                            std::collections::VecDeque::new(),
                             attempt_clock: self.attempt_clock.clone(),
                             frag_assemblies:
                                 std::collections::HashMap::new(),
@@ -1882,6 +1922,13 @@ impl PersistentActor for Node {
                 debug!(
                     event_type = "MarkCleanShutdown",
                     "Applied clean shutdown marker"
+                );
+            }
+            NodeEvent::MarkDirtyBoot => {
+                inner.dirty_shutdown = true;
+                debug!(
+                    event_type = "MarkDirtyBoot",
+                    "Applied dirty boot marker"
                 );
             }
         };

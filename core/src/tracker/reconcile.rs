@@ -37,7 +37,9 @@ use crate::governance::witnesses_register::{
 };
 use crate::model::common::{TrackerVisibilityState, get_n_events};
 use crate::model::event::{Ledger, Protocols};
-use crate::node::{Node, NodeMessage, NodeResponse, TransferSubject};
+use crate::node::{
+    Node, NodeMessage, NodeResponse, SubjectData, TransferSubject,
+};
 #[cfg(feature = "test")]
 use crate::system::ConfigHelper;
 use ave_common::request::EventRequest;
@@ -455,6 +457,23 @@ impl Tracker {
             return Ok(false);
         }
 
+        // A known-but-unregistered subject answers (false, None) just
+        // like an absent one above: require the Node entry itself, or
+        // a cut between genesis apply and registration would read as
+        // landed while lift and sync still miss the subject.
+        let NodeResponse::SubjectData(data) = node
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+            .await?
+        else {
+            return Err(ActorError::UnexpectedResponse {
+                path: node_path,
+                expected: "NodeResponse::SubjectData".to_owned(),
+            });
+        };
+        if !matches!(data, Some(SubjectData::Tracker { .. })) {
+            return Ok(false);
+        }
+
         let gov_path = format!(
             "/user/node/subject_manager/{}",
             self.governance_id
@@ -635,6 +654,26 @@ impl Tracker {
         let subject_id = self.subject_metadata.subject_id.clone();
         if event.is_create_event() {
             let owner = event.ledger_seal_signature.signer.clone();
+            let node = ctx
+                .system()
+                .get_actor::<Node>(&ActorPath::from("/user/node"))
+                .await?;
+            // The live path registers the subject in Node after the
+            // genesis apply: a cut between the two leaves the ledger
+            // persisted without the entry, and lift/sync miss the
+            // subject. Re-sending converges (same data, idempotent).
+            node.tell(NodeMessage::RegisterSubject {
+                owner: owner.clone(),
+                subject_id: subject_id.clone(),
+                data: SubjectData::Tracker {
+                    governance_id: self.governance_id.clone(),
+                    schema_id: self.subject_metadata.schema_id.clone(),
+                    namespace: self.namespace.to_string(),
+                    active: true,
+                },
+            })
+            .await?;
+            report.writes_resent += 1;
             let witnesses_register = ctx
                 .system()
                 .get_actor::<WitnessesRegister>(&ActorPath::from(format!(

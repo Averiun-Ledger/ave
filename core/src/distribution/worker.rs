@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -117,6 +117,21 @@ pub struct DistriWorker {
     /// timer-driven expiry.
     #[cfg(feature = "test")]
     pub(crate) frag_expired: std::sync::atomic::AtomicU64,
+    /// Dead supervised rounds per subject: (generation, target sn).
+    /// A supervised update round that exhausts its retries without
+    /// certifying records its generation here before stopping, so a
+    /// late batch naming it is recognized as a supervised response
+    /// instead of an unsupervised copy: below its target it must not
+    /// acquire or unblock serving. Memory-only like the rest of the
+    /// worker state; bounded per subject (latest generations win)
+    /// and across subjects (oldest subject evicted first: a subject
+    /// idle long enough to be evicted has no late batch in flight,
+    /// the same staleness argument as the per-subject cap).
+    pub(crate) dead_supervised_rounds:
+        HashMap<DigestIdentifier, Vec<(u64, u64)>>,
+    /// Insertion order of `dead_supervised_rounds` keys, oldest
+    /// first, so the across-subjects bound evicts deterministically.
+    pub(crate) dead_supervised_round_order: VecDeque<DigestIdentifier>,
 }
 
 use super::transfer_verifier::SimulateInput;
@@ -337,6 +352,35 @@ pub(crate) struct FragStatsRegistry {
 pub(crate) type SharedFragStats =
     std::sync::Arc<std::sync::Mutex<FragStatsRegistry>>;
 
+/// Test-only serve-attempt counter, shared across workers via the
+/// `serve_stats` helper. Noted once `build_distribution_batch`
+/// returns, whether it built a batch or refused: a test can poll
+/// for the increment to prove its crafted request was fully
+/// processed before asserting that nothing was served, instead of
+/// inferring processing from silence. Zero cost in production: the
+/// struct, helper and call site only exist under
+/// `#[cfg(feature = "test")]`.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub(crate) struct ServeStatsRegistry {
+    processed: HashMap<DigestIdentifier, u64>,
+}
+
+#[cfg(feature = "test")]
+pub(crate) type SharedServeStats =
+    std::sync::Arc<std::sync::Mutex<ServeStatsRegistry>>;
+
+#[cfg(feature = "test")]
+impl ServeStatsRegistry {
+    pub(crate) fn note(&mut self, subject_id: &DigestIdentifier) {
+        *self.processed.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn count(&self, subject_id: &DigestIdentifier) -> u64 {
+        self.processed.get(subject_id).copied().unwrap_or(0)
+    }
+}
+
 /// Sender-side batch outcome: either a batch that fits the
 /// effective wire cap, or a single event that needs fragmentation.
 /// Both carry the tip-completeness of the response they belong to.
@@ -426,6 +470,27 @@ impl DistriWorker {
                 })
             })
             .unwrap_or(false)
+    }
+
+    #[cfg(feature = "test")]
+    fn note_dead_supervised_round(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        generation: u64,
+        target_sn: u64,
+    ) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_dead_supervised_round(
+                subject_id.to_string(),
+                generation,
+                target_sn,
+            );
+        }
     }
 
     #[cfg(feature = "test")]
@@ -586,6 +651,29 @@ impl DistriWorker {
             | (HiSnLimit::None, HiSnLimit::Sn(n)) => HiSnLimit::Sn(n),
             (HiSnLimit::None, HiSnLimit::None) => HiSnLimit::None,
         }
+    }
+
+    /// Whether a complete batch is a late answer of a dead supervised
+    /// round below its target: generation zero is always an
+    /// unsupervised copy, and unknown generations keep the old
+    /// behavior. A late supervised batch must not run the deferred
+    /// pass (that would clear markers and unblock serving ahead of
+    /// the supervised tip); at or above its target the normal
+    /// fallback still applies.
+    pub(crate) fn is_late_supervised_below_target(
+        &self,
+        subject_id: &DigestIdentifier,
+        generation: u64,
+        tip_sn: u64,
+    ) -> bool {
+        if generation == 0 {
+            return false;
+        }
+        self.dead_supervised_rounds.get(subject_id).is_some_and(|rounds| {
+            rounds
+                .iter()
+                .any(|(generation_, target)| *generation_ == generation && tip_sn < *target)
+        })
     }
 
     /// Best governance ceiling across incremental checks, same
@@ -3515,7 +3603,18 @@ impl DistriWorker {
                 range.target_sn,
                 range.already_verified_transfer_sn,
             )
-            .await?;
+            .await;
+        // Completion marker for the test suites: noted after the
+        // build resolves either way, so a poll on the counter proves
+        // the request was processed before asserting on (non-)serves.
+        #[cfg(feature = "test")]
+        if let Some(stats) =
+            ctx.system().get_helper::<SharedServeStats>("serve_stats")
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note(&subject_id);
+        }
+        let payload = payload?;
 
         let new_info = self.build_response_info(
             sender.clone(),
@@ -4909,7 +5008,7 @@ pub enum DistriWorkerMessage {
         sender: PublicKey,
         receiver_actor: String,
     },
-    // Un nodo nos solicitó la copia del ledger.
+    // A peer requested a copy of the ledger.
     SendDistribution {
         actual_sn: Option<u64>,
         target_sn: Option<u64>,
@@ -4919,7 +5018,7 @@ pub enum DistriWorkerMessage {
         already_verified_transfer_sn: Option<u64>,
         expected_governance_id: Option<DigestIdentifier>,
     },
-    // Nos llega una replica, guardarla en informar que la hemos recivido
+    // A replica arrived: store it and report the receipt.
     LastEventDistribution {
         ledger: Box<Ledger>,
         info: ComunicateInfo,
@@ -4998,6 +5097,14 @@ pub enum DistriWorkerMessage {
     /// prove the rebuild path rejoins the deferred chain.
     #[cfg(feature = "test")]
     TestEvictVerifyCursor { subject_id: DigestIdentifier },
+    /// A supervised update round exhausted its retries without
+    /// certifying: remember its generation and target so a late
+    /// batch naming it is not mistaken for an unsupervised copy.
+    NoteDeadSupervisedRound {
+        subject_id: DigestIdentifier,
+        generation: u64,
+        target_sn: u64,
+    },
 }
 
 impl Message for DistriWorkerMessage {}
@@ -5291,6 +5398,60 @@ impl Handler<Self> for DistriWorker {
                     msg_type = "TestEvictVerifyCursor",
                     subject_id = %subject_id,
                     "Verify cursor evicted for tests"
+                );
+            }
+            DistriWorkerMessage::NoteDeadSupervisedRound {
+                subject_id,
+                generation,
+                target_sn,
+            } => {
+                // A supervised round died uncertified: keep its
+                // generation and target so a late batch naming it is
+                // not mistaken for an unsupervised copy. Latest
+                // record wins per generation; the list stays short,
+                // and subjects stay bounded: the oldest subject is
+                // evicted first when full.
+                #[cfg(feature = "test")]
+                Self::note_dead_supervised_round(
+                    ctx,
+                    &subject_id,
+                    generation,
+                    target_sn,
+                );
+                if !self.dead_supervised_rounds.contains_key(&subject_id)
+                {
+                    while self.dead_supervised_round_order.len() >= 256 {
+                        if let Some(oldest) =
+                            self.dead_supervised_round_order.pop_front()
+                        {
+                            self.dead_supervised_rounds.remove(&oldest);
+                        } else {
+                            break;
+                        }
+                    }
+                    self.dead_supervised_round_order
+                        .push_back(subject_id.clone());
+                }
+                let rounds = self
+                    .dead_supervised_rounds
+                    .entry(subject_id.clone())
+                    .or_default();
+                if let Some(entry) =
+                    rounds.iter_mut().find(|(generation_, _)| *generation_ == generation)
+                {
+                    entry.1 = target_sn;
+                } else {
+                    rounds.push((generation, target_sn));
+                    while rounds.len() > 8 {
+                        rounds.remove(0);
+                    }
+                }
+                debug!(
+                    msg_type = "NoteDeadSupervisedRound",
+                    subject_id = %subject_id,
+                    generation = generation,
+                    target_sn = target_sn,
+                    "Recorded dead supervised round"
                 );
             }
         };

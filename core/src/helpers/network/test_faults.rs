@@ -210,6 +210,8 @@ pub struct TestFaultRegistry {
     post_success_attempt: Option<u64>,
     single_updated_holds: u64,
     single_updated_paused: bool,
+    verify_before_sn_holds: u64,
+    verify_before_sn_paused: bool,
     single_push_attempts: std::collections::HashMap<String, u64>,
     pre_purge_holds: u64,
     pre_purge_paused: bool,
@@ -219,7 +221,9 @@ pub struct TestFaultRegistry {
     update_retry_exhausted_holds: u64,
     update_retry_exhausted_paused: bool,
     tracker_sync_version_holds: u64,
+    tracker_sync_version_hold_nonces: Vec<u64>,
     tracker_sync_version_paused: bool,
+    dead_supervised_rounds: Vec<(String, u64, u64)>,
     fail_next_sink: bool,
     fail_next_node_register: bool,
 }
@@ -247,6 +251,8 @@ impl TestFaultRegistry {
             post_success_attempt: None,
             single_updated_holds: 0,
             single_updated_paused: false,
+            verify_before_sn_holds: 0,
+            verify_before_sn_paused: false,
             single_push_attempts: std::collections::HashMap::new(),
             pre_purge_holds: 0,
             pre_purge_paused: false,
@@ -256,7 +262,9 @@ impl TestFaultRegistry {
             update_retry_exhausted_holds: 0,
             update_retry_exhausted_paused: false,
             tracker_sync_version_holds: 0,
+            tracker_sync_version_hold_nonces: Vec::new(),
             tracker_sync_version_paused: false,
+            dead_supervised_rounds: Vec::new(),
             fail_next_sink: false,
             fail_next_node_register: false,
         }
@@ -416,6 +424,26 @@ impl TestFaultRegistry {
         self.single_updated_paused
     }
 
+    /// Records an aux-evidence pre-read barrier hit: verification of
+    /// a transfer hint parked before reading the local tip, so a test
+    /// can apply a concurrent same-SN variant first and prove the
+    /// late hint is judged against the winner, never by SN alone.
+    pub fn note_verify_before_sn_hold(&mut self) {
+        self.verify_before_sn_holds += 1;
+    }
+
+    pub fn verify_before_sn_hold_count(&self) -> u64 {
+        self.verify_before_sn_holds
+    }
+
+    pub fn set_verify_before_sn_paused(&mut self, paused: bool) {
+        self.verify_before_sn_paused = paused;
+    }
+
+    pub fn verify_before_sn_paused(&self) -> bool {
+        self.verify_before_sn_paused
+    }
+
     /// Records the attempt a single-push entry point assigned for a
     /// subject, so a test can tell the skipped push apart from the
     /// parked batch it interleaves with. First assignment wins:
@@ -523,12 +551,50 @@ impl TestFaultRegistry {
         self.update_retry_exhausted_paused
     }
 
-    pub fn note_tracker_sync_version_hold(&mut self) {
+    pub fn note_tracker_sync_version_hold(&mut self, nonce: u64) {
         self.tracker_sync_version_holds += 1;
+        self.tracker_sync_version_hold_nonces.push(nonce);
     }
 
     pub fn tracker_sync_version_hold_count(&self) -> u64 {
         self.tracker_sync_version_holds
+    }
+
+    /// Nonces parked at the version/listing boundary, in park order.
+    /// Lets a test prove its own request parked once per pass while
+    /// background syncs interleave theirs.
+    pub fn tracker_sync_version_hold_nonces(&self) -> Vec<u64> {
+        self.tracker_sync_version_hold_nonces.clone()
+    }
+
+    /// Records a dead supervised round handled by a distributor, so
+    /// a test can wait for the record before injecting the late
+    /// batch instead of pacing it with a sleep. Entries are
+    /// (subject, generation, target): the tell carrying them is
+    /// fire-and-forget, so without this the test cannot prove the
+    /// gate under test was armed.
+    pub fn note_dead_supervised_round(
+        &mut self,
+        subject_id: String,
+        generation: u64,
+        target_sn: u64,
+    ) {
+        self.dead_supervised_rounds
+            .push((subject_id, generation, target_sn));
+    }
+
+    /// Whether a dead supervised round was recorded for this
+    /// subject and generation.
+    pub fn has_dead_supervised_round(
+        &self,
+        subject_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.dead_supervised_rounds.iter().any(
+            |(subject, generation_, _)| {
+                subject == subject_id && *generation_ == generation
+            },
+        )
     }
 
     pub fn set_tracker_sync_version_paused(&mut self, paused: bool) {
@@ -637,6 +703,13 @@ impl TestFaultRegistry {
             // There is no `send_command` on the receiving side.
             FaultAction::FailSend => InboundVerdict::Pass,
         }
+    }
+
+    /// Drops every held message without delivering it, keeping the
+    /// rules: lets a test reset the observable traffic right before
+    /// the stimulus it actually asserts on.
+    pub fn clear_held(&mut self) {
+        self.held.clear();
     }
 
     /// Takes every held message out as re-injection commands and

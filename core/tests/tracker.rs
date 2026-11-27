@@ -36,6 +36,11 @@ use test_log::test;
 
 use crate::common::sink_setup::example_schema_governance_fact;
 use crate::common::sink_setup::governance_with_viewpoints_fact;
+use crate::common::sink_setup::{
+    assert_sink_lagging, assert_subject_sn_sequence, example_sink_config,
+    wait_for_sink_blocked,
+};
+use crate::common::test_sink::{ResponseMode, TestSink};
 use crate::common::{
     CreateNodeConfig, CreateNodesAndConnectionsConfig, NodeData, PORT_COUNTER,
     create_node, emit_fact_signed, get_abort_request, node_running,
@@ -9577,7 +9582,10 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     let (seen, resent) =
         api2.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
     assert_eq!(seen, 5, "a diverged boot replays every ledger event");
-    assert_eq!(resent, 14, "replay must resend exactly the derives");
+    assert_eq!(
+        resent, 15,
+        "replay must resend exactly the derives, including the Node entry"
+    );
 
     // A later fact sits above Confirm. Move only the derived ownership
     // projections back to Alice: presence checks still see a subject,
@@ -9800,6 +9808,316 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     join_all(alice.handler.iter_mut()).await;
 }
 
+/// A proof no ledger transfer can consume fails the boot loudly:
+/// three full passes find the ownership projections still stale and
+/// return the functional error instead of converging or hanging, and
+/// the failed lift leaves no requester or attempt behind.
+#[test(tokio::test)]
+async fn reconcile_unverifiable_proof_fails_after_three_passes() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let ext_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        local_db: Some(local_dir.path().to_path_buf()),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+    let owner_key = PublicKey::from_str(api.public_key()).unwrap();
+
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
+    emit_fact(
+        &api,
+        governance_id.clone(),
+        example_schema_governance_fact(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&api, subject_id.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+    emit_fact(&api, subject_id.clone(), json!({"ModOne": {"data": 2}}), true)
+        .await
+        .unwrap();
+
+    // A consumed proof with no ledger transfer behind it: the replay
+    // walks every event three times but no transfer ever consumes it.
+    api.test_record_legacy_verified_transfer(
+        &governance_id,
+        subject_id.clone(),
+        2,
+        owner_key.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        api.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .map(|(sn, _)| sn),
+        Some(2),
+        "the stale proof must be recorded before the reboot"
+    );
+
+    // Crash without handshake: a clean boot would skip the replay.
+    let keys = node.keys.clone();
+    let local_db = local_dir.path().to_path_buf();
+    let ext_db = ext_dir.path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+
+    // Three full passes find the same stale proof and fail loud with
+    // the functional error instead of converging or hanging: the
+    // error text itself proves the loop exhausted its three passes.
+    let err = api
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .expect_err("an unverifiable proof must fail the lift");
+    let err = format!("{err:?}");
+    assert!(
+        err.contains("three reconciliation passes"),
+        "the error must prove three passes ran, got {err}"
+    );
+    // The unconsumable proof is still there: the error reports the
+    // stale proof, not some other divergence.
+    assert_eq!(
+        api.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .map(|(sn, _)| sn),
+        Some(2),
+        "the unconsumable proof must survive the failed replay"
+    );
+    // The failed lift holds no requester and leaves no attempt: the
+    // error path registers nothing to release.
+    assert!(
+        !api.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        "no requester may survive the failed lift"
+    );
+    assert!(
+        api.test_list_requesters(subject_id.clone()).await.unwrap().is_empty(),
+        "no requester may survive the failed lift"
+    );
+    assert_eq!(
+        api.test_active_attempts_len().await.unwrap(),
+        0,
+        "no copy attempt may survive the failed lift"
+    );
+    // The node itself stays healthy.
+    node_running(&api).await.unwrap();
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// A pending tip with correct projections still sweeps proofs on a
+/// dirty boot: the tail replay removes the consumed proof without a
+/// genesis walk, and a future proof survives it. Deleting only the
+/// register entry never exercises this path, as the pending
+/// early-return skips the proof check while the replay still sweeps.
+#[test(tokio::test)]
+async fn reconcile_pending_tail_replay_sweeps_consumed_proof() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let ext_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        local_db: Some(local_dir.path().to_path_buf()),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+
+    // Throwaway transfer target: must be a registered creator, but
+    // needs no node of its own.
+    let rita_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
+    emit_fact(
+        &api,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{"name": "Rita", "key": rita_key.to_string()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                            {"name": "Rita", "namespace": [], "quantity": "infinity"},
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_id, _) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    // Pending transfer at the tip, never confirmed.
+    emit_transfer(&api, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    get_subject(&api, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // The consumed proof for the pending transfer sits behind markers
+    // already at the tip; projections are untouched and correct.
+    api.test_record_legacy_verified_transfer(
+        &governance_id,
+        subject_id.clone(),
+        2,
+        rita_key.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        api.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .map(|(sn, _)| sn),
+        Some(2),
+        "the pending proof must be recorded before the reboot"
+    );
+
+    // Crash without handshake: a clean boot would skip the replay.
+    let keys = node.keys.clone();
+    let local_db = local_dir.path().to_path_buf();
+    let ext_db = ext_dir.path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        keys: Some(keys.clone()),
+        local_db: Some(local_db.clone()),
+        ext_db: Some(ext_db.clone()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+    api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+
+    // The tail replay removed the consumed proof without a genesis
+    // walk: a single event walked proves the early return held and no
+    // full replay was needed.
+    assert_eq!(
+        api.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap(),
+        None,
+        "the consumed pending proof must not survive the replay"
+    );
+    let (seen, _) =
+        api.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
+    assert_eq!(
+        seen, 1,
+        "a pending tip with correct projections replays only its tip"
+    );
+
+    // A future proof is not consumed by the tip it never reached: it
+    // survives the same tail replay untouched.
+    api.test_record_legacy_verified_transfer(
+        &governance_id,
+        subject_id.clone(),
+        7,
+        rita_key,
+    )
+    .await
+    .unwrap();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+    api.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    assert_eq!(
+        api.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
+            .await
+            .unwrap()
+            .map(|(sn, _)| sn),
+        Some(7),
+        "a future proof must survive the replay"
+    );
+    let (seen, _) =
+        api.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
+    assert_eq!(
+        seen, 1,
+        "a future proof must not force a genesis walk"
+    );
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
 /// Dirty boot restores the external subject row: stuck-active rows
 /// go inactive and missing rows come back inactive, exactly one row
 /// each. The live EOL sends can be cut by a crash after ledger and
@@ -9891,12 +10209,707 @@ async fn reconcile_eol_marks_external_subject_inactive() {
         "live EOL must mark the row inactive"
     );
 
-    // Exact crash cut: one row stuck active, the other one missing,
-    // while ledger and node are already inactive.
+    // Exact crash cut, repeated: one row stuck active, the other
+    // one missing, while ledger and node are already inactive. Every
+    // dirty boot must converge to exactly one inactive row per
+    // subject, with no resurrection, no duplicates and no
+    // reactivation on later passes.
+    let mut keys = node.keys.clone();
+    let mut local_db = local_dir.path().to_path_buf();
+    let mut ext_db = ext_dir.path().to_path_buf();
+    for pass in 1..=3 {
+        {
+            let conn =
+                rusqlite::Connection::open(ext_dir.path().join("database.db"))
+                    .unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            conn.execute(
+                "UPDATE register_subjects SET active = 1 WHERE subject_id = ?1",
+                rusqlite::params![subject_stuck.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM register_subjects WHERE subject_id = ?1",
+                rusqlite::params![subject_gone.to_string()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            external_rows(ext_dir.path(), &subject_stuck),
+            vec![1],
+            "pass {pass}: surgery must leave the row stuck active"
+        );
+        assert!(
+            external_rows(ext_dir.path(), &subject_gone).is_empty(),
+            "pass {pass}: surgery must leave no row"
+        );
+
+        node.token.cancel();
+        join_all(node.handler.iter_mut()).await;
+        drop(node);
+
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let (rebooted, _) = create_node(CreateNodeConfig {
+            node_type: NodeType::Bootstrap,
+            listen_address: format!("/memory/{port}"),
+            always_accept: true,
+            keys: Some(keys),
+            local_db: Some(local_db),
+            ext_db: Some(ext_db),
+            ..Default::default()
+        })
+        .await;
+        node_running(&rebooted.api).await.unwrap();
+        let api = rebooted.api.clone();
+        api.lift_subject_for_sync(subject_stuck.clone()).await.unwrap();
+        api.lift_subject_for_sync(subject_gone.clone()).await.unwrap();
+
+        // One single inactive row each: no resurrection of deleted
+        // subjects, no duplicated rows, no stuck-active row.
+        assert_eq!(
+            external_rows(ext_dir.path(), &subject_stuck),
+            vec![0],
+            "pass {pass}: stuck-active row must go inactive"
+        );
+        assert_eq!(
+            external_rows(ext_dir.path(), &subject_gone),
+            vec![0],
+            "pass {pass}: missing row must come back inactive"
+        );
+
+        keys = rebooted.keys.clone();
+        local_db = local_dir.path().to_path_buf();
+        ext_db = ext_dir.path().to_path_buf();
+        node = rebooted;
+    }
+
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+}
+
+/// A cut between genesis apply and Node registration must heal on
+/// dirty boot: the replay re-emits the missing Node registration,
+/// so lift converges with the entry, the distributor and the
+/// subject present. Non-owner variant: without the re-emit the lift
+/// would succeed while `GetSubjectData` stays `None`.
+#[test(tokio::test)]
+async fn reconcile_heals_missing_node_registration() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let ext_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let owner = node.api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r, r_dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![node.listen_address.clone()],
+        }],
+        always_accept: true,
+        local_db: Some(local_dir.path().to_path_buf()),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&r.api).await.unwrap();
+    let rita = r.api.clone();
+    let rita_key = PublicKey::from_str(rita.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&rita]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{"name": "Rita", "key": rita.public_key()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "governance": {"add": {"witness": ["Rita"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}, {"name": "Rita", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                            {"name": "Rita", "namespace": [], "quantity": "infinity"},
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}, {"name": "Rita", "namespace": []}],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    rita
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(owner_key.clone()),
+        )
+        .await
+        .unwrap();
+    rita.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&rita, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // Isolate rita: every tracker byte below arrives through the
+    // test's own calls, never through background sync.
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLedgerReq,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(
+                    PublicKey::from_str(rita.public_key()).expect("node key"),
+                ),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    let (subject_id, _) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &owner,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    let genesis = owner
+        .test_get_tracker_ledger(subject_id.clone(), 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.sn == 0)
+        .expect("tracker genesis must exist");
+
+    // The cut: genesis lands in the journal but the Node entry never
+    // does, and the creation reports its error instead of confirming.
+    rita.test_arm_fail_next_node_register().await.unwrap();
+    assert!(
+        rita.test_up_subject_with_create(
+            subject_id.clone(),
+            genesis.clone(),
+        )
+        .await
+        .is_err(),
+        "a failed registration must not confirm the creation"
+    );
+    assert!(
+        !rita
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "no partial tracker may be registered in Node"
+    );
+
+    // Dirty reboot: no clean-shutdown handshake, so the replay runs.
+    let keys = r.keys.clone();
+    let local_db = local_dir.path().to_path_buf();
+    let ext_db = ext_dir.path().to_path_buf();
+    r.token.cancel();
+    join_all(r.handler.iter_mut()).await;
+    drop(r);
+    drop(r_dirs);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r2, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![node.listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys.clone()),
+        local_db: Some(local_db.clone()),
+        ext_db: Some(ext_db.clone()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&r2.api).await.unwrap();
+    let healed = r2.api.clone();
+    healed.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    assert!(
+        healed
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "the replay must restore the Node entry"
+    );
+    assert_eq!(
+        healed
+            .test_get_node_subject_data(subject_id.clone())
+            .await
+            .unwrap(),
+        Some(ave_core::node::SubjectData::Tracker {
+            governance_id: governance_id.clone(),
+            schema_id: ave_common::SchemaType::Type("Example".to_owned()),
+            namespace: String::new(),
+            active: true,
+        }),
+        "the restored entry must be the real Tracker metadata"
+    );
+    assert!(
+        healed
+            .test_has_distributor(subject_id.clone())
+            .await
+            .unwrap(),
+        "the replay must restore the distributor"
+    );
+    get_subject(&healed, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    // Post-heal transfers converge to the final owner without
+    // duplicating the replayed derives: the healed subject syncs,
+    // confirms and stays converged across a clean reboot.
+    // Clear both sides: the setup Drops isolated the cut, now the
+    // live copy must flow again.
+    healed.test_clear_faults().await.unwrap();
+    owner.test_clear_faults().await.unwrap();
+    emit_transfer(&owner, subject_id.clone(), rita_key.clone(), true)
+        .await
+        .unwrap();
+    healed
+        .authorize_governance(
+            subject_id.clone(),
+            ave_core::auth::AuthWitness::One(owner_key.clone()),
+        )
+        .await
+        .unwrap();
+    healed.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&healed, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&healed, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    owner.update_subject(subject_id.clone()).await.unwrap();
+    for api in [&owner, &healed] {
+        let state = get_subject(api, subject_id.clone(), Some(3), true)
+            .await
+            .unwrap();
+        assert_eq!(state.sn, 3, "transfer and confirm must converge");
+        assert_eq!(
+            state.owner,
+            rita.public_key(),
+            "the final owner must be the healed node"
+        );
+    }
+
+    // Clean shutdown and repeat: the converged state survives a
+    // clean boot with no replay duplication.
+    healed.prepare_clean_shutdown().await;
+    r2.token.cancel();
+    join_all(r2.handler.iter_mut()).await;
+    drop(r2);
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut r3, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![node.listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&r3.api).await.unwrap();
+    let again = r3.api.clone();
+    again.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    assert!(
+        again
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "the clean boot must keep the Node entry"
+    );
+    assert_eq!(
+        again
+            .test_get_node_subject_data(subject_id.clone())
+            .await
+            .unwrap(),
+        Some(ave_core::node::SubjectData::Tracker {
+            governance_id: governance_id.clone(),
+            schema_id: ave_common::SchemaType::Type("Example".to_owned()),
+            namespace: String::new(),
+            active: true,
+        }),
+        "the clean boot must keep the Tracker metadata"
+    );
+    assert!(
+        again
+            .test_has_distributor(subject_id.clone())
+            .await
+            .unwrap(),
+        "the clean boot must keep the distributor"
+    );
+    let state = get_subject(&again, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 3, "the clean boot must keep the tip");
+    assert_eq!(
+        state.owner,
+        rita.public_key(),
+        "the clean boot must keep the final owner"
+    );
+
+    node.token.cancel();
+    r3.token.cancel();
+    join_all(
+        node.handler
+            .iter_mut()
+            .chain(r3.handler.iter_mut()),
+    )
+    .await;
+}
+
+/// Same cut on the owning node itself: its own create reports the
+/// registration error instead of confirming, and a dirty boot heals
+/// it the same way. Without the replayed Node registration the
+/// ownership check would fail three passes and the lift with it.
+#[test(tokio::test)]
+async fn reconcile_heals_missing_node_registration_owner() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let ext_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        local_db: Some(local_dir.path().to_path_buf()),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let owner = node.api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [{"name": "Owner", "namespace": [], "quantity": "infinity"}],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+
+    // The owner's own create hits the same genesis-before-register
+    // cut when registration fails. The id is known on acceptance,
+    // before the request settles, so the reboot can lift it after.
+    owner.test_arm_fail_next_node_register().await.unwrap();
+    let (subject_id, request_id) =
+        create_subject(&owner, governance_id.clone(), "Example", "", false)
+            .await
+            .unwrap();
+    let start = tokio::time::Instant::now();
+    for _ in 0..200 {
+        if let Ok(state) = owner.get_request_state(request_id.clone()).await
+        {
+            match state.state {
+                RequestState::Finish
+                | RequestState::Abort { .. }
+                | RequestState::Invalid { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the failed creation must settle instead of hanging"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        !owner
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "no partial tracker may be registered in Node"
+    );
+
+    // Dirty reboot: no clean-shutdown handshake, so the replay runs.
+    let keys = node.keys.clone();
+    let local_db = local_dir.path().to_path_buf();
+    let ext_db = ext_dir.path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node2, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        keys: Some(keys),
+        local_db: Some(local_db),
+        ext_db: Some(ext_db),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node2.api).await.unwrap();
+    let healed = node2.api.clone();
+    healed.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    assert!(
+        healed
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "the replay must restore the Node entry"
+    );
+    assert_eq!(
+        healed
+            .test_get_node_subject_data(subject_id.clone())
+            .await
+            .unwrap(),
+        Some(ave_core::node::SubjectData::Tracker {
+            governance_id: governance_id.clone(),
+            schema_id: ave_common::SchemaType::Type("Example".to_owned()),
+            namespace: String::new(),
+            active: true,
+        }),
+        "the restored entry must be the real Tracker metadata"
+    );
+    assert!(
+        healed
+            .test_has_distributor(subject_id.clone())
+            .await
+            .unwrap(),
+        "the replay must restore the distributor"
+    );
+    get_subject(&healed, subject_id.clone(), Some(0), true)
+        .await
+        .unwrap();
+
+    node2.token.cancel();
+    join_all(node2.handler.iter_mut()).await;
+}
+
+/// A clean shutdown followed by new activity and a crash must
+/// still boot dirty. The pre-start marker voids the previous clean
+/// state, so the replay heals a stuck-active EOL row, a missing row,
+/// a moved ownership projection and a lagging sink instead of
+/// skipping everything as clean.
+#[test(tokio::test)]
+async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
+    fn external_rows(
+        ext_dir: &std::path::Path,
+        subject_id: &DigestIdentifier,
+    ) -> Vec<i64> {
+        let conn =
+            rusqlite::Connection::open(ext_dir.join("database.db")).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT active FROM register_subjects WHERE subject_id = ?1",
+            )
+            .unwrap();
+        stmt.query_map(
+            rusqlite::params![subject_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        .map(|value| value.unwrap())
+        .collect()
+    }
+
+    let local_dir = tempfile::tempdir().unwrap();
+    let ext_dir = tempfile::tempdir().unwrap();
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        local_db: Some(local_dir.path().to_path_buf()),
+        ext_db: Some(ext_dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+    let owner_key = PublicKey::from_str(api.public_key()).unwrap();
+    // Throwaway projection target: must be a registered creator, but
+    // needs no node of its own.
+    let rita_key =
+        KeyPair::Ed25519(Ed25519Signer::generate().unwrap()).public_key();
+
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
+    emit_fact(
+        &api,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{"name": "Rita", "key": rita_key.to_string()}]},
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+            }]},
+            "roles": {
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": "infinity"},
+                            {"name": "Rita", "namespace": [], "quantity": "infinity"},
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                    },
+                }],
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let (subject_stuck, _) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&api, subject_stuck.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
+    let (subject_gone, _) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&api, subject_gone.clone(), json!({"ModOne": {"data": 2}}), true)
+        .await
+        .unwrap();
+    emit_eol(&api, subject_stuck.clone(), true).await.unwrap();
+    emit_eol(&api, subject_gone.clone(), true).await.unwrap();
+    assert_eq!(
+        external_rows(ext_dir.path(), &subject_stuck),
+        vec![0],
+        "live EOL must mark the row inactive"
+    );
+    assert_eq!(
+        external_rows(ext_dir.path(), &subject_gone),
+        vec![0],
+        "live EOL must mark the row inactive"
+    );
+
+    // Graceful shutdown, then a clean boot that must stay clean: the
+    // node works and the new activity below is ordinary live traffic.
+    api.prepare_clean_shutdown().await;
+    let keys = node.keys.clone();
+    let local_db = local_dir.path().to_path_buf();
+    let ext_db = ext_dir.path().to_path_buf();
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
+
+    let sink = TestSink::start().await;
+    sink.set_mode(ResponseMode::ClientError).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node, _) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        always_accept: true,
+        keys: Some(keys.clone()),
+        local_db: Some(local_db.clone()),
+        ext_db: Some(ext_db.clone()),
+        sinks: example_sink_config(
+            sink.url(),
+            Some(governance_id.to_string()),
+        ),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    let api = node.api.clone();
+    let (subject_new, _) =
+        create_subject(&api, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(&api, subject_new.clone(), json!({"ModOne": {"data": 3}}), true)
+        .await
+        .unwrap();
+    wait_for_sink_blocked(&api, "example-sink").await;
+
+    // Diverge the derived state while live: move the ownership
+    // projections of the still-active subject away. Only a dirty
+    // boot replays genesis back over the live move. EOL subjects
+    // deliberately skip ownership convergence (their external row
+    // is healed by the register backstop instead), so the moved
+    // subject must stay active here.
+    api.test_move_ownership_projection(
+        governance_id.clone(),
+        subject_new.clone(),
+        rita_key,
+        ave_common::SchemaType::Type("Example".to_owned()),
+        String::new(),
+        1,
+    )
+    .await
+    .unwrap();
+
+    // Crash with no handshake: the previous clean shutdown must not
+    // launder this dirty stop into a clean boot.
+    node.token.cancel();
+    join_all(node.handler.iter_mut()).await;
+    drop(node);
     {
         let conn =
-            rusqlite::Connection::open(ext_dir.path().join("database.db"))
-                .unwrap();
+            rusqlite::Connection::open(ext_dir.path().join("database.db")).unwrap();
         conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
         conn.execute(
             "UPDATE register_subjects SET active = 1 WHERE subject_id = ?1",
@@ -9919,13 +10932,6 @@ async fn reconcile_eol_marks_external_subject_inactive() {
         "surgery must leave no row"
     );
 
-    let keys = node.keys.clone();
-    let local_db = local_dir.path().to_path_buf();
-    let ext_db = ext_dir.path().to_path_buf();
-    node.token.cancel();
-    join_all(node.handler.iter_mut()).await;
-    drop(node);
-
     let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (mut node, _) = create_node(CreateNodeConfig {
         node_type: NodeType::Bootstrap,
@@ -9934,6 +10940,10 @@ async fn reconcile_eol_marks_external_subject_inactive() {
         keys: Some(keys),
         local_db: Some(local_db),
         ext_db: Some(ext_db),
+        sinks: example_sink_config(
+            sink.url(),
+            Some(governance_id.to_string()),
+        ),
         ..Default::default()
     })
     .await;
@@ -9941,24 +10951,50 @@ async fn reconcile_eol_marks_external_subject_inactive() {
     let api = node.api.clone();
     api.lift_subject_for_sync(subject_stuck.clone()).await.unwrap();
     api.lift_subject_for_sync(subject_gone.clone()).await.unwrap();
+    api.lift_subject_for_sync(subject_new.clone()).await.unwrap();
 
-    // One single inactive row each: no resurrection of deleted
-    // subjects, no duplicated rows, no stuck-active row.
+    // All three backstops ran: EOL rows converge, the moved
+    // ownership projection of the active subject is restored, and
+    // the frozen sink is marked lagging for its missed tail.
     assert_eq!(
-        external_rows(
-            ext_dir.path(),
-            &subject_stuck
-        ),
+        external_rows(ext_dir.path(), &subject_stuck),
         vec![0],
         "stuck-active row must go inactive"
     );
     assert_eq!(
-        external_rows(
-            ext_dir.path(),
-            &subject_gone
-        ),
+        external_rows(ext_dir.path(), &subject_gone),
         vec![0],
         "missing row must come back inactive"
+    );
+    assert_eq!(
+        api.test_ownership_projection(
+            governance_id.clone(),
+            subject_new.clone(),
+            owner_key,
+            ave_common::SchemaType::Type("Example".to_owned()),
+            String::new(),
+        )
+        .await
+        .unwrap(),
+        (true, None, true),
+        "the moved ownership projection must converge back"
+    );
+    assert_sink_lagging(&api, "example-sink", 1).await;
+
+    // Unblock: the missed tail is delivered without duplicates.
+    sink.set_mode(ResponseMode::Accept).await;
+    api.unblock_sink("example-sink".to_owned()).await.unwrap();
+    sink.wait_for_count(2, true).await;
+    assert_subject_sn_sequence(
+        &sink.snapshot().await,
+        &subject_new.to_string(),
+        0,
+        1,
+    );
+    assert_eq!(
+        external_rows(ext_dir.path(), &subject_stuck),
+        vec![0],
+        "catch-up must not resurrect the EOL row"
     );
 
     node.token.cancel();

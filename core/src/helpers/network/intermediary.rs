@@ -38,6 +38,7 @@ use crate::{
 use super::error::IntermediaryError;
 
 use super::ActorMessage;
+use ave_network::ComunicateInfo;
 #[cfg(feature = "test")]
 use super::test_faults;
 use super::{NetworkMessage, WIRE_VERSION, service::NetworkSender};
@@ -169,6 +170,31 @@ impl Intermediary {
                 crate::distribution::worker::FragStatsRegistry::default(),
             )),
         );
+        // Test-only push-fragment lifecycle counters, read by the
+        // suites through the `push_frag_stats` helper. Counts failed
+        // initial sends, resent group identities, consumed acks and
+        // live groups/timers per subject without sleeps. Same
+        // lifetime and threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "push_frag_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::distribution::coordinator::PushFragStatsRegistry::default(
+                ),
+            )),
+        );
+        // Test-only serve-attempt counters, read by the suites
+        // through the `serve_stats` helper. Counts processed
+        // `SendDistribution` requests per subject so a test can prove
+        // its request ran before asserting on (non-)serves. Same
+        // lifetime and threading as the helpers above.
+        #[cfg(feature = "test")]
+        system.add_helper(
+            "serve_stats",
+            Arc::new(std::sync::Mutex::new(
+                crate::distribution::worker::ServeStatsRegistry::default(),
+            )),
+        );
 
         #[cfg(feature = "test")]
         let service_sender =
@@ -266,11 +292,14 @@ impl Intermediary {
         system: &SystemRef,
         path: &ActorPath,
         sender: &PublicKey,
+        info: &ComunicateInfo,
         version: u64,
         sn: Option<u64>,
     ) -> Result<(), IntermediaryError> {
         // Both wire shapes land on the same version-sync message:
-        // the legacy answer carries no tip.
+        // the legacy answer carries no tip. The envelope generation
+        // travels with the answer so a stale round can not close,
+        // idle-certify or retarget a newer one.
         let actor = system
             .get_actor::<GovernanceVersionSync>(path)
             .await
@@ -283,6 +312,7 @@ impl Intermediary {
                 peer: sender.clone(),
                 version,
                 sn,
+                generation: info.version,
             })
             .await
             .map_err(|e| IntermediaryError::SendMessageFailed {
@@ -594,7 +624,12 @@ impl Intermediary {
                     }
                     ActorMessage::GovernanceVersionRes { version } => {
                         Self::forward_governance_version(
-                            system, &path, &sender, version, None,
+                            system,
+                            &path,
+                            &sender,
+                            &message.info,
+                            version,
+                            None,
                         )
                         .await?;
                     }
@@ -603,6 +638,7 @@ impl Intermediary {
                             system,
                             &path,
                             &sender,
+                            &message.info,
                             version,
                             Some(sn),
                         )

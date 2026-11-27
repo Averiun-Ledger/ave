@@ -23,6 +23,10 @@ use ave_common::{
 use ave_core::Api;
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
+use ave_core::governance::witnesses_register::{
+    TrackerDeliveryMode, TrackerDeliveryRange,
+};
+use ave_core::update::{UpdateSubjectKind, UpdateWitnessOffer};
 use ave_core::model::event::Ledger;
 use ave_core::helpers::network::test_faults::{
     FaultAction, FaultDirection, FaultMessage, FaultRule,
@@ -39,8 +43,8 @@ use common::{
     EXAMPLE_CONTRACT, EXAMPLE_CONTRACT_V2, INVALID_EXAMPLE_CONTRACT,
     assert_governance_properties_eq, create_and_authorize_governance,
     create_nodes_and_connections, create_subject, emit_approve, emit_confirm,
-    emit_eol, emit_fact, emit_reject, emit_transfer, get_events, get_subject,
-    governance_properties, wait_sink_events,
+    emit_eol, emit_fact, emit_fact_viewpoints, emit_reject, emit_transfer,
+    get_events, get_subject, governance_properties, wait_sink_events,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -7056,14 +7060,31 @@ async fn gov_copy_premature_is_all_treated_as_partial() {
     get_subject(&learner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
+    // The tip being visible only proves the apply: wait until the
+    // copy attempt itself closes, so the no-acquisition verdict below
+    // is read after the fallback decision ran, never before it.
+    for _ in 0..300 {
+        if learner.test_active_attempts_len().await.unwrap_or(1) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(
-        learner
-            .test_deferred_acquisition_count(governance_id.clone())
-            .await
-            .unwrap(),
+        learner.test_active_attempts_len().await.unwrap(),
         0,
-        "deferred acquisition stays blocked below the offered tip"
+        "the refused batch must leave no attempt in flight"
     );
+    for _ in 0..30 {
+        assert_eq!(
+            learner
+                .test_deferred_acquisition_count(governance_id.clone())
+                .await
+                .unwrap(),
+            0,
+            "deferred acquisition stays blocked below the offered tip"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     owner.test_clear_faults().await.unwrap();
     let state =
@@ -7726,6 +7747,144 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
     join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
 }
 
+/// Same exhausted-round race with a previous-generation batch: the
+/// round parks after reading a short tip, the final batch lands with
+/// the older generation and the stop drains its completion. The tip
+/// already covers the target, so the stale completion must certify
+/// exactly once instead of being dropped silently. Non-service
+/// nodes have no periodic idle to repair the markers.
+#[test(tokio::test)]
+async fn gov_copy_stale_generation_done_certifies_reached_target() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            is_service: false,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
+    // No pushes to the learner from here on: it must stay empty so
+    // every sweep below is a genuine pull with a live request.
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B", "C", "D"] {
+        let key = KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+            .public_key()
+            .to_string();
+        emit_fact(
+            &owner,
+            governance_id.clone(),
+            serde_json::json!({"members": {"add": [{"name": name, "key": key}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    assert!(
+        learner.get_subject_state(governance_id.clone()).await.is_err(),
+        "the learner starts empty so no prior acquisition exists"
+    );
+
+    // Every ledger request stays held: retries keep firing while no
+    // response ever lands, until the last retry round parks.
+    learner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    wait_update_retry_exhausted(&learner).await;
+    let round = newest_held_request_round(&learner).await;
+    assert!(
+        round >= 1,
+        "a previous generation must exist, got round {round}"
+    );
+
+    // The final batch lands with the previous generation: applying it
+    // reaches the tip, but its completion is stale for the live
+    // round. The re-check must still certify exactly once.
+    let mut ledger = Vec::new();
+    for sn in 0..=tip {
+        ledger.push(
+            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+        );
+    }
+    inject_gov_batch(
+        &learner,
+        &owner_key,
+        governance_id.clone(),
+        ledger,
+        true,
+        round - 1,
+    )
+    .await;
+    get_subject(&learner, governance_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
+    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+
+    wait_deferred_count(&learner, governance_id.clone(), 1).await;
+    assert_eq!(
+        learner
+            .test_deferred_acquisition_count(governance_id.clone())
+            .await
+            .unwrap(),
+        1,
+        "the stale completion must certify the reached tip exactly once"
+    );
+    assert!(
+        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        "the certified round stops instead of lingering"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
 /// Same race through the manual catch-up round: no `Auth` update
 /// exists, so only the `gov_manual_update` path can certify the tip
 /// and run the single deferred acquisition.
@@ -7850,6 +8009,18 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
         .unwrap();
     learner.test_pause_update_retry_exhausted(false).await.unwrap();
 
+    // The stop is the completion proof: only after the round is gone
+    // may the count be read as final, never right after the release.
+    for _ in 0..300 {
+        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        "no auth round lingers behind the manual one"
+    );
     wait_deferred_count(&learner, governance_id.clone(), 2).await;
     assert_eq!(
         learner
@@ -7859,10 +8030,17 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
         2,
         "the drained completion certifies the tip exactly once more"
     );
-    assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
-        "no auth round lingers behind the manual one"
-    );
+    for _ in 0..30 {
+        assert_eq!(
+            learner
+                .test_deferred_acquisition_count(governance_id.clone())
+                .await
+                .unwrap(),
+            2,
+            "the drained completion certifies exactly once"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     for node in nodes.iter_mut() {
         node.token.cancel();
@@ -8111,6 +8289,780 @@ async fn gov_copy_unsupervised_completion_runs_deferred_fallback() {
     join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
 }
 
+/// A late answer of a dead supervised round below its target must not
+/// run the unsupervised fallback: no deferred acquisition, markers
+/// kept, serving still blocked. The deferred pass clears markers and
+/// opens the serving gate together, so markers conserved plus an
+/// unchanged trigger count proves the gate never opened.
+#[test(tokio::test)]
+async fn gov_copy_late_supervised_below_target_never_acquires() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0]],
+            always_accept: true,
+            is_service: false,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let learner = nodes[1].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&learner]).await;
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
+    for message in [
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLastEventRes,
+    ] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{"name": "Learner", "key": learner.public_key()}]},
+            "roles": {"governance": {"add": {"witness": ["Learner"]}}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    // The learner first converges to this member-only tip through a
+    // normal supervised round, so the later schema window applies as
+    // an update (deferred markers) instead of a fresh creation.
+    let base = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    for _ in 0..300 {
+        match get_subject(&learner, governance_id.clone(), Some(base), true)
+            .await
+        {
+            Ok(_) => break,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    get_subject(&learner, governance_id.clone(), Some(base), true)
+        .await
+        .unwrap();
+    for _ in 0..300 {
+        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // A contract window so the catch-up defers artifact work: the
+    // partial apply below must leave pending markers behind. The
+    // learner never votes on these facts: SN2 compiles with the
+    // owner alone, and SN3 grants the compiler role together with
+    // the change, so its compile still uses the pre-event compilers.
+    // A behind compiler would answer Unavailable and stall the emit.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [
+                            {"name": "Owner", "namespace": [], "quantity": 10}
+                        ],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                    },
+                }],
+            },
+            "schemas": {
+                "add": [
+                    {
+                        "id": "Example",
+                        "contract": EXAMPLE_CONTRACT,
+                        "initial_value": {
+                            "one": 0,
+                            "two": 0,
+                            "three": 0,
+                        }
+                    }
+                ]
+            },
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "roles": {
+                "governance": {
+                    "add": {"compiler": ["Learner"]}
+                }
+            },
+            "schemas": {
+                "change": [{
+                    "actual_id": "Example",
+                    "new_contract": EXAMPLE_CONTRACT_V2
+                }]
+            }
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    // A trailing member fact moves the tip past the schema window so
+    // the late batch below can name a real target above it.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{
+                "name": "Extra",
+                "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                    .public_key()
+                    .to_string(),
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+
+    // Every ledger request stays held so the supervised round never
+    // completes on its own; it must reach its retry budget parked.
+    learner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    wait_update_retry_exhausted(&learner).await;
+    let round = newest_held_request_round(&learner).await;
+
+    // Let the parked round die uncertified: the supervisor records
+    // its generation and stops.
+    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    for _ in 0..300 {
+        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        "the exhausted round stops without certifying below the target"
+    );
+    // The dead-round record travels by fire-and-forget tell: wait
+    // for it with a bounded poll so the late batch provably meets
+    // the gate under test instead of racing it.
+    for _ in 0..300 {
+        if learner
+            .test_has_dead_supervised_round(governance_id.clone(), round)
+            .await
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        learner
+            .test_has_dead_supervised_round(governance_id.clone(), round)
+            .await
+            .unwrap_or(false),
+        "the dead round must be recorded before the late batch arrives"
+    );
+
+    // Baseline before the late stimulus: phase one certified its
+    // own tip, so the deferred trigger count may already be nonzero;
+    // what matters is that the late batch adds nothing.
+    let base_count = learner
+        .test_deferred_acquisition_count(governance_id.clone())
+        .await
+        .unwrap();
+    // The late batch names the dead generation and claims
+    // completeness, but only reaches below the offered tip. It
+    // starts at the learner's tip: an older head would be discarded
+    // as stale (`EnsureNextSn`) instead of exercising the fallback
+    // gate under test.
+    let mut ledger = Vec::new();
+    for sn in (base + 1)..tip {
+        ledger.push(
+            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+        );
+    }
+    inject_gov_batch(
+        &learner,
+        &owner_key,
+        governance_id.clone(),
+        ledger,
+        true,
+        round,
+    )
+    .await;
+    // The batch applies (the learner reaches below the tip) but
+    // must not certify: the supervisor is gone and the generation
+    // is recorded dead, so the unsupervised fallback stays off.
+    get_subject(&learner, governance_id.clone(), Some(tip - 1), true)
+        .await
+        .unwrap();
+
+    // The fallback would clear markers and bump the count
+    // asynchronously: poll a bounded budget, failing fast if it
+    // ever fires, so a settled read is not rushed. The late batch
+    // must add nothing on top of the phase-one baseline.
+    for _ in 0..30 {
+        assert_eq!(
+            learner
+                .test_deferred_acquisition_count(governance_id.clone())
+                .await
+                .unwrap(),
+            base_count,
+            "a late supervised answer below its target never acquires"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !learner
+            .test_governance_pending_acquisitions(governance_id.clone())
+            .await
+            .unwrap()
+            .is_empty(),
+        "the late batch below the target keeps its deferred markers"
+    );
+    assert!(
+        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        "no supervisor is resurrected by the late batch"
+    );
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+/// Mixed-kind offers pin the subject type: the first selected offer fixes
+/// the subject kind and extends the target only over same-kind
+/// offers. A higher opposite-kind offer must not inflate the
+/// request, and a stale completion between the two targets neither
+/// certifies nor acquires. Both pin directions are covered: a
+/// tracker update pinned by preference over a higher governance
+/// offer, and a governance update pinned while a higher tracker
+/// offer sits in the map without covering the next SN.
+#[test(tokio::test)]
+async fn gov_copy_mixed_kind_offers_pin_subject_type() {
+    // Held ledger requests of one node as (receiver, actual,
+    // target, round): the round pins which supervised generation
+    // emitted each request.
+    async fn held_reqs(
+        api: &Api,
+        subject: &DigestIdentifier,
+    ) -> Vec<(PublicKey, Option<u64>, Option<u64>, u64)> {
+        api.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerReq {
+                    actual_sn,
+                    target_sn,
+                    subject_id,
+                    ..
+                } if subject_id == *subject => Some((
+                    m.info.receiver,
+                    actual_sn,
+                    target_sn,
+                    m.info.version,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Injects a crafted offer as if `from` had answered the sweep in
+    // `round`: the updater only accepts its own witness, so the rogue
+    // must name a swept peer.
+    async fn inject_offer(
+        api: &Api,
+        from: &PublicKey,
+        subject: &DigestIdentifier,
+        witness: &PublicKey,
+        round: u64,
+        offer: &UpdateWitnessOffer,
+    ) {
+        let receiver = PublicKey::from_str(api.public_key()).unwrap();
+        api.test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: String::new(),
+                    version: 0,
+                    receiver,
+                    receiver_actor: format!(
+                        "/user/node/auth/{subject}/{witness}_{round}"
+                    ),
+                },
+                ActorMessage::UpdateOffer {
+                    offer: offer.clone(),
+                },
+            ),
+            from,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Polls until the learner holds requests for `subject`, then
+    // asserts every supervised round requested exactly once, to an
+    // expected witness, for the pinned target. Retries repeat the
+    // same single request per generation; a duplicate or inflated
+    // fetch inside one round fails here.
+    async fn assert_pinned_requests(
+        api: &Api,
+        subject: &DigestIdentifier,
+        allowed: &[(&str, PublicKey)],
+        actual: Option<u64>,
+        target: u64,
+    ) -> u64 {
+        let mut seen_rounds = BTreeSet::new();
+        for _ in 0..300 {
+            for (to, req_actual, req_target, round) in
+                held_reqs(api, subject).await
+            {
+                let who = allowed
+                    .iter()
+                    .find(|(_, key)| *key == to)
+                    .map(|(name, _)| *name)
+                    .unwrap_or("unexpected");
+                assert_eq!(
+                    req_target,
+                    Some(target),
+                    "every round must request the pinned target, got {req_target:?} to {to:?} ({who})"
+                );
+                assert_eq!(
+                    who, "owner",
+                    "the request must go to the same-kind witness, got {to:?} ({who})"
+                );
+                assert_eq!(
+                    req_actual, actual,
+                    "the request must carry the requester tip"
+                );
+                assert_eq!(
+                    req_target,
+                    Some(target),
+                    "every round must request the pinned target, got {req_target:?} to {to:?}"
+                );
+                seen_rounds.insert(round);
+            }
+            if !seen_rounds.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!seen_rounds.is_empty(), "the pinned round must request");
+        let mut per_round: BTreeMap<u64, usize> = BTreeMap::new();
+        for (_, _, _, round) in held_reqs(api, subject).await {
+            *per_round.entry(round).or_default() += 1;
+        }
+        assert!(
+            per_round.values().all(|count| *count == 1),
+            "every round must emit exactly one request, got {per_round:?}"
+        );
+        seen_rounds.iter().last().copied().unwrap_or(0)
+    }
+
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let w1 = nodes[1].api.clone();
+    let learner = nodes[2].api.clone();
+    let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
+    let w1_key = PublicKey::from_str(w1.public_key()).unwrap();
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&w1, &learner]).await;
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [
+                {"name": "W1", "key": w1.public_key()},
+                {"name": "Learner", "key": learner.public_key()},
+            ]},
+            "roles": {
+                "governance": {"add": {"witness": ["W1", "Learner"]}},
+                "schema": [{
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [{"name": "Owner", "namespace": []}],
+                        "creator": [{
+                            "name": "Owner",
+                            "namespace": [],
+                            "quantity": "infinity",
+                            "witnesses": [
+                                {"name": "W1", "viewpoints": ["agua"]},
+                                {"name": "Learner", "viewpoints": ["agua"]},
+                            ],
+                        }],
+                        "issuer": [{"name": "Owner", "namespace": []}],
+                    },
+                }],
+            },
+            "schemas": {"add": [{
+                "id": "Example",
+                "contract": EXAMPLE_CONTRACT,
+                "initial_value": {"one": 0, "two": 0, "three": 0},
+                "viewpoints": ["agua"],
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let gov_tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    w1.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&w1, governance_id.clone(), Some(gov_tip), true)
+        .await
+        .unwrap();
+
+    // No pushes to the learner while the calendar builds: it must
+    // start empty so both updates below are genuine pulls with live
+    // requests, never pre-seeded state. Dropping the last-event
+    // handshake blocks pushes at their trigger, and dropping ledger
+    // batches blocks direct pushes; the witness empty-mapping test
+    // proves the handshake part. Background version and tracker
+    // syncs stay off the learner too, so its tips only move through
+    // the driven updates below.
+    for api in [&owner, &w1] {
+        for message in [
+            FaultMessage::DistributionLastEventReq,
+            FaultMessage::DistributionLastEventRes,
+            FaultMessage::DistributionLedgerRes,
+        ] {
+            api.test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: Some(learner_key.clone()),
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+        }
+    }
+    for message in [
+        FaultMessage::GovernanceVersionReq,
+        FaultMessage::TrackerSyncReq,
+    ] {
+        learner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Drop,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Tracker subject both witnesses pull; the learner stays empty so
+    // both updates below start without a kind hint.
+    let (subject_id, _) =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    for data in [1, 2, 3] {
+        emit_fact_viewpoints(
+            &owner,
+            subject_id.clone(),
+            json!({"ModOne": {"data": data}}),
+            BTreeSet::from(["agua".to_string()]),
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let tip = get_subject(&owner, subject_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    assert_eq!(tip, 3, "three facts plus the create");
+    w1.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&w1, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
+    assert!(
+        learner.get_subject_state(subject_id.clone()).await.is_err(),
+        "the learner starts with no tracker data"
+    );
+    learner
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    // The learner's requests stay held so every supervised round
+    // parks with a live request to read.
+    learner
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerReq,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+
+    // Direction one: tracker pinned by preference over a higher
+    // governance rogue. w1 joins the sweep as a sync peer; its real
+    // offer is dropped so its only response is the rogue, while the
+    // owner answers with the genuine tracker offer. The rogue lands
+    // in milliseconds against the updater's five-second timeout, so
+    // the selection below runs with both kinds mapped; w1 could only
+    // answer with the rogue.
+    learner
+        .add_sync_peer(subject_id.clone(), vec![w1_key.clone()])
+        .await
+        .unwrap();
+    for message in [
+        FaultMessage::UpdateOffer,
+        FaultMessage::UpdateNoOffer,
+    ] {
+        w1.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Drop,
+        })
+        .await
+        .unwrap();
+    }
+    learner.update_subject(subject_id.clone()).await.unwrap();
+    let mut w1_rounds = Vec::new();
+    for _ in 0..300 {
+        w1_rounds = learner
+            .test_update_updater_rounds(subject_id.clone(), w1_key.clone())
+            .await
+            .unwrap_or_default();
+        if !w1_rounds.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !w1_rounds.is_empty(),
+        "w1 must be swept for the mixed offers to meet"
+    );
+    inject_offer(
+        &learner,
+        &w1_key,
+        &subject_id,
+        &w1_key,
+        *w1_rounds.iter().max().unwrap(),
+        &UpdateWitnessOffer {
+            kind: UpdateSubjectKind::Governance,
+            sn: tip + 10,
+            clear_sn: None,
+            ranges: Vec::new(),
+        },
+    )
+    .await;
+    let round = assert_pinned_requests(
+        &learner,
+        &subject_id,
+        &[("owner", owner_key.clone()), ("w1", w1_key.clone())],
+        None,
+        tip,
+    )
+    .await;
+    // A stale completion between the two targets certifies nothing:
+    // the tip never reached the pinned target. Baseline first: only
+    // the Done below may move the count, and it must not.
+    let base_count = learner
+        .test_deferred_acquisition_count(governance_id.clone())
+        .await
+        .unwrap();
+    learner
+        .test_update_done(subject_id.clone(), tip + 5, round + 1)
+        .await
+        .unwrap();
+    assert!(
+        learner.test_update_alive(subject_id.clone()).await.unwrap(),
+        "the between-targets completion must not stop the round"
+    );
+    for _ in 0..30 {
+        assert_eq!(
+            learner
+                .test_deferred_acquisition_count(governance_id.clone())
+                .await
+                .unwrap(),
+            base_count,
+            "the between-targets completion must not acquire"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Direction two: governance pinned while a higher tracker rogue
+    // sits in the map without covering the next SN. The learner
+    // stays behind on purpose: a fresh governance fact moves the tip
+    // past its snapshot, so the genuine offer below still counts
+    // while the rogue above the tip can never cover the next SN.
+    // w1's real offer is dropped so its only response is the rogue.
+    emit_fact(
+        &owner,
+        governance_id.clone(),
+        json!({
+            "members": {"add": [{
+                "name": "Extra",
+                "key": KeyPair::Ed25519(Ed25519Signer::generate().unwrap())
+                    .public_key()
+                    .to_string(),
+            }]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let gov_tip = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap()
+        .sn;
+    w1.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&w1, governance_id.clone(), Some(gov_tip), true)
+        .await
+        .unwrap();
+    let learner_gov_sn = learner
+        .get_subject_state(governance_id.clone())
+        .await
+        .map(|state| state.sn)
+        .ok();
+    learner
+        .add_sync_peer(governance_id.clone(), vec![w1_key.clone()])
+        .await
+        .unwrap();
+    learner.update_subject(governance_id.clone()).await.unwrap();
+    let mut w1_rounds = Vec::new();
+    for _ in 0..300 {
+        w1_rounds = learner
+            .test_update_updater_rounds(
+                governance_id.clone(),
+                w1_key.clone(),
+            )
+            .await
+            .unwrap_or_default();
+        if !w1_rounds.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !w1_rounds.is_empty(),
+        "w1 must be swept for the mixed offers to meet"
+    );
+    inject_offer(
+        &learner,
+        &w1_key,
+        &governance_id,
+        &w1_key,
+        *w1_rounds.iter().max().unwrap(),
+        &UpdateWitnessOffer {
+            kind: UpdateSubjectKind::Tracker,
+            sn: gov_tip + 10,
+            clear_sn: None,
+            ranges: vec![TrackerDeliveryRange {
+                from_sn: gov_tip + 10,
+                to_sn: gov_tip + 10,
+                mode: TrackerDeliveryMode::Clear,
+            }],
+        },
+    )
+    .await;
+    let round = assert_pinned_requests(
+        &learner,
+        &governance_id,
+        &[("owner", owner_key.clone()), ("w1", w1_key.clone())],
+        learner_gov_sn,
+        gov_tip,
+    )
+    .await;
+    learner
+        .test_update_done(governance_id.clone(), gov_tip + 5, round + 1)
+        .await
+        .unwrap();
+    assert!(
+        learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        "the between-targets completion must not stop the round"
+    );
+    let base_count = learner
+        .test_deferred_acquisition_count(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..30 {
+        let count = learner
+            .test_deferred_acquisition_count(governance_id.clone())
+            .await
+            .unwrap();
+        let tip = learner
+            .get_subject_state(governance_id.clone())
+            .await
+            .map(|s| s.sn);
+        let alive = learner.test_update_alive(governance_id.clone()).await.unwrap();
+        assert_eq!(
+            count, base_count,
+            "the between-targets completion must not acquire (tip={tip:?}, alive={alive})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
 /// A partial governance creation never confirms: a failed step
 /// reports its error and drops a fresh child, so the retry resumes
 /// instead of accepting an unregistered child. The same holds for a
@@ -8167,15 +9119,16 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
     // Sink failure first: nothing is confirmed and nothing stays
     // behind to confirm later.
     learner.test_arm_fail_next_sink().await.unwrap();
+    let err = learner
+        .test_up_subject_with_create(
+            governance_id.clone(),
+            genesis.clone(),
+        )
+        .await
+        .expect_err("a failed sink setup must not confirm the creation");
     assert!(
-        learner
-            .test_up_subject_with_create(
-                governance_id.clone(),
-                genesis.clone(),
-            )
-            .await
-            .is_err(),
-        "a failed sink setup must not confirm the creation"
+        format!("{err:?}").contains("injected sink setup failure"),
+        "the sink fault must surface, got {err:?}"
     );
     assert!(
         !learner
@@ -8183,21 +9136,28 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
             .await
             .unwrap(),
         "no partial governance may be registered in Node"
+    );
+    assert!(
+        !learner
+            .test_has_live_subject_actor(governance_id.clone())
+            .await,
+        "no fresh child may linger after the failed sink setup"
     );
 
     // Registration failure next: genesis already landed, but the
     // creation still reports its error instead of confirming a
     // missing registration.
     learner.test_arm_fail_next_node_register().await.unwrap();
+    let err = learner
+        .test_up_subject_with_create(
+            governance_id.clone(),
+            genesis.clone(),
+        )
+        .await
+        .expect_err("a failed registration must not confirm the creation");
     assert!(
-        learner
-            .test_up_subject_with_create(
-                governance_id.clone(),
-                genesis.clone(),
-            )
-            .await
-            .is_err(),
-        "a failed registration must not confirm the creation"
+        format!("{err:?}").contains("injected node registration failure"),
+        "the register fault must surface, got {err:?}"
     );
     assert!(
         !learner
@@ -8205,6 +9165,12 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
             .await
             .unwrap(),
         "no partial governance may be registered in Node"
+    );
+    assert!(
+        !learner
+            .test_has_live_subject_actor(governance_id.clone())
+            .await,
+        "no fresh child may linger after the failed registration"
     );
 
     // Cleanup finishes before the error returns, so the very next
@@ -8213,6 +9179,19 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
         .test_up_subject_with_create(governance_id.clone(), genesis.clone())
         .await
         .unwrap();
+    assert!(
+        learner
+            .test_node_has_subject(governance_id.clone())
+            .await
+            .unwrap(),
+        "the resumed creation must register in Node, not just externally"
+    );
+    assert!(
+        learner
+            .test_has_live_subject_actor(governance_id.clone())
+            .await,
+        "the resumed creation must run on a live child"
+    );
     let state = get_subject(&learner, governance_id.clone(), Some(0), true)
         .await
         .unwrap();
@@ -8299,15 +9278,16 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
         .find(|event| event.sn == 0)
         .expect("tracker genesis must exist");
     learner.test_arm_fail_next_sink().await.unwrap();
+    let err = learner
+        .test_up_subject_with_create(
+            subject_id.clone(),
+            tracker_genesis.clone(),
+        )
+        .await
+        .expect_err("a failed tracker sink setup must not confirm the creation");
     assert!(
-        learner
-            .test_up_subject_with_create(
-                subject_id.clone(),
-                tracker_genesis.clone(),
-            )
-            .await
-            .is_err(),
-        "a failed tracker sink setup must not confirm the creation"
+        format!("{err:?}").contains("injected sink setup failure"),
+        "the sink fault must surface, got {err:?}"
     );
     assert!(
         !learner
@@ -8316,6 +9296,43 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
             .unwrap(),
         "no partial tracker may be registered in Node"
     );
+    assert!(
+        !learner
+            .test_has_live_subject_actor(subject_id.clone())
+            .await,
+        "no fresh child may linger after the failed tracker sink setup"
+    );
+
+    // Registration failure, tracker side: genesis already landed,
+    // but the creation reports its error instead of confirming a
+    // missing registration.
+    learner.test_arm_fail_next_node_register().await.unwrap();
+    let err = learner
+        .test_up_subject_with_create(
+            subject_id.clone(),
+            tracker_genesis.clone(),
+        )
+        .await
+        .expect_err(
+            "a failed tracker registration must not confirm the creation",
+        );
+    assert!(
+        format!("{err:?}").contains("injected node registration failure"),
+        "the register fault must surface, got {err:?}"
+    );
+    assert!(
+        !learner
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "no partial tracker may be registered in Node"
+    );
+    assert!(
+        !learner
+            .test_has_live_subject_actor(subject_id.clone())
+            .await,
+        "no fresh child may linger after the failed tracker registration"
+    );
     learner
         .test_up_subject_with_create(
             subject_id.clone(),
@@ -8323,6 +9340,19 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
         )
         .await
         .unwrap();
+    assert!(
+        learner
+            .test_node_has_subject(subject_id.clone())
+            .await
+            .unwrap(),
+        "the resumed tracker must register in Node, not just externally"
+    );
+    assert!(
+        learner
+            .test_has_live_subject_actor(subject_id.clone())
+            .await,
+        "the resumed tracker must run on a live child"
+    );
     get_subject(&learner, subject_id.clone(), Some(0), true)
         .await
         .unwrap();

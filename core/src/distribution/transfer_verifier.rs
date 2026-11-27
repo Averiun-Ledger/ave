@@ -13,14 +13,22 @@ use ave_common::{
 };
 
 use crate::governance::role_register::{RoleDataRegister, SearchRole};
+use crate::governance::{
+    Governance, GovernanceMessage, GovernanceResponse,
+};
+#[cfg(feature = "test")]
+use crate::helpers::network::test_faults::SharedFaultRegistry;
 use crate::model::common::{
     check_quorum_signers, get_actual_roles_register, node::get_subject_data,
-    subject::get_local_subject_sn,
+    subject::{
+        acquire_subject, get_local_subject_sn, get_subject_path_and_data,
+    },
 };
 use crate::model::event::{
     EvaluationData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
 };
 use crate::node::SubjectData;
+use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use crate::subject::Metadata;
 use crate::subject::RequestSubjectData;
 use crate::validation::response::ValidationRes;
@@ -31,7 +39,7 @@ use super::error::DistributorError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferSimulationResult {
-    /// La simulación fue afirmativa: el nodo es testigo del owner/new_owner.
+    /// The simulation passed: the node witnesses owner/new_owner.
     Witness,
     /// The aux chain is incomplete: the missing events may still
     /// arrive, so the batch is held unapplied without passage or
@@ -802,6 +810,116 @@ impl TransferVerifier {
         }
     }
 
+    /// Test-only aux pre-read barrier: parked while a test applies
+    /// a concurrent same-SN variant, so the late hint is judged
+    /// against the winner. Production never arms it.
+    #[cfg(feature = "test")]
+    fn verify_before_sn_paused(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+    ) -> bool {
+        ctx.system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            .and_then(|registry| {
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.verify_before_sn_paused())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Test-only aux pre-read barrier hit.
+    #[cfg(feature = "test")]
+    fn note_verify_before_sn_hold(
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+    ) {
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_verify_before_sn_hold();
+        }
+    }
+
+    /// Hash of the locally stored event at `sn`, if readable. The
+    /// already-applied bypass only trusts it for a byte-identical
+    /// event: a same-SN divergence is never proven by SN alone.
+    async fn local_event_hash(
+        &self,
+        ctx: &mut ActorContext<super::worker::DistriWorker>,
+        subject_id: &DigestIdentifier,
+        sn: u64,
+    ) -> Result<Option<DigestIdentifier>, ActorError> {
+        let (path, subject_data) =
+            get_subject_path_and_data(ctx, subject_id).await?;
+        // `lo_sn` is exclusive in `GetLedger`: ask from just below.
+        let lo_sn = sn.checked_sub(1);
+        let found: Option<Ledger> = match subject_data {
+            SubjectData::Tracker { .. } => {
+                let lease = acquire_subject(
+                    ctx,
+                    subject_id,
+                    format!("verify_before_sn_check:{subject_id}"),
+                    None,
+                    true,
+                )
+                .await?;
+                let tracker_actor =
+                    match ctx.system().get_actor::<Tracker>(&path).await {
+                        Ok(actor) => actor,
+                        Err(error) => {
+                            lease.finish(ctx).await?;
+                            return Err(error.into());
+                        }
+                    };
+                let response = tracker_actor
+                    .ask(TrackerMessage::GetLedger { lo_sn, hi_sn: sn })
+                    .await;
+                lease.finish(ctx).await?;
+                match response? {
+                    TrackerResponse::Ledger { mut ledger, .. } => ledger.pop(),
+                    _ => {
+                        return Err(ActorError::UnexpectedResponse {
+                            path,
+                            expected: "TrackerResponse::Ledger".to_owned(),
+                        });
+                    }
+                }
+            }
+            SubjectData::Governance { .. } => {
+                let governance_actor =
+                    ctx.system().get_actor::<Governance>(&path).await?;
+                match governance_actor
+                    .ask(GovernanceMessage::GetLedger { lo_sn, hi_sn: sn })
+                    .await?
+                {
+                    GovernanceResponse::Ledger { mut ledger, .. } => {
+                        ledger.pop()
+                    }
+                    _ => {
+                        return Err(ActorError::UnexpectedResponse {
+                            path,
+                            expected: "GovernanceResponse::Ledger".to_owned(),
+                        });
+                    }
+                }
+            }
+        };
+        found
+            .filter(|event| event.sn == sn)
+            .map(|event| {
+                event.ledger_hash(self.hash).map_err(|e| {
+                    ActorError::Functional {
+                        description: format!(
+                            "Can not hash local event: {e:?}"
+                        ),
+                    }
+                })
+            })
+            .transpose()
+    }
+
     /// Test-only buffer workload counters: cloned events,
     /// merge/dedup visits and reordered elements per suffix
     /// assembly and full rebuild. The merge emits in ascending
@@ -1416,12 +1534,27 @@ impl TransferVerifier {
             transfer_event,
             buffered,
         } = input;
-        let local_sn =
-            get_local_subject_sn(ctx, subject_id).await.ok().flatten();
-        if let Some(lsn) = local_sn
-            && lsn >= transfer_event.sn
+        #[cfg(feature = "test")]
         {
-            return AuxEvidence::Proven;
+            // Test-only barrier before the local-tip read: lets a
+            // test apply a concurrent same-SN variant first, so the
+            // late hint is judged against the winner instead of
+            // racing it. Only per-subject workers pause here; the
+            // node-level distributor stays free for the interleaved
+            // valid copy. Production never arms it.
+            if !ctx.path().to_string().ends_with("/distributor") {
+                let mut noted = false;
+                while Self::verify_before_sn_paused(ctx) {
+                    if !noted {
+                        Self::note_verify_before_sn_hold(ctx);
+                        noted = true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100,
+                    ))
+                    .await;
+                }
+            }
         }
         // The verdict belongs to the exact hint bytes: a re-sealed
         // variant never shares a verdict with another by SN alone.
@@ -1429,6 +1562,25 @@ impl TransferVerifier {
             Ok(hash) => hash,
             Err(_) => return AuxEvidence::Missing,
         };
+        let local_sn =
+            get_local_subject_sn(ctx, subject_id).await.ok().flatten();
+        if let Some(lsn) = local_sn
+            && lsn >= transfer_event.sn
+        {
+            // Already covered is not enough: only the exact event
+            // this hint names counts as proven. A same-SN divergence
+            // (a concurrent worker applied another valid variant) is
+            // held like a missing chain: no passage, no proof and no
+            // effects for bytes this node does not hold.
+            match self.local_event_hash(ctx, subject_id, transfer_event.sn)
+                .await
+            {
+                Ok(Some(local_hash)) if local_hash == aux_hash => {
+                    return AuxEvidence::Proven;
+                }
+                _ => return AuxEvidence::Missing,
+            }
+        }
         // Fast path: resume the validated prefix instead of
         // rebuilding it from genesis. A divergent branch or an
         // already-covered aux falls back to a full rebuild below.

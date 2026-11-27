@@ -306,14 +306,32 @@ impl TrackerSync {
     }
 
     #[cfg(feature = "test")]
-    fn note_tracker_sync_version_hold(ctx: &ActorContext<Self>) {
+    fn set_tracker_sync_version_paused(
+        ctx: &ActorContext<Self>,
+        paused: bool,
+    ) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
         if let Some(registry) = ctx
             .system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             && let Ok(mut faults) = registry.lock()
         {
-            faults.note_tracker_sync_version_hold();
+            faults.set_tracker_sync_version_paused(paused);
+        }
+    }
+
+    #[cfg(feature = "test")]
+    fn note_tracker_sync_version_hold(
+        ctx: &ActorContext<Self>,
+        nonce: u64,
+    ) {
+        use crate::helpers::network::test_faults::SharedFaultRegistry;
+        if let Some(registry) = ctx
+            .system()
+            .get_helper::<SharedFaultRegistry>("test_faults")
+            && let Ok(mut faults) = registry.lock()
+        {
+            faults.note_tracker_sync_version_hold(nonce);
         }
     }
 
@@ -827,13 +845,21 @@ impl TrackerSync {
             #[cfg(feature = "test")]
             {
                 if Self::tracker_sync_version_paused(ctx) {
-                    Self::note_tracker_sync_version_hold(ctx);
+                    Self::note_tracker_sync_version_hold(
+                        ctx,
+                        request.request_nonce,
+                    );
                     while Self::tracker_sync_version_paused(ctx) {
                         tokio::time::sleep(
                             std::time::Duration::from_millis(100),
                         )
                         .await;
                     }
+                    // One-shot release: re-arm so the next pass parks
+                    // again instead of sweeping through on one release.
+                    // Each release moves exactly one pass, like the
+                    // suite-standard hold rules.
+                    Self::set_tracker_sync_version_paused(ctx, true);
                 }
             }
             let response = actor
@@ -1070,6 +1096,35 @@ impl Handler<Self> for TrackerSync {
                     items.truncate(1024);
                 }
 
+                // A page is only valid for the round that requested
+                // it: validate version and nonce before any budget
+                // effect. A mismatched page must not save a resume
+                // cursor, complete a cycle, or suppress the
+                // governance nudge of a higher version.
+                let local_governance_version =
+                    match self.get_governance_version(ctx).await {
+                        Ok(version) => version,
+                        Err(e) => {
+                            return self
+                                .fail_cycle(ctx, "network response", e)
+                                .await;
+                        }
+                    };
+                if governance_version != active_governance_version
+                    || governance_version != local_governance_version
+                {
+                    self.cancel_fetch_timeout(ctx);
+                    // It answered: alive, whatever the version says —
+                    // forgive any silence backoff on the spot.
+                    self.peer_backoff.note_success(&peer);
+                    Self::observe_round("gov_changed");
+                    if governance_version > local_governance_version {
+                        self.nudge_governance_update(ctx).await;
+                    }
+                    self.finish_cycle(ctx).await?;
+                    return Ok(TrackerSyncResponse::None);
+                }
+
                 // Page budget spent but the peer keeps paging: save where
                 // to resume next tick and yield instead of letting one
                 // peer hold the cycle (and the tick loop) forever
@@ -1110,29 +1165,8 @@ impl Handler<Self> for TrackerSync {
                 // of stalling without a timeout.
                 let page_result: Result<TrackerSyncResponse, ActorError> =
                     async {
-                        let local_governance_version =
-                            self.get_governance_version(ctx).await?;
-                        // A page is only valid for the round that
-                        // requested it: items process solely when
-                        // response, active and local versions coincide.
-                        // A higher version is never adopted as our
-                        // own and launches no updates: the page is
-                        // discarded, the governance update is nudged
-                        // first, and the round ends. An older version
-                        // is stale and dropped the same way. Neither
-                        // touches the page budget: a response can not
-                        // mint new requests.
-                        if governance_version != active_governance_version
-                            || governance_version != local_governance_version
-                        {
-                            Self::observe_round("gov_changed");
-                            if governance_version > local_governance_version {
-                                self.nudge_governance_update(ctx).await;
-                            }
-                            self.finish_cycle(ctx).await?;
-                            return Ok(TrackerSyncResponse::None);
-                        }
-
+                        // Versions were validated above before any
+                        // budget effect; only coherent pages process.
                         let pending_items =
                             self.build_pending_updates(ctx, items).await?;
                         if pending_items.is_empty() {

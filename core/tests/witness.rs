@@ -12487,6 +12487,66 @@ async fn request_held_ledger(
     panic!("server did not answer direct ledger request {request_id}");
 }
 
+async fn request_held_ledger_target(
+    server: &Api,
+    sender: &PublicKey,
+    governance_id: &DigestIdentifier,
+    subject_id: &DigestIdentifier,
+    request_id: &str,
+    actual_sn: Option<u64>,
+    target_sn: Option<u64>,
+) -> Vec<ave_core::model::event::Ledger> {
+    server
+        .test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::DistributionLedgerRes,
+            peer: Some(sender.clone()),
+            remaining: Some(1),
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    server
+        .test_inject_inbound(
+            NetworkMessage::new(
+                ComunicateInfo {
+                    request_id: request_id.to_owned(),
+                    version: 0,
+                    receiver: PublicKey::from_str(server.public_key()).unwrap(),
+                    receiver_actor: "/user/node/distributor".to_owned(),
+                },
+                ActorMessage::DistributionLedgerReq {
+                    actual_sn,
+                    target_sn,
+                    subject_id: subject_id.clone(),
+                    already_verified_transfer_sn: None,
+                    expected_governance_id: Some(governance_id.clone()),
+                },
+            ),
+            sender,
+        )
+        .await
+        .unwrap();
+    for _ in 0..300 {
+        if let Some(message) = server
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|message| message.info.request_id == request_id)
+        {
+            let ActorMessage::DistributionLedgerRes { ledger, .. } =
+                message.message
+            else {
+                panic!("unexpected response to direct ledger request");
+            };
+            return ledger;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("server did not answer direct ledger request {request_id}");
+}
+
 // A late User(Clear) conceded mid-stint opens the fact
 // retroactively, and keeps opening it once the granter becomes an
 // old owner: exact lookup first, then a fallback limited to the very
@@ -12952,6 +13012,933 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
     join_all(nodes.iter_mut().take(3).flat_map(|node| node.handler.iter_mut())).await;
 }
 
+// A repeated owner must not leak an earlier grant into a later reign:
+// the grant fallback is bounded by the single reign holding each event,
+// never by a merged interval set fusing touching reigns. Alice grants
+// Nora Clear in v1, retires it in v2 and leaves twice inside v2, so the
+// first reign still reads Full while a fact in the second reign reads
+// Opaque. The direct probe exercises the live ownership log on the
+// final owner, the incremental copy the stored-base receipt path and
+// the fresh node the ledger reconstruction.
+#[test(tokio::test)]
+async fn repeated_owner_reign_keeps_grant_isolated_per_stint() {
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+    let nora = nodes[3].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob, &nora])
+            .await;
+
+    // v1: private schema, Alice grants Nora Clear over agua from genesis.
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "Nora", "key": nora.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0},
+                    "viewpoints": ["agua"]
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob", "Nora"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "Nora", "namespace": []},
+                            {"name": "Bob", "namespace": []}
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "Nora", "viewpoints": ["agua"]}
+                                ]
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "Nora", "viewpoints": []}
+                                ]
+                            }
+                        ],
+                        "issuer": [
+                            {"name": "Alice", "namespace": []},
+                            {"name": "Bob", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact_viewpoints(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // First reign at v1: the grant is current, the fact reads Full.
+    nora.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    nora.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&nora, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let first = get_events(&nora, subject_id.clone(), 2, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &first[1].event,
+        json!({"ModOne": {"data": 1}}),
+        &["agua"],
+    );
+
+    // v2: Alice retires Nora's grant. Membership stays open through
+    // Bob's untouched entry, so later events remain servable and only
+    // their visibility may change.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    for node in [&alice, &bob, &nora] {
+        node.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+        node.update_subject(governance_id.clone()).await.unwrap();
+    }
+    get_subject(&nora, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(owner_gov.sn, 2, "owner gov must sit at SN2, got {}", owner_gov.sn);
+
+    // First Alice reign closes inside v2: SN2 transfer, SN3 confirm.
+    emit_transfer(
+        &alice,
+        subject_id.clone(),
+        PublicKey::from_str(bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(3), true)
+        .await
+        .unwrap();
+
+    // Bob hands back: SN4 transfer, SN5 confirm, second Alice reign.
+    emit_transfer(
+        &bob,
+        subject_id.clone(),
+        PublicKey::from_str(alice.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    alice
+        .update_subject(subject_id.clone())
+        .await
+        .unwrap();
+    emit_confirm(&alice, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(5), true)
+        .await
+        .unwrap();
+
+    // SN6 fact in the second Alice reign, grant already retired.
+    emit_fact_viewpoints(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 6}}),
+        BTreeSet::from(["agua".to_owned()]),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(6), true)
+        .await
+        .unwrap();
+
+    // Alice leaves a second time inside v2: SN7 transfer, SN8 confirm.
+    // Both Alice reigns now share one merged interval set.
+    emit_transfer(
+        &alice,
+        subject_id.clone(),
+        PublicKey::from_str(bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+
+    // Direct probe of what the final owner serves to Nora: SN1 keeps
+    // the first reign grant, SN6 must not inherit it. The server first
+    // answers the Clear prefix, then the remainder past actual_sn.
+    let nora_key = PublicKey::from_str(nora.public_key()).unwrap();
+    let served = request_held_ledger_target(
+        &bob,
+        &nora_key,
+        &governance_id,
+        &subject_id,
+        "repeated-reign-direct",
+        None,
+        Some(8),
+    )
+    .await;
+    assert!(
+        served.len() >= 2,
+        "server must serve the head prefix, got {} events",
+        served.len()
+    );
+    assert!(
+        matches!(
+            &served[1].protocols,
+            ave_core::model::event::Protocols::TrackerFactFull { .. }
+        ),
+        "SN1 of the first reign must stay Full"
+    );
+
+    // Continuation past the Clear prefix: SN6 must read Opaque.
+    let tail = request_held_ledger_target(
+        &bob,
+        &nora_key,
+        &governance_id,
+        &subject_id,
+        "repeated-reign-continuation",
+        Some(5),
+        Some(8),
+    )
+    .await;
+    assert!(
+        tail.first().is_some_and(|event| event.sn == 6),
+        "continuation must start at SN6, got {:?}",
+        tail.first().map(|event| event.sn)
+    );
+    assert!(
+        matches!(
+            &tail[0].protocols,
+            ave_core::model::event::Protocols::TrackerFactOpaque { .. }
+        ),
+        "SN6 of the second reign must stay Opaque, got {:?}",
+        tail[0].protocols
+    );
+
+    // Incremental copy on the original node: same expectation.
+    nora.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&nora, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    let copied = get_events(&nora, subject_id.clone(), 9, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &copied[1].event,
+        json!({"ModOne": {"data": 1}}),
+        &["agua"],
+    );
+    assert_tracker_fact_opaque(&copied[6].event, &["agua"]).unwrap();
+
+    // Fresh node with the same keys rebuilds ownership from the ledger:
+    // the merged interval set must not reopen the retired grant.
+    nodes[3].token.cancel();
+    join_all(nodes[3].handler.iter_mut()).await;
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node_new_nora, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(nodes[3].keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let new_nora = node_new_nora.api.clone();
+    node_running(&new_nora).await.unwrap();
+    new_nora
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_nora
+        .update_subject(governance_id.clone())
+        .await
+        .unwrap();
+    get_subject(&new_nora, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    new_nora
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    new_nora.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&new_nora, subject_id.clone(), Some(8), true)
+        .await
+        .unwrap();
+    let rebuilt = get_events(&new_nora, subject_id.clone(), 9, true)
+        .await
+        .unwrap();
+    assert_tracker_fact_full(
+        &rebuilt[1].event,
+        json!({"ModOne": {"data": 1}}),
+        &["agua"],
+    );
+    assert_tracker_fact_opaque(&rebuilt[6].event, &["agua"]).unwrap();
+
+    node_new_nora.token.cancel();
+    join_all(node_new_nora.handler.iter_mut()).await;
+    // Index 3 (the old Nora) was already stopped before the fresh
+    // node took over her keys: joining it again would panic.
+    for node in nodes.iter_mut().take(3) {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().take(3).flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// A schema role fully before the creator-Witnesses opening shares no
+// version with it: the numeric search must yield no candidate. Marta
+// holds the schema role at v1, loses it at v2, while Alice opens the
+// Witnesses membership at v3 and closes it at v4. All three limits
+// stay None and no copy lands. Bob keeps an open User witness all
+// along, proving the harness still delivers where overlap is real.
+#[test(tokio::test)]
+async fn numeric_search_rejects_role_before_witnesses_opening() {
+    use ave_core::governance::witnesses_register::{
+        GovVersionLimit, HiSnLimit,
+    };
+
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+    let marta = nodes[3].api.clone();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob, &marta])
+            .await;
+
+    // v1: Marta holds the schema role; Alice grants Bob a User
+    // witness but no Witnesses membership yet.
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "Marta", "key": marta.public_key()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob", "Marta"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "Owner", "namespace": []},
+                            {"name": "Marta", "namespace": []}
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "Bob", "viewpoints": []}
+                                ],
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 1),
+        "alice register never mapped sn 1, got {window:?}"
+    );
+
+    // Control: Bob's open User witness copies at v1, so serving and
+    // delivery work where the overlap is real.
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // v2: Marta loses the schema role: role interval [1,1].
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "remove": {
+                        "witness": [
+                            {"name": "Marta", "namespace": []}
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // v3: Alice opens the Witnesses membership.
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": [
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    // v4: Alice closes the Witnesses membership: interval [3,3],
+    // disjoint from the role [1,1].
+    let json = json!({
+        "roles": {
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "change": {
+                        "creator": [
+                            {
+                                "actual_name": "Alice",
+                                "actual_namespace": [],
+                                "new_witnesses": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+    for node in [&alice, &bob, &marta] {
+        node.authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+        node.update_subject(governance_id.clone()).await.unwrap();
+    }
+    get_subject(&marta, governance_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+    let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(owner_gov.sn, 4, "owner gov must sit at SN4, got {}", owner_gov.sn);
+
+    // All three numeric limits stay None on the serving register.
+    let marta_key = PublicKey::from_str(marta.public_key()).unwrap();
+    let (access, hi, gov) = alice
+        .test_tracker_limits(
+            &governance_id,
+            subject_id.clone(),
+            marta_key,
+            String::new(),
+            ave_common::SchemaType::Type("Example".to_owned()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(access, None, "disjoint role must yield no access");
+    assert_eq!(hi, HiSnLimit::None, "disjoint role must yield no hi cap");
+    assert_eq!(gov, GovVersionLimit::None, "disjoint role must yield no gov cap");
+
+    // No copy lands for Marta: the subject never registers.
+    marta
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    marta.update_subject(subject_id.clone()).await.unwrap();
+    for _ in 0..30 {
+        assert!(
+            marta.get_subject_state(subject_id.clone()).await.is_err(),
+            "disjoint role must register nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    node_running(&marta).await.unwrap();
+
+    // Control still holds after the calendar: Bob keeps his copy.
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
+// Status, limits and cache come from the same ownership the window is
+// built on. A witness with generic rights open throughout sees SN1
+// under the first owner; after Transfer SN2, Confirm SN3 and Fact SN4
+// without rights under the new owner, everything stays capped at the
+// old-owner sn 3. A stale SN1 ownership underneath must not promote a
+// LastSn past that cap.
+#[test(tokio::test)]
+async fn status_and_window_share_supplied_ownership() {
+    use ave_common::identity::keys::Ed25519Signer;
+    use ave_core::governance::witnesses_register::{
+        GovVersionLimit, HiSnLimit,
+    };
+
+    let (mut nodes, _dirs) =
+        create_nodes_and_connections(CreateNodesAndConnectionsConfig {
+            bootstrap: vec![vec![]],
+            addressable: vec![vec![0], vec![0]],
+            always_accept: true,
+            ..Default::default()
+        })
+        .await;
+    let owner = nodes[0].api.clone();
+    let alice = nodes[1].api.clone();
+    let bob = nodes[2].api.clone();
+
+    let witness_keys =
+        KeyPair::Ed25519(Ed25519Signer::generate().expect("keygen"));
+    let witness_key = witness_keys.public_key();
+
+    let governance_id =
+        create_and_authorize_governance(&owner, vec![&alice, &bob]).await;
+
+    // v1: Alice owns, the Witnesses membership stays open and the
+    // witness key holds the schema role throughout. Bob never grants
+    // the witness anything.
+    let json = json!({
+        "members": {
+            "add": [
+                {"name": "Alice", "key": alice.public_key()},
+                {"name": "Bob", "key": bob.public_key()},
+                {"name": "Wit", "key": witness_key.to_string()},
+            ]
+        },
+        "schemas": {
+            "add": [
+                {
+                    "id": "Example",
+                    "contract": EXAMPLE_CONTRACT,
+                    "initial_value": {"one": 0, "two": 0, "three": 0}
+                }
+            ]
+        },
+        "roles": {
+            "governance": {"add": {"witness": ["Alice", "Bob", "Wit"]}},
+            "schema": [
+                {
+                    "schema_id": "Example",
+                    "add": {
+                        "evaluator": [{"name": "Owner", "namespace": []}],
+                        "validator": [{"name": "Owner", "namespace": []}],
+                        "witness": [
+                            {"name": "Owner", "namespace": []},
+                            {"name": "Bob", "namespace": []},
+                            {"name": "Wit", "namespace": []}
+                        ],
+                        "creator": [
+                            {
+                                "name": "Alice",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "Bob", "viewpoints": []},
+                                    {
+                                        "name": "Witnesses",
+                                        "viewpoints": ["AllViewpoints"]
+                                    }
+                                ],
+                            },
+                            {
+                                "name": "Bob",
+                                "namespace": [],
+                                "quantity": "infinity",
+                                "witnesses": [
+                                    {"name": "Alice", "viewpoints": []}
+                                ],
+                            }
+                        ],
+                        "issuer": [{"name": "Alice", "namespace": []}, {"name": "Bob", "namespace": []}]
+                    }
+                }
+            ]
+        }
+    });
+    emit_fact(&owner, governance_id.clone(), json, true)
+        .await
+        .unwrap();
+
+    let (subject_id, _) =
+        create_subject(&alice, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap();
+    emit_fact(
+        &alice,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&alice, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    let mut window = Vec::new();
+    for _ in 0..100 {
+        window = alice
+            .test_get_gov_version_window(
+                governance_id.clone(),
+                subject_id.clone(),
+                0,
+                100,
+            )
+            .await
+            .unwrap();
+        if window.last().is_some_and(|range| range.1 >= 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        window.last().is_some_and(|range| range.1 >= 1),
+        "alice register never mapped sn 1, got {window:?}"
+    );
+
+    // Chain: Transfer SN2, Confirm SN3 Alice -> Bob, Fact SN4 by Bob.
+    emit_transfer(
+        &alice,
+        subject_id.clone(),
+        PublicKey::from_str(bob.public_key()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    bob.authorize_governance(
+        subject_id.clone(),
+        AuthWitness::One(PublicKey::from_str(alice.public_key()).unwrap()),
+    )
+    .await
+    .unwrap();
+    bob.update_subject(subject_id.clone()).await.unwrap();
+    get_subject(&bob, subject_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    emit_confirm(&bob, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    emit_fact(
+        &bob,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 4}}),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&bob, subject_id.clone(), Some(4), true)
+        .await
+        .unwrap();
+
+    // A node holding only governance and a stale SN1 ownership view
+    // while the mappings already run ahead: the exact production skew.
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (mut node_stale, _dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Bootstrap,
+        listen_address: format!("/memory/{port}"),
+        peers: vec![RoutingNode {
+            peer_id: owner.peer_id().to_string(),
+            address: vec![nodes[0].listen_address.clone()],
+        }],
+        always_accept: true,
+        keys: Some(witness_keys.clone()),
+        ..Default::default()
+    })
+    .await;
+    let stale = node_stale.api.clone();
+    node_running(&stale).await.unwrap();
+    stale
+        .authorize_governance(
+            governance_id.clone(),
+            AuthWitness::One(PublicKey::from_str(owner.public_key()).unwrap()),
+        )
+        .await
+        .unwrap();
+    stale.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&stale, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    stale
+        .test_witnesses_create(
+            &governance_id,
+            subject_id.clone(),
+            PublicKey::from_str(alice.public_key()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+    stale
+        .test_register_sn(governance_id.clone(), subject_id.clone(), 1, 4)
+        .await
+        .unwrap();
+
+    // Full batch straight from the current owner, requested by the
+    // owner himself so no visibility cap trims the tail.
+    let bob_key = PublicKey::from_str(bob.public_key()).unwrap();
+    let full = request_held_ledger_target(
+        &bob,
+        &bob_key,
+        &governance_id,
+        &subject_id,
+        "status-window-stale-ledger",
+        None,
+        Some(4),
+    )
+    .await;
+    assert_eq!(full.len(), 5, "owner must serve SN0..SN4");
+    assert!(
+        full.iter().enumerate().all(|(i, event)| event.sn == i as u64),
+        "ledger must be contiguous from genesis"
+    );
+
+    // Stale ownership underneath, supplied chain on top: everything
+    // stays capped at the old-owner sn 3, SN4 never appears.
+    let (access, hi, gov, window_sn) = stale
+        .test_status_and_window_over_ledger(
+            &governance_id,
+            subject_id.clone(),
+            full.clone(),
+            witness_key.clone(),
+            String::new(),
+            ave_common::SchemaType::Type("Example".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(access, Some(3), "stale cache must not widen access past sn 3");
+    assert_eq!(hi, HiSnLimit::Sn(3), "hi limit must stop at sn 3");
+    assert_eq!(gov, GovVersionLimit::Version(1));
+    assert_eq!(window_sn, Some(3), "window must stop at sn 3");
+
+    // Control with an up-to-date register: identical caps.
+    let (access, hi, gov, window_sn) = bob
+        .test_status_and_window_over_ledger(
+            &governance_id,
+            subject_id.clone(),
+            full.clone(),
+            witness_key.clone(),
+            String::new(),
+            ave_common::SchemaType::Type("Example".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(access, Some(3));
+    assert_eq!(hi, HiSnLimit::Sn(3));
+    assert_eq!(gov, GovVersionLimit::Version(1));
+    assert_eq!(window_sn, Some(3));
+
+    // Control with no supplied batch: the stored genesis answers, so
+    // the ledger branch above is what moves the result.
+    let (access, hi, gov, window_sn) = stale
+        .test_status_and_window_over_ledger(
+            &governance_id,
+            subject_id.clone(),
+            Vec::new(),
+            witness_key.clone(),
+            String::new(),
+            ave_common::SchemaType::Type("Example".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(access, Some(0));
+    assert_eq!(hi, HiSnLimit::Infinity);
+    assert_eq!(gov, GovVersionLimit::Infinity);
+    assert_eq!(window_sn, Some(0));
+
+    node_stale.token.cancel();
+    join_all(node_stale.handler.iter_mut()).await;
+    for node in nodes.iter_mut() {
+        node.token.cancel();
+    }
+    join_all(nodes.iter_mut().flat_map(|node| node.handler.iter_mut())).await;
+}
+
 // An empty sn map defers every grant-dependent read: with no mapping
 // evidence the server must not evaluate SNs under an assumed version.
 // Only direct bypasses (owner, pending, old owner) may still be
@@ -13058,11 +14045,23 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
                                         "viewpoints": ["agua"]
                                     }
                                 ]
+                            },
+                            // A transfer target must hold the creator
+                            // role: the pending/old-owner bypasses below
+                            // transfer to the witness.
+                            {
+                                "name": "W",
+                                "namespace": [],
+                                "quantity": "infinity"
                             }
                         ],
                         "issuer": [
                             {
                                 "name": "Owner",
+                                "namespace": []
+                            },
+                            {
+                                "name": "W",
                                 "namespace": []
                             }
                         ]
@@ -13297,8 +14296,14 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
     );
 
     // The fact request itself must stay unserved while the map is
-    // empty: poll a bounded spell asserting zero serves, so a slow
-    // leak still fails instead of passing on timing.
+    // empty. The worker refuses the build without answering, so
+    // absence of traffic alone proves nothing: poll the processed
+    // counter first, so the zero below is read only after the
+    // request provably ran through the empty map.
+    let processed_before = owner
+        .test_serve_processed_count(subject_id.clone())
+        .await
+        .unwrap();
     inject_req(
         &owner,
         &owner_key,
@@ -13313,22 +14318,31 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
         },
     )
     .await;
-    for _ in 0..30 {
-        let served = owner
-            .test_held_outbound()
+    let mut processed = processed_before;
+    for _ in 0..300 {
+        processed = owner
+            .test_serve_processed_count(subject_id.clone())
             .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|m| {
-                matches!(m.message, ActorMessage::DistributionLedgerRes { .. })
-            })
-            .count();
-        assert_eq!(
-            served, 0,
-            "no fact may be served from an empty map"
-        );
+            .unwrap();
+        if processed > processed_before {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert!(
+        processed > processed_before,
+        "the refused request must run through the worker"
+    );
+    let served = owner
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| {
+            matches!(m.message, ActorMessage::DistributionLedgerRes { .. })
+        })
+        .count();
+    assert_eq!(served, 0, "no fact may be served from an empty map");
     // No fact may be written to the receiver while the map is
     // empty: an empty ledger (or no tracker at all) proves no serve
     // happened, without depending on background discovery state.
@@ -13526,6 +14540,312 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
         .await
         .unwrap();
     assert_tracker_fact_full(&events[1].event, fact_payload, &["agua"]);
+
+    // Pending and old-owner bypasses under the same empty map: the
+    // direct rights never consult the wiped register. Transfer to the
+    // witness (its grant copy above already converged), so the
+    // pending party is a real node that confirms afterwards.
+    emit_transfer(&owner, subject_id.clone(), witness_key.clone(), true)
+        .await
+        .unwrap();
+    let owner_after_transfer: Vec<u64> = owner
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|event| event.sn)
+        .collect();
+    assert_eq!(
+        owner_after_transfer,
+        vec![0, 1, 2],
+        "the transfer must apply locally before the pending pull"
+    );
+    let transfer_ok = owner
+        .test_get_tracker_ledger(subject_id.clone(), 2)
+        .await
+        .unwrap()
+        .last()
+        .is_some_and(|event| {
+            matches!(
+                &event.protocols,
+                ave_core::model::event::Protocols::Transfer {
+                    evaluation,
+                    ..
+                } if evaluation.evaluator_response_ok().is_some()
+            )
+        });
+    assert!(transfer_ok, "the transfer evaluation must succeed");
+    // The register trails the ledger on independent tells: wait for
+    // the pending install itself, so the serve below cannot pass on
+    // a stale ownership that grants nothing.
+    let mut pending_access = None;
+    for _ in 0..300 {
+        pending_access = owner
+            .test_tracker_limits(
+                &governance_id,
+                subject_id.clone(),
+                witness_key.clone(),
+                String::new(),
+                ave_common::SchemaType::Type("Example".to_owned()),
+            )
+            .await
+            .unwrap()
+            .0;
+        if pending_access == Some(2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        pending_access,
+        Some(2),
+        "the register must install the pending transfer"
+    );
+    owner
+        .test_delete_sn_subject(governance_id.clone(), subject_id.clone())
+        .await
+        .unwrap();
+    owner.test_clear_held_outbound().await.unwrap();
+    for message in [FaultMessage::DistributionLedgerRes] {
+        owner
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Hold,
+            })
+            .await
+            .unwrap();
+    }
+    let processed_before = owner
+        .test_serve_processed_count(subject_id.clone())
+        .await
+        .unwrap();
+    inject_req(
+        &owner,
+        &owner_key,
+        &witness_key,
+        &server_actor,
+        ActorMessage::DistributionLedgerReq {
+            actual_sn: Some(1),
+            target_sn: Some(2),
+            subject_id: subject_id.clone(),
+            already_verified_transfer_sn: None,
+            expected_governance_id: Some(governance_id.clone()),
+        },
+    )
+    .await;
+    let mut processed = processed_before;
+    for _ in 0..300 {
+        processed = owner
+            .test_serve_processed_count(subject_id.clone())
+            .await
+            .unwrap();
+        if processed > processed_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        processed > processed_before,
+        "the pending request must run through the worker"
+    );
+    let pending_batches: Vec<Vec<u64>> = owner
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m.message {
+            ActorMessage::DistributionLedgerRes { ledger, .. }
+                if m.info.receiver == witness_key =>
+            {
+                Some(ledger.iter().map(|event| event.sn).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pending_batches,
+        vec![vec![2]],
+        "pending must copy exactly through the transfer sn"
+    );
+
+    // Deliver the transfer: the witness applies it as pending, so the
+    // later confirm extends the same ledger instead of forking it.
+    owner.test_release_held().await.unwrap();
+    let mut applied = Vec::new();
+    for _ in 0..300 {
+        applied = witness
+            .test_get_tracker_ledger(subject_id.clone(), 2)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|event| event.sn)
+            .collect();
+        if applied == vec![0, 1, 2] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        applied,
+        vec![0, 1, 2],
+        "the witness must hold the transfer as pending"
+    );
+    emit_confirm(&witness, subject_id.clone(), None, true)
+        .await
+        .unwrap();
+    let confirm_payload = json!({
+        "ModOne": {
+            "data": 2
+        }
+    });
+    emit_fact(&witness, subject_id.clone(), confirm_payload, true)
+        .await
+        .unwrap();
+    // The old owner pulls nothing: it converges through the new
+    // owner's push to the schema witness, exactly at its exit, never
+    // past it.
+    let mut owner_tip = 0;
+    for _ in 0..300 {
+        owner_tip = owner
+            .test_get_tracker_ledger(subject_id.clone(), 3)
+            .await
+            .unwrap_or_default()
+            .last()
+            .map(|event| event.sn)
+            .unwrap_or(0);
+        if owner_tip == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(owner_tip, 3, "the old owner must converge at its exit");
+
+    // Old-owner window on the witness, which holds the full ledger
+    // including the fact past the exit. Wipe only its map: ledger,
+    // ownership and proofs stay.
+    witness
+        .test_delete_sn_subject(governance_id.clone(), subject_id.clone())
+        .await
+        .unwrap();
+    witness.test_ensure_distributor(subject_id.clone()).await.unwrap();
+    witness.test_clear_held_outbound().await.unwrap();
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::UpdateNoOffer,
+        FaultMessage::UpdateOffer,
+    ] {
+        witness
+            .test_install_fault(FaultRule {
+                direction: FaultDirection::Outbound,
+                message,
+                peer: None,
+                remaining: None,
+                action: FaultAction::Hold,
+            })
+            .await
+            .unwrap();
+    }
+    // Within the exit: the exit event itself is still served, exactly.
+    let witness_actor = format!("/user/node/distributor_{subject_id}");
+    let processed_before = witness
+        .test_serve_processed_count(subject_id.clone())
+        .await
+        .unwrap();
+    inject_req(
+        &witness,
+        &witness_key,
+        &owner_key,
+        &witness_actor,
+        ActorMessage::DistributionLedgerReq {
+            actual_sn: Some(2),
+            target_sn: Some(3),
+            subject_id: subject_id.clone(),
+            already_verified_transfer_sn: None,
+            expected_governance_id: Some(governance_id.clone()),
+        },
+    )
+    .await;
+    let mut processed = processed_before;
+    for _ in 0..300 {
+        processed = witness
+            .test_serve_processed_count(subject_id.clone())
+            .await
+            .unwrap();
+        if processed > processed_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        processed > processed_before,
+        "the old-owner request must run through the worker"
+    );
+    let old_batches: Vec<Vec<u64>> = witness
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m.message {
+            ActorMessage::DistributionLedgerRes { ledger, .. }
+                if m.info.receiver == owner_key =>
+            {
+                Some(ledger.iter().map(|event| event.sn).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        old_batches,
+        vec![vec![3]],
+        "old-owner must copy exactly through its exit sn"
+    );
+    // Past the exit: the offer refuses instead of serving the fact.
+    witness.test_clear_held_outbound().await.unwrap();
+    inject_req(
+        &witness,
+        &witness_key,
+        &owner_key,
+        &witness_actor,
+        ActorMessage::DistributionGetLastSn {
+            subject_id: subject_id.clone(),
+            actual_sn: Some(3),
+            receiver_actor: witness_actor.clone(),
+        },
+    )
+    .await;
+    let mut no_offer = 0;
+    for _ in 0..300 {
+        let held = witness
+            .test_held_outbound()
+            .await
+            .unwrap_or_default();
+        no_offer = held
+            .iter()
+            .filter(|m| {
+                matches!(m.message, ActorMessage::UpdateNoOffer)
+                    && m.info.receiver == owner_key
+            })
+            .count();
+        if no_offer >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(no_offer, 1, "past its exit the old owner gets NoOffer");
+    let leaked = witness
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| {
+            matches!(m.message, ActorMessage::DistributionLedgerRes { .. })
+                && m.info.receiver == owner_key
+        })
+        .count();
+    assert_eq!(leaked, 0, "no fact past the exit may be served");
 
     for node in nodes.iter_mut() {
         node.token.cancel();

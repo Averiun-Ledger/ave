@@ -96,11 +96,18 @@ impl WitnessesRegister {
                         // commit between Transfer and Confirm while a new
                         // owner is pending, so the transfer is the
                         // immediately preceding SN.
+                        let from_sn = data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1));
                         data.ownership_transitions.push(OwnershipStint {
                             owner: data.actual_owner.clone(),
                             incoming_transfer_sn: event.sn.saturating_sub(1),
                             exit_sn: event.sn,
                             outcome: OwnershipStintOutcome::Confirmed,
+                            from_sn,
+                            gov_lo: data.gov_version,
+                            gov_hi: event.gov_version,
                         });
 
                         data.actual_owner = new_owner;
@@ -131,11 +138,18 @@ impl WitnessesRegister {
                         // Mirrors the live path: the rejected proposal is
                         // logged so the rejected node can copy, marked as
                         // rejected so it never links another owner's chain.
+                        let from_sn = data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1));
                         data.ownership_transitions.push(OwnershipStint {
                             owner: new_owner,
                             incoming_transfer_sn: event.sn.saturating_sub(1),
                             exit_sn: event.sn,
                             outcome: OwnershipStintOutcome::Rejected,
+                            from_sn,
+                            gov_lo: new_owner_gov_version,
+                            gov_hi: event.gov_version,
                         });
                     } else {
                         warn!(
@@ -215,6 +229,12 @@ impl WitnessesRegister {
                         incoming_transfer_sn: event.sn.saturating_sub(1),
                         exit_sn: event.sn,
                         outcome: OwnershipStintOutcome::Confirmed,
+                        from_sn: data.ownership_transitions.last().map_or(
+                            0,
+                            |stint| stint.exit_sn.saturating_add(1),
+                        ),
+                        gov_lo: data.gov_version,
+                        gov_hi: event.gov_version,
                     });
                     data.actual_owner = new_owner;
                     data.gov_version = new_owner_gov_version;
@@ -236,6 +256,12 @@ impl WitnessesRegister {
                         incoming_transfer_sn: event.sn.saturating_sub(1),
                         exit_sn: event.sn,
                         outcome: OwnershipStintOutcome::Rejected,
+                        from_sn: data.ownership_transitions.last().map_or(
+                            0,
+                            |stint| stint.exit_sn.saturating_add(1),
+                        ),
+                        gov_lo: new_owner_gov_version,
+                        gov_hi: event.gov_version,
                     });
                 }
             }

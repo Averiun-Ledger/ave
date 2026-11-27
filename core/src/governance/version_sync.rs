@@ -57,6 +57,10 @@ pub enum GovernanceVersionSyncMessage {
         peer: PublicKey,
         version: u64,
         sn: Option<u64>,
+        /// Round that requested this answer: only the current round
+        /// may consume it. A retained answer from an older round can
+        /// not close, idle-certify or retarget a newer one.
+        generation: u64,
     },
     /// Test-only read of the idle-round counter: proves silent or
     /// failed rounds never certify the tip.
@@ -110,6 +114,12 @@ pub struct GovernanceVersionSync {
     round_open: bool,
     pending_timeout: Option<TimerKey>,
     round: u64,
+    /// A round where any version request failed to send can never
+    /// prove the tip: the failed peer never answered, so an empty
+    /// pending set is not a full answer set. The round still
+    /// completes (answers may carry an update), but idle is
+    /// suppressed; unanswered peers still back off on timeout.
+    round_send_failed: bool,
     peer_backoff: SyncPeerBackoff,
     /// Test-only count of idle certifications: silent, failed or
     /// backed-off rounds must never increment it.
@@ -207,6 +217,7 @@ impl GovernanceVersionSync {
             round_open: false,
             pending_timeout: None,
             round: 0,
+            round_send_failed: false,
             peer_backoff: SyncPeerBackoff::default(),
             target_set_at: None,
             idle_notified_at_version: None,
@@ -441,8 +452,12 @@ impl GovernanceVersionSync {
         peer: PublicKey,
         version: u64,
         sn: Option<u64>,
+        generation: u64,
     ) -> bool {
-        if !self.round_open || !self.pending_peers.remove(&peer) {
+        if !self.round_open
+            || generation != self.round
+            || !self.pending_peers.remove(&peer)
+        {
             return false;
         }
         // It answered: whatever the version says, the peer is alive —
@@ -486,6 +501,7 @@ impl GovernanceVersionSync {
             return Ok(());
         }
         self.round += 1;
+        self.round_send_failed = false;
 
         let sync_peers = match self.get_sync_peers(ctx).await {
             Ok(peers) => peers,
@@ -525,7 +541,9 @@ impl GovernanceVersionSync {
                 ComunicateInfo {
                     receiver: peer.clone(),
                     request_id: String::default(),
-                    version: 0,
+                    // Round generation: the answer echoes it and the
+                    // round only consumes its own generation back.
+                    version: self.round,
                     receiver_actor: format!(
                         "/user/node/distributor_{}",
                         self.governance_id
@@ -551,6 +569,11 @@ impl GovernanceVersionSync {
                     error = %error,
                     "Failed to send governance version request"
                 );
+                // A failed send is a recorded failure, never an
+                // answer: the round may still complete through the
+                // peers that did get the request, but it can never
+                // certify the tip.
+                self.round_send_failed = true;
                 self.pending_peers.remove(&peer);
             }
         }
@@ -678,12 +701,22 @@ impl Handler<Self> for GovernanceVersionSync {
                     }
                 }
             }
-            GovernanceVersionSyncMessage::PeerVersion { peer, version, sn } => {
-                if self.peer_version(peer.clone(), version, sn) {
+            GovernanceVersionSyncMessage::PeerVersion {
+                peer,
+                version,
+                sn,
+                generation,
+            } => {
+                if self.peer_version(peer.clone(), version, sn, generation) {
                     self.cancel_timeout(ctx);
                     self.round_open = false;
+                    // A round with a failed send still completes here
+                    // (the answers may carry an update), but it can
+                    // never certify the tip: the failed peer never
+                    // answered.
+                    let notify_idle = !self.round_send_failed;
                     if let Err(error) =
-                        self.trigger_update_if_needed(ctx, true).await
+                        self.trigger_update_if_needed(ctx, notify_idle).await
                     {
                         if let Some(metrics) = try_core_metrics() {
                             metrics.observe_governance_version_sync_failure(
@@ -696,10 +729,10 @@ impl Handler<Self> for GovernanceVersionSync {
                             "Failed to trigger governance update after round completion"
                         );
                     }
-                } else if (version > self.local_version
-                    || (version == self.local_version
-                        && sn.is_some_and(|s| s > self.local_sn)))
-                    && self.governance_peers.contains(&peer)
+                } else if generation == self.round
+                    && (version > self.local_version
+                        || (version == self.local_version
+                            && sn.is_some_and(|s| s > self.local_sn)))
                     && self.update_target.as_ref().is_none_or(|target| {
                         version > target.version
                             || (version == target.version
@@ -709,10 +742,35 @@ impl Handler<Self> for GovernanceVersionSync {
                     })
                 {
                     // Late but valuable: the round already closed, yet
-                    // a known peer is ahead of us (and of any target).
+                    // a peer from the live union of governance and
+                    // sync peers is ahead of us (and of any target).
+                    // Only the generation of the just-closed round
+                    // counts: an older round can not retarget us.
                     // Adopt it and fire the update now instead of
                     // dropping the intel until the next tick.
-                    // Not an idle proof, so no idle notify.
+                    // Not an idle proof, so no idle notify. A
+                    // stranger stays ignored.
+                    let sync_peers = match self.get_sync_peers(ctx).await
+                    {
+                        Ok(peers) => peers,
+                        Err(error) => {
+                            warn!(
+                                governance_id = %self.governance_id,
+                                error = %error,
+                                "Late version answer dropped: sync peers unreadable",
+                            );
+                            return Ok(
+                                GovernanceVersionSyncResponse::None,
+                            );
+                        }
+                    };
+                    if !self.governance_peers.contains(&peer)
+                        && !sync_peers.contains(&peer)
+                    {
+                        return Ok(
+                            GovernanceVersionSyncResponse::None,
+                        );
+                    }
                     self.peer_backoff.note_success(&peer);
                     self.update_target = Some(UpdateTarget {
                         peer,

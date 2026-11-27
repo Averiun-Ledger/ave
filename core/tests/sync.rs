@@ -141,6 +141,27 @@ async fn wait_held_ledger_reqs(api: &Api, at_least: usize, timeout_secs: u64) {
     );
 }
 
+// Waits until the version/listing barrier parked `times` passes of
+// the request with this nonce. Per-nonce so background syncs cannot
+// satisfy or spoil the barrier.
+async fn wait_parked(api: &Api, nonce: u64, times: usize) {
+    for _ in 0..300 {
+        if api
+            .test_tracker_sync_version_hold_nonces()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|n| **n == nonce)
+            .count()
+            >= times
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("nonce {nonce} never parked {times} time(s)");
+}
+
 // An update target that never resolves must not pin the sync
 // forever. B announces v2 and then its ledger never arrives; after the
 // target TTL the node must open a fresh round (second ledger-request
@@ -603,6 +624,10 @@ async fn tracker_sync_response_uses_actual_governance_version() {
     // listing. The response must be rebuilt at V3, never tag the new
     // listing with the V2 read that preceded it.
     hold_outbound(&a, FaultMessage::TrackerSyncReq).await;
+    // One release moves exactly one parked pass (the barrier
+    // re-arms itself): wait for this nonce to park, bump the version
+    // under it, release, and prove the retry rebuilt the page at the
+    // new version instead of tagging new data with the old one.
     b.test_pause_tracker_sync_version(true).await.unwrap();
     inject_sync_req_version(
         &b,
@@ -614,16 +639,7 @@ async fn tracker_sync_response_uses_actual_governance_version() {
         13,
     )
     .await;
-    for _ in 0..300 {
-        if b.test_tracker_sync_version_hold_count().await.unwrap_or(0) >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        b.test_tracker_sync_version_hold_count().await.unwrap_or(0) >= 1,
-        "the request never reached the version/listing boundary"
-    );
+    wait_parked(&b, 13, 1).await;
     emit_fact(
         &b,
         governance_id.clone(),
@@ -636,6 +652,10 @@ async fn tracker_sync_response_uses_actual_governance_version() {
         .await
         .unwrap();
     assert_eq!(governance_properties(b_state.properties).version, 3);
+    b.test_pause_tracker_sync_version(false).await.unwrap();
+    // The retry re-reads at V3 and parks again behind the one-shot
+    // re-arm; releasing it a second time serves the rebuilt page.
+    wait_parked(&b, 13, 2).await;
     b.test_pause_tracker_sync_version(false).await.unwrap();
 
     let mut raced = None;
@@ -660,6 +680,161 @@ async fn tracker_sync_response_uses_actual_governance_version() {
         raced,
         Some(3),
         "a listing that raced V2 -> V3 must be retried at V3"
+    );
+
+    // Exhaustion across three unstable passes: the version moves on
+    // every pass, so all three retries mismatch and the request is
+    // dropped with no answer for its nonce. Each release moves
+    // exactly one pass (the one-shot barrier re-arms itself), so the
+    // three parks below are the three loop iterations, no more. A
+    // stable request right after proves the silence is a drop, not a
+    // wedged responder, and its page must be coherent.
+    let settled = governance_properties(
+        get_subject(&b, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .properties,
+    )
+    .version;
+    b.test_pause_tracker_sync_version(true).await.unwrap();
+    inject_sync_req_version(
+        &b,
+        &b_key,
+        &a_key,
+        &governance_id,
+        &sync_actor,
+        settled,
+        14,
+    )
+    .await;
+    for (step, name) in ["E", "F", "G"].iter().enumerate() {
+        let pass = step + 1;
+        wait_parked(&b, 14, pass).await;
+        emit_fact(
+            &b,
+            governance_id.clone(),
+            json!({"members": {"add": [{"name": name, "key": fresh_key()}]}}),
+            true,
+        )
+        .await
+        .unwrap();
+        let tip = get_subject(&b, governance_id.clone(), None, true)
+            .await
+            .unwrap()
+            .sn;
+        assert_eq!(
+            governance_properties(
+                get_subject(&b, governance_id.clone(), Some(tip), true)
+                    .await
+                    .unwrap()
+                    .properties
+            )
+            .version,
+            settled + pass as u64,
+            "pass {pass} must race a real version bump"
+        );
+        // This release lets exactly the parked pass list against the
+        // bumped version; the barrier re-arms itself for the next one.
+        b.test_pause_tracker_sync_version(false).await.unwrap();
+    }
+    // The last pass mismatches and the loop exhausts without answering:
+    // no release is needed after the third bump.
+    let mut answered_14 = false;
+    for _ in 0..30 {
+        answered_14 = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|m| {
+                matches!(
+                    &m.message,
+                    ActorMessage::TrackerSyncRes { request_nonce, .. }
+                        if *request_nonce == 14
+                )
+            });
+        if answered_14 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !answered_14,
+        "three unstable passes must drop the request with no answer"
+    );
+
+    // Stable requests right after are answered at the settled
+    // version with identical pages: the responder is alive, only the
+    // unstable nonce was dropped. Unpause first: the last release
+    // re-armed the one-shot barrier behind the dropped pass.
+    let stable = settled + 3;
+    b.test_pause_tracker_sync_version(false).await.unwrap();
+    for nonce in [15, 16] {
+        inject_sync_req_version(
+            &b,
+            &b_key,
+            &a_key,
+            &governance_id,
+            &sync_actor,
+            stable,
+            nonce,
+        )
+        .await;
+    }
+    let mut pages = Vec::new();
+    for _ in 0..300 {
+        pages = b
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::TrackerSyncRes {
+                    request_nonce,
+                    governance_version,
+                    items,
+                    ..
+                } if request_nonce == 15 || request_nonce == 16 => {
+                    Some((request_nonce, governance_version, items))
+                }
+                _ => None,
+            })
+            .collect();
+        if pages.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        pages.len(),
+        2,
+        "both stable requests must be answered, got {pages:?}"
+    );
+    for (nonce, version, _) in &pages {
+        assert_eq!(
+            *version, stable,
+            "the stable page for nonce {nonce} must carry V{stable}"
+        );
+    }
+    assert_eq!(
+        format!("{:?}", pages[0].2),
+        format!("{:?}", pages[1].2),
+        "stable pages must be identical"
+    );
+    // The dropped nonce stays silent through the stable exchange.
+    assert!(
+        !b.test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|m| {
+                matches!(
+                    &m.message,
+                    ActorMessage::TrackerSyncRes { request_nonce, .. }
+                        if *request_nonce == 14
+                )
+            }),
+        "the exhausted nonce must stay unanswered"
     );
 }
 
@@ -1003,6 +1178,49 @@ async fn create_manual_sync_nodes()
     (nodes, dirs)
 }
 
+/// One more manual-sync addressable node on the same bootstrap, for
+/// tests selecting two peers at once. Same frozen intervals as
+/// `create_manual_sync_nodes`.
+async fn add_manual_sync_node(
+    boot_peer_id: String,
+    boot_listen: String,
+) -> (common::NodeData, Vec<tempfile::TempDir>) {
+    let gov_sync = || {
+        Some(GovernanceSyncConfig {
+            interval_secs: 3600,
+            sample_size: 3,
+            response_timeout_secs: 3600,
+        })
+    };
+    let tracker_sync = || {
+        Some(TrackerSyncConfig {
+            interval_secs: 3600,
+            page_size: 10,
+            response_timeout_secs: 3600,
+            update_batch_size: 2,
+            update_timeout_secs: 5,
+        })
+    };
+    let port: u16 = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let listen = format!("/memory/{port}");
+    let (node, dirs) = create_node(CreateNodeConfig {
+        node_type: NodeType::Addressable,
+        listen_address: listen,
+        peers: vec![RoutingNode {
+            peer_id: boot_peer_id,
+            address: vec![boot_listen],
+        }],
+        always_accept: true,
+        is_service: true,
+        governance_sync: gov_sync(),
+        tracker_sync: tracker_sync(),
+        ..Default::default()
+    })
+    .await;
+    node_running(&node.api).await.unwrap();
+    (node, dirs)
+}
+
 /// A timeout queued by an older round must not close the active
 /// one: it must not cancel its timer, drain its pending peers or
 /// change backoff. Only the matching round may close, exactly once.
@@ -1232,6 +1450,731 @@ async fn sync_unanswered_peers_never_prove_idle() {
         idle_count(&a, &governance_id).await,
         1,
         "a fully answered round with no superior peer reports idle once"
+    );
+    node_running(&a).await.unwrap();
+    node_running(&b).await.unwrap();
+}
+
+/// A failed send is never an answer: when one selected peer never
+/// gets the request, another peer answering at the tip completes the
+/// round without certifying it as idle. The failed peer backs off
+/// while the next clean round still reports idle exactly once.
+#[test(tokio::test)]
+async fn sync_failed_send_never_certifies_round_idle() {
+    let (mut nodes, mut dirs) = create_manual_sync_nodes().await;
+    let boot_peer_id = nodes[0].api.peer_id().to_string();
+    let boot_listen = nodes[0].listen_address.clone();
+    let (node_c, mut dir_c) = add_manual_sync_node(boot_peer_id, boot_listen).await;
+    dirs.append(&mut dir_c);
+    nodes.push(node_c);
+    let (a, b, c) =
+        (nodes[1].api.clone(), nodes[2].api.clone(), nodes[3].api.clone());
+    let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
+    let c_key = PublicKey::from_str(&nodes[3].api.public_key()).unwrap();
+    let _ = nodes;
+
+    let governance_id =
+        create_and_authorize_governance(&b, vec![&a, &c]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+                { "name": "C", "key": c.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A", "C"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    for node in [&a, &c] {
+        node.update_subject(governance_id.clone()).await.unwrap();
+    }
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    get_subject(&c, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    async fn idle_count(api: &Api, gov: &DigestIdentifier) -> u64 {
+        api.test_version_sync_idle_count(gov.clone()).await.unwrap()
+    }
+    assert_eq!(idle_count(&a, &governance_id).await, 0);
+
+    // Round 1 selects both peers; the request to C fails while
+    // B's request is held so the pending set stays observable.
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::GovernanceVersionReq,
+        peer: Some(b_key.clone()),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::GovernanceVersionReq,
+        peer: Some(c_key.clone()),
+        remaining: None,
+        action: FaultAction::FailSend,
+    })
+    .await
+    .unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    // Barrier: the tick was processed and C's send failed, leaving
+    // B as the only pending peer.
+    for _ in 0..100 {
+        let (_, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if pending == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, _, pending) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(pending, 1, "only the failed peer leaves the pending set");
+
+    // B answers at the tip once its held request is released: the
+    // round completes with the failed peer unheard, so idle stays
+    // at zero.
+    a.test_release_held().await.unwrap();
+    for _ in 0..100 {
+        let (_, round_open, _) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !round_open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, round_open, _) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(!round_open, "the answered round must complete");
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        0,
+        "a round with a failed send never certifies idle"
+    );
+
+    // Round 2 repeats the mixed selection: C fails again while B is
+    // held, proving the mixed round is reproducible and still quiet.
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::GovernanceVersionReq,
+        peer: Some(b_key),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (_, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if pending == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, _, pending) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(pending, 1, "the mixed selection repeats");
+    a.test_release_held().await.unwrap();
+    for _ in 0..100 {
+        let (_, round_open, _) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !round_open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        0,
+        "a repeated failed send still never certifies idle"
+    );
+
+    // Control: faults cleared, the next round answers fully and
+    // reports idle once.
+    a.test_clear_faults().await.unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if idle_count(&a, &governance_id).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        1,
+        "a fully answered round still reports idle once"
+    );
+    node_running(&a).await.unwrap();
+    node_running(&b).await.unwrap();
+    node_running(&c).await.unwrap();
+}
+
+/// A retained answer from an older round can not close, idle-certify
+/// or retarget a newer one: only the current generation counts. B's
+/// round-1 answer is retained while B moves ahead; once round 2 is
+/// open the stale answer is ignored and the genuine round-2 answer
+/// completes the round and drives the update.
+#[test(tokio::test)]
+async fn sync_stale_generation_never_closes_newer_round() {
+    let (nodes, _dirs) = create_manual_sync_nodes().await;
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let _ = nodes;
+
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    async fn idle_count(api: &Api, gov: &DigestIdentifier) -> u64 {
+        api.test_version_sync_idle_count(gov.clone()).await.unwrap()
+    }
+    assert_eq!(idle_count(&a, &governance_id).await, 0);
+
+    // Round 1 stays open with B's answer retained. Fact pushes to A
+    // are held inbound so B can move ahead without A following
+    // through distribution: A only learns the new version through the
+    // genuine round-2 answer and the update it drives.
+    b.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::GovernanceVersionRes,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Inbound,
+        message: FaultMessage::DistributionLedgerFrag,
+        peer: Some(
+            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
+        ),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Inbound,
+        message: FaultMessage::UpdateOffer,
+        peer: Some(
+            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
+        ),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_install_fault(FaultRule {
+        direction: FaultDirection::Inbound,
+        message: FaultMessage::DistributionLastEventReq,
+        peer: Some(
+            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
+        ),
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (round, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if round == 1 && pending == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (round, _, pending) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!((round, pending), (1, 1), "round 1 opens with B pending");
+
+    // B moves ahead while its round-1 answer is still retained.
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "D", "key": fresh_key() },
+            ]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+
+    // Round 2 opens: the round-2 request is sent (and its answer
+    // retained behind the round-1 one) before anything is released.
+    // A is still behind: the fragment hold blocked the push.
+    let state = a
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1, "A must still sit at v1 while B is at v2");
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (round, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if round == 2 && pending == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (round, _, pending) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!((round, pending), (2, 1), "round 2 opens with B pending");
+
+    // The retained round-1 answer arrives first: stale, ignored. The
+    // genuine round-2 answer follows and completes the round ahead,
+    // so it drives the update without certifying idle.
+    b.test_release_held().await.unwrap();
+    for _ in 0..100 {
+        let (_, round_open, _) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !round_open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, round_open, _) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert!(!round_open, "the genuine round-2 answer completes the round");
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        0,
+        "a stale answer never certifies a newer round as idle"
+    );
+    get_subject(&a, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    node_running(&a).await.unwrap();
+    node_running(&b).await.unwrap();
+}
+
+/// A late answer from the live union of governance and sync
+/// peers counts: it clears backoff and drives the update. C is a
+/// sync peer but never a governance witness; its retained answer
+/// arrives after the timeout, clears backoff and fires the copy
+/// that lands v2 on A, and the next selection proves the backoff
+/// is clean. B's pushes to A are held (peer-scoped, so C can still
+/// pull); every verdict is state-barriered, no sleeps decide.
+#[test(tokio::test)]
+async fn sync_late_sync_only_answer_drives_update() {
+    let (mut nodes, mut dirs) = create_manual_sync_nodes().await;
+    let boot_peer_id = nodes[0].api.peer_id().to_string();
+    let boot_listen = nodes[0].listen_address.clone();
+    let (node_c, mut dir_c) =
+        add_manual_sync_node(boot_peer_id, boot_listen).await;
+    dirs.append(&mut dir_c);
+    nodes.push(node_c);
+    let (a, b, c) = (
+        nodes[1].api.clone(),
+        nodes[2].api.clone(),
+        nodes[3].api.clone(),
+    );
+    let _ = nodes;
+
+    let governance_id =
+        create_and_authorize_governance(&b, vec![&a, &c]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+                { "name": "C", "key": c.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // C is a sync-only peer: explicitly known through the sync peer
+    // set, never through the governance witnesses.
+    a.add_sync_peer(
+        governance_id.clone(),
+        vec![PublicKey::from_str(&c.public_key()).unwrap()],
+    )
+    .await
+    .unwrap();
+
+    async fn idle_count(api: &Api, gov: &DigestIdentifier) -> u64 {
+        api.test_version_sync_idle_count(gov.clone()).await.unwrap()
+    }
+    assert_eq!(idle_count(&a, &governance_id).await, 0);
+
+    // B's answers are retained; B's pushes to A are held (peer A
+    // only, so C can still pull and serve). A only learns new
+    // versions through the sync update.
+    for node in [&b, &c] {
+        node.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message: FaultMessage::GovernanceVersionRes,
+            peer: None,
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+    for message in [
+        FaultMessage::DistributionLedgerRes,
+        FaultMessage::DistributionLastEventReq,
+        FaultMessage::DistributionLedgerFrag,
+        FaultMessage::UpdateOffer,
+    ] {
+        b.test_install_fault(FaultRule {
+            direction: FaultDirection::Outbound,
+            message,
+            peer: Some(
+                PublicKey::from_str(&a.public_key()).unwrap(),
+            ),
+            remaining: None,
+            action: FaultAction::Hold,
+        })
+        .await
+        .unwrap();
+    }
+
+    // B moves to v2; C follows by pull while A stays behind.
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "D", "key": fresh_key() },
+            ]},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    c.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&c, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    let state = a
+        .get_subject_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(state.sn, 1, "A must still sit at v1 while B is at v2");
+
+    // Round 1 opens with both peers pending and times out
+    // unanswered: both back off, nothing idles.
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (round, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if round == 1 && pending == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.test_version_sync_stale_timeout(governance_id.clone(), 1)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (_, round_open, _) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !round_open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        0,
+        "a timed-out round never idles"
+    );
+
+    // Only C's retained answer is released: useful and late, so it
+    // clears backoff and fires the copy that lands v2 on A.
+    c.test_release_held().await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(2), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        0,
+        "a late answer never idles"
+    );
+
+    // Round 2 selects C again: the late answer cleaned its backoff
+    // while B stays backed off. C's fresh answer completes at the
+    // tip, which legitimately reports idle once.
+    c.test_install_fault(FaultRule {
+        direction: FaultDirection::Outbound,
+        message: FaultMessage::GovernanceVersionRes,
+        peer: None,
+        remaining: None,
+        action: FaultAction::Hold,
+    })
+    .await
+    .unwrap();
+    a.test_version_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let (round, _, pending) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if round == 2 && pending == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (round, _, pending) = a
+        .test_version_sync_state(governance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!((round, pending), (2, 1), "the late answer cleaned C's backoff");
+    c.test_release_held().await.unwrap();
+    for _ in 0..100 {
+        let (_, round_open, _) = a
+            .test_version_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !round_open {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        idle_count(&a, &governance_id).await,
+        1,
+        "a fully answered round at the tip still reports idle once"
+    );
+    node_running(&a).await.unwrap();
+    node_running(&b).await.unwrap();
+    node_running(&c).await.unwrap();
+}
+
+/// A version-mismatched page must be validated before the page cap
+/// runs: it can not save its resume cursor, and a higher version
+/// must nudge the governance update instead. 99 valid v1 pages fill
+/// the budget, page 100 arrives with v2 and cursor X: X is never
+/// reused and the nudge fires exactly once.
+#[test(tokio::test)]
+async fn tracker_sync_mismatched_page_skips_page_cap() {
+    let (nodes, _dirs) = create_manual_sync_nodes().await;
+    let (a, b) = (nodes[1].api.clone(), nodes[2].api.clone());
+    let a_key = PublicKey::from_str(&nodes[1].api.public_key()).unwrap();
+    let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
+    let _ = nodes;
+
+    let governance_id = create_and_authorize_governance(&b, vec![&a]).await;
+    emit_fact(
+        &b,
+        governance_id.clone(),
+        json!({
+            "members": { "add": [
+                { "name": "A", "key": a.public_key() },
+            ]},
+            "roles": { "governance": { "add": {
+                "witness": ["A"],
+            }}},
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    get_subject(&b, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+    a.update_subject(governance_id.clone()).await.unwrap();
+    get_subject(&a, governance_id.clone(), Some(1), true)
+        .await
+        .unwrap();
+
+    // A's own fetches and copy requests are held: forged pages drive
+    // the cycle, and the nudge surfaces as a held copy request.
+    hold_outbound(&a, FaultMessage::TrackerSyncReq).await;
+    hold_outbound(&a, FaultMessage::DistributionLedgerReq).await;
+    hold_outbound(&a, FaultMessage::DistributionGetLastSn).await;
+    let sync_actor =
+        format!("/user/node/subject_manager/{governance_id}/tracker_sync");
+
+    // 99 valid v1 pages fill the 100-page budget (initial fetch plus
+    // 99 continuations).
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    let mut nonce = wait_tracker_fetch(&a, &b_key, None).await;
+    let mut seen = HashSet::from([nonce]);
+    let valid_cursor = DigestIdentifier::default();
+    for _ in 0..99 {
+        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, valid_cursor.clone())
+            .await;
+        nonce = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
+        seen.insert(nonce);
+    }
+
+    // Page 100 carries a higher version with a foreign cursor: it must
+    // not complete a cycle over the cap nor save its cursor. The
+    // higher version nudges exactly one governance copy request.
+    // Drain first: only traffic caused by this page may count.
+    a.test_clear_held_outbound().await.unwrap();
+    let foreign_cursor = governance_id.clone();
+    inject_sync_page_versioned(
+        &a,
+        &a_key,
+        &b_key,
+        &sync_actor,
+        nonce,
+        2,
+        vec![],
+        Some(foreign_cursor.clone()),
+    )
+    .await;
+    // Barrier: the page was consumed (either path ends the cycle).
+    // A nonce mismatch would leave the fetch open instead.
+    for _ in 0..100 {
+        let (_, _, _, has_fetch_timeout, _) = a
+            .test_tracker_sync_state(governance_id.clone())
+            .await
+            .unwrap();
+        if !has_fetch_timeout {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for _ in 0..100 {
+        let nudged = a
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|m| {
+                matches!(
+                    &m.message,
+                    ActorMessage::DistributionGetLastSn { .. }
+                ) && m.info.receiver == b_key
+            });
+        if nudged {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let nudges = a
+        .test_held_outbound()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| {
+            matches!(&m.message, ActorMessage::DistributionGetLastSn { .. })
+                && m.info.receiver == b_key
+        })
+        .count();
+    assert!(
+        nudges >= 1,
+        "the higher version must nudge the governance update, got {nudges}"
+    );
+
+    // The next cycle scans from the head: the foreign cursor is never
+    // reused.
+    a.test_tracker_sync_tick(governance_id.clone())
+        .await
+        .unwrap();
+    let fresh = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
+    let _ = fresh;
+    let fetches = tracker_fetch_full(&a, &b_key).await;
+    assert_eq!(
+        fetches.last(),
+        Some(&None),
+        "the foreign cursor must never resume a cycle, got {fetches:?}"
     );
     node_running(&a).await.unwrap();
     node_running(&b).await.unwrap();

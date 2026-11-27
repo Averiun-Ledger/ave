@@ -111,41 +111,75 @@ impl WitnessesRegister {
                         continue;
                     }
 
-                    for range in old_owner.interval_gov_version.iter().rev() {
-                        if !range.contains(gov_version) {
-                            continue;
-                        }
-
-                        // Exact first; only its absence permits the
-                        // fallback limited to this very stint. A grant
-                        // conceded mid-stint opens its history
-                        // retroactively, but never replaces an exact
-                        // restrictive grant nor leaks across reigns.
-                        let stint = self
-                            .creator_grant_for_owner_interval(
-                                node,
-                                creator,
-                                schema_id,
-                                namespace,
-                                gov_version,
-                                gov_version,
-                            )
-                            .or_else(|| {
-                                self.creator_grant_for_owner_interval(
-                                    node,
-                                    creator,
-                                    schema_id,
-                                    namespace,
-                                    range.lo,
-                                    range.hi,
-                                )
-                            });
-                        grant = Some(Self::merge_grant(
-                            grant,
-                            &stint.unwrap_or(CreatorWitnessGrant::Hash),
-                        ));
-                        break;
+                    // The fallback belongs to the single reign holding
+                    // `sn`: a merged interval set would fuse touching
+                    // reigns of a repeated owner and leak an earlier
+                    // grant into a later one. Exact first; only its
+                    // absence permits the stint-bounded fallback. Data
+                    // without any stint predates reign tracking and
+                    // keeps the legacy merged behavior.
+                    let stint_window = data
+                        .ownership_transitions
+                        .iter()
+                        .filter(|stint| {
+                            stint.owner == *creator
+                                && stint.from_sn <= sn
+                                && sn <= stint.exit_sn
+                        })
+                        .last()
+                        .map(|stint| (stint.gov_lo, stint.gov_hi));
+                    let legacy = data.ownership_transitions.is_empty();
+                    if stint_window.is_none() && !legacy {
+                        continue;
                     }
+
+                    // Exact first; only its absence permits the
+                    // fallback limited to this very reign. A grant
+                    // conceded mid-reign opens its history
+                    // retroactively, but never replaces an exact
+                    // restrictive grant nor leaks across reigns.
+                    let exact = self.creator_grant_for_owner_interval(
+                        node,
+                        creator,
+                        schema_id,
+                        namespace,
+                        gov_version,
+                        gov_version,
+                    );
+                    let fallback = match (exact, stint_window) {
+                        (Some(grant), _) => Some(grant),
+                        (None, Some((lo, hi))) => self
+                            .creator_grant_for_owner_interval(
+                                node, creator, schema_id, namespace, lo, hi,
+                            ),
+                        (None, None) => {
+                            let mut merged = None;
+                            for range in old_owner
+                                .interval_gov_version
+                                .iter()
+                                .rev()
+                            {
+                                if !range.contains(gov_version) {
+                                    continue;
+                                }
+                                merged = self
+                                    .creator_grant_for_owner_interval(
+                                        node,
+                                        creator,
+                                        schema_id,
+                                        namespace,
+                                        range.lo,
+                                        range.hi,
+                                    );
+                                break;
+                            }
+                            merged
+                        }
+                    };
+                    grant = Some(Self::merge_grant(
+                        grant,
+                        &fallback.unwrap_or(CreatorWitnessGrant::Hash),
+                    ));
                 }
 
                 if Self::grant_allows_clear(grant, viewpoints) {
@@ -563,6 +597,28 @@ impl WitnessesRegister {
             return Ok(None);
         };
 
+        self.access_limit_for_transfer_data(
+            ctx,
+            subject_id,
+            node,
+            namespace,
+            schema_id,
+            data,
+            cached,
+        )
+        .await
+    }
+
+    pub(crate) async fn access_limit_for_transfer_data(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        node: &PublicKey,
+        namespace: &str,
+        schema_id: &SchemaType,
+        data: &TransferData,
+        cached: &mut Option<(SnLimit, Option<PublicKey>)>,
+    ) -> Result<Option<u64>, ActorError> {
         let sn = if data.actual_owner == *node {
             Some(data.sn)
         } else if let Some((new_owner, ..)) = &data.actual_new_owner_data
@@ -1169,6 +1225,25 @@ impl WitnessesRegister {
                                 lo: working.gov_version,
                                 hi: event.gov_version,
                             });
+                            let from_sn = working
+                                .ownership_transitions
+                                .last()
+                                .map_or(0, |stint| {
+                                    stint.exit_sn.saturating_add(1)
+                                });
+                            working.ownership_transitions.push(
+                                super::OwnershipStint {
+                                    owner: working.actual_owner.clone(),
+                                    incoming_transfer_sn: event
+                                        .sn
+                                        .saturating_sub(1),
+                                    exit_sn: event.sn,
+                                    outcome: super::OwnershipStintOutcome::Confirmed,
+                                    from_sn,
+                                    gov_lo: working.gov_version,
+                                    gov_hi: event.gov_version,
+                                },
+                            );
                             working.actual_owner = new_owner;
                             working.gov_version = new_gov;
                         }
@@ -1179,13 +1254,32 @@ impl WitnessesRegister {
                         {
                             let entry = working
                                 .old_owners
-                                .entry(new_owner)
+                                .entry(new_owner.clone())
                                 .or_default();
                             entry.sn = event.sn;
                             entry.interval_gov_version.insert(Interval {
                                 lo: new_gov,
                                 hi: event.gov_version,
                             });
+                            let from_sn = working
+                                .ownership_transitions
+                                .last()
+                                .map_or(0, |stint| {
+                                    stint.exit_sn.saturating_add(1)
+                                });
+                            working.ownership_transitions.push(
+                                super::OwnershipStint {
+                                    owner: new_owner,
+                                    incoming_transfer_sn: event
+                                        .sn
+                                        .saturating_sub(1),
+                                    exit_sn: event.sn,
+                                    outcome: super::OwnershipStintOutcome::Rejected,
+                                    from_sn,
+                                    gov_lo: new_gov,
+                                    gov_hi: event.gov_version,
+                                },
+                            );
                         }
                     }
                     _ => {}

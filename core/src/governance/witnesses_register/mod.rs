@@ -204,6 +204,15 @@ pub struct OwnershipStint {
     pub(crate) incoming_transfer_sn: u64,
     pub(crate) exit_sn: u64,
     pub(crate) outcome: OwnershipStintOutcome,
+    /// First SN owned in this reign: the previous stint exit plus one,
+    /// or genesis when this is the first closed stint. Selects the
+    /// fallback by the reign holding `sn`, never by a merged set.
+    pub(crate) from_sn: u64,
+    /// Governance versions bracketing this reign: the reign start at
+    /// close time and the closing version. Bounds the grant fallback
+    /// so a later reign cannot inherit an earlier one.
+    pub(crate) gov_lo: u64,
+    pub(crate) gov_hi: u64,
 }
 
 /// How a stint ended: installed successor or rejected proposal.
@@ -335,6 +344,14 @@ pub enum WitnessesRegisterMessage {
         schema_id: SchemaType,
         actual_sn: Option<u64>,
     },
+    /// Test-only read of the three numeric limits for a node, without
+    /// building a window: access sn, hi sn and gov version caps.
+    GetTrackerLimits {
+        subject_id: DigestIdentifier,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+    },
     SimulateTransferHiSnLimit {
         subject_id: DigestIdentifier,
         transfer_event: Box<Ledger>,
@@ -352,6 +369,18 @@ pub enum WitnessesRegisterMessage {
         actual_sn: Option<u64>,
         owner: Option<PublicKey>,
         owner_gov_version: Option<u64>,
+    },
+    /// Test-only read of status and window over an explicit ledger:
+    /// ownership is rebuilt from the batch while mappings, grants and
+    /// roles come from this node. An empty ledger falls back to the
+    /// stored ownership.
+    QueryWitnessStatusAndWindowOverLedger {
+        subject_id: DigestIdentifier,
+        ledger: Vec<Ledger>,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
     },
     QueryWitnessStatus {
         subject_id: Option<DigestIdentifier>,
@@ -481,6 +510,13 @@ pub enum WitnessesRegisterResponse {
     },
     WitnessStatus(WitnessStatus),
     MaxVersion(u64),
+    /// Test-only numeric limits: access sn, hi sn cap and gov
+    /// version cap for a node over a subject.
+    TrackerLimits {
+        access: Option<u64>,
+        hi_sn: HiSnLimit,
+        gov_version: GovVersionLimit,
+    },
     /// Test-only ownership snapshot: actual owner, pending new
     /// owner, old owners with their last sn, and the stint count.
     Ownership {
@@ -995,7 +1031,7 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         gov_version: u64,
         mut better_gov_version: Option<u64>,
-        witnesses_hi: Option<u64>,
+        witnesses_window: Option<(u64, u64)>,
     ) -> ActualSearch {
         for (namespace, (interval, actual_lo)) in witness_data.iter() {
             if namespace.is_ancestor_or_equal_of(parse_namespace) {
@@ -1004,11 +1040,11 @@ impl WitnessesRegister {
                     // LastSn only when the creator-Witnesses side is open
                     // too: an open schema role alone must not extend a
                     // closed witnesses membership up to the tip.
-                    match witnesses_hi {
+                    match witnesses_window {
                         None => {
                             return ActualSearch::End(SnLimit::LastSn);
                         }
-                        Some(hi) => {
+                        Some((_, hi)) => {
                             // The open schema role must have started
                             // at or before the Witnesses closure to
                             // share a version with it.
@@ -1023,17 +1059,22 @@ impl WitnessesRegister {
                 // Closed intervals are checked oldest first and every
                 // overlapping one counts: only the last interval was
                 // consulted before, so a newer grant without overlap
-                // hid an older valid prefix behind a denial.
+                // hid an older valid prefix behind a denial. A role
+                // fully before the Witnesses opening shares no version
+                // with it and never yields a candidate.
                 for range in interval.iter() {
                     if gov_version > range.hi
-                        || witnesses_hi.is_some_and(|w| range.lo > w)
+                        || witnesses_window.is_some_and(|(_, hi)| range.lo > hi)
+                        || witnesses_window
+                            .is_some_and(|(lo, _)| range.hi < lo)
                     {
                         continue;
                     }
                     // range.hi is the top reachable gov_version;
                     // resolve its sn. The witnesses side caps it when
                     // it closed earlier.
-                    let hi = witnesses_hi.map_or(range.hi, |w| w.min(range.hi));
+                    let hi = witnesses_window
+                        .map_or(range.hi, |(_, hi)| hi.min(range.hi));
                     better_gov_version = better_gov_version.max(Some(hi));
                 }
             }
@@ -1051,7 +1092,7 @@ impl WitnessesRegister {
         parse_namespace: &Namespace,
         gov_version: u64,
         better_gov_version: Option<u64>,
-        witnesses_hi: Option<u64>,
+        witnesses_window: Option<(u64, u64)>,
     ) -> ActualSearch {
         // el esquema específico
         let better_gov_version = if let Some(witness_data) =
@@ -1062,7 +1103,7 @@ impl WitnessesRegister {
                 parse_namespace,
                 gov_version,
                 better_gov_version,
-                witnesses_hi,
+                witnesses_window,
             )
             .await
             {
@@ -1085,7 +1126,7 @@ impl WitnessesRegister {
                 parse_namespace,
                 gov_version,
                 better_gov_version,
-                witnesses_hi,
+                witnesses_window,
             )
             .await;
         }
@@ -1185,19 +1226,28 @@ impl WitnessesRegister {
                     .await;
             }
 
-            if let Some(range) = interval.iter().last()
-                && owner_gov_version <= range.hi
-            {
-                return self
+            for range in interval.iter() {
+                if owner_gov_version > range.hi {
+                    continue;
+                }
+                match self
                     .search_schemas_actual(
                         node,
                         schema_id,
                         parse_namespace,
                         owner_gov_version,
                         better_gov_version,
-                        Some(range.hi),
+                        Some((range.lo, range.hi)),
                     )
-                    .await;
+                    .await
+                {
+                    ActualSearch::End(sn_limit) => {
+                        return ActualSearch::End(sn_limit);
+                    }
+                    ActualSearch::Continue { gov_version } => {
+                        better_gov_version = gov_version;
+                    }
+                }
             }
         }
 
@@ -1668,6 +1718,48 @@ impl Handler<Self> for WitnessesRegister {
                     ranges,
                 });
             }
+            WitnessesRegisterMessage::GetTrackerLimits {
+                subject_id,
+                node,
+                namespace,
+                schema_id,
+            } => {
+                let mut cached = None;
+                let access = self
+                    .access_limit_for_node(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                        &mut cached,
+                    )
+                    .await?;
+                let mut cached = None;
+                let hi_sn = self
+                    .hi_sn_limit_for_node(
+                        ctx,
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                        &mut cached,
+                    )
+                    .await?;
+                let gov_version = self
+                    .gov_version_limit_for_node(
+                        &subject_id,
+                        &node,
+                        &namespace,
+                        &schema_id,
+                    )
+                    .await?;
+                return Ok(WitnessesRegisterResponse::TrackerLimits {
+                    access,
+                    hi_sn,
+                    gov_version,
+                });
+            }
             WitnessesRegisterMessage::SimulateTransferHiSnLimit {
                 subject_id,
                 transfer_event,
@@ -1777,6 +1869,7 @@ impl Handler<Self> for WitnessesRegister {
                 owner_gov_version,
                 ..
             } => {
+                let supplied = transfer_data.is_some();
                 let data = match transfer_data {
                     Some(data) => data,
                     None => match self.subjects.get(&subject_id) {
@@ -1791,36 +1884,58 @@ impl Handler<Self> for WitnessesRegister {
                         }
                     },
                 };
-                let (status, cached) = self
-                    .query_witness_status(
-                        ctx,
-                        Some(subject_id.clone()),
-                        node.clone(),
-                        TrackerIdentity {
-                            namespace: namespace.clone(),
-                            schema_id: schema_id.clone(),
-                        },
-                        OwnerContext {
-                            owner,
-                            gov_version: owner_gov_version,
-                        },
-                        None,
-                    )
-                    .await?;
-                let (sn, transfer_sn, clear_sn, ranges) = self
-                    .build_tracker_window_from_data(
-                        ctx,
-                        &subject_id,
-                        &data,
-                        &node,
-                        TrackerParams {
+                // Status, limits and cache come from the same ownership
+                // the window is built on: a search over stored data
+                // must never back a window over supplied data.
+                let (status, sn, transfer_sn, clear_sn, ranges) =
+                    if supplied {
+                        self.status_and_window_over_data(
+                            ctx,
+                            &subject_id,
+                            &data,
+                            node,
                             namespace,
                             schema_id,
                             actual_sn,
-                        },
-                        cached,
-                    )
-                    .await?;
+                            OwnerContext {
+                                owner,
+                                gov_version: owner_gov_version,
+                            },
+                        )
+                        .await?
+                    } else {
+                        let (status, cached) = self
+                            .query_witness_status(
+                                ctx,
+                                Some(subject_id.clone()),
+                                node.clone(),
+                                TrackerIdentity {
+                                    namespace: namespace.clone(),
+                                    schema_id: schema_id.clone(),
+                                },
+                                OwnerContext {
+                                    owner,
+                                    gov_version: owner_gov_version,
+                                },
+                                None,
+                            )
+                            .await?;
+                        let (sn, transfer_sn, clear_sn, ranges) = self
+                            .build_tracker_window_from_data(
+                                ctx,
+                                &subject_id,
+                                &data,
+                                &node,
+                                TrackerParams {
+                                    namespace,
+                                    schema_id,
+                                    actual_sn,
+                                },
+                                cached,
+                            )
+                            .await?;
+                        (status, sn, transfer_sn, clear_sn, ranges)
+                    };
 
                 return Ok(WitnessesRegisterResponse::WitnessStatusAndWindow {
                     status,
@@ -1856,6 +1971,55 @@ impl Handler<Self> for WitnessesRegister {
                     .await?;
 
                 return Ok(WitnessesRegisterResponse::WitnessStatus(status));
+            }
+            WitnessesRegisterMessage::QueryWitnessStatusAndWindowOverLedger {
+                subject_id,
+                ledger,
+                node,
+                namespace,
+                schema_id,
+                actual_sn,
+            } => {
+                let data = match Self::transfer_data_from_ledger(
+                    &subject_id,
+                    &ledger,
+                ) {
+                    Ok(data) => data,
+                    Err(_) => match self.subjects.get(&subject_id) {
+                        Some(data) => data.clone(),
+                        None => {
+                            return Err(ActorError::Functional {
+                                description: format!(
+                                    "Subject data not found for {}",
+                                    subject_id
+                                ),
+                            });
+                        }
+                    },
+                };
+                let (status, sn, transfer_sn, clear_sn, ranges) = self
+                    .status_and_window_over_data(
+                        ctx,
+                        &subject_id,
+                        &data,
+                        node,
+                        namespace,
+                        schema_id,
+                        actual_sn,
+                        OwnerContext {
+                            owner: None,
+                            gov_version: None,
+                        },
+                    )
+                    .await?;
+
+                return Ok(WitnessesRegisterResponse::WitnessStatusAndWindow {
+                    status,
+                    sn,
+                    transfer_sn,
+                    clear_sn,
+                    ranges,
+                });
             }
         };
 
@@ -2242,11 +2406,18 @@ impl PersistentActor for WitnessesRegister {
                         // event: with a pending new owner the request layer
                         // rejects every Fact/Transfer/EOL, so no tracker
                         // event can interleave between Transfer and Confirm.
+                        let from_sn = data.ownership_transitions.last().map_or(
+                            0,
+                            |stint| stint.exit_sn.saturating_add(1),
+                        );
                         data.ownership_transitions.push(OwnershipStint {
                             owner: data.actual_owner.clone(),
                             incoming_transfer_sn: sn.saturating_sub(1),
                             exit_sn: *sn,
                             outcome: OwnershipStintOutcome::Confirmed,
+                            from_sn,
+                            gov_lo: data.gov_version,
+                            gov_hi: *gov_version,
                         });
 
                         data.actual_owner = new_owner;
@@ -2348,11 +2519,18 @@ impl PersistentActor for WitnessesRegister {
                         // between Transfer and Reject while a new owner
                         // is pending, so the rejected transfer is the
                         // immediately preceding SN.
+                        let from_sn = data.ownership_transitions.last().map_or(
+                            0,
+                            |stint| stint.exit_sn.saturating_add(1),
+                        );
                         data.ownership_transitions.push(OwnershipStint {
                             owner: new_owner,
                             incoming_transfer_sn: sn.saturating_sub(1),
                             exit_sn: *sn,
                             outcome: OwnershipStintOutcome::Rejected,
+                            from_sn,
+                            gov_lo: new_owner_gov_version,
+                            gov_hi: *gov_version,
                         });
 
                         debug!(

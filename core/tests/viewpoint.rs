@@ -12333,6 +12333,12 @@ async fn test_witness_copy_offers_only_head_range() {
     // single-range offers, head SN, wire cap and tip movement. The
     // rest converges freely below, avoiding updater retry timeouts
     // under prolonged holds.
+    // The previous step's open continuation (target None, emitted
+    // once its batch applied) never reaches the server: it stays
+    // held. Drain it here so every step starts quiescent, and prove
+    // no late duplicate of the previous offer scope survived: only
+    // open probes may linger, never a second targeted fetch.
+    let mut prev_to: Option<u64> = None;
     for _ in 0..3 {
         // No batch can advance while the offer is held, so the local
         // tip names exactly the next SN this offer must cover.
@@ -12340,6 +12346,25 @@ async fn test_witness_copy_offers_only_head_range() {
             .get_subject_state(subject_id.clone())
             .await
             .map_or(0, |state| state.sn + 1);
+        let stale: Vec<_> = witness
+            .test_held_outbound()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| match m.message {
+                ActorMessage::DistributionLedgerReq {
+                    target_sn: Some(to),
+                    subject_id: req_subject,
+                    ..
+                } if req_subject == subject_id => Some(to),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            prev_to.is_none_or(|to| !stale.contains(&to)),
+            "no duplicate of the previous offer scope may survive, got {stale:?}"
+        );
+        witness.test_clear_held_outbound().await.unwrap();
 
         // The sweep stalls at its offer: exactly one head to inspect.
         let mut offers = Vec::new();
@@ -12388,28 +12413,47 @@ async fn test_witness_copy_offers_only_head_range() {
         );
 
         // The offer flows and launches a ledger request; re-arm both
-        // holds so the next probe and request stay stepwise.
+        // holds so the next probe and request stay stepwise. Exactly
+        // one new request may name this subject, with the requester's
+        // tip as actual and the offered head range as target: any
+        // duplicate or mistargeted fetch fails the step. Continuations
+        // past the consumed offer scope travel open (target None);
+        // they are a separate mechanism and never match this filter.
+        let served_before = owner
+            .test_serve_processed_count(subject_id.clone())
+            .await
+            .unwrap();
         owner.test_release_held().await.unwrap();
         hold_owner_offers(&owner).await;
-        let mut req_seen = false;
+        let mut reqs = Vec::new();
         for _ in 0..100 {
-            req_seen = witness
+            reqs = witness
                 .test_held_outbound()
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .any(|m| {
-                    matches!(
-                        m.message,
-                        ActorMessage::DistributionLedgerReq { .. }
-                    )
-                });
-            if req_seen {
+                .filter_map(|m| match m.message {
+                    ActorMessage::DistributionLedgerReq {
+                        actual_sn,
+                        target_sn: Some(to),
+                        subject_id: req_subject,
+                        ..
+                    } if req_subject == subject_id => {
+                        Some((actual_sn, to))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !reqs.is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(req_seen, "the head offer must launch exactly one fetch");
+        assert_eq!(
+            reqs,
+            vec![(next_sn.checked_sub(1), range.to_sn)],
+            "the head offer must launch exactly one fetch for the next sn"
+        );
         witness.test_release_held().await.unwrap();
         hold_witness_ledger_reqs(&witness).await;
         // The answer flows freely and the tip moves one head range.
@@ -12427,6 +12471,26 @@ async fn test_witness_copy_offers_only_head_range() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(moved, "the head batch must advance the copy tip");
+        // Exactly one request reached the server this step: the
+        // released fetch. A duplicate emitted alongside it would be
+        // released too and processed as well.
+        let mut served = served_before;
+        for _ in 0..300 {
+            served = owner
+                .test_serve_processed_count(subject_id.clone())
+                .await
+                .unwrap();
+            if served > served_before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            served,
+            served_before + 1,
+            "exactly one fetch may reach the server per step"
+        );
+        prev_to = Some(range.to_sn);
         if *tips.last().unwrap() >= tip {
             break;
         }

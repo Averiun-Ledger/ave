@@ -45,6 +45,186 @@ pub(crate) struct FragSendState {
     tries_left: u32,
 }
 
+/// Test-only push-fragment lifecycle counters, shared across
+/// coordinators via the `push_frag_stats` helper. Records, per
+/// subject, failed initial sends, resent group identities, consumed
+/// acks and live fragment groups/timers. A test proves the injected
+/// first-send failure really fired, the retry resent the whole group
+/// under the same identity, the ack was consumed exactly once and
+/// nothing stays pending on either side. Zero cost in production:
+/// the struct, helper and every call site only exist under
+/// `#[cfg(feature = "test")]`.
+#[cfg(feature = "test")]
+#[derive(Debug, Default)]
+pub(crate) struct PushFragStatsRegistry {
+    initial_failures: std::collections::HashMap<DigestIdentifier, u64>,
+    resends: std::collections::HashMap<
+        DigestIdentifier,
+        Vec<DigestIdentifier>,
+    >,
+    acks: std::collections::HashMap<DigestIdentifier, u64>,
+    live_groups: std::collections::HashMap<DigestIdentifier, i64>,
+    live_timers: std::collections::HashMap<DigestIdentifier, i64>,
+}
+
+#[cfg(feature = "test")]
+pub(crate) type SharedPushFragStats =
+    std::sync::Arc<std::sync::Mutex<PushFragStatsRegistry>>;
+
+#[cfg(feature = "test")]
+impl PushFragStatsRegistry {
+    pub(crate) fn note_initial_failure(
+        &mut self,
+        subject_id: &DigestIdentifier,
+    ) {
+        *self.initial_failures.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn note_resend(
+        &mut self,
+        subject_id: &DigestIdentifier,
+        group_hash: DigestIdentifier,
+    ) {
+        self.resends.entry(subject_id.clone()).or_default().push(group_hash);
+    }
+
+    pub(crate) fn note_ack(&mut self, subject_id: &DigestIdentifier) {
+        *self.acks.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn note_group_open(&mut self, subject_id: &DigestIdentifier) {
+        *self.live_groups.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn note_group_closed(
+        &mut self,
+        subject_id: &DigestIdentifier,
+    ) {
+        *self.live_groups.entry(subject_id.clone()).or_default() -= 1;
+    }
+
+    pub(crate) fn note_timer_armed(&mut self, subject_id: &DigestIdentifier) {
+        *self.live_timers.entry(subject_id.clone()).or_default() += 1;
+    }
+
+    pub(crate) fn note_timer_gone(&mut self, subject_id: &DigestIdentifier) {
+        *self.live_timers.entry(subject_id.clone()).or_default() -= 1;
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        subject_id: &DigestIdentifier,
+    ) -> (u64, Vec<DigestIdentifier>, u64, i64, i64) {
+        (
+            self.initial_failures.get(subject_id).copied().unwrap_or(0),
+            self.resends.get(subject_id).cloned().unwrap_or_default(),
+            self.acks.get(subject_id).copied().unwrap_or(0),
+            self.live_groups.get(subject_id).copied().unwrap_or(0),
+            self.live_timers.get(subject_id).copied().unwrap_or(0),
+        )
+    }
+}
+
+#[cfg(feature = "test")]
+impl DistriCoordinator {
+    fn push_stats(
+        ctx: &ActorContext<Self>,
+    ) -> Option<SharedPushFragStats> {
+        ctx.system().get_helper::<SharedPushFragStats>("push_frag_stats")
+    }
+
+    /// Subject and group identity carried by a fragment batch: the
+    /// coordinator itself never stores them, so tests read them off
+    /// the wire frames it already holds.
+    fn frag_identity(
+        frags: &[ActorMessage],
+    ) -> Option<(DigestIdentifier, DigestIdentifier)> {
+        match frags.first()? {
+            ActorMessage::DistributionLedgerFrag {
+                subject_id,
+                group_hash,
+                ..
+            } => Some((subject_id.clone(), group_hash.clone())),
+            _ => None,
+        }
+    }
+
+    fn note_initial_failure(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_initial_failure(subject_id);
+        }
+    }
+
+    fn note_resend(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        group_hash: DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_resend(subject_id, group_hash);
+        }
+    }
+
+    fn note_ack(ctx: &ActorContext<Self>, subject_id: &DigestIdentifier) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_ack(subject_id);
+        }
+    }
+
+    fn note_group_open(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_group_open(subject_id);
+        }
+    }
+
+    fn note_group_closed(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_group_closed(subject_id);
+        }
+    }
+
+    fn note_timer_armed(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_timer_armed(subject_id);
+        }
+    }
+
+    fn note_timer_gone(
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+    ) {
+        if let Some(stats) = Self::push_stats(ctx)
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.note_timer_gone(subject_id);
+        }
+    }
+}
+
 #[async_trait]
 impl Actor for DistriCoordinator {
     type Event = ();
@@ -93,8 +273,24 @@ impl DistriCoordinator {
         &mut self,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        // Test-only lifecycles mirror the transitions below, so a
+        // leaked group or timer fails the suites instead of hiding.
+        #[cfg(feature = "test")]
+        let subject_id = self
+            .frag_pending
+            .as_ref()
+            .and_then(|pending| Self::frag_identity(&pending.frags))
+            .map(|(subject_id, _)| subject_id);
         if let Some(key) = self.frag_timer.take() {
             ctx.cancel_timer(key);
+            #[cfg(feature = "test")]
+            if let Some(subject_id) = &subject_id {
+                Self::note_timer_gone(ctx, subject_id);
+            }
+        }
+        #[cfg(feature = "test")]
+        if let Some(subject_id) = &subject_id {
+            Self::note_group_closed(ctx, subject_id);
         }
         self.frag_pending = None;
         if let Some(metrics) = try_core_metrics() {
@@ -149,8 +345,18 @@ impl DistriCoordinator {
         &mut self,
         ctx: &ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        #[cfg(feature = "test")]
+        let subject_id = self
+            .frag_pending
+            .as_ref()
+            .and_then(|pending| Self::frag_identity(&pending.frags))
+            .map(|(subject_id, _)| subject_id);
         if let Some(key) = self.frag_timer.take() {
             ctx.cancel_timer(key);
+            #[cfg(feature = "test")]
+            if let Some(subject_id) = &subject_id {
+                Self::note_timer_gone(ctx, subject_id);
+            }
         }
         #[cfg(any(test, feature = "test"))]
         let interval = Duration::from_secs(2);
@@ -159,6 +365,10 @@ impl DistriCoordinator {
         let key =
             ctx.schedule_once(interval, DistriCoordinatorMessage::FragRetry)?;
         self.frag_timer = Some(key);
+        #[cfg(feature = "test")]
+        if let Some(subject_id) = &subject_id {
+            Self::note_timer_armed(ctx, subject_id);
+        }
         Ok(())
     }
 
@@ -269,6 +479,8 @@ impl DistriCoordinator {
             receiver_actor,
             tries_left: tries,
         });
+        #[cfg(feature = "test")]
+        Self::note_group_open(ctx, &subject_id);
         if let Err(e) = self.arm_frag_timer(ctx) {
             error!(
                 msg_type = "NetworkDistribution",
@@ -300,6 +512,8 @@ impl DistriCoordinator {
                 error = %e,
                 "Initial fragment send failed, keeping retry alive"
             );
+            #[cfg(feature = "test")]
+            Self::note_initial_failure(ctx, &subject_id);
         }
 
         debug!(
@@ -327,17 +541,41 @@ impl Handler<Self> for DistriCoordinator {
                 self.finish_with_timeout(ctx).await?;
             }
             DistriCoordinatorMessage::FragRetry => {
+                // The retry timer fired: consume its arm here; the
+                // re-arm below counts a fresh one. Taking first keeps
+                // a fired key from being double-counted at re-arm.
+                #[cfg(feature = "test")]
+                if self.frag_timer.take().is_some()
+                    && let Some(pending) = self.frag_pending.as_ref()
+                    && let Some((subject_id, _)) =
+                        Self::frag_identity(&pending.frags)
+                {
+                    Self::note_timer_gone(ctx, &subject_id);
+                }
                 let Some(mut pending) = self.frag_pending.take() else {
                     return Ok(());
                 };
                 if pending.tries_left == 0 {
+                    #[cfg(feature = "test")]
+                    if let Some((subject_id, _)) =
+                        Self::frag_identity(&pending.frags)
+                    {
+                        Self::note_group_closed(ctx, &subject_id);
+                    }
                     self.finish_with_timeout(ctx).await?;
                     return Ok(());
                 }
                 pending.tries_left = pending.tries_left.saturating_sub(1);
                 // Best effort resend: a failed fragment rides the
                 // next retry, and exhaustion still closes loudly
-                // through the timeout below.
+                // through the timeout below. The whole group goes out
+                // together under its original identity.
+                #[cfg(feature = "test")]
+                if let Some((subject_id, group_hash)) =
+                    Self::frag_identity(&pending.frags)
+                {
+                    Self::note_resend(ctx, &subject_id, group_hash);
+                }
                 if let Err(e) = self
                     .send_frags(
                         &pending.frags,
@@ -543,8 +781,24 @@ impl Handler<Self> for DistriCoordinator {
                 // The verified ack completes this generation in both
                 // modes: drop any fragment resend timer alongside the
                 // retry actor below.
+                #[cfg(feature = "test")]
+                let ack_identity = self
+                    .frag_pending
+                    .as_ref()
+                    .and_then(|pending| {
+                        Self::frag_identity(&pending.frags)
+                    });
                 if let Some(key) = self.frag_timer.take() {
                     ctx.cancel_timer(key);
+                    #[cfg(feature = "test")]
+                    if let Some((subject_id, _)) = &ack_identity {
+                        Self::note_timer_gone(ctx, subject_id);
+                    }
+                }
+                #[cfg(feature = "test")]
+                if let Some((subject_id, _)) = &ack_identity {
+                    Self::note_group_closed(ctx, subject_id);
+                    Self::note_ack(ctx, subject_id);
                 }
                 self.frag_pending = None;
 

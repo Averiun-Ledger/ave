@@ -8,7 +8,8 @@ use ave_common::{Namespace, SchemaType};
 
 use super::{
     ActualSearch, CreatorWitnessRegistration, GovVersionLimit, HiSnLimit,
-    IntervalData, WitnessStatus, WitnessesRegister, WitnessesType,
+    IntervalData, TrackerDeliveryRange, TransferData, WitnessStatus,
+    WitnessesRegister, WitnessesType,
 };
 
 impl WitnessesRegister {
@@ -250,6 +251,145 @@ impl WitnessesRegister {
                 GovVersionLimit::None
             }
         }
+    }
+
+    pub(crate) async fn query_witness_status_for_transfer_data(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        data: &TransferData,
+        node: PublicKey,
+        identity: TrackerIdentity,
+        owner_ctx: OwnerContext,
+        cached_search: Option<(SnLimit, Option<PublicKey>)>,
+    ) -> Result<(WitnessStatus, Option<(SnLimit, Option<PublicKey>)>), ActorError>
+    {
+        // Status, limits and the search cache are all derived from the
+        // same ownership used by the window below: reusing a search
+        // from another ownership could promote a stale LastSn past an
+        // old-owner cap.
+        let mut cached = cached_search;
+        let access_sn = self
+            .access_limit_for_transfer_data(
+                ctx,
+                subject_id,
+                &node,
+                &identity.namespace,
+                &identity.schema_id,
+                data,
+                &mut cached,
+            )
+            .await?;
+        let hi_sn_limit = self
+            .hi_sn_limit_for_transfer_data(
+                ctx,
+                subject_id,
+                &node,
+                TrackerIdentity {
+                    namespace: identity.namespace.clone(),
+                    schema_id: identity.schema_id.clone(),
+                },
+                data,
+                &mut cached,
+            )
+            .await?;
+        let gov_version_limit = self
+            .gov_version_limit_for_transfer_data(
+                &node,
+                &identity.namespace,
+                &identity.schema_id,
+                data,
+            )
+            .await;
+
+        let mut create_access = false;
+        let mut create_gov_version_limit = GovVersionLimit::None;
+        if let Some(owner) = owner_ctx.owner
+            && let Some(gov_version) = owner_ctx.gov_version
+        {
+            create_access = self.has_create_access_for_node_at_version(
+                &node,
+                &owner,
+                &identity.schema_id,
+                &identity.namespace,
+                gov_version,
+            );
+            create_gov_version_limit = self
+                .create_gov_version_limit_for_node(
+                    &node,
+                    &owner,
+                    &identity.schema_id,
+                    &identity.namespace,
+                    gov_version,
+                )
+                .await;
+        }
+
+        Ok((
+            WitnessStatus {
+                access_sn,
+                hi_sn_limit,
+                gov_version_limit,
+                create_access,
+                create_gov_version_limit,
+            },
+            cached,
+        ))
+    }
+
+    /// Status and window over one explicit ownership: the search cache
+    /// backing the window always comes from the same data, so a stale
+    /// stored ownership can never promote its search into a newer
+    /// supplied one.
+    pub(crate) async fn status_and_window_over_data(
+        &self,
+        ctx: &ActorContext<Self>,
+        subject_id: &DigestIdentifier,
+        data: &TransferData,
+        node: PublicKey,
+        namespace: String,
+        schema_id: SchemaType,
+        actual_sn: Option<u64>,
+        owner_ctx: OwnerContext,
+    ) -> Result<
+        (
+            WitnessStatus,
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            Vec<TrackerDeliveryRange>,
+        ),
+        ActorError,
+    > {
+        let (status, cached) = self
+            .query_witness_status_for_transfer_data(
+                ctx,
+                subject_id,
+                data,
+                node.clone(),
+                TrackerIdentity {
+                    namespace: namespace.clone(),
+                    schema_id: schema_id.clone(),
+                },
+                owner_ctx,
+                None,
+            )
+            .await?;
+        let (sn, transfer_sn, clear_sn, ranges) = self
+            .build_tracker_window_from_data(
+                ctx,
+                subject_id,
+                data,
+                &node,
+                crate::model::common::TrackerParams {
+                    namespace,
+                    schema_id,
+                    actual_sn,
+                },
+                cached,
+            )
+            .await?;
+        Ok((status, sn, transfer_sn, clear_sn, ranges))
     }
 
     pub(crate) async fn query_witness_status(
