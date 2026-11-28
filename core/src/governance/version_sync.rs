@@ -477,11 +477,7 @@ impl GovernanceVersionSync {
                     && sn.is_some_and(|s| target.sn.is_none_or(|t| s > t)))
         });
         if should_replace {
-            self.update_target = Some(UpdateTarget {
-                peer,
-                version,
-                sn,
-            });
+            self.update_target = Some(UpdateTarget { peer, version, sn });
             self.target_set_at = Some(Instant::now());
         }
 
@@ -750,8 +746,7 @@ impl Handler<Self> for GovernanceVersionSync {
                     // dropping the intel until the next tick.
                     // Not an idle proof, so no idle notify. A
                     // stranger stays ignored.
-                    let sync_peers = match self.get_sync_peers(ctx).await
-                    {
+                    let sync_peers = match self.get_sync_peers(ctx).await {
                         Ok(peers) => peers,
                         Err(error) => {
                             warn!(
@@ -759,24 +754,17 @@ impl Handler<Self> for GovernanceVersionSync {
                                 error = %error,
                                 "Late version answer dropped: sync peers unreadable",
                             );
-                            return Ok(
-                                GovernanceVersionSyncResponse::None,
-                            );
+                            return Ok(GovernanceVersionSyncResponse::None);
                         }
                     };
                     if !self.governance_peers.contains(&peer)
                         && !sync_peers.contains(&peer)
                     {
-                        return Ok(
-                            GovernanceVersionSyncResponse::None,
-                        );
+                        return Ok(GovernanceVersionSyncResponse::None);
                     }
                     self.peer_backoff.note_success(&peer);
-                    self.update_target = Some(UpdateTarget {
-                        peer,
-                        version,
-                        sn,
-                    });
+                    self.update_target =
+                        Some(UpdateTarget { peer, version, sn });
                     self.target_set_at = Some(Instant::now());
                     if let Err(error) =
                         self.trigger_update_if_needed(ctx, false).await

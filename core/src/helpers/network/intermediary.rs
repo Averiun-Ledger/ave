@@ -38,7 +38,6 @@ use crate::{
 use super::error::IntermediaryError;
 
 use super::ActorMessage;
-use ave_network::ComunicateInfo;
 #[cfg(feature = "test")]
 use super::test_faults;
 use super::{NetworkMessage, WIRE_VERSION, service::NetworkSender};
@@ -49,6 +48,7 @@ use ave_actors::{ActorPath, SystemRef};
 use ave_common::identity::{DSAlgorithm, PublicKey};
 use ave_network::Command as NetworkCommand;
 use ave_network::CommandHelper as Command;
+use ave_network::ComunicateInfo;
 use ave_network::{PeerId, PublicKeyEd25519};
 use bytes::Bytes;
 use rmp_serde::Deserializer;
@@ -116,8 +116,7 @@ impl Intermediary {
         system.add_helper(
             "verify_stats",
             Arc::new(std::sync::Mutex::new(
-                crate::distribution::transfer_verifier::VerifyStatsRegistry::default(
-                ),
+                crate::distribution::transfer_verifier::VerifyStatsRegistry::default(),
             )),
         );
         // Test-only retained-prefix counters, read by the suites
@@ -156,9 +155,7 @@ impl Intermediary {
         #[cfg(feature = "test")]
         system.add_helper(
             "truncation_stats",
-            Arc::new(std::sync::Mutex::new(
-                TruncationStatsRegistry::default(),
-            )),
+            Arc::new(std::sync::Mutex::new(TruncationStatsRegistry::default())),
         );
         // Test-only fragment reassembly counters, read by the suites
         // through the `frag_stats` helper. Tracks assemblies, ready
@@ -179,8 +176,7 @@ impl Intermediary {
         system.add_helper(
             "push_frag_stats",
             Arc::new(std::sync::Mutex::new(
-                crate::distribution::coordinator::PushFragStatsRegistry::default(
-                ),
+                crate::distribution::coordinator::PushFragStatsRegistry::default(),
             )),
         );
         // Test-only serve-attempt counters, read by the suites
@@ -467,10 +463,9 @@ impl Intermediary {
                     );
                 }
                 {
-                    let required =
-                        crate::helpers::network::NetworkMessage::required_wire_version(
-                            &message.message,
-                        );
+                    let required = crate::helpers::network::NetworkMessage::required_wire_version(
+                        &message.message,
+                    );
                     if required > message.wire_version {
                         if let Some(metrics) = try_core_metrics() {
                             metrics
@@ -1186,23 +1181,19 @@ impl Intermediary {
                                     }
                                 })?;
                             actor
-                                .tell(
-                                    CompileWorkerMessage::ArtifactProbeRequest {
-                                        subject_id,
-                                        schema_id,
-                                        gov_version,
-                                        request_nonce,
-                                        info: message.info,
-                                        sender: sender.clone(),
-                                        receiver_actor,
-                                    },
-                                )
+                                .tell(CompileWorkerMessage::ArtifactProbeRequest {
+                                    subject_id,
+                                    schema_id,
+                                    gov_version,
+                                    request_nonce,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                    receiver_actor,
+                                })
                                 .await
-                                .map_err(|e| {
-                                    IntermediaryError::SendMessageFailed {
-                                        path: path.to_string(),
-                                        details: e.to_string(),
-                                    }
+                                .map_err(|e| IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
                                 })?;
                         } else {
                             let actor = system
@@ -1214,23 +1205,19 @@ impl Intermediary {
                                     }
                                 })?;
                             actor
-                                .tell(
-                                    ContractCompilerMessage::ArtifactProbeRequest {
-                                        subject_id,
-                                        schema_id,
-                                        gov_version,
-                                        request_nonce,
-                                        info: message.info,
-                                        sender: sender.clone(),
-                                        receiver_actor,
-                                    },
-                                )
+                                .tell(ContractCompilerMessage::ArtifactProbeRequest {
+                                    subject_id,
+                                    schema_id,
+                                    gov_version,
+                                    request_nonce,
+                                    info: message.info,
+                                    sender: sender.clone(),
+                                    receiver_actor,
+                                })
                                 .await
-                                .map_err(|e| {
-                                    IntermediaryError::SendMessageFailed {
-                                        path: path.to_string(),
-                                        details: e.to_string(),
-                                    }
+                                .map_err(|e| IntermediaryError::SendMessageFailed {
+                                    path: path.to_string(),
+                                    details: e.to_string(),
                                 })?;
                         }
                     }
@@ -1245,19 +1232,15 @@ impl Intermediary {
                                 path: path.to_string(),
                             })?;
                         actor
-                            .tell(
-                                ContractCompilerMessage::ArtifactProbeResponse {
-                                    result,
-                                    request_nonce,
-                                    sender: sender.clone(),
-                                },
-                            )
+                            .tell(ContractCompilerMessage::ArtifactProbeResponse {
+                                result,
+                                request_nonce,
+                                sender: sender.clone(),
+                            })
                             .await
-                            .map_err(|e| {
-                                IntermediaryError::SendMessageFailed {
-                                    path: path.to_string(),
-                                    details: e.to_string(),
-                                }
+                            .map_err(|e| IntermediaryError::SendMessageFailed {
+                                path: path.to_string(),
+                                details: e.to_string(),
                             })?;
                     }
                     ActorMessage::ArtifactReq {

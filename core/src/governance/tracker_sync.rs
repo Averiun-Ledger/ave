@@ -298,18 +298,16 @@ impl TrackerSync {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.tracker_sync_version_paused()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.tracker_sync_version_paused())
             })
             .unwrap_or(false)
     }
 
     #[cfg(feature = "test")]
-    fn set_tracker_sync_version_paused(
-        ctx: &ActorContext<Self>,
-        paused: bool,
-    ) {
+    fn set_tracker_sync_version_paused(ctx: &ActorContext<Self>, paused: bool) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
         if let Some(registry) = ctx
             .system()
@@ -321,10 +319,7 @@ impl TrackerSync {
     }
 
     #[cfg(feature = "test")]
-    fn note_tracker_sync_version_hold(
-        ctx: &ActorContext<Self>,
-        nonce: u64,
-    ) {
+    fn note_tracker_sync_version_hold(ctx: &ActorContext<Self>, nonce: u64) {
         use crate::helpers::network::test_faults::SharedFaultRegistry;
         if let Some(registry) = ctx
             .system()
@@ -850,9 +845,9 @@ impl TrackerSync {
                         request.request_nonce,
                     );
                     while Self::tracker_sync_version_paused(ctx) {
-                        tokio::time::sleep(
-                            std::time::Duration::from_millis(100),
-                        )
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        ))
                         .await;
                     }
                     // One-shot release: re-arm so the next pass parks

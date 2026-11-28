@@ -671,7 +671,10 @@ impl WitnessesRegister {
         if let Some(from) = current_from
             && from <= hi
         {
-            out.insert(Interval { lo: from.max(lo), hi });
+            out.insert(Interval {
+                lo: from.max(lo),
+                hi,
+            });
         }
         out
     }
@@ -719,8 +722,7 @@ impl WitnessesRegister {
             let Some(witness_data) = self.witnesses.get(&key) else {
                 continue;
             };
-            for (current_namespace, (intervals, current_from)) in witness_data
-            {
+            for (current_namespace, (intervals, current_from)) in witness_data {
                 if !current_namespace.is_ancestor_or_equal_of(namespace) {
                     continue;
                 }
@@ -857,7 +859,10 @@ impl WitnessesRegister {
             out = Some(Self::merge_grant(out, grant));
         }
 
-        if let (Some(history), Some((creator_intervals, creator_current_from))) = (
+        if let (
+            Some(history),
+            Some((creator_intervals, creator_current_from)),
+        ) = (
             grants.get(&WitnessesType::Witnesses),
             intervals.get(&WitnessesType::Witnesses),
         ) {
@@ -873,11 +878,7 @@ impl WitnessesRegister {
                 owner_hi,
             );
             let role_cov = self.schema_role_coverage_in(
-                node,
-                schema_id,
-                namespace,
-                owner_lo,
-                owner_hi,
+                node, schema_id, namespace, owner_lo, owner_hi,
             );
             let mut generic = None;
             for iv in Self::intersect_sets(&creator_cov, &role_cov).iter() {
@@ -1065,8 +1066,7 @@ impl WitnessesRegister {
                 for range in interval.iter() {
                     if gov_version > range.hi
                         || witnesses_window.is_some_and(|(_, hi)| range.lo > hi)
-                        || witnesses_window
-                            .is_some_and(|(lo, _)| range.hi < lo)
+                        || witnesses_window.is_some_and(|(lo, _)| range.hi < lo)
                     {
                         continue;
                     }
@@ -2406,10 +2406,10 @@ impl PersistentActor for WitnessesRegister {
                         // event: with a pending new owner the request layer
                         // rejects every Fact/Transfer/EOL, so no tracker
                         // event can interleave between Transfer and Confirm.
-                        let from_sn = data.ownership_transitions.last().map_or(
-                            0,
-                            |stint| stint.exit_sn.saturating_add(1),
-                        );
+                        let from_sn = data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1));
                         data.ownership_transitions.push(OwnershipStint {
                             owner: data.actual_owner.clone(),
                             incoming_transfer_sn: sn.saturating_sub(1),
@@ -2519,10 +2519,10 @@ impl PersistentActor for WitnessesRegister {
                         // between Transfer and Reject while a new owner
                         // is pending, so the rejected transfer is the
                         // immediately preceding SN.
-                        let from_sn = data.ownership_transitions.last().map_or(
-                            0,
-                            |stint| stint.exit_sn.saturating_add(1),
-                        );
+                        let from_sn = data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1));
                         data.ownership_transitions.push(OwnershipStint {
                             owner: new_owner,
                             incoming_transfer_sn: sn.saturating_sub(1),

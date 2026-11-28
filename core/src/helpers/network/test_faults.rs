@@ -590,11 +590,11 @@ impl TestFaultRegistry {
         subject_id: &str,
         generation: u64,
     ) -> bool {
-        self.dead_supervised_rounds.iter().any(
-            |(subject, generation_, _)| {
+        self.dead_supervised_rounds
+            .iter()
+            .any(|(subject, generation_, _)| {
                 subject == subject_id && *generation_ == generation
-            },
-        )
+            })
     }
 
     pub fn set_tracker_sync_version_paused(&mut self, paused: bool) {

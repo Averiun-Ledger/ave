@@ -23,19 +23,19 @@ use ave_common::{
 use ave_core::Api;
 use ave_core::auth::AuthWitness;
 use ave_core::governance::data::GovernanceData;
-use ave_core::governance::witnesses_register::{
-    TrackerDeliveryMode, TrackerDeliveryRange,
-};
-use ave_core::update::{UpdateSubjectKind, UpdateWitnessOffer};
-use ave_core::model::event::Ledger;
-use ave_core::helpers::network::test_faults::{
-    FaultAction, FaultDirection, FaultMessage, FaultRule,
-};
-use ave_core::helpers::network::{ActorMessage, NetworkMessage};
 use ave_core::governance::model::{
     CreatorWitness, PolicyGov, PolicySchema, Quorum, RoleCreator,
     RoleGovIssuer, RolesGov, RolesSchema, RolesTrackerSchemas, Schema,
 };
+use ave_core::governance::witnesses_register::{
+    TrackerDeliveryMode, TrackerDeliveryRange,
+};
+use ave_core::helpers::network::test_faults::{
+    FaultAction, FaultDirection, FaultMessage, FaultRule,
+};
+use ave_core::helpers::network::{ActorMessage, NetworkMessage};
+use ave_core::model::event::Ledger;
+use ave_core::update::{UpdateSubjectKind, UpdateWitnessOffer};
 
 use ave_network::{ComunicateInfo, NodeType, RoutingNode};
 use common::{
@@ -51,8 +51,8 @@ use serde_json::json;
 use test_log::test;
 
 use crate::common::{
-    PORT_COUNTER, create_node, get_abort_request, node_running, wait_request,
-    wait_request_state,
+    PORT_COUNTER, create_node, fast_update_sync, get_abort_request,
+    node_running, wait_request, wait_request_state,
 };
 
 #[test(tokio::test)]
@@ -6777,8 +6777,7 @@ async fn gov_copy_auth_req_lost_retries_to_tip() {
         .await;
     let owner = nodes[0].api.clone();
     let learner = nodes[1].api.clone();
-    let learner_key =
-        PublicKey::from_str(learner.public_key()).unwrap();
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&learner]).await;
@@ -6837,19 +6836,15 @@ async fn gov_copy_auth_req_lost_retries_to_tip() {
         .await
         .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
-    let state =
-        get_subject(&learner, governance_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
+    let state = get_subject(&learner, governance_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(state.sn, tip);
     let held = learner.test_held_outbound().await.unwrap();
     let held_reqs = held
         .iter()
         .filter(|m| {
-            matches!(
-                &m.message,
-                ActorMessage::DistributionLedgerReq { .. }
-            )
+            matches!(&m.message, ActorMessage::DistributionLedgerReq { .. })
         })
         .count();
     assert_eq!(held_reqs, 1, "first request must stay held, copy via retry");
@@ -6873,8 +6868,7 @@ async fn gov_copy_auth_res_lost_retries_to_tip() {
         .await;
     let owner = nodes[0].api.clone();
     let learner = nodes[1].api.clone();
-    let learner_key =
-        PublicKey::from_str(learner.public_key()).unwrap();
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&learner]).await;
@@ -6933,19 +6927,15 @@ async fn gov_copy_auth_res_lost_retries_to_tip() {
         .await
         .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
-    let state =
-        get_subject(&learner, governance_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
+    let state = get_subject(&learner, governance_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(state.sn, tip);
     let held = owner.test_held_outbound().await.unwrap();
     let held_res = held
         .iter()
         .filter(|m| {
-            matches!(
-                &m.message,
-                ActorMessage::DistributionLedgerRes { .. }
-            )
+            matches!(&m.message, ActorMessage::DistributionLedgerRes { .. })
         })
         .count();
     assert_eq!(held_res, 1, "first response must stay held, copy via retry");
@@ -6971,8 +6961,7 @@ async fn gov_copy_premature_is_all_treated_as_partial() {
     let owner = nodes[0].api.clone();
     let learner = nodes[1].api.clone();
     let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
-    let learner_key =
-        PublicKey::from_str(learner.public_key()).unwrap();
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&learner]).await;
@@ -7035,7 +7024,12 @@ async fn gov_copy_premature_is_all_treated_as_partial() {
 
     let mut prefix = Vec::new();
     for sn in 0..=2 {
-        prefix.push(owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap());
+        prefix.push(
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
+        );
     }
     learner
         .test_inject_inbound(
@@ -7087,10 +7081,9 @@ async fn gov_copy_premature_is_all_treated_as_partial() {
     }
 
     owner.test_clear_faults().await.unwrap();
-    let state =
-        get_subject(&learner, governance_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
+    let state = get_subject(&learner, governance_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(state.sn, tip);
     let start = tokio::time::Instant::now();
     loop {
@@ -7129,8 +7122,7 @@ async fn gov_copy_partial_is_all_false_continues_to_tip() {
     let owner = nodes[0].api.clone();
     let learner = nodes[1].api.clone();
     let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
-    let learner_key =
-        PublicKey::from_str(learner.public_key()).unwrap();
+    let learner_key = PublicKey::from_str(learner.public_key()).unwrap();
 
     let governance_id =
         create_and_authorize_governance(&owner, vec![&learner]).await;
@@ -7192,7 +7184,12 @@ async fn gov_copy_partial_is_all_false_continues_to_tip() {
 
     let mut prefix = Vec::new();
     for sn in 0..=2 {
-        prefix.push(owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap());
+        prefix.push(
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
+        );
     }
     learner
         .test_inject_inbound(
@@ -7219,10 +7216,9 @@ async fn gov_copy_partial_is_all_false_continues_to_tip() {
         .unwrap();
 
     owner.test_release_held().await.unwrap();
-    let state =
-        get_subject(&learner, governance_id.clone(), Some(tip), true)
-            .await
-            .unwrap();
+    let state = get_subject(&learner, governance_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(state.sn, tip);
 
     for node in nodes.iter_mut() {
@@ -7331,7 +7327,10 @@ async fn gov_copy_failed_events_terminate_by_sn_not_version() {
         .unwrap();
     let tip = owner_state.sn;
     let version = governance_properties(owner_state.properties).version;
-    assert!(tip > version, "trailing failures must split SN {tip} from version {version}");
+    assert!(
+        tip > version,
+        "trailing failures must split SN {tip} from version {version}"
+    );
 
     learner
         .test_install_fault(FaultRule {
@@ -7357,10 +7356,7 @@ async fn gov_copy_failed_events_terminate_by_sn_not_version() {
     let held_reqs = held
         .iter()
         .filter(|m| {
-            matches!(
-                &m.message,
-                ActorMessage::DistributionLedgerReq { .. }
-            )
+            matches!(&m.message, ActorMessage::DistributionLedgerReq { .. })
         })
         .count();
     assert_eq!(held_reqs, 1, "first request must stay held, copy via retry");
@@ -7379,9 +7375,9 @@ async fn gov_copy_failed_events_terminate_by_sn_not_version() {
 #[test(tokio::test)]
 async fn governance_sync_discovers_failed_event_with_unchanged_version() {
     assert_eq!(
-        NetworkMessage::required_wire_version(&ActorMessage::GovernanceVersionRes {
-            version: 1
-        }),
+        NetworkMessage::required_wire_version(
+            &ActorMessage::GovernanceVersionRes { version: 1 }
+        ),
         1,
         "the legacy version-only answer stays a v1 message"
     );
@@ -7535,7 +7531,10 @@ async fn governance_sync_discovers_failed_event_with_unchanged_version() {
 /// of timing assumptions.
 async fn wait_update_retry_exhausted(api: &Api) {
     for _ in 0..450 {
-        if api.test_update_retry_exhausted_hold_count().await.unwrap_or(0)
+        if api
+            .test_update_retry_exhausted_hold_count()
+            .await
+            .unwrap_or(0)
             >= 1
         {
             return;
@@ -7628,6 +7627,7 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            update_sync: Some(fast_update_sync()),
             ..Default::default()
         })
         .await;
@@ -7684,7 +7684,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
         .unwrap()
         .sn;
     assert!(
-        learner.get_subject_state(governance_id.clone()).await.is_err(),
+        learner
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err(),
         "the learner starts empty so no prior acquisition exists"
     );
 
@@ -7700,7 +7703,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
         })
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(true)
+        .await
+        .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
     wait_update_retry_exhausted(&learner).await;
     let round = newest_held_request_round(&learner).await;
@@ -7710,7 +7716,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
     let mut ledger = Vec::new();
     for sn in 0..=tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -7725,7 +7734,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
     get_subject(&learner, governance_id.clone(), Some(tip), true)
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(false)
+        .await
+        .unwrap();
 
     wait_deferred_count(&learner, governance_id.clone(), 1).await;
     assert_eq!(
@@ -7737,7 +7749,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop() {
         "the drained completion certifies the tip exactly once"
     );
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "the certified round stops instead of lingering"
     );
 
@@ -7760,6 +7775,7 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            update_sync: Some(fast_update_sync()),
             is_service: false,
             ..Default::default()
         })
@@ -7817,7 +7833,10 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
         .unwrap()
         .sn;
     assert!(
-        learner.get_subject_state(governance_id.clone()).await.is_err(),
+        learner
+            .get_subject_state(governance_id.clone())
+            .await
+            .is_err(),
         "the learner starts empty so no prior acquisition exists"
     );
 
@@ -7833,7 +7852,10 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
         })
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(true)
+        .await
+        .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
     wait_update_retry_exhausted(&learner).await;
     let round = newest_held_request_round(&learner).await;
@@ -7848,7 +7870,10 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
     let mut ledger = Vec::new();
     for sn in 0..=tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -7863,7 +7888,10 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
     get_subject(&learner, governance_id.clone(), Some(tip), true)
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(false)
+        .await
+        .unwrap();
 
     wait_deferred_count(&learner, governance_id.clone(), 1).await;
     assert_eq!(
@@ -7875,7 +7903,10 @@ async fn gov_copy_stale_generation_done_certifies_reached_target() {
         "the stale completion must certify the reached tip exactly once"
     );
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "the certified round stops instead of lingering"
     );
 
@@ -7895,6 +7926,7 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            update_sync: Some(fast_update_sync()),
             ..Default::default()
         })
         .await;
@@ -7964,7 +7996,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
         .unwrap()
         .sn;
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "no auth round may certify this copy"
     );
 
@@ -7978,8 +8013,14 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
         })
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(true).await.unwrap();
-    learner.test_trigger_gov_update(governance_id.clone()).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(true)
+        .await
+        .unwrap();
+    learner
+        .test_trigger_gov_update(governance_id.clone())
+        .await
+        .unwrap();
     wait_update_retry_exhausted(&learner).await;
     let round = newest_held_request_round(&learner).await;
 
@@ -7992,7 +8033,10 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
     let mut ledger = Vec::new();
     for sn in local_sn + 1..=tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -8007,18 +8051,28 @@ async fn gov_copy_distribution_done_survives_retry_exhaustion_stop_manual() {
     get_subject(&learner, governance_id.clone(), Some(tip), true)
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(false)
+        .await
+        .unwrap();
 
     // The stop is the completion proof: only after the round is gone
     // may the count be read as final, never right after the release.
     for _ in 0..300 {
-        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+        if !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "no auth round lingers behind the manual one"
     );
     wait_deferred_count(&learner, governance_id.clone(), 2).await;
@@ -8058,6 +8112,7 @@ async fn gov_copy_premature_target_done_is_ignored() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            update_sync: Some(fast_update_sync()),
             ..Default::default()
         })
         .await;
@@ -8124,7 +8179,10 @@ async fn gov_copy_premature_target_done_is_ignored() {
         })
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(true)
+        .await
+        .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
     wait_update_retry_exhausted(&learner).await;
     let round = newest_held_request_round(&learner).await;
@@ -8135,7 +8193,10 @@ async fn gov_copy_premature_target_done_is_ignored() {
     let mut ledger = Vec::new();
     for sn in 0..tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -8151,7 +8212,10 @@ async fn gov_copy_premature_target_done_is_ignored() {
         .await
         .unwrap();
     assert!(
-        learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "a premature completion must not stop the supervised round"
     );
     assert_eq!(
@@ -8166,7 +8230,10 @@ async fn gov_copy_premature_target_done_is_ignored() {
     // Releasing the exhausted stop still acquires nothing: the only
     // queued completion stayed below the target, and no supervisor
     // remains to run anything else afterwards.
-    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(false)
+        .await
+        .unwrap();
     assert_eq!(
         learner
             .test_deferred_acquisition_count(governance_id.clone())
@@ -8251,13 +8318,19 @@ async fn gov_copy_unsupervised_completion_runs_deferred_fallback() {
     // No update round of any kind runs here: the injected batch must
     // complete through the unsupervised fallback alone.
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "no supervised round may certify this copy"
     );
     let mut ledger = Vec::new();
     for sn in 0..=tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -8301,6 +8374,7 @@ async fn gov_copy_late_supervised_below_target_never_acquires() {
             bootstrap: vec![vec![]],
             addressable: vec![vec![0]],
             always_accept: true,
+            update_sync: Some(fast_update_sync()),
             is_service: false,
             ..Default::default()
         })
@@ -8360,7 +8434,11 @@ async fn gov_copy_late_supervised_below_target_never_acquires() {
         .await
         .unwrap();
     for _ in 0..300 {
-        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+        if !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -8461,22 +8539,35 @@ async fn gov_copy_late_supervised_below_target_never_acquires() {
         })
         .await
         .unwrap();
-    learner.test_pause_update_retry_exhausted(true).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(true)
+        .await
+        .unwrap();
     learner.update_subject(governance_id.clone()).await.unwrap();
     wait_update_retry_exhausted(&learner).await;
     let round = newest_held_request_round(&learner).await;
 
     // Let the parked round die uncertified: the supervisor records
     // its generation and stops.
-    learner.test_pause_update_retry_exhausted(false).await.unwrap();
+    learner
+        .test_pause_update_retry_exhausted(false)
+        .await
+        .unwrap();
     for _ in 0..300 {
-        if !learner.test_update_alive(governance_id.clone()).await.unwrap() {
+        if !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "the exhausted round stops without certifying below the target"
     );
     // The dead-round record travels by fire-and-forget tell: wait
@@ -8515,7 +8606,10 @@ async fn gov_copy_late_supervised_below_target_never_acquires() {
     let mut ledger = Vec::new();
     for sn in (base + 1)..tip {
         ledger.push(
-            owner.test_get_ledger_event(governance_id.clone(), sn).await.unwrap(),
+            owner
+                .test_get_ledger_event(governance_id.clone(), sn)
+                .await
+                .unwrap(),
         );
     }
     inject_gov_batch(
@@ -8558,7 +8652,10 @@ async fn gov_copy_late_supervised_below_target_never_acquires() {
         "the late batch below the target keeps its deferred markers"
     );
     assert!(
-        !learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        !learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "no supervisor is resurrected by the late batch"
     );
 
@@ -8866,10 +8963,7 @@ async fn gov_copy_mixed_kind_offers_pin_subject_type() {
         .add_sync_peer(subject_id.clone(), vec![w1_key.clone()])
         .await
         .unwrap();
-    for message in [
-        FaultMessage::UpdateOffer,
-        FaultMessage::UpdateNoOffer,
-    ] {
+    for message in [FaultMessage::UpdateOffer, FaultMessage::UpdateNoOffer] {
         w1.test_install_fault(FaultRule {
             direction: FaultDirection::Outbound,
             message,
@@ -8987,10 +9081,7 @@ async fn gov_copy_mixed_kind_offers_pin_subject_type() {
     let mut w1_rounds = Vec::new();
     for _ in 0..300 {
         w1_rounds = learner
-            .test_update_updater_rounds(
-                governance_id.clone(),
-                w1_key.clone(),
-            )
+            .test_update_updater_rounds(governance_id.clone(), w1_key.clone())
             .await
             .unwrap_or_default();
         if !w1_rounds.is_empty() {
@@ -9033,7 +9124,10 @@ async fn gov_copy_mixed_kind_offers_pin_subject_type() {
         .await
         .unwrap();
     assert!(
-        learner.test_update_alive(governance_id.clone()).await.unwrap(),
+        learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap(),
         "the between-targets completion must not stop the round"
     );
     let base_count = learner
@@ -9049,7 +9143,10 @@ async fn gov_copy_mixed_kind_offers_pin_subject_type() {
             .get_subject_state(governance_id.clone())
             .await
             .map(|s| s.sn);
-        let alive = learner.test_update_alive(governance_id.clone()).await.unwrap();
+        let alive = learner
+            .test_update_alive(governance_id.clone())
+            .await
+            .unwrap();
         assert_eq!(
             count, base_count,
             "the between-targets completion must not acquire (tip={tip:?}, alive={alive})"
@@ -9120,10 +9217,7 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
     // behind to confirm later.
     learner.test_arm_fail_next_sink().await.unwrap();
     let err = learner
-        .test_up_subject_with_create(
-            governance_id.clone(),
-            genesis.clone(),
-        )
+        .test_up_subject_with_create(governance_id.clone(), genesis.clone())
         .await
         .expect_err("a failed sink setup must not confirm the creation");
     assert!(
@@ -9149,10 +9243,7 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
     // missing registration.
     learner.test_arm_fail_next_node_register().await.unwrap();
     let err = learner
-        .test_up_subject_with_create(
-            governance_id.clone(),
-            genesis.clone(),
-        )
+        .test_up_subject_with_create(governance_id.clone(), genesis.clone())
         .await
         .expect_err("a failed registration must not confirm the creation");
     assert!(
@@ -9218,7 +9309,10 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
         })
         .unwrap_or_else(|| "Holder".to_owned());
     let mut member_adds = vec![];
-    if !members.values().any(|key| key.to_string() == owner.public_key()) {
+    if !members
+        .values()
+        .any(|key| key.to_string() == owner.public_key())
+    {
         member_adds.push(json!({"name": "Holder", "key": owner.public_key()}));
     }
     let mut schema_fact = json!({
@@ -9260,16 +9354,11 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
     get_subject(&learner, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    let subject_id = create_subject(
-        &owner,
-        governance_id.clone(),
-        "Example",
-        "",
-        true,
-    )
-    .await
-    .unwrap()
-    .0;
+    let subject_id =
+        create_subject(&owner, governance_id.clone(), "Example", "", true)
+            .await
+            .unwrap()
+            .0;
     let tracker_genesis = owner
         .test_get_tracker_ledger(subject_id.clone(), 0)
         .await
@@ -9284,7 +9373,9 @@ async fn partial_governance_create_is_resumed_not_confirmed() {
             tracker_genesis.clone(),
         )
         .await
-        .expect_err("a failed tracker sink setup must not confirm the creation");
+        .expect_err(
+            "a failed tracker sink setup must not confirm the creation",
+        );
     assert!(
         format!("{err:?}").contains("injected sink setup failure"),
         "the sink fault must surface, got {err:?}"

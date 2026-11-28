@@ -422,10 +422,7 @@ impl Update {
         Ok(())
     }
 
-    async fn trigger_deferred_if_governance(
-        &self,
-        ctx: &ActorContext<Self>,
-    ) {
+    async fn trigger_deferred_if_governance(&self, ctx: &ActorContext<Self>) {
         if self.subject_kind_hint != Some(UpdateSubjectKind::Governance) {
             return;
         }
@@ -433,8 +430,7 @@ impl Update {
             "/user/node/subject_manager/{}",
             self.subject_id
         ));
-        let Ok(governance) =
-            ctx.system().get_actor::<Governance>(&path).await
+        let Ok(governance) = ctx.system().get_actor::<Governance>(&path).await
         else {
             debug!(
                 msg_type = "DistributionDone",
@@ -466,9 +462,10 @@ impl Update {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.update_retry_exhausted_paused()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.update_retry_exhausted_paused())
             })
             .unwrap_or(false)
     }
@@ -660,9 +657,8 @@ impl Handler<Self> for Update {
                     // Both the node-level and the per-subject
                     // workers can process a late batch, so both
                     // remember the dead round.
-                    let target = self
-                        .pending_target_sn
-                        .unwrap_or(expected_target_sn);
+                    let target =
+                        self.pending_target_sn.unwrap_or(expected_target_sn);
                     for path in [
                         ActorPath::from("/user/node/distributor".to_owned()),
                         ActorPath::from(format!(
@@ -670,10 +666,8 @@ impl Handler<Self> for Update {
                             self.subject_id
                         )),
                     ] {
-                        if let Ok(worker) = ctx
-                            .system()
-                            .get_actor::<DistriWorker>(&path)
-                            .await
+                        if let Ok(worker) =
+                            ctx.system().get_actor::<DistriWorker>(&path).await
                         {
                             let _ = worker
                                 .tell(
@@ -757,9 +751,7 @@ impl Handler<Self> for Update {
                                 }
                                 let covered = match candidate.kind {
                                     UpdateSubjectKind::Tracker => self
-                                        .next_tracker_range(
-                                            &candidate.ranges,
-                                        )
+                                        .next_tracker_range(&candidate.ranges)
                                         .is_some(),
                                     UpdateSubjectKind::Governance => {
                                         self.has_progress(candidate.sn)
@@ -975,9 +967,10 @@ impl Handler<Self> for Update {
                             .await
                             .ok()
                             .flatten();
-                    if self.pending_target_sn.is_some_and(|t| {
-                        current_sn.is_some_and(|s| s >= t)
-                    }) {
+                    if self
+                        .pending_target_sn
+                        .is_some_and(|t| current_sn.is_some_and(|s| s >= t))
+                    {
                         if let Some(key) = self.pending_retry.take() {
                             ctx.cancel_timer(key);
                         }

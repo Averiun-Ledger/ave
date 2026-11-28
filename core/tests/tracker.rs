@@ -9392,8 +9392,7 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     node_running(&bob.api).await.unwrap();
 
     let governance_id =
-        create_and_authorize_governance(&api, vec![&alice.api, &bob.api])
-            .await;
+        create_and_authorize_governance(&api, vec![&alice.api, &bob.api]).await;
     emit_fact(
         &api,
         governance_id.clone(),
@@ -9565,13 +9564,19 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     .await;
     node_running(&bob2.api).await.unwrap();
     let api2 = bob2.api.clone();
-    api2.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    api2.lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     get_subject(&api2, subject_id.clone(), Some(4), true)
         .await
         .unwrap();
 
     // Both derives healed, the stale proof consumed, no duplication.
-    assert!(api2.test_has_subject_entry(governance_id.clone(), subject_id.clone()).await.unwrap());
+    assert!(
+        api2.test_has_subject_entry(governance_id.clone(), subject_id.clone())
+            .await
+            .unwrap()
+    );
     assert_eq!(
         api2.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
@@ -9579,8 +9584,10 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
         None,
         "the consumed proof must not survive the replay"
     );
-    let (seen, resent) =
-        api2.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
+    let (seen, resent) = api2
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(seen, 5, "a diverged boot replays every ledger event");
     assert_eq!(
         resent, 15,
@@ -9639,7 +9646,9 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     .await;
     node_running(&bob3.api).await.unwrap();
     let api3 = bob3.api.clone();
-    api3.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    api3.lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         api3.test_ownership_projection(
             governance_id.clone(),
@@ -9653,9 +9662,14 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
         (true, None, true),
         "a full replay must restore the confirmed owner in both projections"
     );
-    let (seen, _) =
-        api3.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
-    assert_eq!(seen, 5, "stale ownership below the tip needs genesis replay");
+    let (seen, _) = api3
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        seen, 5,
+        "stale ownership below the tip needs genesis replay"
+    );
 
     // A pending tip must not hide a missing Create/Confirm projection.
     // Delete only the register entry while Node has the right pending
@@ -9710,7 +9724,9 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     .await;
     node_running(&bob4.api).await.unwrap();
     let api4 = bob4.api.clone();
-    api4.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    api4.lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         api4.test_ownership_projection(
             governance_id.clone(),
@@ -9724,9 +9740,14 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
         (true, Some(false), true),
         "the replay must restore the register without losing pending"
     );
-    let (seen, _) =
-        api4.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
-    assert_eq!(seen, 6, "a missing entry below pending needs genesis replay");
+    let (seen, _) = api4
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        seen, 6,
+        "a missing entry below pending needs genesis replay"
+    );
 
     // Close the transfer, then leave a valid proof for a future
     // transfer above the local tip. It is not consumed and must not
@@ -9787,7 +9808,9 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
     .await;
     node_running(&bob5.api).await.unwrap();
     let api5 = bob5.api.clone();
-    api5.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    api5.lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         api5.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
             .await
@@ -9796,8 +9819,10 @@ async fn reconcile_replays_ownership_writes_behind_visibility_tip() {
         Some(7),
         "a future proof must survive reconciliation"
     );
-    let (seen, _) =
-        api5.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
+    let (seen, _) = api5
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(seen, 2, "a future proof must only replay the tail");
 
     bob5.token.cancel();
@@ -9843,12 +9868,22 @@ async fn reconcile_unverifiable_proof_fails_after_three_passes() {
         create_subject(&api, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(&api, subject_id.clone(), json!({"ModOne": {"data": 1}}), true)
-        .await
-        .unwrap();
-    emit_fact(&api, subject_id.clone(), json!({"ModOne": {"data": 2}}), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
+    emit_fact(
+        &api,
+        subject_id.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
 
     // A consumed proof with no ledger transfer behind it: the replay
     // walks every event three times but no transfer ever consumes it.
@@ -9916,11 +9951,16 @@ async fn reconcile_unverifiable_proof_fails_after_three_passes() {
     // The failed lift holds no requester and leaves no attempt: the
     // error path registers nothing to release.
     assert!(
-        !api.test_has_live_requesters(subject_id.clone()).await.unwrap(),
+        !api.test_has_live_requesters(subject_id.clone())
+            .await
+            .unwrap(),
         "no requester may survive the failed lift"
     );
     assert!(
-        api.test_list_requesters(subject_id.clone()).await.unwrap().is_empty(),
+        api.test_list_requesters(subject_id.clone())
+            .await
+            .unwrap()
+            .is_empty(),
         "no requester may survive the failed lift"
     );
     assert_eq!(
@@ -10064,8 +10104,10 @@ async fn reconcile_pending_tail_replay_sweeps_consumed_proof() {
         None,
         "the consumed pending proof must not survive the replay"
     );
-    let (seen, _) =
-        api.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
+    let (seen, _) = api
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(
         seen, 1,
         "a pending tip with correct projections replays only its tip"
@@ -10107,12 +10149,11 @@ async fn reconcile_pending_tail_replay_sweeps_consumed_proof() {
         Some(7),
         "a future proof must survive the replay"
     );
-    let (seen, _) =
-        api.test_tracker_reconcile_report(subject_id.clone()).await.unwrap();
-    assert_eq!(
-        seen, 1,
-        "a future proof must not force a genesis walk"
-    );
+    let (seen, _) = api
+        .test_tracker_reconcile_report(subject_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(seen, 1, "a future proof must not force a genesis walk");
 
     node.token.cancel();
     join_all(node.handler.iter_mut()).await;
@@ -10140,8 +10181,7 @@ async fn reconcile_eol_marks_external_subject_inactive() {
     node_running(&node.api).await.unwrap();
     let api = node.api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&api, vec![]).await;
+    let governance_id = create_and_authorize_governance(&api, vec![]).await;
     emit_fact(
         &api,
         governance_id.clone(),
@@ -10183,16 +10223,16 @@ async fn reconcile_eol_marks_external_subject_inactive() {
     ) -> Vec<i64> {
         let conn =
             rusqlite::Connection::open(ext_db.join("database.db")).unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let mut stmt = conn
             .prepare(
                 "SELECT active FROM register_subjects WHERE subject_id = ?1",
             )
             .unwrap();
-        stmt.query_map(
-            rusqlite::params![subject_id.to_string()],
-            |row| row.get::<_, i64>(0),
-        )
+        stmt.query_map(rusqlite::params![subject_id.to_string()], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap()
         .map(|value| value.unwrap())
         .collect()
@@ -10222,7 +10262,8 @@ async fn reconcile_eol_marks_external_subject_inactive() {
             let conn =
                 rusqlite::Connection::open(ext_dir.path().join("database.db"))
                     .unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             conn.execute(
                 "UPDATE register_subjects SET active = 1 WHERE subject_id = ?1",
                 rusqlite::params![subject_stuck.to_string()],
@@ -10261,8 +10302,12 @@ async fn reconcile_eol_marks_external_subject_inactive() {
         .await;
         node_running(&rebooted.api).await.unwrap();
         let api = rebooted.api.clone();
-        api.lift_subject_for_sync(subject_stuck.clone()).await.unwrap();
-        api.lift_subject_for_sync(subject_gone.clone()).await.unwrap();
+        api.lift_subject_for_sync(subject_stuck.clone())
+            .await
+            .unwrap();
+        api.lift_subject_for_sync(subject_gone.clone())
+            .await
+            .unwrap();
 
         // One single inactive row each: no resurrection of deleted
         // subjects, no duplicated rows, no stuck-active row.
@@ -10359,13 +10404,12 @@ async fn reconcile_heals_missing_node_registration() {
     )
     .await
     .unwrap();
-    rita
-        .authorize_governance(
-            governance_id.clone(),
-            AuthWitness::One(owner_key.clone()),
-        )
-        .await
-        .unwrap();
+    rita.authorize_governance(
+        governance_id.clone(),
+        AuthWitness::One(owner_key.clone()),
+    )
+    .await
+    .unwrap();
     rita.update_subject(governance_id.clone()).await.unwrap();
     get_subject(&rita, governance_id.clone(), None, true)
         .await
@@ -10416,12 +10460,9 @@ async fn reconcile_heals_missing_node_registration() {
     // does, and the creation reports its error instead of confirming.
     rita.test_arm_fail_next_node_register().await.unwrap();
     assert!(
-        rita.test_up_subject_with_create(
-            subject_id.clone(),
-            genesis.clone(),
-        )
-        .await
-        .is_err(),
+        rita.test_up_subject_with_create(subject_id.clone(), genesis.clone(),)
+            .await
+            .is_err(),
         "a failed registration must not confirm the creation"
     );
     assert!(
@@ -10458,7 +10499,10 @@ async fn reconcile_heals_missing_node_registration() {
     .await;
     node_running(&r2.api).await.unwrap();
     let healed = r2.api.clone();
-    healed.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    healed
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert!(
         healed
             .test_node_has_subject(subject_id.clone())
@@ -10550,7 +10594,10 @@ async fn reconcile_heals_missing_node_registration() {
     .await;
     node_running(&r3.api).await.unwrap();
     let again = r3.api.clone();
-    again.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    again
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert!(
         again
             .test_node_has_subject(subject_id.clone())
@@ -10590,12 +10637,7 @@ async fn reconcile_heals_missing_node_registration() {
 
     node.token.cancel();
     r3.token.cancel();
-    join_all(
-        node.handler
-            .iter_mut()
-            .chain(r3.handler.iter_mut()),
-    )
-    .await;
+    join_all(node.handler.iter_mut().chain(r3.handler.iter_mut())).await;
 }
 
 /// Same cut on the owning node itself: its own create reports the
@@ -10619,8 +10661,7 @@ async fn reconcile_heals_missing_node_registration_owner() {
     node_running(&node.api).await.unwrap();
     let owner = node.api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![]).await;
+    let governance_id = create_and_authorize_governance(&owner, vec![]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -10661,8 +10702,7 @@ async fn reconcile_heals_missing_node_registration_owner() {
             .unwrap();
     let start = tokio::time::Instant::now();
     for _ in 0..200 {
-        if let Ok(state) = owner.get_request_state(request_id.clone()).await
-        {
+        if let Ok(state) = owner.get_request_state(request_id.clone()).await {
             match state.state {
                 RequestState::Finish
                 | RequestState::Abort { .. }
@@ -10705,7 +10745,10 @@ async fn reconcile_heals_missing_node_registration_owner() {
     .await;
     node_running(&node2.api).await.unwrap();
     let healed = node2.api.clone();
-    healed.lift_subject_for_sync(subject_id.clone()).await.unwrap();
+    healed
+        .lift_subject_for_sync(subject_id.clone())
+        .await
+        .unwrap();
     assert!(
         healed
             .test_node_has_subject(subject_id.clone())
@@ -10754,16 +10797,16 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
     ) -> Vec<i64> {
         let conn =
             rusqlite::Connection::open(ext_dir.join("database.db")).unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let mut stmt = conn
             .prepare(
                 "SELECT active FROM register_subjects WHERE subject_id = ?1",
             )
             .unwrap();
-        stmt.query_map(
-            rusqlite::params![subject_id.to_string()],
-            |row| row.get::<_, i64>(0),
-        )
+        stmt.query_map(rusqlite::params![subject_id.to_string()], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap()
         .map(|value| value.unwrap())
         .collect()
@@ -10824,16 +10867,26 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
         create_subject(&api, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(&api, subject_stuck.clone(), json!({"ModOne": {"data": 1}}), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &api,
+        subject_stuck.clone(),
+        json!({"ModOne": {"data": 1}}),
+        true,
+    )
+    .await
+    .unwrap();
     let (subject_gone, _) =
         create_subject(&api, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(&api, subject_gone.clone(), json!({"ModOne": {"data": 2}}), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &api,
+        subject_gone.clone(),
+        json!({"ModOne": {"data": 2}}),
+        true,
+    )
+    .await
+    .unwrap();
     emit_eol(&api, subject_stuck.clone(), true).await.unwrap();
     emit_eol(&api, subject_gone.clone(), true).await.unwrap();
     assert_eq!(
@@ -10867,10 +10920,7 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
         keys: Some(keys.clone()),
         local_db: Some(local_db.clone()),
         ext_db: Some(ext_db.clone()),
-        sinks: example_sink_config(
-            sink.url(),
-            Some(governance_id.to_string()),
-        ),
+        sinks: example_sink_config(sink.url(), Some(governance_id.to_string())),
         ..Default::default()
     })
     .await;
@@ -10880,9 +10930,14 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
         create_subject(&api, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(&api, subject_new.clone(), json!({"ModOne": {"data": 3}}), true)
-        .await
-        .unwrap();
+    emit_fact(
+        &api,
+        subject_new.clone(),
+        json!({"ModOne": {"data": 3}}),
+        true,
+    )
+    .await
+    .unwrap();
     wait_for_sink_blocked(&api, "example-sink").await;
 
     // Diverge the derived state while live: move the ownership
@@ -10909,8 +10964,10 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
     drop(node);
     {
         let conn =
-            rusqlite::Connection::open(ext_dir.path().join("database.db")).unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            rusqlite::Connection::open(ext_dir.path().join("database.db"))
+                .unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         conn.execute(
             "UPDATE register_subjects SET active = 1 WHERE subject_id = ?1",
             rusqlite::params![subject_stuck.to_string()],
@@ -10940,18 +10997,21 @@ async fn dirty_boot_flag_survives_clean_shutdown_then_crash() {
         keys: Some(keys),
         local_db: Some(local_db),
         ext_db: Some(ext_db),
-        sinks: example_sink_config(
-            sink.url(),
-            Some(governance_id.to_string()),
-        ),
+        sinks: example_sink_config(sink.url(), Some(governance_id.to_string())),
         ..Default::default()
     })
     .await;
     node_running(&node.api).await.unwrap();
     let api = node.api.clone();
-    api.lift_subject_for_sync(subject_stuck.clone()).await.unwrap();
-    api.lift_subject_for_sync(subject_gone.clone()).await.unwrap();
-    api.lift_subject_for_sync(subject_new.clone()).await.unwrap();
+    api.lift_subject_for_sync(subject_stuck.clone())
+        .await
+        .unwrap();
+    api.lift_subject_for_sync(subject_gone.clone())
+        .await
+        .unwrap();
+    api.lift_subject_for_sync(subject_new.clone())
+        .await
+        .unwrap();
 
     // All three backstops ran: EOL rows converge, the moved
     // ownership projection of the active subject is restored, and

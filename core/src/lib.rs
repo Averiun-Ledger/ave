@@ -3824,9 +3824,7 @@ impl Api {
     /// on this node: that `get_ledger` fails right after its `Up`
     /// instead of resolving the tracker. The following reads
     /// proceed normally.
-    pub async fn test_arm_fail_get_ledger_resolve(
-        &self,
-    ) -> Result<(), Error> {
+    pub async fn test_arm_fail_get_ledger_resolve(&self) -> Result<(), Error> {
         self.test_faults()?
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3848,9 +3846,7 @@ impl Api {
     /// Arms a one-shot node-registration failure for the next
     /// subject creation on this node. Genesis already landed when it
     /// fires; the following creations proceed normally.
-    pub async fn test_arm_fail_next_node_register(
-        &self,
-    ) -> Result<(), Error> {
+    pub async fn test_arm_fail_next_node_register(&self) -> Result<(), Error> {
         self.test_faults()?
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3888,13 +3884,9 @@ impl Api {
         &self,
         subject_id: DigestIdentifier,
     ) -> bool {
-        let tracker_path = ActorPath::from(format!(
-            "/user/node/subject_manager/{subject_id}"
-        ));
-        if let Ok(actor) = self
-            .system
-            .get_actor::<Tracker>(&tracker_path)
-            .await
+        let tracker_path =
+            ActorPath::from(format!("/user/node/subject_manager/{subject_id}"));
+        if let Ok(actor) = self.system.get_actor::<Tracker>(&tracker_path).await
             && let Ok(TrackerResponse::Metadata(_)) =
                 actor.ask(TrackerMessage::GetMetadata).await
         {
@@ -3903,10 +3895,8 @@ impl Api {
         use crate::governance::{
             Governance, GovernanceMessage, GovernanceResponse,
         };
-        if let Ok(actor) = self
-            .system
-            .get_actor::<Governance>(&tracker_path)
-            .await
+        if let Ok(actor) =
+            self.system.get_actor::<Governance>(&tracker_path).await
             && let Ok(GovernanceResponse::Version(_)) =
                 actor.ask(GovernanceMessage::GetVersion).await
         {
@@ -4147,9 +4137,7 @@ impl Api {
     /// How many times the aux pre-read barrier was hit on this node:
     /// proves the late hint really parked before its local-tip read
     /// instead of racing past it.
-    pub async fn test_verify_before_sn_hold_count(
-        &self,
-    ) -> Result<u64, Error> {
+    pub async fn test_verify_before_sn_hold_count(&self) -> Result<u64, Error> {
         let faults = self.test_faults()?;
         let count = faults
             .lock()
@@ -4584,8 +4572,7 @@ impl Api {
         governance_id: DigestIdentifier,
     ) -> Result<Vec<String>, Error> {
         use crate::governance::contract_register::{
-            ContractRegister, ContractRegisterMessage,
-            ContractRegisterResponse,
+            ContractRegister, ContractRegisterMessage, ContractRegisterResponse,
         };
         let actor = self
             .system
@@ -5131,7 +5118,11 @@ impl Api {
         use crate::governance::subject_register::{
             SubjectRegister, SubjectRegisterMessage, SubjectRegisterResponse,
         };
-        let data = match self.node.ask(NodeMessage::GetSubjectData(subject_id.clone())).await? {
+        let data = match self
+            .node
+            .ask(NodeMessage::GetSubjectData(subject_id.clone()))
+            .await?
+        {
             NodeResponse::SubjectData(Some(data)) => data,
             NodeResponse::SubjectData(None) => {
                 return Err(Error::MissingResource {
@@ -5258,9 +5249,9 @@ impl Api {
             SubjectRegisterResponse::SubjectsBatch(entries) => Ok((
                 node_owner,
                 node_pending,
-                entries.first().is_some_and(|subjects| {
-                    subjects.contains(&subject_id)
-                }),
+                entries
+                    .first()
+                    .is_some_and(|subjects| subjects.contains(&subject_id)),
             )),
             _ => Err(Error::UnexpectedResponse {
                 actor: "subject_register".to_owned(),

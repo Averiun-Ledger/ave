@@ -229,10 +229,10 @@ impl WitnessesRegister {
                         incoming_transfer_sn: event.sn.saturating_sub(1),
                         exit_sn: event.sn,
                         outcome: OwnershipStintOutcome::Confirmed,
-                        from_sn: data.ownership_transitions.last().map_or(
-                            0,
-                            |stint| stint.exit_sn.saturating_add(1),
-                        ),
+                        from_sn: data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1)),
                         gov_lo: data.gov_version,
                         gov_hi: event.gov_version,
                     });
@@ -256,10 +256,10 @@ impl WitnessesRegister {
                         incoming_transfer_sn: event.sn.saturating_sub(1),
                         exit_sn: event.sn,
                         outcome: OwnershipStintOutcome::Rejected,
-                        from_sn: data.ownership_transitions.last().map_or(
-                            0,
-                            |stint| stint.exit_sn.saturating_add(1),
-                        ),
+                        from_sn: data
+                            .ownership_transitions
+                            .last()
+                            .map_or(0, |stint| stint.exit_sn.saturating_add(1)),
                         gov_lo: new_owner_gov_version,
                         gov_hi: event.gov_version,
                     });

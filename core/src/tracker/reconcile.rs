@@ -474,10 +474,8 @@ impl Tracker {
             return Ok(false);
         }
 
-        let gov_path = format!(
-            "/user/node/subject_manager/{}",
-            self.governance_id
-        );
+        let gov_path =
+            format!("/user/node/subject_manager/{}", self.governance_id);
         let subject_register_path =
             ActorPath::from(format!("{gov_path}/subject_register"));
         let subject_register = ctx
@@ -751,23 +749,19 @@ impl Tracker {
                 report.writes_resent += 1;
                 let transfer_verification_register = ctx
                     .system()
-                    .get_actor::<TransferVerificationRegister>(
-                        &ActorPath::from(format!(
-                            "/user/node/subject_manager/{}/transfer_verification_register",
-                            self.governance_id
-                        )),
-                    )
+                    .get_actor::<TransferVerificationRegister>(&ActorPath::from(format!(
+                        "/user/node/subject_manager/{}/transfer_verification_register",
+                        self.governance_id
+                    )))
                     .await?;
                 // Only remove a proof this transfer consumed: a newer
                 // proof (speculative, for a later transfer) must
                 // survive the replay, and a genesis walk replays every
                 // older transfer. Missing proof: nothing to remove.
                 let verified = transfer_verification_register
-                    .ask(
-                        TransferVerificationRegisterMessage::GetVerifiedTransferSn {
-                            subject_id: subject_id.clone(),
-                        },
-                    )
+                    .ask(TransferVerificationRegisterMessage::GetVerifiedTransferSn {
+                        subject_id: subject_id.clone(),
+                    })
                     .await?;
                 let consumed = matches!(
                     verified,

@@ -2118,8 +2118,7 @@ impl DistriWorker {
         let auth_path = ave_actors::ActorPath::from(format!(
             "/user/node/auth/{subject_id}"
         ));
-        if let Ok(actor) =
-            ctx.system().get_actor::<Update>(&auth_path).await
+        if let Ok(actor) = ctx.system().get_actor::<Update>(&auth_path).await
             && actor
                 .tell(UpdateMessage::DistributionDone { sn, round })
                 .await
@@ -2397,16 +2396,13 @@ impl DistriWorker {
                         details: e.to_string(),
                     })?;
                 match modes.first() {
-                    Some(
-                        crate::governance::witnesses_register::TrackerDeliveryMode::Opaque,
-                    ) => {
-                        ledger = ledger.to_tracker_opaque().map_err(|e| {
-                            ActorError::Functional {
-                                description: format!(
-                                    "Failed to mask pushed fact: {e:?}"
-                                ),
-                            }
-                        })?;
+                    Some(crate::governance::witnesses_register::TrackerDeliveryMode::Opaque) => {
+                        ledger =
+                            ledger
+                                .to_tracker_opaque()
+                                .map_err(|e| ActorError::Functional {
+                                    description: format!("Failed to mask pushed fact: {e:?}"),
+                                })?;
                         warn!(
                             msg_type = "LastEventDistribution",
                             subject_id = %subject_id,
@@ -2417,13 +2413,10 @@ impl DistriWorker {
                     }
                     Some(_) => {}
                     None => {
-                        return Err(
-                            DistributorError::VisibilityCheckFailed {
-                                details: "empty modes for pushed fact"
-                                    .to_owned(),
-                            }
-                            .into(),
-                        );
+                        return Err(DistributorError::VisibilityCheckFailed {
+                            details: "empty modes for pushed fact".to_owned(),
+                        }
+                        .into());
                     }
                 }
             }
@@ -2570,24 +2563,21 @@ impl DistriWorker {
                     // apply: only ack the exact bytes this node holds.
                     // A same-SN divergence that skipped as stale earns
                     // no ack, no success and no effects.
-                    let local_hash = match self
-                        .local_event_hash(ctx, &subject_id, sn)
-                        .await
-                    {
-                        Err(e) => {
-                            if let Some(lease) = lease {
-                                lease.finish(ctx).await?;
+                    let local_hash =
+                        match self.local_event_hash(ctx, &subject_id, sn).await
+                        {
+                            Err(e) => {
+                                if let Some(lease) = lease {
+                                    lease.finish(ctx).await?;
+                                }
+                                return Err(e);
                             }
-                            return Err(e);
-                        }
-                        Ok(local_hash) => local_hash,
-                    };
+                            Ok(local_hash) => local_hash,
+                        };
                     match local_hash {
                         Some(local_hash) if local_hash == received_hash => {
-                            Self::note_copy_success(
-                                ctx, &subject_id, attempt,
-                            )
-                            .await;
+                            Self::note_copy_success(ctx, &subject_id, attempt)
+                                .await;
                             lease
                         }
                         _ => {

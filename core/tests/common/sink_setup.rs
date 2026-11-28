@@ -1041,6 +1041,7 @@ pub const fn restart_config_with_peers_and_safe_mode(
         contracts_path: None,
         governance_sync: None,
         tracker_sync: None,
+        update_sync: None,
         approval: None,
         toolchains: None,
         cargo_bin: None,

@@ -465,9 +465,7 @@ pub async fn with_subject_up<A, F, T>(
 ) -> Result<T, ActorError>
 where
     A: Actor + Handler<A>,
-    F: core::ops::AsyncFnOnce(
-        &mut ActorContext<A>,
-    ) -> Result<T, ActorError>,
+    F: core::ops::AsyncFnOnce(&mut ActorContext<A>) -> Result<T, ActorError>,
 {
     let lease =
         acquire_subject(ctx, subject_id, requester, create_ledger, active)

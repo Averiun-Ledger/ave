@@ -62,6 +62,20 @@ pub fn toolchain_name(pin: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Fast update retry timing for tests that wait on genuine retry
+/// exhaustion or held-then-retried rounds: same budgets (3 round
+/// retries, 1 witness retry), only the cadence shortens, so the
+/// proof stays real while the test stops paying the full
+/// production intervals.
+#[allow(dead_code)]
+pub fn fast_update_sync() -> UpdateSyncConfig {
+    UpdateSyncConfig {
+        round_retry_interval_secs: 1,
+        witness_retry_interval_secs: 1,
+        ..Default::default()
+    }
+}
+
 /// Test nodes vote and validate exactly like production, so they need
 /// the pinned toolchain installed (`rustup toolchain install 1.95.0`
 /// plus the wasm32 target): the default map below points `DEFAULT_PIN`
@@ -146,6 +160,11 @@ pub struct CreateNodesAndConnectionsConfig {
     /// projection to explicit updates: a background tick racing a
     /// mid-transition copy can apply a stale projection first.
     pub tracker_sync: Option<TrackerSyncConfig>,
+    /// Explicit update retry timing; `None` uses the production
+    /// default (8s round interval, 3 retries). Needed by tests that
+    /// wait on genuine retry exhaustion so they do not pay the full
+    /// production budget: the count stays, only the cadence shortens.
+    pub update_sync: Option<UpdateSyncConfig>,
 }
 
 #[derive(Default)]
@@ -192,6 +211,11 @@ pub struct CreateNodeConfig {
     /// values (10s interval). Needed by tests that wait on the fetch
     /// tick so they do not pay the full default interval.
     pub tracker_sync: Option<TrackerSyncConfig>,
+    /// Explicit update retry timing; `None` uses the production
+    /// default (8s round interval, 3 retries). Needed by tests that
+    /// wait on genuine retry exhaustion so they do not pay the full
+    /// production budget: the count stays, only the cadence shortens.
+    pub update_sync: Option<UpdateSyncConfig>,
     /// Explicit app-message wire cap in bytes; `None` uses the
     /// default (`ave_network::MAX_APP_MESSAGE_BYTES`). Needed by
     /// tests that prove byte-capped batching and fragment reassembly
@@ -233,6 +257,7 @@ pub async fn try_create_node(
         contracts_path,
         governance_sync,
         tracker_sync,
+        update_sync,
         approval,
         toolchains,
         cargo_bin,
@@ -316,7 +341,7 @@ pub async fn try_create_node(
                 update_batch_size: 2,
                 update_timeout_secs: 5,
             }),
-            update: UpdateSyncConfig::default(),
+            update: update_sync.unwrap_or_default(),
             reboot: RebootSyncConfig::default(),
         },
         // The field only exists in test builds (production nodes
@@ -370,6 +395,7 @@ pub async fn create_nodes_and_connections(
         reconcile_page,
         toolchains,
         tracker_sync,
+        update_sync,
     } = config;
 
     let mut nodes: Vec<NodeData> = Vec::new();
@@ -403,6 +429,7 @@ pub async fn create_nodes_and_connections(
             reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
+            update_sync: update_sync.clone(),
             ..Default::default()
         })
         .await;
@@ -435,6 +462,7 @@ pub async fn create_nodes_and_connections(
             reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
+            update_sync: update_sync.clone(),
             ..Default::default()
         })
         .await;
@@ -467,6 +495,7 @@ pub async fn create_nodes_and_connections(
             reconcile_page,
             toolchains: toolchains.clone(),
             tracker_sync: tracker_sync.clone(),
+            update_sync: update_sync.clone(),
             ..Default::default()
         })
         .await;

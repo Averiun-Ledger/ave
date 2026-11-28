@@ -421,7 +421,11 @@ impl SubjectManager {
                         "/user/node/subject_manager/{}/sink_manager",
                         governance_id
                     ));
-                    match ctx.system().get_actor::<crate::sink::SinkManager>(&sink_manager_path).await {
+                    match ctx
+                        .system()
+                        .get_actor::<crate::sink::SinkManager>(&sink_manager_path)
+                        .await
+                    {
                         Ok(sink_manager) => {
                             if let Err(error) = sink_manager
                                 .tell(crate::sink::SinkManagerMessage::RemoveSubject {
@@ -633,9 +637,7 @@ impl SubjectManager {
         if let Err(error) =
             self.run_tracker_sink(ctx, tracker_actor.clone()).await
         {
-            if is_new
-                && let Err(stop_error) = tracker_actor.ask_stop().await
-            {
+            if is_new && let Err(stop_error) = tracker_actor.ask_stop().await {
                 return Err(ActorError::Functional {
                     description: format!(
                         "{error}; partial tracker cleanup failed: {stop_error}"
@@ -651,9 +653,7 @@ impl SubjectManager {
             })
             .await
         {
-            if is_new
-                && let Err(stop_error) = tracker_actor.ask_stop().await
-            {
+            if is_new && let Err(stop_error) = tracker_actor.ask_stop().await {
                 return Err(ActorError::Functional {
                     description: format!(
                         "{error}; partial tracker cleanup failed: {stop_error}"
@@ -677,9 +677,7 @@ impl SubjectManager {
             )
             .await
         {
-            if is_new
-                && let Err(stop_error) = tracker_actor.ask_stop().await
-            {
+            if is_new && let Err(stop_error) = tracker_actor.ask_stop().await {
                 return Err(ActorError::Functional {
                     description: format!(
                         "{error}; partial tracker cleanup failed: {stop_error}"
@@ -748,11 +746,11 @@ impl SubjectManager {
             Err(e) => return Err(e),
         };
 
-        if let Err(error) =
-            self.run_governance_sink(ctx, governance_actor.clone()).await
+        if let Err(error) = self
+            .run_governance_sink(ctx, governance_actor.clone())
+            .await
         {
-            if is_new
-                && let Err(stop_error) = governance_actor.ask_stop().await
+            if is_new && let Err(stop_error) = governance_actor.ask_stop().await
             {
                 return Err(ActorError::Functional {
                     description: format!(
@@ -775,8 +773,7 @@ impl SubjectManager {
             })
             .await
         {
-            if is_new
-                && let Err(stop_error) = governance_actor.ask_stop().await
+            if is_new && let Err(stop_error) = governance_actor.ask_stop().await
             {
                 return Err(ActorError::Functional {
                     description: format!(
@@ -796,8 +793,7 @@ impl SubjectManager {
             )
             .await
         {
-            if is_new
-                && let Err(stop_error) = governance_actor.ask_stop().await
+            if is_new && let Err(stop_error) = governance_actor.ask_stop().await
             {
                 return Err(ActorError::Functional {
                     description: format!(
@@ -844,13 +840,12 @@ impl SubjectManager {
         #[cfg(feature = "test")]
         if ctx
             .system()
-            .get_helper::<
-                crate::helpers::network::test_faults::SharedFaultRegistry,
-            >("test_faults")
+            .get_helper::<crate::helpers::network::test_faults::SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|mut faults| {
-                    faults.take_fail_next_sink()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|mut faults| faults.take_fail_next_sink())
             })
             .unwrap_or(false)
         {
@@ -896,13 +891,12 @@ impl SubjectManager {
         #[cfg(feature = "test")]
         if ctx
             .system()
-            .get_helper::<
-                crate::helpers::network::test_faults::SharedFaultRegistry,
-            >("test_faults")
+            .get_helper::<crate::helpers::network::test_faults::SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|mut faults| {
-                    faults.take_fail_next_sink()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|mut faults| faults.take_fail_next_sink())
             })
             .unwrap_or(false)
         {
@@ -950,13 +944,12 @@ impl SubjectManager {
         #[cfg(feature = "test")]
         if ctx
             .system()
-            .get_helper::<
-                crate::helpers::network::test_faults::SharedFaultRegistry,
-            >("test_faults")
+            .get_helper::<crate::helpers::network::test_faults::SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|mut faults| {
-                    faults.take_fail_next_node_register()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|mut faults| faults.take_fail_next_node_register())
             })
             .unwrap_or(false)
         {

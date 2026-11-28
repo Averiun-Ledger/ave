@@ -1,7 +1,7 @@
 mod common;
 
-use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_common::identity::keys::{Ed25519Signer, KeyPair};
+use ave_common::identity::{DigestIdentifier, PublicKey};
 use ave_core::{
     Api,
     config::{GovernanceSyncConfig, TrackerSyncConfig},
@@ -888,8 +888,15 @@ async fn tracker_sync_resume_resets_page_budget() {
     let mut seen = HashSet::from([first_nonce]);
     let mut nonce = first_nonce;
     for _ in 0..100 {
-        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, first_cursor.clone())
-            .await;
+        inject_sync_page(
+            &a,
+            &a_key,
+            &b_key,
+            &sync_actor,
+            nonce,
+            first_cursor.clone(),
+        )
+        .await;
         nonce = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
         seen.insert(nonce);
     }
@@ -908,8 +915,15 @@ async fn tracker_sync_resume_resets_page_budget() {
     // every page inside the same cycle with a small count.
     let second_cursor = governance_id.clone();
     for i in 0..10 {
-        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, second_cursor.clone())
-            .await;
+        inject_sync_page(
+            &a,
+            &a_key,
+            &b_key,
+            &sync_actor,
+            nonce,
+            second_cursor.clone(),
+        )
+        .await;
         nonce = wait_tracker_fetch_unseen_short(&a, &b_key, &seen).await;
         seen.insert(nonce);
         let fetches = tracker_fetch_full(&a, &b_key).await;
@@ -1464,17 +1478,20 @@ async fn sync_failed_send_never_certifies_round_idle() {
     let (mut nodes, mut dirs) = create_manual_sync_nodes().await;
     let boot_peer_id = nodes[0].api.peer_id().to_string();
     let boot_listen = nodes[0].listen_address.clone();
-    let (node_c, mut dir_c) = add_manual_sync_node(boot_peer_id, boot_listen).await;
+    let (node_c, mut dir_c) =
+        add_manual_sync_node(boot_peer_id, boot_listen).await;
     dirs.append(&mut dir_c);
     nodes.push(node_c);
-    let (a, b, c) =
-        (nodes[1].api.clone(), nodes[2].api.clone(), nodes[3].api.clone());
+    let (a, b, c) = (
+        nodes[1].api.clone(),
+        nodes[2].api.clone(),
+        nodes[3].api.clone(),
+    );
     let b_key = PublicKey::from_str(&nodes[2].api.public_key()).unwrap();
     let c_key = PublicKey::from_str(&nodes[3].api.public_key()).unwrap();
     let _ = nodes;
 
-    let governance_id =
-        create_and_authorize_governance(&b, vec![&a, &c]).await;
+    let governance_id = create_and_authorize_governance(&b, vec![&a, &c]).await;
     emit_fact(
         &b,
         governance_id.clone(),
@@ -1699,9 +1716,7 @@ async fn sync_stale_generation_never_closes_newer_round() {
     a.test_install_fault(FaultRule {
         direction: FaultDirection::Inbound,
         message: FaultMessage::DistributionLedgerFrag,
-        peer: Some(
-            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
-        ),
+        peer: Some(PublicKey::from_str(&nodes[2].api.public_key()).unwrap()),
         remaining: None,
         action: FaultAction::Hold,
     })
@@ -1710,9 +1725,7 @@ async fn sync_stale_generation_never_closes_newer_round() {
     a.test_install_fault(FaultRule {
         direction: FaultDirection::Inbound,
         message: FaultMessage::UpdateOffer,
-        peer: Some(
-            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
-        ),
+        peer: Some(PublicKey::from_str(&nodes[2].api.public_key()).unwrap()),
         remaining: None,
         action: FaultAction::Hold,
     })
@@ -1721,9 +1734,7 @@ async fn sync_stale_generation_never_closes_newer_round() {
     a.test_install_fault(FaultRule {
         direction: FaultDirection::Inbound,
         message: FaultMessage::DistributionLastEventReq,
-        peer: Some(
-            PublicKey::from_str(&nodes[2].api.public_key()).unwrap(),
-        ),
+        peer: Some(PublicKey::from_str(&nodes[2].api.public_key()).unwrap()),
         remaining: None,
         action: FaultAction::Hold,
     })
@@ -1768,10 +1779,7 @@ async fn sync_stale_generation_never_closes_newer_round() {
     // Round 2 opens: the round-2 request is sent (and its answer
     // retained behind the round-1 one) before anything is released.
     // A is still behind: the fragment hold blocked the push.
-    let state = a
-        .get_subject_state(governance_id.clone())
-        .await
-        .unwrap();
+    let state = a.get_subject_state(governance_id.clone()).await.unwrap();
     assert_eq!(state.sn, 1, "A must still sit at v1 while B is at v2");
     a.test_version_sync_tick(governance_id.clone())
         .await
@@ -1810,7 +1818,10 @@ async fn sync_stale_generation_never_closes_newer_round() {
         .test_version_sync_state(governance_id.clone())
         .await
         .unwrap();
-    assert!(!round_open, "the genuine round-2 answer completes the round");
+    assert!(
+        !round_open,
+        "the genuine round-2 answer completes the round"
+    );
     assert_eq!(
         idle_count(&a, &governance_id).await,
         0,
@@ -1846,8 +1857,7 @@ async fn sync_late_sync_only_answer_drives_update() {
     );
     let _ = nodes;
 
-    let governance_id =
-        create_and_authorize_governance(&b, vec![&a, &c]).await;
+    let governance_id = create_and_authorize_governance(&b, vec![&a, &c]).await;
     emit_fact(
         &b,
         governance_id.clone(),
@@ -1909,9 +1919,7 @@ async fn sync_late_sync_only_answer_drives_update() {
         b.test_install_fault(FaultRule {
             direction: FaultDirection::Outbound,
             message,
-            peer: Some(
-                PublicKey::from_str(&a.public_key()).unwrap(),
-            ),
+            peer: Some(PublicKey::from_str(&a.public_key()).unwrap()),
             remaining: None,
             action: FaultAction::Hold,
         })
@@ -1939,10 +1947,7 @@ async fn sync_late_sync_only_answer_drives_update() {
     get_subject(&c, governance_id.clone(), Some(2), true)
         .await
         .unwrap();
-    let state = a
-        .get_subject_state(governance_id.clone())
-        .await
-        .unwrap();
+    let state = a.get_subject_state(governance_id.clone()).await.unwrap();
     assert_eq!(state.sn, 1, "A must still sit at v1 while B is at v2");
 
     // Round 1 opens with both peers pending and times out
@@ -2020,7 +2025,11 @@ async fn sync_late_sync_only_answer_drives_update() {
         .test_version_sync_state(governance_id.clone())
         .await
         .unwrap();
-    assert_eq!((round, pending), (2, 1), "the late answer cleaned C's backoff");
+    assert_eq!(
+        (round, pending),
+        (2, 1),
+        "the late answer cleaned C's backoff"
+    );
     c.test_release_held().await.unwrap();
     for _ in 0..100 {
         let (_, round_open, _) = a
@@ -2096,8 +2105,15 @@ async fn tracker_sync_mismatched_page_skips_page_cap() {
     let mut seen = HashSet::from([nonce]);
     let valid_cursor = DigestIdentifier::default();
     for _ in 0..99 {
-        inject_sync_page(&a, &a_key, &b_key, &sync_actor, nonce, valid_cursor.clone())
-            .await;
+        inject_sync_page(
+            &a,
+            &a_key,
+            &b_key,
+            &sync_actor,
+            nonce,
+            valid_cursor.clone(),
+        )
+        .await;
         nonce = wait_tracker_fetch_unseen(&a, &b_key, &seen).await;
         seen.insert(nonce);
     }
@@ -2138,10 +2154,8 @@ async fn tracker_sync_mismatched_page_skips_page_cap() {
             .unwrap_or_default()
             .iter()
             .any(|m| {
-                matches!(
-                    &m.message,
-                    ActorMessage::DistributionGetLastSn { .. }
-                ) && m.info.receiver == b_key
+                matches!(&m.message, ActorMessage::DistributionGetLastSn { .. })
+                    && m.info.receiver == b_key
             });
         if nudged {
             break;
@@ -3055,9 +3069,8 @@ async fn tracker_sync_switches_verified_sender_mid_copy() {
     )
     .await
     .unwrap();
-    let sync_actor = format!(
-        "/user/node/subject_manager/{governance_id}/tracker_sync"
-    );
+    let sync_actor =
+        format!("/user/node/subject_manager/{governance_id}/tracker_sync");
 
     // Everyone pulls the governance once the member fact above
     // lands; R never touches the subject except through the driven
@@ -3102,14 +3115,9 @@ async fn tracker_sync_switches_verified_sender_mid_copy() {
         create_subject(&a, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(
-        &a,
-        subject_id.clone(),
-        json!({"ModOne": {"data": 1}}),
-        true,
-    )
-    .await
-    .unwrap();
+    emit_fact(&a, subject_id.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
     emit_transfer(&a, subject_id.clone(), b_key.clone(), true)
         .await
         .unwrap();
@@ -3195,9 +3203,12 @@ async fn tracker_sync_switches_verified_sender_mid_copy() {
         r.get_subject_state(subject_id.clone())
             .await
             .is_ok_and(|state| state.sn == 1)
-            && r.test_get_verified_transfer_sn(&governance_id, subject_id.clone())
-                .await
-                .unwrap()
+            && r.test_get_verified_transfer_sn(
+                &governance_id,
+                subject_id.clone()
+            )
+            .await
+            .unwrap()
                 == Some((2, a_key.clone())),
         "R must hold (T, A) at T-1 before the forged page"
     );
@@ -3225,9 +3236,11 @@ async fn tracker_sync_switches_verified_sender_mid_copy() {
             .unwrap_or_default()
             .iter()
             .filter_map(|m| match &m.message {
-                ActorMessage::TrackerSyncReq {
-                    request_nonce, ..
-                } if m.info.receiver == b_key => Some(*request_nonce),
+                ActorMessage::TrackerSyncReq { request_nonce, .. }
+                    if m.info.receiver == b_key =>
+                {
+                    Some(*request_nonce)
+                }
                 _ => None,
             })
             .collect();

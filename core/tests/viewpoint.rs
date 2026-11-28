@@ -12184,8 +12184,7 @@ async fn test_witness_copy_offers_only_head_range() {
     // witness must start empty and fetch each batch through a held
     // offer below, never via a pre-seeding push. The drops lift after
     // the calendar so the witness can pull the gov once.
-    let witness_key =
-        PublicKey::from_str(witness.public_key()).unwrap();
+    let witness_key = PublicKey::from_str(witness.public_key()).unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
         FaultMessage::DistributionLastEventReq,
@@ -12438,9 +12437,7 @@ async fn test_witness_copy_offers_only_head_range() {
                         target_sn: Some(to),
                         subject_id: req_subject,
                         ..
-                    } if req_subject == subject_id => {
-                        Some((actual_sn, to))
-                    }
+                    } if req_subject == subject_id => Some((actual_sn, to)),
                     _ => None,
                 })
                 .collect();
@@ -12500,10 +12497,7 @@ async fn test_witness_copy_offers_only_head_range() {
         seen >= 2,
         "the calendar must need several head offers, saw {seen}"
     );
-    assert_eq!(
-        max_ranges, 1,
-        "range count never grows past the head offer"
-    );
+    assert_eq!(max_ranges, 1, "range count never grows past the head offer");
     assert_eq!(
         transported_ranges, seen,
         "the wire carries exactly one range per observed offer"

@@ -58,10 +58,7 @@ pub(crate) struct FragSendState {
 #[derive(Debug, Default)]
 pub(crate) struct PushFragStatsRegistry {
     initial_failures: std::collections::HashMap<DigestIdentifier, u64>,
-    resends: std::collections::HashMap<
-        DigestIdentifier,
-        Vec<DigestIdentifier>,
-    >,
+    resends: std::collections::HashMap<DigestIdentifier, Vec<DigestIdentifier>>,
     acks: std::collections::HashMap<DigestIdentifier, u64>,
     live_groups: std::collections::HashMap<DigestIdentifier, i64>,
     live_timers: std::collections::HashMap<DigestIdentifier, i64>,
@@ -85,7 +82,10 @@ impl PushFragStatsRegistry {
         subject_id: &DigestIdentifier,
         group_hash: DigestIdentifier,
     ) {
-        self.resends.entry(subject_id.clone()).or_default().push(group_hash);
+        self.resends
+            .entry(subject_id.clone())
+            .or_default()
+            .push(group_hash);
     }
 
     pub(crate) fn note_ack(&mut self, subject_id: &DigestIdentifier) {
@@ -96,10 +96,7 @@ impl PushFragStatsRegistry {
         *self.live_groups.entry(subject_id.clone()).or_default() += 1;
     }
 
-    pub(crate) fn note_group_closed(
-        &mut self,
-        subject_id: &DigestIdentifier,
-    ) {
+    pub(crate) fn note_group_closed(&mut self, subject_id: &DigestIdentifier) {
         *self.live_groups.entry(subject_id.clone()).or_default() -= 1;
     }
 
@@ -127,10 +124,9 @@ impl PushFragStatsRegistry {
 
 #[cfg(feature = "test")]
 impl DistriCoordinator {
-    fn push_stats(
-        ctx: &ActorContext<Self>,
-    ) -> Option<SharedPushFragStats> {
-        ctx.system().get_helper::<SharedPushFragStats>("push_frag_stats")
+    fn push_stats(ctx: &ActorContext<Self>) -> Option<SharedPushFragStats> {
+        ctx.system()
+            .get_helper::<SharedPushFragStats>("push_frag_stats")
     }
 
     /// Subject and group identity carried by a fragment batch: the
@@ -492,12 +488,11 @@ impl DistriCoordinator {
             return Err(crash_system(ctx, e).await);
         }
         if let Err(e) = {
-            let pending = self
-                .frag_pending
-                .as_ref()
-                .ok_or_else(|| ActorError::Functional {
+            let pending = self.frag_pending.as_ref().ok_or_else(|| {
+                ActorError::Functional {
                     description: "Fragment retry state missing".to_owned(),
-                })?;
+                }
+            })?;
             self.send_frags(
                 &pending.frags,
                 &pending.request_id,
@@ -785,9 +780,7 @@ impl Handler<Self> for DistriCoordinator {
                 let ack_identity = self
                     .frag_pending
                     .as_ref()
-                    .and_then(|pending| {
-                        Self::frag_identity(&pending.frags)
-                    });
+                    .and_then(|pending| Self::frag_identity(&pending.frags));
                 if let Some(key) = self.frag_timer.take() {
                     ctx.cancel_timer(key);
                     #[cfg(feature = "test")]

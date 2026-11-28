@@ -465,9 +465,10 @@ impl DistriWorker {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|faults| {
-                    faults.get_ledger_up_paused()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|faults| faults.get_ledger_up_paused())
             })
             .unwrap_or(false)
     }
@@ -514,9 +515,10 @@ impl DistriWorker {
         ctx.system()
             .get_helper::<SharedFaultRegistry>("test_faults")
             .and_then(|registry| {
-                registry.lock().ok().map(|mut faults| {
-                    faults.take_fail_get_ledger_resolve()
-                })
+                registry
+                    .lock()
+                    .ok()
+                    .map(|mut faults| faults.take_fail_get_ledger_resolve())
             })
             .unwrap_or(false)
     }
@@ -669,11 +671,13 @@ impl DistriWorker {
         if generation == 0 {
             return false;
         }
-        self.dead_supervised_rounds.get(subject_id).is_some_and(|rounds| {
-            rounds
-                .iter()
-                .any(|(generation_, target)| *generation_ == generation && tip_sn < *target)
-        })
+        self.dead_supervised_rounds
+            .get(subject_id)
+            .is_some_and(|rounds| {
+                rounds.iter().any(|(generation_, target)| {
+                    *generation_ == generation && tip_sn < *target
+                })
+            })
     }
 
     /// Best governance ceiling across incremental checks, same
@@ -801,8 +805,7 @@ impl DistriWorker {
             // a requester entry, or the first one to finish stops the
             // tracker while the other still needs it.
             let attempt = self.attempt_clock.fetch_add(1, Ordering::SeqCst);
-            let requester =
-                format!("send_distribution:{subject_id}:{attempt}");
+            let requester = format!("send_distribution:{subject_id}:{attempt}");
             with_subject_up(
                 ctx,
                 subject_id,
@@ -827,10 +830,8 @@ impl DistriWorker {
                             });
                         }
                     }
-                    let tracker_actor = ctx
-                        .system()
-                        .get_actor::<Tracker>(&path)
-                        .await?;
+                    let tracker_actor =
+                        ctx.system().get_actor::<Tracker>(&path).await?;
                     let response = tracker_actor
                         .ask(TrackerMessage::GetLedger { lo_sn, hi_sn })
                         .await?;
@@ -1492,9 +1493,7 @@ impl DistriWorker {
                     return Err(DistributorError::ReceiverNoAccess.into());
                 };
                 let Some(mut metadata) =
-                    super::transfer_verifier::TransferVerifier::genesis_metadata(
-                        held,
-                    )
+                    super::transfer_verifier::TransferVerifier::genesis_metadata(held)
                 else {
                     fresh.broken = true;
                     pending_auth.insert(subject_id.clone(), fresh);
@@ -1664,14 +1663,8 @@ impl DistriWorker {
                     else {
                         state.broken = true;
                         #[cfg(feature = "test")]
-                        Self::note_auth_work(
-                            ctx,
-                            subject_id,
-                            current.len() as u64,
-                        );
-                        return Err(
-                            DistributorError::ReceiverNoAccess.into()
-                        );
+                        Self::note_auth_work(ctx, subject_id, current.len() as u64);
+                        return Err(DistributorError::ReceiverNoAccess.into());
                     };
                     let Some(create) = combined_for_genesis
                         .iter()
@@ -1882,35 +1875,23 @@ impl DistriWorker {
                                     }),
                                 _ => None,
                             };
-                            let minimal = state.transfer_data.as_ref().map(
-                                |data| {
-                                    let mut olds = HashMap::new();
-                                    if let Some(key) = new_key.as_ref()
-                                        && let Some(entry) =
-                                            data.old_owners.get(key)
-                                    {
-                                        olds.insert(
-                                            key.clone(),
-                                            entry.clone(),
-                                        );
-                                    }
-                                    crate::governance::witnesses_register::TransferData {
-                                        actual_owner: data
-                                            .actual_owner
-                                            .clone(),
-                                        actual_new_owner_data: data
-                                            .actual_new_owner_data
-                                            .clone(),
-                                        sn: data.sn,
-                                        gov_version: data.gov_version,
-                                        old_owners: olds,
-                                        ownership_transitions: Vec::new(),
-                                        visibility_state: data
-                                            .visibility_state
-                                            .clone(),
-                                    }
-                                },
-                            );
+                            let minimal = state.transfer_data.as_ref().map(|data| {
+                                let mut olds = HashMap::new();
+                                if let Some(key) = new_key.as_ref()
+                                    && let Some(entry) = data.old_owners.get(key)
+                                {
+                                    olds.insert(key.clone(), entry.clone());
+                                }
+                                crate::governance::witnesses_register::TransferData {
+                                    actual_owner: data.actual_owner.clone(),
+                                    actual_new_owner_data: data.actual_new_owner_data.clone(),
+                                    sn: data.sn,
+                                    gov_version: data.gov_version,
+                                    old_owners: olds,
+                                    ownership_transitions: Vec::new(),
+                                    visibility_state: data.visibility_state.clone(),
+                                }
+                            });
                             if let Some(light) = minimal
                                 && !light.old_owners.is_empty()
                             {
@@ -2031,33 +2012,23 @@ impl DistriWorker {
                             };
                             // Minimal projection: new actual/pending plus at
                             // most one old entry. Transfers carry no new old.
-                            let minimal = state.transfer_data.as_ref().map(
-                            |data| {
+                            let minimal = state.transfer_data.as_ref().map(|data| {
                                 let mut olds = HashMap::new();
                                 if let Some(key) = new_key.as_ref()
-                                    && let Some(entry) =
-                                        data.old_owners.get(key)
+                                    && let Some(entry) = data.old_owners.get(key)
                                 {
-                                    olds.insert(
-                                        key.clone(),
-                                        entry.clone(),
-                                    );
+                                    olds.insert(key.clone(), entry.clone());
                                 }
                                 crate::governance::witnesses_register::TransferData {
                                     actual_owner: data.actual_owner.clone(),
-                                    actual_new_owner_data: data
-                                        .actual_new_owner_data
-                                        .clone(),
+                                    actual_new_owner_data: data.actual_new_owner_data.clone(),
                                     sn: data.sn,
                                     gov_version: data.gov_version,
                                     old_owners: olds,
                                     ownership_transitions: Vec::new(),
-                                    visibility_state: data
-                                        .visibility_state
-                                        .clone(),
+                                    visibility_state: data.visibility_state.clone(),
                                 }
-                            },
-                        );
+                            });
                             if let Some(light) = minimal {
                                 let _delta_len = light.old_owners.len() as u64;
                                 // Snapshot the cached best before releasing
@@ -2114,52 +2085,33 @@ impl DistriWorker {
                                         pending_auth.get_mut(subject_id)
                                 {
                                     state.ownership_version = new_version;
-                                    state.cached_without_aux = Some(
-                                        CachedWithoutAux {
-                                            sender: sender_key,
-                                            gov_version,
-                                            ownership_version:
-                                                new_version,
-                                            status: Some(
-                                                crate::governance::witnesses_register::WitnessStatus {
-                                                    access_sn: prev_status
-                                                        .access_sn
-                                                        .or(new_status
-                                                            .access_sn),
-                                                    hi_sn_limit:
-                                                        Self::max_hi(
-                                                            prev_status
-                                                                .hi_sn_limit,
-                                                            new_status
-                                                                .hi_sn_limit,
-                                                        ),
-                                                    gov_version_limit:
-                                                        Self::max_gov(
-                                                            prev_status
-                                                                .gov_version_limit,
-                                                            new_status
-                                                                .gov_version_limit,
-                                                        ),
-                                                    create_access:
-                                                        prev_status
-                                                            .create_access
-                                                            || new_status
-                                                                .create_access,
-                                                    create_gov_version_limit:
-                                                        Self::max_gov(
-                                                            prev_status
-                                                                .create_gov_version_limit,
-                                                            new_status
-                                                                .create_gov_version_limit,
-                                                        ),
-                                                },
-                                            ),
-                                            window_sn: prev_window
-                                                .into_iter()
-                                                .chain(new_window)
-                                                .max(),
-                                        },
-                                    );
+                                    state.cached_without_aux = Some(CachedWithoutAux {
+                                        sender: sender_key,
+                                        gov_version,
+                                        ownership_version: new_version,
+                                        status: Some(
+                                            crate::governance::witnesses_register::WitnessStatus {
+                                                access_sn: prev_status
+                                                    .access_sn
+                                                    .or(new_status.access_sn),
+                                                hi_sn_limit: Self::max_hi(
+                                                    prev_status.hi_sn_limit,
+                                                    new_status.hi_sn_limit,
+                                                ),
+                                                gov_version_limit: Self::max_gov(
+                                                    prev_status.gov_version_limit,
+                                                    new_status.gov_version_limit,
+                                                ),
+                                                create_access: prev_status.create_access
+                                                    || new_status.create_access,
+                                                create_gov_version_limit: Self::max_gov(
+                                                    prev_status.create_gov_version_limit,
+                                                    new_status.create_gov_version_limit,
+                                                ),
+                                            },
+                                        ),
+                                        window_sn: prev_window.into_iter().chain(new_window).max(),
+                                    });
                                     incremental_done = true;
                                 }
                                 // Re-borrow for the trailing bookkeeping below.
@@ -5418,8 +5370,7 @@ impl Handler<Self> for DistriWorker {
                     generation,
                     target_sn,
                 );
-                if !self.dead_supervised_rounds.contains_key(&subject_id)
-                {
+                if !self.dead_supervised_rounds.contains_key(&subject_id) {
                     while self.dead_supervised_round_order.len() >= 256 {
                         if let Some(oldest) =
                             self.dead_supervised_round_order.pop_front()
@@ -5436,8 +5387,9 @@ impl Handler<Self> for DistriWorker {
                     .dead_supervised_rounds
                     .entry(subject_id.clone())
                     .or_default();
-                if let Some(entry) =
-                    rounds.iter_mut().find(|(generation_, _)| *generation_ == generation)
+                if let Some(entry) = rounds
+                    .iter_mut()
+                    .find(|(generation_, _)| *generation_ == generation)
                 {
                     entry.1 = target_sn;
                 } else {

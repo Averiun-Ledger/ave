@@ -22425,8 +22425,13 @@ async fn remote_fragment_ready_mixed_identity_discarded_before_delivery() {
     get_subject(&a, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
-    poll_pending_ownership(&a, &governance_id, &subject_id, Some(carol_key.clone()))
-        .await;
+    poll_pending_ownership(
+        &a,
+        &governance_id,
+        &subject_id,
+        Some(carol_key.clone()),
+    )
+    .await;
     let (assemblies, mains_n, auxes_n, _, _) =
         a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
     assert_eq!(
@@ -22696,11 +22701,20 @@ async fn remote_fragment_group_sn_identity() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        a.get_subject_state(subject_id.clone()).await.map(|s| s.sn).unwrap_or(0) >= 1,
+        a.get_subject_state(subject_id.clone())
+            .await
+            .map(|s| s.sn)
+            .unwrap_or(0)
+            >= 1,
         "the genuine main delivers SN1 (SN2 may already follow)"
     );
-    poll_pending_ownership(&a, &governance_id, &subject_id, Some(carol_key.clone()))
-        .await;
+    poll_pending_ownership(
+        &a,
+        &governance_id,
+        &subject_id,
+        Some(carol_key.clone()),
+    )
+    .await;
     let (assemblies, mains_n, auxes_n, _, _) =
         a.test_fragment_stats().await.unwrap_or((1, 1, 1, 0, 0));
     assert_eq!(
@@ -25375,8 +25389,7 @@ async fn remote_concurrent_divergent_transfer_is_not_proven_or_acknowledged() {
                 direction: FaultDirection::Outbound,
                 message,
                 peer: Some(
-                    PublicKey::from_str(rita.public_key())
-                        .expect("node key"),
+                    PublicKey::from_str(rita.public_key()).expect("node key"),
                 ),
                 remaining: None,
                 action: FaultAction::Drop,
@@ -25467,7 +25480,9 @@ async fn remote_concurrent_divergent_transfer_is_not_proven_or_acknowledged() {
     // local tip; the concurrent valid copy applies through the
     // node-level distributor, which the barrier exempts.
     let sub_path = format!("/user/node/distributor_{subject_id}");
-    rita.test_ensure_distributor(subject_id.clone()).await.unwrap();
+    rita.test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
     rita.test_pause_verify_before_sn(true).await.unwrap();
     inject_push_to(&rita, &alice_key, transfer_b.clone(), sub_path.clone())
         .await;
@@ -25500,14 +25515,24 @@ async fn remote_concurrent_divergent_transfer_is_not_proven_or_acknowledged() {
     inject_push_to(&rita, &alice_key, transfer_a.clone(), sub_path.clone())
         .await;
     for _ in 0..300 {
-        if held_acks(&rita).await.iter().filter(|h| **h == hash_a).count() >= 2
+        if held_acks(&rita)
+            .await
+            .iter()
+            .filter(|h| **h == hash_a)
+            .count()
+            >= 2
         {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        held_acks(&rita).await.iter().filter(|h| **h == hash_a).count() >= 2,
+        held_acks(&rita)
+            .await
+            .iter()
+            .filter(|h| **h == hash_a)
+            .count()
+            >= 2,
         "the winner and its duplicate must be acknowledged"
     );
     // No settle sleep: re-assert the exact counts stable over a
@@ -25519,7 +25544,11 @@ async fn remote_concurrent_divergent_transfer_is_not_proven_or_acknowledged() {
             "a same-SN divergence is never acknowledged"
         );
         assert_eq!(
-            held_acks(&rita).await.iter().filter(|h| **h == hash_a).count(),
+            held_acks(&rita)
+                .await
+                .iter()
+                .filter(|h| **h == hash_a)
+                .count(),
             2,
             "the winner and its identical duplicate ack exactly once each"
         );
@@ -25539,9 +25568,12 @@ async fn remote_concurrent_divergent_transfer_is_not_proven_or_acknowledged() {
         "the ledger holds exclusively the winning variant"
     );
     assert_eq!(
-        rita.test_get_verified_transfer_detail(&governance_id, subject_id.clone())
-            .await
-            .unwrap(),
+        rita.test_get_verified_transfer_detail(
+            &governance_id,
+            subject_id.clone()
+        )
+        .await
+        .unwrap(),
         None,
         "the divergent hint records no proof"
     );
@@ -25712,8 +25744,9 @@ async fn fragmented_push_retry_case(intermediate: bool) {
     let state = get_subject(&a, subject_id.clone(), Some(1), true)
         .await
         .unwrap();
-    let owner_state =
-        get_subject(&b, subject_id.clone(), Some(1), true).await.unwrap();
+    let owner_state = get_subject(&b, subject_id.clone(), Some(1), true)
+        .await
+        .unwrap();
     assert_eq!(state.properties, owner_state.properties);
     assert_eq!(
         a.test_get_tracker_ledger(subject_id.clone(), 1)
@@ -25753,10 +25786,7 @@ async fn fragmented_push_retry_case(intermediate: bool) {
         initial_failures, 1,
         "the injected first-send failure must fire, not just the timer"
     );
-    assert!(
-        !resends.is_empty(),
-        "the retry must resend the group"
-    );
+    assert!(!resends.is_empty(), "the retry must resend the group");
     assert!(
         resends.iter().all(|group| group == &fact_hash),
         "every resend must carry the whole group under the same id, got {resends:?}"
@@ -25948,7 +25978,11 @@ async fn remote_update_switches_verified_sender_mid_copy() {
 
     // Delivers a bare Create with no aux: crossing nothing, it applies
     // on its own and leaves no proof behind.
-    async fn inject_create(api: &ave_core::Api, from: &PublicKey, create: Ledger) {
+    async fn inject_create(
+        api: &ave_core::Api,
+        from: &PublicKey,
+        create: Ledger,
+    ) {
         let receiver = PublicKey::from_str(api.public_key()).unwrap();
         api.test_inject_inbound(
             NetworkMessage::new(
@@ -26006,14 +26040,8 @@ async fn remote_update_switches_verified_sender_mid_copy() {
         }
         api.test_clear_faults().await.unwrap();
         hold_r_reqs(api).await;
-        inject_state(
-            api,
-            from,
-            history[1..=tip as usize].to_vec(),
-            aux,
-            gov,
-        )
-        .await;
+        inject_state(api, from, history[1..=tip as usize].to_vec(), aux, gov)
+            .await;
         wait_proof_state(
             api,
             gov,
@@ -26266,16 +26294,8 @@ async fn remote_update_switches_verified_sender_mid_copy() {
 
     // R reaches T-1 with the genuine (T, A) proof, then its worker
     // continuation still attributed to A must announce Some(T).
-    inject_fresh_prefix(
-        &r,
-        &a_key,
-        &history,
-        &transfer,
-        &governance_id,
-        2,
-        3,
-    )
-    .await;
+    inject_fresh_prefix(&r, &a_key, &history, &transfer, &governance_id, 2, 3)
+        .await;
     let detail = r
         .test_get_verified_transfer_detail(&governance_id, subject_id.clone())
         .await
@@ -26287,8 +26307,9 @@ async fn remote_update_switches_verified_sender_mid_copy() {
     );
     let reqs = wait_reqs_to(&r, &a_key).await;
     assert!(
-        reqs.iter().all(|(_, actual, _, already)| *actual == Some(2)
-            && *already == Some(3)),
+        reqs.iter()
+            .all(|(_, actual, _, already)| *actual == Some(2)
+                && *already == Some(3)),
         "the continuation still attributed to A reuses the proof, got {reqs:?}"
     );
 
@@ -26341,10 +26362,7 @@ async fn remote_update_switches_verified_sender_mid_copy() {
     let mut omit_dump = Vec::new();
     let mut r_dump = Vec::new();
     for _ in 0..300 {
-        let held = a
-            .test_held_outbound()
-            .await
-            .unwrap_or_default();
+        let held = a.test_held_outbound().await.unwrap_or_default();
         omit_dump = held
             .iter()
             .filter(|m| m.info.receiver == r_key)
@@ -26369,9 +26387,9 @@ async fn remote_update_switches_verified_sender_mid_copy() {
             .collect();
         omitted = !answers.is_empty()
             && answers.iter().all(|m| match &m.message {
-                ActorMessage::DistributionLedgerRes { transfer_event, .. } => {
-                    transfer_event.is_none()
-                }
+                ActorMessage::DistributionLedgerRes {
+                    transfer_event, ..
+                } => transfer_event.is_none(),
                 _ => false,
             });
         if omitted {
@@ -26446,8 +26464,9 @@ async fn remote_update_switches_verified_sender_mid_copy() {
         .await;
     let reqs = wait_reqs_to(&r, &a_key).await;
     assert!(
-        reqs.iter().all(|(_, actual, _, already)| *actual == Some(6)
-            && *already == Some(7)),
+        reqs.iter()
+            .all(|(_, actual, _, already)| *actual == Some(6)
+                && *already == Some(7)),
         "the continuation still attributed to A reuses the proof, got {reqs:?}"
     );
     r.test_clear_faults().await.unwrap();
@@ -26488,9 +26507,8 @@ async fn remote_update_switches_verified_sender_mid_copy() {
     let reqs = wait_reqs_to(&r, &b_key).await;
     assert!(
         !reqs.is_empty()
-            && reqs
-                .iter()
-                .all(|(_, actual, _, already)| *actual == Some(6) && already.is_none()),
+            && reqs.iter().all(|(_, actual, _, already)| *actual == Some(6)
+                && already.is_none()),
         "the first request to B must omit the A proof, got {reqs:?}"
     );
 
@@ -26502,20 +26520,17 @@ async fn remote_update_switches_verified_sender_mid_copy() {
     let mut aux_seen = false;
     let mut held_summary = Vec::new();
     for _ in 0..300 {
-        let held = b
-            .test_held_outbound()
-            .await
-            .unwrap_or_default();
+        let held = b.test_held_outbound().await.unwrap_or_default();
         held_summary = held
             .iter()
             .map(|m| format!("{:?} -> {}", m.message, m.info.receiver))
             .collect();
         aux_seen = held.iter().any(|m| match &m.message {
-            ActorMessage::DistributionLedgerRes {
-                transfer_event, ..
-            } if m.info.receiver == r_key => transfer_event
-                .as_ref()
-                .is_some_and(|event| event.sn == 7),
+            ActorMessage::DistributionLedgerRes { transfer_event, .. }
+                if m.info.receiver == r_key =>
+            {
+                transfer_event.as_ref().is_some_and(|event| event.sn == 7)
+            }
             _ => false,
         });
         if aux_seen {
@@ -26554,14 +26569,9 @@ async fn remote_update_switches_verified_sender_mid_copy() {
         create_subject(&a, governance_id.clone(), "Example", "", true)
             .await
             .unwrap();
-    emit_fact(
-        &a,
-        subject2.clone(),
-        json!({"ModOne": {"data": 1}}),
-        true,
-    )
-    .await
-    .unwrap();
+    emit_fact(&a, subject2.clone(), json!({"ModOne": {"data": 1}}), true)
+        .await
+        .unwrap();
     emit_transfer(&a, subject2.clone(), b_key.clone(), true)
         .await
         .unwrap();
@@ -26574,12 +26584,12 @@ async fn remote_update_switches_verified_sender_mid_copy() {
         .await
         .unwrap();
     for api in [&a, &b, &r] {
-        api.test_ensure_distributor(subject2.clone())
-            .await
-            .unwrap();
+        api.test_ensure_distributor(subject2.clone()).await.unwrap();
     }
-    let history2 =
-        a.test_get_tracker_ledger(subject2.clone(), 2).await.unwrap();
+    let history2 = a
+        .test_get_tracker_ledger(subject2.clone(), 2)
+        .await
+        .unwrap();
     let transfer3 = history2
         .iter()
         .find(|event| event.sn == 2)
@@ -26591,14 +26601,9 @@ async fn remote_update_switches_verified_sender_mid_copy() {
     emit_confirm(&b, subject2.clone(), None, true)
         .await
         .unwrap();
-    emit_fact(
-        &b,
-        subject2.clone(),
-        json!({"ModOne": {"data": 2}}),
-        true,
-    )
-    .await
-    .unwrap();
+    emit_fact(&b, subject2.clone(), json!({"ModOne": {"data": 2}}), true)
+        .await
+        .unwrap();
     emit_transfer(&b, subject2.clone(), a_key.clone(), true)
         .await
         .unwrap();
@@ -26732,7 +26737,11 @@ async fn test_truncation_window_only_built_for_is_all() {
         );
         api.test_inject_inbound(message, from).await.unwrap();
     }
-    async fn wait_tip(api: &ave_core::Api, subject: &DigestIdentifier, sn: u64) {
+    async fn wait_tip(
+        api: &ave_core::Api,
+        subject: &DigestIdentifier,
+        sn: u64,
+    ) {
         for _ in 0..200 {
             if let Ok(state) = api.get_subject_state(subject.clone()).await
                 && state.sn == sn
@@ -26760,14 +26769,11 @@ async fn test_truncation_window_only_built_for_is_all() {
     let sender = nodes[1].api.clone();
     let receiver = nodes[2].api.clone();
     let owner_key = PublicKey::from_str(owner.public_key()).unwrap();
-    let sender_key =
-        PublicKey::from_str(nodes[1].api.public_key()).unwrap();
-    let receiver_key =
-        PublicKey::from_str(nodes[2].api.public_key()).unwrap();
+    let sender_key = PublicKey::from_str(nodes[1].api.public_key()).unwrap();
+    let receiver_key = PublicKey::from_str(nodes[2].api.public_key()).unwrap();
 
     let governance_id =
-        create_and_authorize_governance(&owner, vec![&sender, &receiver])
-            .await;
+        create_and_authorize_governance(&owner, vec![&sender, &receiver]).await;
     emit_fact(
         &owner,
         governance_id.clone(),
@@ -26902,9 +26908,8 @@ async fn test_truncation_window_only_built_for_is_all() {
         .find(|event| event.sn == 2)
         .expect("future transfer")
         .clone();
-    let future_hash = future_transfer
-        .ledger_hash(HashAlgorithm::Blake3)
-        .unwrap();
+    let future_hash =
+        future_transfer.ledger_hash(HashAlgorithm::Blake3).unwrap();
     for subject in [&partial_subject, &complete_subject] {
         receiver
             .test_ensure_distributor(subject.clone())
@@ -27004,7 +27009,10 @@ async fn test_truncation_window_only_built_for_is_all() {
         )
         .await
         .unwrap();
-    receiver.update_subject(complete_subject.clone()).await.unwrap();
+    receiver
+        .update_subject(complete_subject.clone())
+        .await
+        .unwrap();
     inject_with_flag(
         &receiver,
         &sender_key,
@@ -27023,7 +27031,10 @@ async fn test_truncation_window_only_built_for_is_all() {
         "a complete batch must build the truncation window once"
     );
     assert!(
-        receiver.test_update_alive(complete_subject.clone()).await.unwrap(),
+        receiver
+            .test_update_alive(complete_subject.clone())
+            .await
+            .unwrap(),
         "a truncated response must not certify DistributionDone"
     );
     let complete_continued = receiver
@@ -27045,7 +27056,10 @@ async fn test_truncation_window_only_built_for_is_all() {
     );
     assert_eq!(
         receiver
-            .test_get_verified_transfer_sn(&governance_id, complete_subject.clone())
+            .test_get_verified_transfer_sn(
+                &governance_id,
+                complete_subject.clone()
+            )
             .await
             .unwrap()
             .map(|(sn, _)| sn),

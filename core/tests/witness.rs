@@ -7,8 +7,8 @@ use ave_core::governance::sn_register::SnLimit;
 use common::{
     EXAMPLE_CONTRACT, assert_tracker_fact_full, assert_tracker_fact_opaque,
     create_and_authorize_governance, create_nodes_and_connections,
-    create_subject, emit_confirm, emit_fact, emit_fact_viewpoints,
-    emit_reject, emit_transfer, get_events, get_subject,
+    create_subject, emit_confirm, emit_fact, emit_fact_viewpoints, emit_reject,
+    emit_transfer, get_events, get_subject,
 };
 
 use ave_core::{
@@ -10637,9 +10637,11 @@ async fn generic_grant_requires_temporal_overlap_with_schema_role() {
     let marta = nodes[3].api.clone();
     let bob = nodes[4].api.clone();
 
-    let governance_id =
-        create_and_authorize_governance(&owner, vec![&alice, &nora, &marta, &bob])
-            .await;
+    let governance_id = create_and_authorize_governance(
+        &owner,
+        vec![&alice, &nora, &marta, &bob],
+    )
+    .await;
 
     // v1: private schema, Alice creator with generic Full, Marta
     // schema witness from the start.
@@ -10929,9 +10931,8 @@ async fn generic_grant_requires_temporal_overlap_with_schema_role() {
     get_subject(&nora, subject_b.clone(), Some(1), true)
         .await
         .unwrap();
-    let hash_events = get_events(&nora, subject_b.clone(), 2, true)
-        .await
-        .unwrap();
+    let hash_events =
+        get_events(&nora, subject_b.clone(), 2, true).await.unwrap();
     assert_tracker_fact_opaque(&hash_events[1].event, &["agua"]).unwrap();
 
     for node in nodes.iter_mut() {
@@ -12040,8 +12041,7 @@ async fn test_ownership_replay_is_idempotent() {
 /// bounded budget instead of timing assumptions.
 async fn wait_get_ledger_up_holds(api: &Api, at_least: u64) {
     for _ in 0..300 {
-        if api.test_get_ledger_up_hold_count().await.unwrap_or(0) >= at_least
-        {
+        if api.test_get_ledger_up_hold_count().await.unwrap_or(0) >= at_least {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -12062,8 +12062,10 @@ async fn wait_stable_requesters(
     let mut stable = 0u32;
     let mut last: Vec<String> = Vec::new();
     for _ in 0..300 {
-        let current =
-            api.test_list_requesters(subject_id.clone()).await.unwrap_or_default();
+        let current = api
+            .test_list_requesters(subject_id.clone())
+            .await
+            .unwrap_or_default();
         if current == last {
             stable += 1;
             if stable >= 5 {
@@ -12173,14 +12175,9 @@ async fn concurrent_distribution_reads_have_independent_leases() {
     )
     .await
     .unwrap();
-    emit_transfer(
-        &owner,
-        subject_id.clone(),
-        nobody.public_key(),
-        true,
-    )
-    .await
-    .unwrap();
+    emit_transfer(&owner, subject_id.clone(), nobody.public_key(), true)
+        .await
+        .unwrap();
     let tip = get_subject(&owner, subject_id.clone(), None, true)
         .await
         .unwrap()
@@ -12217,8 +12214,7 @@ async fn concurrent_distribution_reads_have_independent_leases() {
     // Second read for the same tracker through the node-level
     // distributor, capped below the transfer so its auxiliary
     // fetch runs as well.
-    let owner_receiver =
-        PublicKey::from_str(owner.public_key()).unwrap();
+    let owner_receiver = PublicKey::from_str(owner.public_key()).unwrap();
     owner
         .test_inject_inbound(
             NetworkMessage::new(
@@ -12242,8 +12238,10 @@ async fn concurrent_distribution_reads_have_independent_leases() {
         .unwrap();
     wait_get_ledger_up_holds(&owner, 2).await;
 
-    let requesters =
-        owner.test_list_requesters(subject_id.clone()).await.unwrap();
+    let requesters = owner
+        .test_list_requesters(subject_id.clone())
+        .await
+        .unwrap();
     let prefix = format!("send_distribution:{subject_id}:");
     assert_eq!(requesters.len(), 2, "each parked read owns its lease");
     assert!(
@@ -12253,16 +12251,23 @@ async fn concurrent_distribution_reads_have_independent_leases() {
     assert_ne!(requesters[0], requesters[1]);
 
     owner.test_pause_get_ledger_up(false).await.unwrap();
-    let l1_state =
-        get_subject(&l1, subject_id.clone(), Some(tip), true).await.unwrap();
-    let l2_state =
-        get_subject(&l2, subject_id.clone(), Some(tip), true).await.unwrap();
-    let owner_state =
-        get_subject(&owner, subject_id.clone(), Some(tip), true).await.unwrap();
+    let l1_state = get_subject(&l1, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
+    let l2_state = get_subject(&l2, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
+    let owner_state = get_subject(&owner, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(l1_state.properties, owner_state.properties);
     assert_eq!(l2_state.properties, owner_state.properties);
     assert!(
-        owner.test_list_requesters(subject_id.clone()).await.unwrap().is_empty(),
+        owner
+            .test_list_requesters(subject_id.clone())
+            .await
+            .unwrap()
+            .is_empty(),
         "no serving lease may survive the reads"
     );
 
@@ -12396,25 +12401,35 @@ async fn distribution_ledger_read_releases_lease_on_tracker_resolve_failure() {
     // The read parks holding its lease; the parked requester proves
     // the `Up` really ran instead of the test passing vacuously.
     wait_get_ledger_up_holds(&owner, 1).await;
-    let parked = owner.test_list_requesters(subject_id.clone()).await.unwrap();
+    let parked = owner
+        .test_list_requesters(subject_id.clone())
+        .await
+        .unwrap();
     assert_eq!(parked.len(), 1, "one read must be parked holding its lease");
     // On release the resolve fails at once; the lease must be gone
     // before the retry round reuses the subject, so poll for a
     // stable set instead of timing the release.
     owner.test_pause_get_ledger_up(false).await.unwrap();
     assert!(
-        wait_stable_requesters(&owner, subject_id.clone()).await.is_empty(),
+        wait_stable_requesters(&owner, subject_id.clone())
+            .await
+            .is_empty(),
         "a failed resolve must not leave its lease behind"
     );
     let learner_state =
         get_subject(&learner, subject_id.clone(), Some(tip), true)
             .await
             .unwrap();
-    let owner_state =
-        get_subject(&owner, subject_id.clone(), Some(tip), true).await.unwrap();
+    let owner_state = get_subject(&owner, subject_id.clone(), Some(tip), true)
+        .await
+        .unwrap();
     assert_eq!(learner_state.properties, owner_state.properties);
     assert!(
-        owner.test_list_requesters(subject_id.clone()).await.unwrap().is_empty(),
+        owner
+            .test_list_requesters(subject_id.clone())
+            .await
+            .unwrap()
+            .is_empty(),
         "no serving lease may survive the reads"
     );
     node_running(&learner).await.unwrap();
@@ -12755,7 +12770,11 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
     let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
         .await
         .unwrap();
-    assert_eq!(owner_gov.sn, 2, "owner gov must sit at SN2, got {}", owner_gov.sn);
+    assert_eq!(
+        owner_gov.sn, 2,
+        "owner gov must sit at SN2, got {}",
+        owner_gov.sn
+    );
 
     // Before any transfer the late grant already opens the fact.
     nora.authorize_governance(
@@ -12912,7 +12931,11 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
     let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
         .await
         .unwrap();
-    assert_eq!(owner_gov.sn, 3, "owner gov must sit at SN3, got {}", owner_gov.sn);
+    assert_eq!(
+        owner_gov.sn, 3,
+        "owner gov must sit at SN3, got {}",
+        owner_gov.sn
+    );
     // Second Alice reign, all at version 3: only Bob still serves
     // the pending transfer, so no stale offer can decide the copy.
     emit_transfer(
@@ -12923,16 +12946,14 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
     )
     .await
     .unwrap();
-    alice.authorize_governance(
-        subject_id.clone(),
-        AuthWitness::One(PublicKey::from_str(bob.public_key()).unwrap()),
-    )
-    .await
-    .unwrap();
     alice
-        .update_subject(subject_id.clone())
+        .authorize_governance(
+            subject_id.clone(),
+            AuthWitness::One(PublicKey::from_str(bob.public_key()).unwrap()),
+        )
         .await
         .unwrap();
+    alice.update_subject(subject_id.clone()).await.unwrap();
     emit_confirm(&alice, subject_id.clone(), None, true)
         .await
         .unwrap();
@@ -13009,7 +13030,13 @@ async fn old_owner_late_clear_grant_applies_retroactively() {
     for node in nodes.iter_mut().take(3) {
         node.token.cancel();
     }
-    join_all(nodes.iter_mut().take(3).flat_map(|node| node.handler.iter_mut())).await;
+    join_all(
+        nodes
+            .iter_mut()
+            .take(3)
+            .flat_map(|node| node.handler.iter_mut()),
+    )
+    .await;
 }
 
 // A repeated owner must not leak an earlier grant into a later reign:
@@ -13177,7 +13204,11 @@ async fn repeated_owner_reign_keeps_grant_isolated_per_stint() {
     let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
         .await
         .unwrap();
-    assert_eq!(owner_gov.sn, 2, "owner gov must sit at SN2, got {}", owner_gov.sn);
+    assert_eq!(
+        owner_gov.sn, 2,
+        "owner gov must sit at SN2, got {}",
+        owner_gov.sn
+    );
 
     // First Alice reign closes inside v2: SN2 transfer, SN3 confirm.
     emit_transfer(
@@ -13211,10 +13242,7 @@ async fn repeated_owner_reign_keeps_grant_isolated_per_stint() {
     )
     .await
     .unwrap();
-    alice
-        .update_subject(subject_id.clone())
-        .await
-        .unwrap();
+    alice.update_subject(subject_id.clone()).await.unwrap();
     emit_confirm(&alice, subject_id.clone(), None, true)
         .await
         .unwrap();
@@ -13382,7 +13410,13 @@ async fn repeated_owner_reign_keeps_grant_isolated_per_stint() {
     for node in nodes.iter_mut().take(3) {
         node.token.cancel();
     }
-    join_all(nodes.iter_mut().take(3).flat_map(|node| node.handler.iter_mut())).await;
+    join_all(
+        nodes
+            .iter_mut()
+            .take(3)
+            .flat_map(|node| node.handler.iter_mut()),
+    )
+    .await;
 }
 
 // A schema role fully before the creator-Witnesses opening shares no
@@ -13599,7 +13633,11 @@ async fn numeric_search_rejects_role_before_witnesses_opening() {
     let owner_gov = get_subject(&owner, governance_id.clone(), None, true)
         .await
         .unwrap();
-    assert_eq!(owner_gov.sn, 4, "owner gov must sit at SN4, got {}", owner_gov.sn);
+    assert_eq!(
+        owner_gov.sn, 4,
+        "owner gov must sit at SN4, got {}",
+        owner_gov.sn
+    );
 
     // All three numeric limits stay None on the serving register.
     let marta_key = PublicKey::from_str(marta.public_key()).unwrap();
@@ -13615,7 +13653,11 @@ async fn numeric_search_rejects_role_before_witnesses_opening() {
         .unwrap();
     assert_eq!(access, None, "disjoint role must yield no access");
     assert_eq!(hi, HiSnLimit::None, "disjoint role must yield no hi cap");
-    assert_eq!(gov, GovVersionLimit::None, "disjoint role must yield no gov cap");
+    assert_eq!(
+        gov,
+        GovVersionLimit::None,
+        "disjoint role must yield no gov cap"
+    );
 
     // No copy lands for Marta: the subject never registers.
     marta
@@ -13871,7 +13913,9 @@ async fn status_and_window_share_supplied_ownership() {
     .await;
     assert_eq!(full.len(), 5, "owner must serve SN0..SN4");
     assert!(
-        full.iter().enumerate().all(|(i, event)| event.sn == i as u64),
+        full.iter()
+            .enumerate()
+            .all(|(i, event)| event.sn == i as u64),
         "ledger must be contiguous from genesis"
     );
 
@@ -13889,7 +13933,11 @@ async fn status_and_window_share_supplied_ownership() {
         )
         .await
         .unwrap();
-    assert_eq!(access, Some(3), "stale cache must not widen access past sn 3");
+    assert_eq!(
+        access,
+        Some(3),
+        "stale cache must not widen access past sn 3"
+    );
     assert_eq!(hi, HiSnLimit::Sn(3), "hi limit must stop at sn 3");
     assert_eq!(gov, GovVersionLimit::Version(1));
     assert_eq!(window_sn, Some(3), "window must stop at sn 3");
@@ -14176,7 +14224,10 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
         )
         .await
         .unwrap();
-    assert!(window.is_empty(), "the wiped map reads empty, got {window:?}");
+    assert!(
+        window.is_empty(),
+        "the wiped map reads empty, got {window:?}"
+    );
     let limits = owner
         .test_get_sns(
             governance_id.clone(),
@@ -14730,7 +14781,10 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
         .test_delete_sn_subject(governance_id.clone(), subject_id.clone())
         .await
         .unwrap();
-    witness.test_ensure_distributor(subject_id.clone()).await.unwrap();
+    witness
+        .test_ensure_distributor(subject_id.clone())
+        .await
+        .unwrap();
     witness.test_clear_held_outbound().await.unwrap();
     for message in [
         FaultMessage::DistributionLedgerRes,
@@ -14818,10 +14872,7 @@ async fn test_witness_copy_empty_mapping_defers_grant_access() {
     .await;
     let mut no_offer = 0;
     for _ in 0..300 {
-        let held = witness
-            .test_held_outbound()
-            .await
-            .unwrap_or_default();
+        let held = witness.test_held_outbound().await.unwrap_or_default();
         no_offer = held
             .iter()
             .filter(|m| {

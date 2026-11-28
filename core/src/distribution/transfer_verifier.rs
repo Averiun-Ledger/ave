@@ -13,13 +13,12 @@ use ave_common::{
 };
 
 use crate::governance::role_register::{RoleDataRegister, SearchRole};
-use crate::governance::{
-    Governance, GovernanceMessage, GovernanceResponse,
-};
+use crate::governance::{Governance, GovernanceMessage, GovernanceResponse};
 #[cfg(feature = "test")]
 use crate::helpers::network::test_faults::SharedFaultRegistry;
 use crate::model::common::{
-    check_quorum_signers, get_actual_roles_register, node::get_subject_data,
+    check_quorum_signers, get_actual_roles_register,
+    node::get_subject_data,
     subject::{
         acquire_subject, get_local_subject_sn, get_subject_path_and_data,
     },
@@ -28,9 +27,9 @@ use crate::model::event::{
     EvaluationData, Ledger, LedgerSeal, Protocols, ValidationMetadata,
 };
 use crate::node::SubjectData;
-use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use crate::subject::Metadata;
 use crate::subject::RequestSubjectData;
+use crate::tracker::{Tracker, TrackerMessage, TrackerResponse};
 use crate::validation::response::ValidationRes;
 use crate::validation::worker::{EventAnchor, check_evaluation};
 use tracing::warn;
@@ -911,9 +910,7 @@ impl TransferVerifier {
             .map(|event| {
                 event.ledger_hash(self.hash).map_err(|e| {
                     ActorError::Functional {
-                        description: format!(
-                            "Can not hash local event: {e:?}"
-                        ),
+                        description: format!("Can not hash local event: {e:?}"),
                     }
                 })
             })
@@ -1036,33 +1033,36 @@ impl TransferVerifier {
                         // is no lease to release.
                         Err(_) => return None,
                     };
-                let loaded =
-                    if fail_resolve {
-                        None
-                    } else {
-                        match ctx
-                            .system()
-                            .get_actor::<crate::tracker::Tracker>(&path)
-                            .await
-                        {
-                            Err(_) => None,
-                            Ok(tracker) => {
-                                match tracker
-                                .ask(crate::tracker::TrackerMessage::GetLedger {
-                                    lo_sn,
-                                    hi_sn,
-                                })
+                let loaded = if fail_resolve {
+                    None
+                } else {
+                    match ctx
+                        .system()
+                        .get_actor::<crate::tracker::Tracker>(&path)
+                        .await
+                    {
+                        Err(_) => None,
+                        Ok(tracker) => {
+                            match tracker
+                                .ask(
+                                    crate::tracker::TrackerMessage::GetLedger {
+                                        lo_sn,
+                                        hi_sn,
+                                    },
+                                )
                                 .await
                             {
-                                Ok(crate::tracker::TrackerResponse::Ledger {
-                                    ledger,
-                                    ..
-                                }) => Some(ledger),
+                                Ok(
+                                    crate::tracker::TrackerResponse::Ledger {
+                                        ledger,
+                                        ..
+                                    },
+                                ) => Some(ledger),
                                 _ => None,
                             }
-                            }
                         }
-                    };
+                    }
+                };
                 // A release failure is logged, never confused with
                 // evidence: the verdict below only depends on the
                 // read itself.
@@ -1549,10 +1549,8 @@ impl TransferVerifier {
                         Self::note_verify_before_sn_hold(ctx);
                         noted = true;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100,
-                    ))
-                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100))
+                        .await;
                 }
             }
         }
@@ -1572,7 +1570,8 @@ impl TransferVerifier {
             // (a concurrent worker applied another valid variant) is
             // held like a missing chain: no passage, no proof and no
             // effects for bytes this node does not hold.
-            match self.local_event_hash(ctx, subject_id, transfer_event.sn)
+            match self
+                .local_event_hash(ctx, subject_id, transfer_event.sn)
                 .await
             {
                 Ok(Some(local_hash)) if local_hash == aux_hash => {

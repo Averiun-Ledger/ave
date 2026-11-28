@@ -154,23 +154,16 @@ impl WitnessesRegister {
                             ),
                         (None, None) => {
                             let mut merged = None;
-                            for range in old_owner
-                                .interval_gov_version
-                                .iter()
-                                .rev()
+                            for range in
+                                old_owner.interval_gov_version.iter().rev()
                             {
                                 if !range.contains(gov_version) {
                                     continue;
                                 }
-                                merged = self
-                                    .creator_grant_for_owner_interval(
-                                        node,
-                                        creator,
-                                        schema_id,
-                                        namespace,
-                                        range.lo,
-                                        range.hi,
-                                    );
+                                merged = self.creator_grant_for_owner_interval(
+                                    node, creator, schema_id, namespace,
+                                    range.lo, range.hi,
+                                );
                                 break;
                             }
                             merged
@@ -403,9 +396,9 @@ impl WitnessesRegister {
                                 // transfer itself.
                                 if node != &data.actual_owner
                                     && data.actual_new_owner_data.is_some()
-                                    && params.actual_sn.is_some_and(
-                                        |sn| sn < data.sn,
-                                    )
+                                    && params
+                                        .actual_sn
+                                        .is_some_and(|sn| sn < data.sn)
                                 {
                                     Some(data.sn)
                                 } else {
@@ -598,13 +591,7 @@ impl WitnessesRegister {
         };
 
         self.access_limit_for_transfer_data(
-            ctx,
-            subject_id,
-            node,
-            namespace,
-            schema_id,
-            data,
-            cached,
+            ctx, subject_id, node, namespace, schema_id, data, cached,
         )
         .await
     }
@@ -1238,7 +1225,8 @@ impl WitnessesRegister {
                                         .sn
                                         .saturating_sub(1),
                                     exit_sn: event.sn,
-                                    outcome: super::OwnershipStintOutcome::Confirmed,
+                                    outcome:
+                                        super::OwnershipStintOutcome::Confirmed,
                                     from_sn,
                                     gov_lo: working.gov_version,
                                     gov_hi: event.gov_version,
@@ -1274,7 +1262,8 @@ impl WitnessesRegister {
                                         .sn
                                         .saturating_sub(1),
                                     exit_sn: event.sn,
-                                    outcome: super::OwnershipStintOutcome::Rejected,
+                                    outcome:
+                                        super::OwnershipStintOutcome::Rejected,
                                     from_sn,
                                     gov_lo: new_gov,
                                     gov_hi: event.gov_version,
@@ -1291,33 +1280,29 @@ impl WitnessesRegister {
         let mut modes = Vec::with_capacity(ledger.len());
         for event in ledger {
             let (stored, inferred) = match &event.protocols {
-                Protocols::TrackerFactFull { event_request, .. } => {
-                    match event_request.content() {
-                        EventRequest::Fact(fact) => {
-                            if fact.viewpoints.is_empty() {
-                                (
-                                    TrackerStoredVisibility::Full,
-                                    crate::model::common::TrackerEventVisibility::Fact(
-                                        fact.viewpoints.clone(),
-                                    ),
-                                )
-                            } else {
-                                (
-                                    TrackerStoredVisibility::Only(
-                                        fact.viewpoints.clone(),
-                                    ),
-                                    crate::model::common::TrackerEventVisibility::Fact(
-                                        fact.viewpoints.clone(),
-                                    ),
-                                )
-                            }
+                Protocols::TrackerFactFull { event_request, .. } => match event_request.content() {
+                    EventRequest::Fact(fact) => {
+                        if fact.viewpoints.is_empty() {
+                            (
+                                TrackerStoredVisibility::Full,
+                                crate::model::common::TrackerEventVisibility::Fact(
+                                    fact.viewpoints.clone(),
+                                ),
+                            )
+                        } else {
+                            (
+                                TrackerStoredVisibility::Only(fact.viewpoints.clone()),
+                                crate::model::common::TrackerEventVisibility::Fact(
+                                    fact.viewpoints.clone(),
+                                ),
+                            )
                         }
-                        _ => (
-                            TrackerStoredVisibility::Full,
-                            crate::model::common::TrackerEventVisibility::NonFact,
-                        ),
                     }
-                }
+                    _ => (
+                        TrackerStoredVisibility::Full,
+                        crate::model::common::TrackerEventVisibility::NonFact,
+                    ),
+                },
                 Protocols::TrackerFactOpaque { evaluation, .. } => (
                     TrackerStoredVisibility::None,
                     crate::model::common::TrackerEventVisibility::Fact(
